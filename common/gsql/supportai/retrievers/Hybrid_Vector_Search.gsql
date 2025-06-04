@@ -1,0 +1,99 @@
+CREATE OR REPLACE DISTRIBUTED QUERY Hybrid_Vector_Search(Set<STRING> vertex_types,
+  LIST<FLOAT> query_vector, UINT top_k=5, UINT num_hops=3, UINT num_seen_min=1, BOOL chunk_only = False, BOOL verbose = False) {
+  TYPEDEF TUPLE<VERTEX v, STRING t> VertexTypes;
+  TYPEDEF tuple<Vertex v, Float score> Similarity_Results;
+  HeapAccum<Similarity_Results>(top_k, score DESC) @@topk_set;
+  SetAccum<VERTEX> @@start_set;
+  SetAccum<VertexTypes> @@start_set_type;
+  SetAccum<VERTEX> @@tmp_set;
+  SetAccum<VertexTypes> @@tmp_set_type;
+  SumAccum<INT> @num_times_seen;
+  SumAccum<INT> @visited;
+  MapAccum<Vertex, SetAccum<String>> @@result_set;
+  MapAccum<STRING, SetAccum<VertexTypes>> @@verbose_info;
+  SetAccum<VERTEX<DocumentChunk>> @@to_retrieve_content;
+  SetAccum<STRING> @context;
+  SetAccum<VERTEX> @parents;
+  SetAccum<EDGE> @paths;
+
+  FOREACH vertex_type IN vertex_types DO
+    IF v_type == "Document" THEN
+        CONTINUE;
+    END;
+
+    vset = {vertex_type};
+    result = SELECT v FROM vset:v POST-ACCUM @@topk_set += Similarity_Results(v, 1 - gds.vector.distance(query_vector, v.embedding, "COSINE"));
+  END;
+
+  WHILE True LIMIT top_k DO
+    @@start_set += @@topk_set.pop().v;
+  END;
+
+  start = {@@start_set};
+  start = SELECT s FROM start:s ACCUM s.@parents += s POST-ACCUM s.@num_times_seen = num_seen_min, @@tmp_set += s, @@start_set_type += VertexTypes(s, s.type);
+
+  @@verbose_info += ("start_set" -> @@start_set_type);
+  
+  FOREACH i IN RANGE[0, num_hops-1] DO
+    start = SELECT t FROM start:s -((RELATIONSHIP>|
+                                     CONTAINS_ENTITY>|
+                                     reverse_CONTAINS_ENTITY>|
+                                     IS_AFTER>|
+                                     IS_HEAD_OF>|
+                                     HAS_TAIL>):e)- :t
+            WHERE s.@visited < 1 AND t NOT IN s.@parents
+            ACCUM s.@visited += 1, t.@num_times_seen += 1, t.@parents += s, t.@parents += s.@parents, t.@paths += s.@paths, t.@paths += e
+            POST-ACCUM(t) @@tmp_set += t;
+
+    IF start.size() == 0 THEN
+      BREAK;
+    END;
+  END;
+  
+  start = {@@tmp_set};
+  @@tmp_set.clear();
+
+  res = SELECT s FROM start:s WHERE s.@num_times_seen >= num_seen_min AND s.type != "Document"
+        ACCUM
+          IF s.type == "Relationship" THEN
+            s.@context += s.definition
+          ELSE IF s.type == "Entity" THEN
+            STRING tmp_dsc = "Entity: " + replace(s.id, "_", " ") + ", Description: " + s.definition,
+            FOREACH dsc IN s.description DO
+              tmp_dsc = tmp_dsc + " " + dsc +";"
+            END,
+            s.@context += tmp_dsc
+          ELSE IF s.type == "DocumentChunk" THEN
+            @@to_retrieve_content += s
+          END
+        POST-ACCUM
+          IF NOT chunk_only OR chunk_only AND s.type == "DocumentChunk" THEN
+            @@tmp_set_type += VertexTypes(s, s.type)
+          END,
+          IF NOT chunk_only THEN
+            FOREACH v IN s.@parents DO
+              IF v IN @@start_set THEN
+                @@result_set += (v -> s.@context)
+              END
+            END
+          END;
+
+  @@verbose_info += ("selected_set" -> @@tmp_set_type);
+
+  doc_chunks = {@@to_retrieve_content};
+
+  res = SELECT t FROM doc_chunks:s -(HAS_CONTENT>)- Content:t
+        ACCUM s.@context += t.text
+        POST-ACCUM
+          FOREACH v IN s.@parents DO
+            IF v IN @@start_set THEN
+              @@result_set += (v -> s.@context)
+            END
+          END;
+
+  PRINT @@result_set as final_retrieval;
+
+  IF verbose THEN
+      PRINT @@verbose_info as verbose;
+  END;
+}

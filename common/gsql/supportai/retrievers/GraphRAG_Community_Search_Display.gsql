@@ -1,0 +1,38 @@
+CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Community_Search_Display(STRING json_list_vts, UINT community_level = 2, BOOL with_chunk = true) { 
+  MapAccum<Vertex, SetAccum<String>> @@final_retrieval;
+  SetAccum<EDGE> @@edges;
+  SetAccum<STRING> @context;
+  SetAccum<Vertex> @children;
+  SetAccum<Vertex> @@start_set;
+  SetAccum<STRING> @@start_vids;
+
+  STRING json_list = json_list_vts;
+  IF instr(json_list_vts, "'v'") > 0 AND instr(json_list_vts, "'t'") > 0 THEN
+      json_list = replace(json_list_vts, "'", "\"");
+  END;
+
+  JSONARRAY vts = parse_json_array(json_list);
+  FOREACH i IN RANGE[0, vts.size()-1] DO
+    JSONOBJECT vt = vts.getJsonObject(i);
+    @@start_set += to_vertex(vt.getString("v"), vt.getString("t"));
+  END;
+
+  selected_comms = {@@start_set};
+
+  IF with_chunk THEN
+      FOREACH i IN RANGE[community_level, 2].STEP(-1) DO
+          selected_comms = SELECT c FROM selected_comms:s -(<HAS_PARENT:e)- Community:c
+              WHERE s.iteration == i
+              ACCUM s.@children += c, @@edges += e;
+      END;
+      related_chunks = SELECT c FROM Content:c -(<HAS_CONTENT:e1)- DocumentChunk:d -(CONTAINS_ENTITY>:e2)- Entity:v -(RESOLVES_TO>:e3)- ResolvedEntity:r -(IN_COMMUNITY>:e4)- selected_comms:m
+          ACCUM m.@context += c.text, m.@children += d, @@edges += e1, @@edges += e2, @@edges += e3, @@edges += e4;
+  END;
+
+  selected_comms = SELECT c FROM selected_comms:c WHERE c.type == "Community"
+      ACCUM c.@context += c.description, @@start_set += c POST-ACCUM(c) @@final_retrieval += (c -> c.@context);
+ 
+  PRINT @@final_retrieval as final_retrieval;
+
+  PRINT @@edges as results;
+}

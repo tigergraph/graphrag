@@ -1,0 +1,14 @@
+CREATE OR REPLACE DISTRIBUTED QUERY get_vertices_or_remove(STRING v_type, STRING keyword = "", STRING with_edge = "", BOOL remove = FALSE) { 
+  SetAccum<EDGE> @@edges;
+  vset = {v_type};
+  STRING pattern = "%"+keyword+"%";
+  
+  IF remove THEN
+      result = SELECT s from vset:s POST-ACCUM delete(s);
+  ELSE
+      result = SELECT s from vset:s WHERE s.id LIKE pattern;
+      vset = SELECT s from result:s -(:e)- :t WHERE with_edge == "" OR e.type == with_edge ACCUM @@edges += e;
+  
+      PRINT result, result.size() as size, @@edges as edges;
+  END;
+}
