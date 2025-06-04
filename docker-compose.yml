@@ -23,7 +23,7 @@ services:
   eventual-consistency-service:
     image: tigergraph/graphrag-ecc:latest
     platform: linux/amd64
-    container_name: graphrag-ecc
+    container_name: eventual-consistency-service
     build:
       context: .
       dockerfile: eventual-consistency-service/Dockerfile
@@ -52,10 +52,10 @@ services:
     volumes:
       - ./configs/:/configs
 
-  ui:
+  graphrag-ui:
     image: tigergraph/graphrag-ui:latest 
     platform: linux/amd64
-    container_name: ui 
+    container_name: graphrag-ui 
     build:
       context: graphrag-ui
       dockerfile: Dockerfile
@@ -72,11 +72,12 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - ui
+      - graphrag-ui
       - graphrag
 
   tigergraph:
-    container_name: tigergraph
     image: tigergraph/community:4.2.0
+    container_name: tigergraph
+    platform: linux/amd64
     ports:
       - "14240:14240"

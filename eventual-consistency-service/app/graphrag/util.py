@@ -76,22 +76,22 @@ async def init(
 ) -> tuple[BaseExtractor, dict[str, EmbeddingStore]]:
     # install requried queries
     requried_queries = [
-        "common/gsql/graphRAG/StreamIds",
-        "common/gsql/graphRAG/StreamDocContent",
-        "common/gsql/graphRAG/SetEpochProcessing",
-        "common/gsql/graphRAG/ResolveRelationships",
-        "common/gsql/graphRAG/get_community_children",
-        "common/gsql/graphRAG/entities_have_resolution",
-        "common/gsql/graphRAG/communities_have_desc",
-        "common/gsql/graphRAG/get_vertices_or_remove",
-        "common/gsql/graphRAG/louvain/graphrag_louvain_init",
-        "common/gsql/graphRAG/louvain/graphrag_louvain_communities",
-        "common/gsql/graphRAG/louvain/modularity",
-        "common/gsql/graphRAG/louvain/stream_community",
+        "common/gsql/graphrag/StreamIds",
+        "common/gsql/graphrag/StreamDocContent",
+        "common/gsql/graphrag/SetEpochProcessing",
+        "common/gsql/graphrag/ResolveRelationships",
+        "common/gsql/graphrag/get_community_children",
+        "common/gsql/graphrag/entities_have_resolution",
+        "common/gsql/graphrag/communities_have_desc",
+        "common/gsql/graphrag/get_vertices_or_remove",
+        "common/gsql/graphrag/louvain/graphrag_louvain_init",
+        "common/gsql/graphrag/louvain/graphrag_louvain_communities",
+        "common/gsql/graphrag/louvain/modularity",
+        "common/gsql/graphrag/louvain/stream_community",
         "common/gsql/supportai/create_entity_type_relationships"
     ]
     # add louvain to queries
-    q = [x.split(".gsql")[0] for x in glob("common/gsql/graphRAG/louvain/*")]
+    q = [x.split(".gsql")[0] for x in glob("common/gsql/graphrag/louvain/*")]
     requried_queries.extend(q)
     await install_queries(requried_queries, conn)
 

@@ -67,9 +67,9 @@ class TigerGraphAgentGraph:
         self.supportai_enabled = True
         self.supportai_retriever = supportai_retriever.lower()
         try:
-            self.db_connection.getQueryMetadata("Hybrid_Search")
+            self.db_connection.getQueryMetadata("GraphRAG_Hybrid_Search")
         except TigerGraphException as e:
-            logger.info(f"Hybrid_Search not found in the graph {self.db_connection.graphname}. Disabling supportai.")
+            logger.info(f"GraphRAG_Hybrid_Search not found in the graph {self.db_connection.graphname}. Disabling supportai.")
             self.supportai_enabled = False
 
     def emit_progress(self, msg):
@@ -211,7 +211,7 @@ class TigerGraphAgentGraph:
             num_hops=2,
         )
 
-        query_name = "Hybrid_Search"
+        query_name = "GraphRAG_Hybrid_Search"
         state["context"] = {
             "function_call": query_name,
             "result": step[0],

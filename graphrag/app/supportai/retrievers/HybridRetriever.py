@@ -49,9 +49,9 @@ class HybridRetriever(BaseRetriever):
 
         verbose and self.logger.info(f"Searching with start_set: {str(start_set)}")
 
-        self._check_query_install("Hybrid_Search")
+        self._check_query_install("GraphRAG_Hybrid_Search")
         res = self.conn.runInstalledQuery(
-            "Hybrid_Search",
+            "GraphRAG_Hybrid_Search",
             params = {
                 "json_list_vts": str(start_set),
                 "num_hops": num_hops,

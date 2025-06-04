@@ -81,27 +81,7 @@ Edge Types:
                 Cypher query for the question.
         """
         PROMPT = PromptTemplate(
-            template="""You're an expert in OpenCypher programming. Given the following schema: {schema}, what is the OpenCypher query that retrieves the {question} 
-                        Only include attributes that are found in the schema. Never include any attributes that are not found in the schema.
-                        Use attributes instead of primary id if attribute name is closer to the keyword type in the question.
-                        Use as less vertex type, edge type and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
-                        Do not return attributes that are not explicitly mentioned in the question. If a vertex type is mentioned in the question, only return the vertex.
-                        Never use directed edge pattern in the OpenCypher query. Always use and create query using undirected pattern.
-                        Always use double quotes for strings instead of single quotes.
-
-                        You cannot use the following clauses:
-                        OPTIONAL MATCH
-                        CREATE
-                        MERGE
-                        REMOVE
-                        UNION
-                        UNION ALL
-                        UNWIND
-                        SET
-
-                        Make sure to have correct attribute names in the OpenCypher query and not to name result aliases that are vertex or edge types.
-                        
-                        ONLY write the OpenCypher query in the response. Do not include any other information in the response.""",
+            template=self.llm.generate_cypher_prompt,
             input_variables=[
                 "question",
                 "schema"
@@ -110,7 +90,7 @@ Edge Types:
 
         schema = self._generate_schema_rep()
     
-        logger.info("Prompt to LLM:\n" + PROMPT.invoke({"question": question, "schema": schema}).to_string())
+        #logger.info("Prompt to LLM:\n" + PROMPT.invoke({"question": question, "schema": schema}).to_string())
 
         chain = PROMPT | self.llm.model | StrOutputParser()
         out = chain.invoke({"question": question, "schema": schema}).strip("```cypher").strip("```")

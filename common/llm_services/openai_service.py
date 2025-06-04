@@ -42,10 +42,26 @@ class OpenAI(LLM_Model):
         return self._read_prompt_file(self.prompt_path + "generate_function.txt")
 
     @property
+    def generate_cypher_prompt(self):
+        filepath = self.prompt_path + "generate_cypher.txt"
+        if os.path.exists(filepath):
+            return self._read_prompt_file(filepath)
+        else:
+            return super().generate_cypher_prompt
+
+    @property
     def entity_relationship_extraction_prompt(self):
         return self._read_prompt_file(
             self.prompt_path + "entity_relationship_extraction.txt"
         )
+
+    @property
+    def route_response_prompt(self):
+        filepath = self.prompt_path + "route_response.txt"
+        if os.path.exists(filepath):
+            return self._read_prompt_file(filepath)
+        else:
+            return super().route_response_prompt
 
     @property
     def graphrag_scoring_prompt(self):
@@ -62,6 +78,7 @@ class OpenAI(LLM_Model):
             return self._read_prompt_file(filepath)
         else:
             return super().keyword_extraction_prompt
+
     @property
     def question_expansion_prompt(self):
         filepath = self.prompt_path + "question_expansion.txt"
