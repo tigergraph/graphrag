@@ -50,5 +50,5 @@ jobs:
         file: ./eventual-consistency-service/Dockerfile
         push: true
         tags: |
-           tginternal/ecc:${{steps.get-image.outputs.IMAGE}}
-           tginternal/ecc:cloud-latest
+           tginternal/graphrag-ecc:${{steps.get-image.outputs.IMAGE}}
+           tginternal/graphrag-ecc:cloud-latest

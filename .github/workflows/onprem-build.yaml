@@ -50,8 +50,8 @@ jobs:
         file: ./eventual-consistency-service/Dockerfile
         push: true
         tags: |
-           tigergraph/ecc:${{steps.get-image.outputs.IMAGE}}
-           tigergraph/ecc:latest
+           tigergraph/graphrag-ecc:${{steps.get-image.outputs.IMAGE}}
+           tigergraph/graphrag-ecc:latest
 
     - name: Build and push Docker image chat-history
       uses: docker/build-push-action@v5
