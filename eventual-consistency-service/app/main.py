@@ -177,7 +177,7 @@ def root():
     return {"status": "ok"}
 
 
-@app.get("/{graphname}/consistency_status/{ecc_method}")
+@app.get("/{graphname}/{ecc_method}/consistency_status")
 def consistency_status(
     graphname: str,
     ecc_method: str,

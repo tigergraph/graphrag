@@ -367,7 +367,7 @@ def supportai_update(
 
     ecc = (
         db_config.get("ecc", "http://localhost:8001")
-        + f"/{graphname}/consistency_status/{method}"
+        + f"/{graphname}/{method}/consistency_status"
     )
     LogWriter.info(f"Sending ECC request to: {ecc}")
     bg_tasks.add_task(
