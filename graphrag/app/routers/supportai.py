@@ -49,6 +49,7 @@ def check_embedding_store_status():
         )
 
 
+@router.post("/{graphname}/graphrag/initialize")
 @router.post("/{graphname}/supportai/initialize")
 def initialize(
     graphname,
@@ -67,6 +68,7 @@ def initialize(
     }
 
 
+@router.post("/{graphname}/graphrag/create_ingest")
 @router.post("/{graphname}/supportai/create_ingest")
 def create_ingest(
     graphname,
@@ -79,6 +81,7 @@ def create_ingest(
     return supportai.create_ingest(graphname, cfg, conn)
 
 
+@router.post("/{graphname}/graphrag/ingest")
 @router.post("/{graphname}/supportai/ingest")
 def ingest(
     graphname,
@@ -126,6 +129,7 @@ def ingest(
     }
 
 
+@router.post("/{graphname}/graphrag/search")
 @router.post("/{graphname}/supportai/search")
 def search(
     graphname,
@@ -144,7 +148,7 @@ def search(
             embedding_service, supportai_embedding_store, get_llm_service(llm_config), conn
         )
         if "method" not in query.method_params:
-            query.method_params["method"] = "Similarity"
+            query.method_params["method"] = "similarity"
         if "chunk_only" not in query.method_params:
             query.method_params["chunk_only"] = False
         if "doc_only" not in query.method_params:
@@ -222,6 +226,7 @@ def search(
     return res
 
 
+@router.post("/{graphname}/graphrag/answerquestion")
 @router.post("/{graphname}/supportai/answerquestion")
 def answer_question(
     graphname,
