@@ -90,7 +90,7 @@ Edge Types:
 
         schema = self._generate_schema_rep()
     
-        #logger.info("Prompt to LLM:\n" + PROMPT.invoke({"question": question, "schema": schema}).to_string())
+        logger.debug_pii("Prompt to LLM:\n" + PROMPT.invoke({"question": question, "schema": schema}).to_string())
 
         chain = PROMPT | self.llm.model | StrOutputParser()
         out = chain.invoke({"question": question, "schema": schema}).strip("```cypher").strip("```")

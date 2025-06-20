@@ -17,7 +17,6 @@ from typing_extensions import TypedDict
 
 from common.logs.log import req_id_cv
 from common.py_schemas import GraphRAGResponse, MapQuestionToSchemaResponse
-from common.config import embedding_store_type
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +207,7 @@ class TigerGraphAgentGraph:
             indices=["Document", "DocumentChunk", "Entity", "Relationship"],
             top_k=5,
             num_seen_min=2,
-            num_hops=2,
+            num_hops=3,
         )
 
         query_name = "GraphRAG_Hybrid_Search"
@@ -335,10 +334,16 @@ class TigerGraphAgentGraph:
         )
 
         if state["lookup_source"] == "supportai":
+            logger.debug_pii(
+                f"""request_id={req_id_cv.get()} Got result: {state["context"]["result"]}"""
+            )
             answer = step.generate_answer(
                 state["question"], state["context"]["result"]
             )
         elif state["lookup_source"] == "inquiryai":
+            logger.debug_pii(
+                f"""request_id={req_id_cv.get()} Got result: {state["context"]["result"]}"""
+            )
             try:
                 context_data_str = json.dumps(state["context"]["result"])
             except (TypeError, ValueError) as e:
@@ -348,6 +353,9 @@ class TigerGraphAgentGraph:
             answer = step.generate_answer(state["question"], context_data_str)
 
         elif state["lookup_source"] == "cypher":
+            logger.debug_pii(
+                f"""request_id={req_id_cv.get()} Got result: {state["context"]["answer"]}"""
+            )
             answer = step.generate_answer(state["question"], state["context"]["answer"])
         logger.debug_pii(
             f"request_id={req_id_cv.get()} Generated answer: {answer.generated_answer}"

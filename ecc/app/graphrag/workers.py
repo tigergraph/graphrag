@@ -14,13 +14,10 @@ from graphrag import community_summarizer, util
 from langchain_community.graphs.graph_document import GraphDocument, Node
 from pyTigerGraph import AsyncTigerGraphConnection
 
-from common.config import milvus_config
 from common.embeddings.embedding_services import EmbeddingModel
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.extractors import BaseExtractor, LLMEntityRelationshipExtractor
 from common.logs.logwriter import LogWriter
-
-vertex_field = milvus_config.get("vertex_field", "vertex_id")
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +187,7 @@ async def embed(
             logger.info("Embed worker waiting for loading event to finish")
             await util.loading_event.wait()
         try:
-            await embed_store.aadd_embeddings([(content, [])], [{vertex_field: v_id}])
+            await embed_store.aadd_embeddings([(content, [])], [{"vertex_id": v_id}])
         except Exception as e:
             logger.error(f"Failed to add embeddings for {v_id}: {e}")
 

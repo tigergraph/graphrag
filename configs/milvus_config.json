@@ -1,9 +1,0 @@
-{
-    "host": "milvus-standalone",
-    "port": 19530,
-    "username": "",
-    "password": "",
-    "enabled": "true",
-    "reuse_embedding": "true",
-    "sync_interval_seconds": 60
-}

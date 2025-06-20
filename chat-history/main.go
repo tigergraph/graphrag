@@ -13,12 +13,9 @@ import (
 
 func main() {
 	configPath := os.Getenv("CONFIG_FILES")
-	// Split the paths into a slice
-	configPaths := strings.Split(configPath, ",")
 
 	cfg, err := config.LoadConfig(map[string]string{
-		"chatdb": configPaths[0],
-		"tgdb":   configPaths[1],
+		"tgconfig":   configPath,
 	})
 	if err != nil {
 		panic(err)

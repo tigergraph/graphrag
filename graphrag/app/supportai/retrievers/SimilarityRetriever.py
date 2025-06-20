@@ -1,7 +1,6 @@
 import json
 from supportai.retrievers import BaseRetriever
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
-from common.config import embedding_store_type
 
 
 class SimilarityRetriever(BaseRetriever):

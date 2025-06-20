@@ -10,16 +10,13 @@ from graphrag import reusable_channel, workers
 from pyTigerGraph import AsyncTigerGraphConnection
 
 from common.config import (
-    doc_processing_config,
+    graphrag_config,
     embedding_service,
     get_llm_service,
     llm_config,
-    milvus_config,
-    embedding_store_type,
 )
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
-from common.embeddings.milvus_embedding_store import MilvusEmbeddingStore
 from common.extractors import GraphExtractor, LLMEntityRelationshipExtractor
 from common.extractors.BaseExtractor import BaseExtractor
 from common.logs.logwriter import LogWriter
@@ -65,12 +62,6 @@ INSTALL QUERY ALL
     logger.info("Finished processing all required queries.")
 
 
-async def init_embedding_index(s: MilvusEmbeddingStore, vertex_field: str):
-    content = "init"
-    await s.aadd_embeddings([(content, [])], [{vertex_field: content}])
-    s.remove_embeddings(expr=f"{vertex_field} in ['{content}']")
-
-
 async def init(
     conn: AsyncTigerGraphConnection,
 ) -> tuple[BaseExtractor, dict[str, EmbeddingStore]]:
@@ -96,58 +87,21 @@ async def init(
     await install_queries(requried_queries, conn)
 
     # extractor
-    if doc_processing_config.get("extractor") == "graphrag":
+    if graphrag_config.get("extractor") == "graphrag":
         extractor = GraphExtractor()
-    elif doc_processing_config.get("extractor") == "llm":
+    elif graphrag_config.get("extractor") == "llm":
         extractor = LLMEntityRelationshipExtractor(get_llm_service(llm_config))
     else:
         raise ValueError("Invalid extractor type")
 
-    if embedding_store_type == "milvus":
-        vertex_field = milvus_config.get("vertex_field", "vertex_id")
-        index_names = milvus_config.get(
-            "indexes",
-            [
-                "Document",
-                "DocumentChunk",
-                "Entity",
-                "Relationship",
-                "Community",
-            ],
-        )
-        index_stores = {}
-        async with asyncio.TaskGroup() as tg:
-            for index_name in index_names:
-                name = conn.graphname + "_" + index_name
-                s = MilvusEmbeddingStore(
-                    embedding_service,
-                    host=milvus_config["host"],
-                    port=milvus_config["port"],
-                    support_ai_instance=True,
-                    collection_name=name,
-                    username=milvus_config.get("username", ""),
-                    password=milvus_config.get("password", ""),
-                    vector_field=milvus_config.get("vector_field", "document_vector"),
-                    text_field=milvus_config.get("text_field", "document_content"),
-                    vertex_field=vertex_field,
-                    drop_old=False,
-                )
-
-                LogWriter.info(f"Initializing {name}")
-                # init collection if it doesn't exist
-                if not s.check_collection_exists():
-                    tg.create_task(init_embedding_index(s, vertex_field))
-
-                index_stores[name] = s
-    else:
-        index_stores = {}
-        s = TigerGraphEmbeddingStore(
-            conn,
-            embedding_service,
-            support_ai_instance=True,
-        )
-        s.set_graphname(conn.graphname)
-        index_stores = {"tigergraph": s}
+    index_stores = {}
+    s = TigerGraphEmbeddingStore(
+        conn,
+        embedding_service,
+        support_ai_instance=True,
+    )
+    s.set_graphname(conn.graphname)
+    index_stores = {"tigergraph": s}
 
     return extractor, index_stores
 

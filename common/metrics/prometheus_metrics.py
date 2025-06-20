@@ -73,20 +73,20 @@ class PrometheusMetrics(metaclass=SingletonMeta):
                 ["llm_model"],
             )
 
-            # collect metrics for Milvus
-            self.milvus_active_connections = Gauge(
-                "milvus_active_connections",
-                "Number of active connections to Milvus",
+            # collect metrics for TigerGraph
+            self.tigergraph_active_connections = Gauge(
+                "tigergraph_active_connections",
+                "Number of active connections to TigerGraph",
                 ["collection_name"],
             )
-            self.milvus_query_duration_seconds = Histogram(
-                "milvus_query_duration_seconds",
-                "Duration of Milvus queries",
+            self.tigergraph_query_duration_seconds = Histogram(
+                "tigergraph_query_duration_seconds",
+                "Duration of TigerGraph queries",
                 ["collection_name", "method_name"],
             )
-            self.milvus_query_total = Counter(
-                "milvus_query_total",
-                "Number of Milvus queries called",
+            self.tigergraph_query_total = Counter(
+                "tigergraph_query_total",
+                "Number of TigerGraph queries called",
                 ["collection_name", "method_name"],
             )
 

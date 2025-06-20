@@ -399,15 +399,11 @@ func messageEquals(m, msg structs.Message) bool {
 
 func TestExecuteGSQL(t *testing.T) {
 
-	os.Setenv("CONFIG_FILES", "../chat_config.json,../db_config.json")
+	os.Setenv("CONFIG_FILES", "../server_config.json")
 
 	configPath := os.Getenv("CONFIG_FILES")
-	// Split the paths into a slice
-	configPaths := strings.Split(configPath, ",")
-
 	cfg, err := config.LoadConfig(map[string]string{
-		"chatdb": configPaths[0],
-		"tgdb":   configPaths[1],
+		"tgconfig": configPath,
 	})
 	if err != nil {
 		panic(err)
@@ -493,17 +489,13 @@ func TestParseUserRoles(t *testing.T) {
 
 func TestGetFeedback(t *testing.T) {
 
-	os.Setenv("CONFIG_FILES", "../chat_config.json,../db_config.json")
+	os.Setenv("CONFIG_FILES", "../server_config.json")
 
 	setupDB(t, true)
 
 	configPath := os.Getenv("CONFIG_FILES")
-	// Split the paths into a slice
-	configPaths := strings.Split(configPath, ",")
-
 	cfg, err := config.LoadConfig(map[string]string{
-		"chatdb": configPaths[0],
-		"tgdb":   configPaths[1],
+		"tgconfig": configPath,
 	})
 	if err != nil {
 		panic(err)

@@ -5,7 +5,7 @@ from app.eventual_consistency_checker import EventualConsistencyChecker
 
 
 class TestEventualConsistencyChecker(unittest.TestCase):
-    @patch("common.embeddings.milvus_embedding_store.MilvusEmbeddingStore")
+    @patch("common.embeddings.tigergraph_embedding_store.TigerGraphEmbeddingStore")
     @patch("common.embeddings.embedding_services.EmbeddingModel")
     @patch("common.db.connections.elevate_db_connection_to_token", return_value=Mock())
     def test_initialization(
@@ -37,7 +37,7 @@ class TestEventualConsistencyChecker(unittest.TestCase):
         checker.initialize()
         self.assertTrue(checker.is_initialized)
 
-    @patch("common.embeddings.milvus_embedding_store.MilvusEmbeddingStore")
+    @patch("common.embeddings.tigergraph_embedding_store.TigerGraphEmbeddingStore")
     @patch("common.embeddings.embedding_services.EmbeddingModel")
     @patch("common.db.connections.elevate_db_connection_to_token", return_value=Mock())
     def test_fetch_and_process_vertex(
@@ -81,7 +81,7 @@ class TestEventualConsistencyChecker(unittest.TestCase):
         mock_embedding_model.embed_query.assert_called()
         mock_embedding_store.add_embeddings.assert_called()
         
-    @patch("common.embeddings.milvus_embedding_store.MilvusEmbeddingStore")
+    @patch("common.embeddings.tigergraph_embedding_store.TigerGraphEmbeddingStore")
     @patch("common.embeddings.embedding_services.EmbeddingModel")
     @patch("common.db.connections.elevate_db_connection_to_token", return_value=Mock())
     def test_verify_and_cleanup_embeddings(

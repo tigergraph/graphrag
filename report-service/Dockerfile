@@ -9,9 +9,7 @@ RUN pip install -r requirements.txt
 COPY report-service/app /code
 COPY common /code/common
 
-ENV LLM_CONFIG="/llm_config.json"
-ENV DB_CONFIG="/db_config.json"
-ENV MILVUS_CONFIG="/milvus_config.json"
+ENV SERVE_CONFIG="/server_config.json"
 ENV LOGLEVEL="INFO"
 
 EXPOSE 8000

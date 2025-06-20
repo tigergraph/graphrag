@@ -1,4 +1,4 @@
-name: GraphRAG LLM Performance Evaluation
+name: GraphRAG SERVER Performance Evaluation
 
 on:
   push:
@@ -33,35 +33,32 @@ jobs:
     - name: Create db config
       run: |
         mkdir configs
-        echo "$DB_CONFIG" > configs/db_config.json
-        echo "$LLM_CONFIG_OPENAI_GPT4" > configs/openai_gpt4_config.json
-        echo "$LLM_CONFIG_OPENAI_GPT4O" > configs/openai_gpt4o_config.json
-        echo "$LLM_CONFIG_AZURE_GPT35" > configs/azure_llm_config.json
-        echo "$LLM_CONFIG_OPENAI_GPT35" > configs/openai_gpt3.5-turbo_config.json
-        echo "$LLM_CONFIG_GCP_TEXT_BISON" > configs/gcp_text-bison_config.json
-        echo "$LLM_CONFIG_HUGGINGFACE_PHI3" > configs/huggingface_severless_endpoint_phi3_config.json
+        echo "$SERVER_CONFIG_OPENAI_GPT4" > configs/openai_gpt4_config.json
+        echo "$SERVER_CONFIG_OPENAI_GPT4O" > configs/openai_gpt4o_config.json
+        echo "$SERVER_CONFIG_AZURE_GPT35" > configs/azure_server_config.json
+        echo "$SERVER_CONFIG_OPENAI_GPT35" > configs/openai_gpt3.5-turbo_config.json
+        echo "$SERVER_CONFIG_GCP_TEXT_BISON" > configs/gcp_text-bison_config.json
+        echo "$SERVER_CONFIG_HUGGINGFACE_PHI3" > configs/huggingface_severless_endpoint_phi3_config.json
         echo "$GCP_CREDS_CONFIG" > configs/GCP_CREDS.json
-        echo "$LLM_TEST_EVALUATOR" > configs/test_evaluation_model_config.json
-        echo "$LLM_CONFIG_GROQ_MIXTRAL" > configs/groq_mixtral_config.json
-        echo "$LLM_CONFIG_BEDROCK_CLAUDE3" > configs/bedrock_config.json
-        echo "$LLM_CONFIG_HUGGINGFACE_LLAMA70B" > configs/huggingface_llama70b_config.json
-        echo "$LLM_CONFIG_WATSONX_MISTRAL_LARGE" > configs/ibm_watsonx_config.json
-        echo "$MILVUS_CONFIG" > configs/milvus_config.json
+        echo "$SERVER_TEST_EVALUATOR" > configs/test_evaluation_model_config.json
+        echo "$SERVER_CONFIG_GROQ_MIXTRAL" > configs/groq_mixtral_config.json
+        echo "$SERVER_CONFIG_BEDROCK_CLAUDE3" > configs/bedrock_config.json
+        echo "$SERVER_CONFIG_HUGGINGFACE_LLAMA70B" > configs/huggingface_llama70b_config.json
+        echo "$SERVER_CONFIG_WATSONX_MISTRAL_LARGE" > configs/ibm_watsonx_config.json
       env:
         DB_CONFIG: ${{ secrets.DB_CONFIG }}
-        LLM_CONFIG_OPENAI_GPT4:  ${{ secrets.LLM_CONFIG_OPENAI_GPT4 }}
-        LLM_CONFIG_AZURE_GPT35: ${{ secrets.LLM_CONFIG_AZURE_GPT35 }}
-        LLM_CONFIG_GCP_TEXT_BISON: ${{ secrets.LLM_CONFIG_GCP_TEXT_BISON }}
-        LLM_CONFIG_OPENAI_GPT35: ${{ secrets.LLM_CONFIG_OPENAI_GPT35 }}
-        LLM_CONFIG_GROQ_MIXTRAL: ${{ secrets.LLM_CONFIG_GROQ_MIXTRAL }}
-        LLM_CONFIG_BEDROCK_CLAUDE3: ${{ secrets.LLM_CONFIG_BEDROCK_CLAUDE3 }}
-        LLM_CONFIG_HUGGINGFACE_PHI3: ${{ secrets.LLM_CONFIG_HUGGINGFACE_PHI3 }}
-        LLM_CONFIG_OPENAI_GPT4O: ${{ secrets.LLM_CONFIG_OPENAI_GPT4O }}
-        LLM_CONFIG_HUGGINGFACE_LLAMA70B: ${{ secrets.LLM_CONFIG_HUGGINGFACE_LLAMA70B }}
-        LLM_CONFIG_WATSONX_MISTRAL_LARGE: ${{ secrets.LLM_CONFIG_WATSONX_MISTRAL_LARGE }}
+        SERVER_CONFIG_OPENAI_GPT4:  ${{ secrets.SERVER_CONFIG_OPENAI_GPT4 }}
+        SERVER_CONFIG_AZURE_GPT35: ${{ secrets.SERVER_CONFIG_AZURE_GPT35 }}
+        SERVER_CONFIG_GCP_TEXT_BISON: ${{ secrets.SERVER_CONFIG_GCP_TEXT_BISON }}
+        SERVER_CONFIG_OPENAI_GPT35: ${{ secrets.SERVER_CONFIG_OPENAI_GPT35 }}
+        SERVER_CONFIG_GROQ_MIXTRAL: ${{ secrets.SERVER_CONFIG_GROQ_MIXTRAL }}
+        SERVER_CONFIG_BEDROCK_CLAUDE3: ${{ secrets.SERVER_CONFIG_BEDROCK_CLAUDE3 }}
+        SERVER_CONFIG_HUGGINGFACE_PHI3: ${{ secrets.SERVER_CONFIG_HUGGINGFACE_PHI3 }}
+        SERVER_CONFIG_OPENAI_GPT4O: ${{ secrets.SERVER_CONFIG_OPENAI_GPT4O }}
+        SERVER_CONFIG_HUGGINGFACE_LLAMA70B: ${{ secrets.SERVER_CONFIG_HUGGINGFACE_LLAMA70B }}
+        SERVER_CONFIG_WATSONX_MISTRAL_LARGE: ${{ secrets.SERVER_CONFIG_WATSONX_MISTRAL_LARGE }}
         GCP_CREDS_CONFIG: ${{ secrets.GCP_CREDS_CONFIG }}
-        LLM_TEST_EVALUATOR: ${{ secrets.LLM_TEST_EVALUATOR }}
-        MILVUS_CONFIG: ${{ secrets.MILVUS_CONFIG }}
+        SERVER_TEST_EVALUATOR: ${{ secrets.SERVER_TEST_EVALUATOR }}
 
 
     - name: Run Docker Container for PR

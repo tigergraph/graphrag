@@ -4,7 +4,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request, Response, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pymilvus import connections, utility
 
 from common.config import llm_config, service_status
 

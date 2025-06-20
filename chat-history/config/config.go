@@ -29,55 +29,22 @@ type TgDbConfig struct {
 }
 
 type Config struct {
-	ChatDbConfig
-	TgDbConfig
-	// LLMConfig
+	TgDbConfig TgDbConfig `json:"db_config"`
+	ChatDbConfig ChatDbConfig `json:"chat_config"`
+	// LLMConfig LLMConfig `json:"llm_config"`
 }
 
 func LoadConfig(paths map[string]string) (Config, error) {
 	var config Config
 
-	// Load database config
-	if dbConfigPath, ok := paths["chatdb"]; ok {
-		dbConfig, err := loadChatDbConfig(dbConfigPath)
-		if err != nil {
+        if config_path, ok := paths["tgconfig"]; ok {
+	        b, err := os.ReadFile(config_path)
+	        if err != nil {
 			return Config{}, err
-		}
-		config.ChatDbConfig = dbConfig
-	}
-
-	// Load TigerGraph config
-	if tgConfigPath, ok := paths["tgdb"]; ok {
-		tgConfig, err := loadTgDbConfig(tgConfigPath)
-		if err != nil {
-			return Config{}, err
-		}
-		config.TgDbConfig = tgConfig
-	}
-
+	        }
+	        if err := json.Unmarshal(b, &config); err != nil {
+		        return Config{}, err
+	        }
+        }
 	return config, nil
-}
-
-func loadChatDbConfig(path string) (ChatDbConfig, error) {
-	var dbConfig ChatDbConfig
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ChatDbConfig{}, err
-	}
-	if err := json.Unmarshal(b, &dbConfig); err != nil {
-		return ChatDbConfig{}, err
-	}
-	return dbConfig, nil
-}
-
-func loadTgDbConfig(path string) (TgDbConfig, error) {
-	var tgConfig TgDbConfig
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return TgDbConfig{}, err
-	}
-	if err := json.Unmarshal(b, &tgConfig); err != nil {
-		return TgDbConfig{}, err
-	}
-	return tgConfig, nil
 }

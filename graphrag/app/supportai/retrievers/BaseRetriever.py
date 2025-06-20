@@ -3,7 +3,6 @@ from common.embeddings.base_embedding_store import EmbeddingStore
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.llm_services.base_llm import LLM_Model
 from common.py_schemas import CandidateScore, CandidateGenerator
-from common.config import embedding_store_type
 
 from langchain_core.output_parsers import StrOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
@@ -25,8 +24,7 @@ class BaseRetriever:
         self.llm_service = llm_service
         self.conn = connection
         self.embedding_store = embedding_store
-        if embedding_store_type == "tigergraph":
-            self.embedding_store.set_graphname(connection.graphname)
+        self.embedding_store.set_graphname(connection.graphname)
         self.logger = logging.getLogger(__name__)
 
     def _install_query(self, query_name):
@@ -165,33 +163,17 @@ class BaseRetriever:
                 query_embedding = self._hyde_embedding(question)
             else:
                 query_embedding = self._generate_embedding(question)
-            if embedding_store_type == "tigergraph":
-                if filter_expr and "\"%" in filter_expr:
-                    filter_expr = re.findall(r'"(%[^"]*)"', filter_expr)[0]
-                res = self.embedding_store.retrieve_similar_with_score(
-                    query_embedding=query_embedding,
-                    top_k=top_k,
-                    similarity_threshold=similarity_threshold,
-                    vertex_types=indices,
-                    filter_expr=filter_expr,
-                )
-                verbose and self.logger.info(f"Retrived topk similar for query \"{question}\": {res}")
-                candidate_set += res
-            else:
-                #old_collection_name = self.embedding_store.collection_name
-                for v_type in indices:
-                    self.embedding_store.set_collection_name(self.conn.graphname+"_"+v_type)
-                    res = self.embedding_store.retrieve_similar_with_score(
-                        query_embedding=query_embedding,
-                        top_k=top_k,
-                        similarity_threshold=similarity_threshold,
-                        filter_expr=filter_expr,
-                    )
-                    for doc in res:
-                        doc[0].metadata["vertex_type"] = v_type
-                    verbose and self.logger.info(f"Retrived topk similar for query \"{question}\": {res}")
-                    candidate_set += res
-                #self.embedding_store.set_collection_name(old_collection_name)
+            if filter_expr and "\"%" in filter_expr:
+                filter_expr = re.findall(r'"(%[^"]*)"', filter_expr)[0]
+            res = self.embedding_store.retrieve_similar_with_score(
+                query_embedding=query_embedding,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold,
+                vertex_types=indices,
+                filter_expr=filter_expr,
+            )
+            verbose and self.logger.info(f"Retrived topk similar for query \"{question}\": {res}")
+            candidate_set += res
         candidate_set.sort(key=lambda x: x[1], reverse=True)
         start_set = []
         for document, _ in candidate_set:

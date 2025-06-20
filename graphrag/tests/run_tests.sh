@@ -1,6 +1,5 @@
 #!/bin/bash
 export DB_CONFIG=./configs/db_config.json
-export MILVUS_CONFIG=./configs/milvus_config.json
 export LOGLEVEL=INFO
 
 # Set default values

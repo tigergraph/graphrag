@@ -47,7 +47,7 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./eventual-consistency-service/Dockerfile
+        file: ./ecc/Dockerfile
         push: true
         tags: |
            tginternal/graphrag-ecc:${{steps.get-image.outputs.IMAGE}}

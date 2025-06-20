@@ -25,7 +25,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pyTigerGraph import TigerGraphConnection
 from tools.validation_utils import MapQuestionToSchemaException
 
-from common.config import db_config, embedding_service, llm_config, service_status
+from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status
 from common.db.connections import get_db_connection_pwd_manual
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
@@ -106,7 +106,7 @@ def add_feedback(
     auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
     try:
         res = httpx.post(
-            f"{db_config['chat_history_api']}/conversation",
+            f"{graphrag_config['chat_history_api']}/conversation",
             json=message.model_dump(),
             headers={"Authorization": f"Basic {auth}"},
         )
@@ -131,7 +131,7 @@ async def get_user_conversations(
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(
-                f"{db_config['chat_history_api']}/user/{user_id}",
+                f"{graphrag_config['chat_history_api']}/user/{user_id}",
                 headers={"Authorization": f"Basic {auth}"},
             )
             res.raise_for_status()
@@ -155,7 +155,7 @@ async def get_conversation_contents(
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(
-                f"{db_config['chat_history_api']}/conversation/{conversation_id}",
+                f"{graphrag_config['chat_history_api']}/conversation/{conversation_id}",
                 headers={"Authorization": f"Basic {auth}"},
             )
             res.raise_for_status()
@@ -177,7 +177,7 @@ async def get_conversation_feedback(
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(
-                f"{db_config['chat_history_api']}/get_feedback",
+                f"{graphrag_config['chat_history_api']}/get_feedback",
                 headers={"Authorization": f"Basic {auth}"},
             )
             res.raise_for_status()
@@ -274,7 +274,7 @@ async def run_agent(
 
 
 async def write_message_to_history(message: Message, usr_auth: str):
-    ch = db_config.get("chat_history_api")
+    ch = graphrag_config.get("chat_history_api")
     if ch is not None:
         headers = {"Authorization": f"Basic {usr_auth}"}
         try:

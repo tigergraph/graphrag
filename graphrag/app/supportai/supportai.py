@@ -4,7 +4,6 @@ import uuid
 import logging
 
 from pyTigerGraph import TigerGraphConnection
-from common.config import embedding_store_type
 
 from common.py_schemas.schemas import (
     # GraphRAGResponse,
@@ -35,28 +34,27 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
             )
         )
 
-    if embedding_store_type == "tigergraph":
-        if "- embedding(Dimension=" in current_schema:
-            schema_res+=" Embeddding schema already exists, skipped"
-        else:
-            if int(ver[0]) >= 4 and int(ver[1]) >= 2:
-                file_path = "common/gsql/supportai/SupportAI_Schema_Native_Vector.gsql"
-                with open(file_path, "r") as f:
-                    schema = f.read()
-                schema_res += " "
-                schema_res += conn.gsql(
-                    """USE GRAPH {}\n{}\nRUN SCHEMA_CHANGE JOB add_supportai_vector""".format(
-                        graphname, schema
-                    )
+    if "- embedding(Dimension=" in current_schema:
+        schema_res+=" Embeddding schema already exists, skipped"
+    else:
+        if int(ver[0]) >= 4 and int(ver[1]) >= 2:
+            file_path = "common/gsql/supportai/SupportAI_Schema_Native_Vector.gsql"
+            with open(file_path, "r") as f:
+                schema = f.read()
+            schema_res += " "
+            schema_res += conn.gsql(
+                """USE GRAPH {}\n{}\nRUN SCHEMA_CHANGE JOB add_supportai_vector""".format(
+                    graphname, schema
                 )
+            )
 
-                logger.info(f"Installing GDS library")
-                q_res = conn.gsql(
-                    """USE GLOBAL\nimport package gds\ninstall function gds.**"""
-                )
-                logger.info(f"Done installing GDS library with status {q_res}")
-            else:
-                raise Exception(f"Vector feature is not supported by the current TigerGraph version: {ver}")
+            logger.info(f"Installing GDS library")
+            q_res = conn.gsql(
+                """USE GLOBAL\nimport package gds\ninstall function gds.**"""
+            )
+            logger.info(f"Done installing GDS library with status {q_res}")
+        else:
+            raise Exception(f"Vector feature is not supported by the current TigerGraph version: {ver}")
 
     if "- doc_chunk_epoch_processed_index" in current_schema:
         index_res="Index already exists, skipped"

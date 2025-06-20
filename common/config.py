@@ -2,7 +2,6 @@ import json
 import os
 
 from fastapi.security import HTTPBasic
-from pymilvus.exceptions import MilvusException
 from pyTigerGraph import TigerGraphConnection
 
 from common.embeddings.embedding_services import (
@@ -11,7 +10,6 @@ from common.embeddings.embedding_services import (
     OpenAI_Embedding,
     VertexAI_PaLM_Embedding,
 )
-from common.embeddings.milvus_embedding_store import MilvusEmbeddingStore
 from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
 from common.llm_services import (
     AWS_SageMaker_Endpoint,
@@ -35,12 +33,7 @@ status_manager = StatusManager()
 service_status = {}
 
 # Configs
-LLM_SERVICE = os.getenv("LLM_CONFIG", "configs/llm_config.json")
-DB_CONFIG = os.getenv("DB_CONFIG", "configs/db_config.json")
-MILVUS_CONFIG = os.getenv("MILVUS_CONFIG", "configs/milvus_config.json")
-DOC_PROCESSING_CONFIG = os.getenv(
-    "DOC_PROCESSING_CONFIG", "configs/doc_processing_config.json"
-)
+SERVER_CONFIG = os.getenv("SERVER_CONFIG", "configs/server_config.json")
 PATH_PREFIX = os.getenv("PATH_PREFIX", "")
 PRODUCTION = os.getenv("PRODUCTION", "false").lower() == "true"
 
@@ -49,53 +42,36 @@ if not PATH_PREFIX.startswith("/") and len(PATH_PREFIX) != 0:
 if PATH_PREFIX.endswith("/"):
     PATH_PREFIX = PATH_PREFIX[:-1]
 
-if LLM_SERVICE is None:
-    raise Exception("LLM_CONFIG environment variable not set")
-if DB_CONFIG is None:
-    raise Exception("DB_CONFIG environment variable not set")
+if SERVER_CONFIG is None:
+    raise Exception("SERVER_CONFIG environment variable not set")
 
-if LLM_SERVICE[-5:] != ".json":
+if SERVER_CONFIG[-5:] != ".json":
     try:
-        llm_config = json.loads(LLM_SERVICE)
+        server_config = json.loads(str(SERVER_CONFIG))
     except Exception as e:
         raise Exception(
-            "LLM_CONFIG environment variable must be a .json file or a JSON string, failed with error: "
+            "SERVER_CONFIG environment variable must be a .json file or a JSON string, failed with error: "
             + str(e)
         )
 else:
-    with open(LLM_SERVICE, "r") as f:
-        llm_config = json.load(f)
+    with open(SERVER_CONFIG, "r") as f:
+        server_config = json.load(f)
 
-if DB_CONFIG[-5:] != ".json":
-    try:
-        db_config = json.loads(str(DB_CONFIG))
-    except Exception as e:
-        raise Exception(
-            "DB_CONFIG environment variable must be a .json file or a JSON string, failed with error: "
-            + str(e)
-        )
-else:
-    with open(DB_CONFIG, "r") as f:
-        db_config = json.load(f)
+db_config = server_config.get("db_config")
+llm_config = server_config.get("llm_config")
+graphrag_config = server_config.get("graphrag_config")
 
-embedding_store_type = db_config.get("embedding_store", "tigergraph")
-reuse_embedding = db_config.get("reuse_embedding", True)
+if db_config is None:
+    raise Exception("graphrag_config is not found in SERVER_CONFIG")
+if llm_config is None:
+    raise Exception("graphrag_config is not found in SERVER_CONFIG")
 
-if MILVUS_CONFIG is None or (
-    MILVUS_CONFIG.endswith(".json") and not os.path.exists(MILVUS_CONFIG)
-):
-    milvus_config = {"host": "localhost", "port": "19530", "enabled": "false"}
-elif MILVUS_CONFIG.endswith(".json"):
-    with open(MILVUS_CONFIG, "r") as f:
-        milvus_config = json.load(f)
-else:
-    try:
-        milvus_config = json.loads(str(MILVUS_CONFIG))
-    except json.JSONDecodeError as e:
-        raise Exception(
-            "MILVUS_CONFIG must be a .json file or a JSON string, failed with error: "
-            + str(e)
-        )
+if graphrag_config is None:
+    graphrag_config = {"reuse_embedding", true}
+if "chunker" not in graphrag_config:
+    graphrag_config["chunker"] = "semantic"
+if "extractor" not in graphrag_config:
+    graphrag_config["extractor"] = "llm"
 
 if "model_name" not in llm_config or "model_name" not in llm_config["embedding_service"]:
     if "model_name" not in llm_config:
@@ -137,94 +113,20 @@ def get_llm_service(llm_config) -> LLM_Model:
         raise Exception("LLM Completion Service Not Supported")
 
 if os.getenv("INIT_EMBED_STORE", "true") == "true":
-    if embedding_store_type == "milvus":
-        LogWriter.info(
-            f"Milvus enabled for host {milvus_config['host']} at port {milvus_config['port']}"
-        )
+    conn = TigerGraphConnection(
+        host=db_config.get("hostname", "http://tigergraph"),
+        username=db_config.get("username", "tigergraph"),
+        password=db_config.get("password", "tigergraph"),
+        gsPort=db_config.get("gsPort", "14240"),
+        restppPort=db_config.get("restppPort", "9000"),
+    )
+    if db_config.get("getToken"):
+        conn.getToken()
 
-        try:
-            embedding_store = MilvusEmbeddingStore(
-                embedding_service,
-                host=milvus_config["host"],
-                port=milvus_config["port"],
-                collection_name="tg_inquiry_documents",
-                metric_type=milvus_config.get("metric_type", "COSINE"),
-                support_ai_instance=False,
-                username=milvus_config.get("username", ""),
-                password=milvus_config.get("password", ""),
-                alias=milvus_config.get("alias", "default"),
-            )
-            service_status["embedding_store"] = {"status": "ok", "error": None}
-        except MilvusException as e:
-            embedding_store = None
-            service_status["embedding_store"] = {"status": "milvus error", "error": str(e)}
-            raise
-        except Exception as e:
-            embedding_store = None
-            service_status["embedding_store"] = {"status": "embedding error", "error": str(e)}
-            raise
+    embedding_store = TigerGraphEmbeddingStore(
+        conn,
+        embedding_service,
+        support_ai_instance=True,
+    )
+    service_status["embedding_store"] = {"status": "ok", "error": None}
 
-        support_collection_name = milvus_config.get("collection_name", "tg_support_documents")
-        LogWriter.info(
-            f"Setting up Milvus embedding store for SupportAI with collection_name: {support_collection_name}"
-        )
-        try:
-            supportai_embedding_store = MilvusEmbeddingStore(
-                embedding_service,
-                host=milvus_config["host"],
-                port=milvus_config["port"],
-                support_ai_instance=True,
-                collection_name=support_collection_name,
-                metric_type=milvus_config.get("metric_type", "COSINE"),
-                username=milvus_config.get("username", ""),
-                password=milvus_config.get("password", ""),
-                vector_field=milvus_config.get("vector_field", "document_vector"),
-                text_field=milvus_config.get("text_field", "document_content"),
-                vertex_field=milvus_config.get("vertex_field", "vertex_id"),
-                alias=milvus_config.get("alias", "default"),
-            )
-            service_status["supportai_embedding_store"] = {"status": "ok", "error": None}
-        except MilvusException as e:
-            supportai_embedding_store = None
-            service_status["supportai_embedding_store"] = {"status": "milvus error", "error": str(e)}
-            raise
-        except Exception as e:
-            supportai_embedding_store = None
-            service_status["supportai_embedding_store"] = {"status": "embedding error", "error": str(e)}
-            raise
-    else:
-        conn = TigerGraphConnection(
-            host=db_config.get("hostname", "http://tigergraph"),
-            username=db_config.get("username", "tigergraph"),
-            password=db_config.get("password", "tigergraph"),
-            gsPort=db_config.get("gsPort", "14240"),
-            restppPort=db_config.get("restppPort", "9000"),
-        )
-        #conn.graphname = db_config.get("supportai_graphname", "tg_support_documents")
-        if db_config.get("getToken"):
-            conn.getToken()
-
-        embedding_store = TigerGraphEmbeddingStore(
-            conn,
-            embedding_service,
-            support_ai_instance=True,
-        )
-        supportai_embedding_store = embedding_store
-        service_status["embedding_store"] = {"status": "ok", "error": None}
-        service_status["supportai_embedding_store"] = {"status": "ok", "error": None}
-
-if DOC_PROCESSING_CONFIG is None or (
-    DOC_PROCESSING_CONFIG.endswith(".json")
-    and not os.path.exists(DOC_PROCESSING_CONFIG)
-):
-    doc_processing_config = {
-        "chunker": "semantic",
-        "chunker_config": {"method": "percentile", "threshold": 0.90},
-        "extractor": "llm",
-        "extractor_config": {}
-    }
-elif DOC_PROCESSING_CONFIG.endswith(".json"):
-    with open(DOC_PROCESSING_CONFIG, "r") as f:
-        doc_processing_config = json.load(f)
-else:
-    doc_processing_config = json.loads(DOC_PROCESSING_CONFIG)

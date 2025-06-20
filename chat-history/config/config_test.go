@@ -7,11 +7,10 @@ import (
 )
 
 func TestLoadConfig(t *testing.T) {
-	chatConfigPath, tgConfigPath := setup(t)
+	tgConfigPath := setup(t)
 
 	cfg, err := LoadConfig(map[string]string{
-		"chatdb": chatConfigPath,
-		"tgdb":   tgConfigPath,
+		"tgconfig":   tgConfigPath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -33,31 +32,26 @@ func TestLoadConfig(t *testing.T) {
 func setup(t *testing.T) (string, string) {
 	tmp := t.TempDir()
 
-	chatConfigPath := fmt.Sprintf("%s/%s", tmp, "chat_config.json")
-	chatConfigData := `
+	tgConfigPath := fmt.Sprintf("%s/%s", tmp, "server_config.json")
+	tgConfigData := `
 {
+    "db_config": {
+        "hostname": "http://tigergraph",
+        "gsPort": "14240",
+        "username": "tigergraph",
+        "password": "tigergraph"
+    },
+    "chat_config": {
 	"apiPort":"8002",
 	"dbPath": "chats.db",
 	"dbLogPath": "db.log",
 	"logPath": "requestLogs.jsonl",
 	"conversationAccessRoles": ["superuser", "globaldesigner"]
-}`
-
-	if err := os.WriteFile(chatConfigPath, []byte(chatConfigData), 0644); err != nil {
-		t.Fatal("error setting up chat_config.json")
-	}
-
-	tgConfigPath := fmt.Sprintf("%s/%s", tmp, "db_config.json")
-	tgConfigData := `
-{
-    "hostname": "https://tg-0cdef603-3760-41c3-af6f-41e95afc40de.us-east-1.i.tgcloud.io",
-    "gsPort": "14240",
-    "username": "supportai",
-    "password": "supportai"
+    }
 }`
 	if err := os.WriteFile(tgConfigPath, []byte(tgConfigData), 0644); err != nil {
-		t.Fatal("error setting up tg_config.json")
+		t.Fatal("error setting up server_config.json")
 	}
 
-	return chatConfigPath, tgConfigPath
+	return tgConfigPath
 }
