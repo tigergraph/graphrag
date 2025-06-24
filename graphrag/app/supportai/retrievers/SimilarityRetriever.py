@@ -16,24 +16,43 @@ class SimilarityRetriever(BaseRetriever):
     def search(self, question, index, top_k=1, withHyDE=False, expand=False, verbose=False):
         if expand:
             questions = self._expand_question(question, top_k, verbose)
-        else:
-            questions = [question]
-        start_set = self._generate_start_set(questions, [index], top_k, withHyDE=withHyDE, verbose=verbose)
+            verbose and self.logger.info(f"Expanded questions to use: {questions}")
 
-        self._check_query_install("Content_Similarity_Search")
-        res = self.conn.runInstalledQuery(
-            "Content_Similarity_Search",
-            params = {
-                "json_list_vts": str(start_set),
-                "v_type": index,
-                "verbose": verbose,
-            },
-            usePost=True
-        )
+            start_set = self._generate_start_set(questions, [index], top_k, withHyDE=withHyDE, verbose=verbose)
+            
+
+            self._check_query_install("Content_Similarity_Search")
+            res = self.conn.runInstalledQuery(
+                "Content_Similarity_Search",
+                params = {
+                    "json_list_vts": str(start_set),
+                    "v_type": index,
+                    "verbose": verbose,
+                },
+                usePost=True
+            )
+        else:
+            if withHyDE:
+                query_vector = self._hyde_embedding(question)
+            else:
+                query_vector = self._generate_embedding(question)
+
+            self._check_query_install("Content_Similarity_Vector_Search")
+            res = self.conn.runInstalledQuery(
+                "Content_Similarity_Vector_Search",
+                params = {
+                    "v_type": index,
+                    "query_vector": query_vector,
+                    "top_k": top_k,
+                    "verbose": verbose,
+                },
+                usePost=True
+            )
         if len(res) > 1 and "verbose" in res[1]:
             verbose_info = json.dumps(res[1]['verbose'])
             self.logger.info(f"Retrived SimilaritySearch query verbose info: {verbose_info}")
-            res[1]["verbose"]["expanded_questions"] = questions
+            if expand:
+                res[1]["verbose"]["expanded_questions"] = questions
         return res
 
     def retrieve_answer(self, question, index, top_k=1, withHyDE=False, expand=False, combine=False, verbose=False):

@@ -1,14 +1,14 @@
-CREATE OR REPLACE DISTRIBUTED QUERY Hybrid_Vector_Search(Set<STRING> vertex_types,
-  LIST<FLOAT> query_vector, UINT top_k=5, UINT num_hops=3, UINT num_seen_min=1, BOOL chunk_only = False, BOOL verbose = False) {
+CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Hybrid_Vector_Search(Set<STRING> v_types,
+  LIST<FLOAT> query_vector, UINT top_k=5, UINT num_hops=3, UINT num_seen_min=1, BOOL chunk_only = False, BOOL doc_only = False, BOOL verbose = False) {
   TYPEDEF TUPLE<VERTEX v, STRING t> VertexTypes;
   TYPEDEF tuple<Vertex v, Float score> Similarity_Results;
   HeapAccum<Similarity_Results>(top_k, score DESC) @@topk_set;
   SetAccum<VERTEX> @@start_set;
   SetAccum<VertexTypes> @@start_set_type;
   SetAccum<VERTEX> @@tmp_set;
-  SetAccum<VertexTypes> @@tmp_set_type;
-  SumAccum<INT> @num_times_seen;
+  SetAccum<VertexTypes> @@selected_set_type;
   SumAccum<INT> @visited;
+  SumAccum<INT> @num_times_seen;
   MapAccum<Vertex, SetAccum<String>> @@result_set;
   MapAccum<STRING, SetAccum<VertexTypes>> @@verbose_info;
   SetAccum<VERTEX<DocumentChunk>> @@to_retrieve_content;
@@ -16,12 +16,12 @@ CREATE OR REPLACE DISTRIBUTED QUERY Hybrid_Vector_Search(Set<STRING> vertex_type
   SetAccum<VERTEX> @parents;
   SetAccum<EDGE> @paths;
 
-  FOREACH vertex_type IN vertex_types DO
+  FOREACH v_type IN v_types DO
     IF v_type == "Document" THEN
         CONTINUE;
     END;
 
-    vset = {vertex_type};
+    vset = {v_type.*};
     result = SELECT v FROM vset:v POST-ACCUM @@topk_set += Similarity_Results(v, 1 - gds.vector.distance(query_vector, v.embedding, "COSINE"));
   END;
 
@@ -33,7 +33,7 @@ CREATE OR REPLACE DISTRIBUTED QUERY Hybrid_Vector_Search(Set<STRING> vertex_type
   start = SELECT s FROM start:s ACCUM s.@parents += s POST-ACCUM s.@num_times_seen = num_seen_min, @@tmp_set += s, @@start_set_type += VertexTypes(s, s.type);
 
   @@verbose_info += ("start_set" -> @@start_set_type);
-  
+
   FOREACH i IN RANGE[0, num_hops-1] DO
     start = SELECT t FROM start:s -((RELATIONSHIP>|
                                      CONTAINS_ENTITY>|
@@ -49,7 +49,7 @@ CREATE OR REPLACE DISTRIBUTED QUERY Hybrid_Vector_Search(Set<STRING> vertex_type
       BREAK;
     END;
   END;
-  
+
   start = {@@tmp_set};
   @@tmp_set.clear();
 
@@ -66,11 +66,11 @@ CREATE OR REPLACE DISTRIBUTED QUERY Hybrid_Vector_Search(Set<STRING> vertex_type
           ELSE IF s.type == "DocumentChunk" THEN
             @@to_retrieve_content += s
           END
-        POST-ACCUM
-          IF NOT chunk_only OR chunk_only AND s.type == "DocumentChunk" THEN
-            @@tmp_set_type += VertexTypes(s, s.type)
+        POST-ACCUM(s)
+          IF NOT (chunk_only OR doc_only) OR (chunk_only OR doc_only) AND s.type == "DocumentChunk" THEN
+            @@selected_set_type += VertexTypes(s, s.type)
           END,
-          IF NOT chunk_only THEN
+          IF NOT (chunk_only OR doc_only) THEN
             FOREACH v IN s.@parents DO
               IF v IN @@start_set THEN
                 @@result_set += (v -> s.@context)
@@ -78,18 +78,30 @@ CREATE OR REPLACE DISTRIBUTED QUERY Hybrid_Vector_Search(Set<STRING> vertex_type
             END
           END;
 
-  @@verbose_info += ("selected_set" -> @@tmp_set_type);
-
   doc_chunks = {@@to_retrieve_content};
 
-  res = SELECT t FROM doc_chunks:s -(HAS_CONTENT>)- Content:t
-        ACCUM s.@context += t.text
-        POST-ACCUM
+  IF doc_only THEN
+      @@selected_set_type.clear();
+      res = SELECT s FROM doc_chunks:s -(reverse_HAS_CHILD>:e1)- Document:d -(HAS_CONTENT>:e2)- Content:t
+        ACCUM s.@context += t.text, @@selected_set_type += VertexTypes(d, d.type)
+        POST-ACCUM(s)
           FOREACH v IN s.@parents DO
             IF v IN @@start_set THEN
               @@result_set += (v -> s.@context)
             END
           END;
+      @@verbose_info += ("selected_set" -> @@selected_set_type);
+  ELSE
+      res = SELECT s FROM doc_chunks:s -(HAS_CONTENT>:e)- Content:t
+        ACCUM s.@context += t.text
+        POST-ACCUM(s)
+          FOREACH v IN s.@parents DO
+            IF v IN @@start_set THEN
+              @@result_set += (v -> s.@context)
+            END
+          END;
+      @@verbose_info += ("selected_set" -> @@selected_set_type);
+  END;
 
   PRINT @@result_set as final_retrieval;
 

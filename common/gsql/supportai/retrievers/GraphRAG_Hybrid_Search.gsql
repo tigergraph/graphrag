@@ -30,8 +30,6 @@ CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Hybrid_Search(STRING json_list_vts 
   @@verbose_info += ("start_set" -> @@start_set_type);
 
   FOREACH i IN RANGE[0, num_hops-1] DO
-    STRING hierachy = "hop_" + to_string(i+1);
-
     start = SELECT t FROM start:s -((RELATIONSHIP>|
                                      CONTAINS_ENTITY>|
                                      reverse_CONTAINS_ENTITY>|
@@ -55,9 +53,9 @@ CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Hybrid_Search(STRING json_list_vts 
           IF s.type == "Relationship" THEN
             s.@context += s.definition
           ELSE IF s.type == "Entity" THEN
-            STRING tmp_dsc = s.id + " " + s.definition,
+            STRING tmp_dsc = "Entity: " + replace(s.id, "_", " ") + ", Description: " + s.definition,
             FOREACH dsc IN s.description DO
-              tmp_dsc = tmp_dsc + dsc +";"
+              tmp_dsc = tmp_dsc + " " + dsc +";"
             END,
             s.@context += tmp_dsc
           ELSE IF s.type == "DocumentChunk" THEN
@@ -74,7 +72,6 @@ CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Hybrid_Search(STRING json_list_vts 
               END
             END
           END;
-
 
   doc_chunks = {@@to_retrieve_content};
 

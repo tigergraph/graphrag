@@ -91,15 +91,14 @@ async def init(
     else:
         raise ValueError("Invalid extractor type")
 
-    index_stores = {}
-    s = TigerGraphEmbeddingStore(
+    embedding_store = TigerGraphEmbeddingStore(
         conn,
         embedding_service,
         support_ai_instance=True,
     )
-    index_stores = {"tigergraph": s}
+    embedding_store.set_graphname(conn.graphname)
 
-    return extractor, index_stores
+    return extractor, embedding_store
 
 
 def make_headers(conn: TigerGraphConnection):

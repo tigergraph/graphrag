@@ -40,30 +40,49 @@ class GraphRAGRetriever(BaseRetriever):
     def search(self, question, community_level: int, top_k: int = 5, similarity_threshold = 0.90, expand: bool = False, with_chunk: bool = True, with_doc: bool = False, verbose: bool = False):
         if expand:
             questions = self._expand_question(question, top_k, verbose=verbose)
-        else:
-            questions = [question]
-        filter_expr = f"vertex_id like \"%"
-        for i in range(1, community_level+1):
-            filter_expr += f"_{i}"
-        filter_expr += "\""  
-        start_set = self._generate_start_set(questions, ["Community"], top_k, similarity_threshold, filter_expr=filter_expr, verbose=verbose)
+            verbose and self.logger.info(f"Expanded questions to use: {questions}")
 
-        self._check_query_install("GraphRAG_Community_Search")
-        res = self.conn.runInstalledQuery(
-            "GraphRAG_Community_Search",
-            params = {
-                "json_list_vts": str(start_set),
-                "community_level": community_level,
-                "with_chunk": with_chunk,
-                "with_doc": with_doc,
-                "verbose": verbose,
-            },
-            usePost=True
-        )
+            filter_expr = f"vertex_id like \"%"
+            for i in range(1, community_level+1):
+                filter_expr += f"_{i}"
+            filter_expr += "\""  
+            start_set = self._generate_start_set(questions, ["Community"], top_k, similarity_threshold, filter_expr=filter_expr, verbose=verbose)
+            verbose and self.logger.info(f"Searching with start_set: {str(start_set)}")
+
+            self._check_query_install("GraphRAG_Community_Search")
+            res = self.conn.runInstalledQuery(
+                "GraphRAG_Community_Search",
+                params = {
+                    "json_list_vts": str(start_set),
+                    "community_level": community_level,
+                    "with_chunk": with_chunk,
+                    "with_doc": with_doc,
+                    "verbose": verbose,
+                },
+                usePost=True
+            )
+        else:
+            query_vector = self._generate_embedding(question)
+
+            self._check_query_install("GraphRAG_Community_Vector_Search")
+            res = self.conn.runInstalledQuery(
+                "GraphRAG_Community_Vector_Search",
+                params = {
+                    "query_vector": query_vector,
+                    "community_level": community_level,
+                    "top_k": top_k,
+                    #"similarity_threshold": similarity_threshold,
+                    "with_chunk": with_chunk,
+                    "with_doc": with_doc,
+                    "verbose": verbose,
+                },
+                usePost=True
+            )
         if len(res) > 1 and "verbose" in res[1]:
             verbose_info = json.dumps(res[1]['verbose'])
             self.logger.info(f"Retrived GraphRAG query verbose info: {verbose_info}")
-            res[1]["verbose"]["expanded_questions"] = questions
+            if expand:
+                res[1]["verbose"]["expanded_questions"] = questions
         return res
     
     async def _generate_candidate(self, question, context):

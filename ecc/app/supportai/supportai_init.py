@@ -111,7 +111,7 @@ async def upsert(
 
 async def embed(
     embed_chan: Channel,
-    index_stores: dict[str, EmbeddingStore],
+    embedding_store: EmbeddingStore,
     graphname: str
 ):  
     """
@@ -123,7 +123,6 @@ async def embed(
     async with asyncio.TaskGroup() as sp:
         # consume task queue
         async for v_id, content, index_name in embed_chan:
-            embedding_store = index_stores["tigergraph"]
             logger.info(f"Embed to {graphname}_{index_name}: {v_id}")
             sp.create_task(
                 workers.embed(
@@ -179,7 +178,7 @@ async def run(
             - upsert everything to the graph
     """
 
-    extractor, index_stores = await init(conn)
+    extractor, embedding_store = await init(conn)
     init_start = time.perf_counter()
 
     doc_process_switch = True
@@ -200,7 +199,7 @@ async def run(
             # Upsert chunks
             sp.create_task(upsert(upsert_chan))
             # Embed
-            sp.create_task(embed(embed_chan, index_stores, graphname))
+            sp.create_task(embed(embed_chan, embedding_store, graphname))
             # Extract entities
             sp.create_task(
                 extract(extract_chan, upsert_chan, embed_chan, extractor, conn)

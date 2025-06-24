@@ -193,7 +193,7 @@ async def load(conn: AsyncTigerGraphConnection):
 
 
 async def embed(
-    embed_chan: Channel, index_stores: dict[str, EmbeddingStore], graphname: str
+    embed_chan: Channel, embedding_store: EmbeddingStore, graphname: str
 ):
     """
     Creates and starts one worker for each embed job
@@ -206,7 +206,6 @@ async def embed(
         while True:
             try:
                 (v_id, content, index_name) = await embed_chan.get()
-                embedding_store = index_stores["tigergraph"]
                 v_id = (v_id, index_name)
                 logger.info(f"Embed to {graphname}_{index_name}: {v_id}")
                 if graphrag_config.get("reuse_embedding", True) and embedding_store.has_embeddings([v_id]):
@@ -471,7 +470,7 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
             Ex: "Vincent van Gogh" and "van Gogh" should be resolved to "Vincent van Gogh"
     """
 
-    extractor, index_stores = await init(conn)
+    extractor, embedding_store = await init(conn)
     init_start = time.perf_counter()
 
     doc_process_switch = True
@@ -494,7 +493,7 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
             # embed
-            grp.create_task(embed(embed_chan, index_stores, graphname))
+            grp.create_task(embed(embed_chan, embedding_store, graphname))
             # extract entities
             grp.create_task(
                 extract(extract_chan, upsert_chan, embed_chan, extractor, conn)
@@ -533,7 +532,6 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
         load_q.reopen()
         async with asyncio.TaskGroup() as grp:
             grp.create_task(stream_entities(conn, entities_chan, 50))
-            embedding_store = index_stores["tigergraph"]
             grp.create_task(
                 resolve_entities(
                     conn,
@@ -575,7 +573,7 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
             )
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
-            grp.create_task(embed(embed_chan, index_stores, graphname))
+            grp.create_task(embed(embed_chan, embedding_store, graphname))
         logger.info("Join comm_process_chan")
         await comm_process_chan.join()
         logger.info("Join embed_chan")

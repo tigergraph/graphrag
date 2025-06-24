@@ -1,3 +1,0 @@
-CREATE OR REPLACE DISTRIBUTED QUERY HNSW_CreateEntrypoint(STRING index_name) { 
-  INSERT INTO HNSWEntrypoint VALUES (index_name, 0, 0, now()); 
-}

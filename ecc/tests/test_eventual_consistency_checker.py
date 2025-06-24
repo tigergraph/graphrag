@@ -25,8 +25,8 @@ class TestEventualConsistencyChecker(unittest.TestCase):
             graphname,
             "vertex_id",
             mock_embedding_model,
+            mock_embedding_store,
             ["index1"],
-            {"testGraph_index1": mock_embedding_store},
             mock_conn,
             Mock(),
             Mock(),
@@ -62,8 +62,8 @@ class TestEventualConsistencyChecker(unittest.TestCase):
             graphname,
             "vertex_id",
             mock_embedding_model,
+            mock_embedding_store,
             ["index1"],
-            {"testGraph_index1": mock_embedding_store},
             mock_conn,
             MagicMock(),
             MagicMock(),
@@ -104,21 +104,21 @@ class TestEventualConsistencyChecker(unittest.TestCase):
             graphname,
             "vertex_id",
             mock_embedding_model,
+            mock_embedding_store,
             ["index1"],
-            {"testGraph_index1": mock_embedding_store},
             mock_conn,
             MagicMock(),
             MagicMock(),
             run_forever=False
         )
-        checker.embedding_stores['testGraph_index1'].query.return_value = [
+        checker.embedding_store.query.return_value = [
             {checker.vertex_field: 'v1'},
             {checker.vertex_field: 'v2'}
         ]
         checker.verify_and_cleanup_embeddings()
 
         # Verify the sequence of calls and check the outputs
-        checker.embedding_stores['testGraph_index1'].query.assert_called_once_with(
+        checker.embedding_store.query.assert_called_once_with(
             "pk > 0", [checker.vertex_field]
         )
 
@@ -128,7 +128,7 @@ class TestEventualConsistencyChecker(unittest.TestCase):
         )
 
         # Ensure the call to remove the non-existent vertex is made
-        checker.embedding_stores['testGraph_index1'].remove_embeddings.assert_called_once_with(
+        checker.embedding_store.remove_embeddings.assert_called_once_with(
             expr=f"{checker.vertex_field} == 'v1'"
         )
 

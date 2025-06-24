@@ -15,56 +15,73 @@ class HybridRetriever(BaseRetriever):
     def search(self, question, indices, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand = False, method = "similarity", chunk_only=False, doc_only=False, verbose=False):
         if expand:
             questions = self._expand_question(question, top_k, verbose)
-        else:
-            questions = [question]
-        verbose and self.logger.info(f"Questions to use: {questions}")
+            verbose and self.logger.info(f"Expanded questions to use: {questions}")
 
-        method = method.lower()
-        if method == "keywords" or method == "both" or method == "all":
-            keywords = self._question_to_keywords(questions, top_k, verbose)
-            verbose and self.logger.info(f"Searching with keywords: {keywords}")
+            method = method.lower()
+            if method == "keywords" or method == "both" or method == "all":
+                keywords = self._question_to_keywords(questions, top_k, verbose)
+                verbose and self.logger.info(f"Searching with keywords: {keywords}")
 
-            self._check_query_install("Keyword_Search")
+                self._check_query_install("Keyword_Search")
+                res = self.conn.runInstalledQuery(
+                    "Keyword_Search",
+                    params = {
+                        "keywords": keywords,
+                        "mode": "Any",
+                        "top_k": top_k,
+                        "doc_only": doc_only,
+                        "verbose": verbose,
+                    },
+                    usePost=True
+                )            
+                start_set = []
+                if len(res) > 1 and "selected_set" in res[1]:
+                    if len(res[1]["selected_set"]) > 0:
+                        start_set += res[1]["selected_set"]
+                self.logger.info(f"Got start_set from keywords {keywords}: {str(start_set)}")
+                if not method == "keywords":
+                    start_set += self._generate_start_set(questions, indices, top_k, similarity_threshold, verbose=verbose)
+            else:
+                start_set = self._generate_start_set(questions, indices, top_k, similarity_threshold, verbose=verbose)
+
+            verbose and self.logger.info(f"Searching with start_set: {str(start_set)}")
+
+            self._check_query_install("GraphRAG_Hybrid_Search")
             res = self.conn.runInstalledQuery(
-                "Keyword_Search",
+                "GraphRAG_Hybrid_Search",
                 params = {
-                    "keywords": keywords,
-                    "mode": "Any",
-                    "top_k": top_k,
+                    "json_list_vts": str(start_set),
+                    "num_hops": num_hops,
+                    "num_seen_min": num_seen_min,
+                    "chunk_only": chunk_only,
                     "doc_only": doc_only,
                     "verbose": verbose,
                 },
                 usePost=True
-            )            
-            start_set = []
-            if len(res) > 1 and "selected_set" in res[1]:
-                if len(res[1]["selected_set"]) > 0:
-                    start_set += res[1]["selected_set"]
-            self.logger.info(f"Got start_set from keywords {keywords}: {str(start_set)}")
-            if not method == "keywords":
-                start_set += self._generate_start_set(questions, indices, top_k, similarity_threshold, verbose=verbose)
+            )  
         else:
-            start_set = self._generate_start_set(questions, indices, top_k, similarity_threshold, verbose=verbose)
-
-        verbose and self.logger.info(f"Searching with start_set: {str(start_set)}")
-
-        self._check_query_install("GraphRAG_Hybrid_Search")
-        res = self.conn.runInstalledQuery(
-            "GraphRAG_Hybrid_Search",
-            params = {
-                "json_list_vts": str(start_set),
-                "num_hops": num_hops,
-                "num_seen_min": num_seen_min,
-                "chunk_only": chunk_only,
-                "doc_only": doc_only,
-                "verbose": verbose,
-            },
-            usePost=True
-        )            
+            query_vector = self._generate_embedding(question)        
+            self._check_query_install("GraphRAG_Hybrid_Vector_Search")
+            res = self.conn.runInstalledQuery(
+                "GraphRAG_Hybrid_Vector_Search",
+                params = {
+                    "v_types": indices,
+                    "query_vector": query_vector,
+                    "top_k": top_k,
+                    #"similarity_threshold": similarity_threshold,
+                    "num_hops": num_hops,
+                    "num_seen_min": num_seen_min,
+                    "chunk_only": chunk_only,
+                    "doc_only": doc_only,
+                    "verbose": verbose,
+                },
+                usePost=True
+            )  
         if len(res) > 1 and "verbose" in res[1]:
             verbose_info = json.dumps(res[1]['verbose'])
             self.logger.info(f"Retrived HybridSearch query verbose info: {verbose_info}")
-            res[1]["verbose"]["expanded_questions"] = questions
+            if expand:
+                res[1]["verbose"]["expanded_questions"] = questions
         return res
 
     def retrieve_answer(self, question, index, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand: bool = False, method: str = "similarity", chunk_only: bool = False, doc_only: bool = False, combine: bool = False, verbose: bool = False):

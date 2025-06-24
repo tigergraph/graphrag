@@ -22,6 +22,18 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
 
     current_schema = conn.gsql("""USE GRAPH {}\n ls""".format(graphname))
 
+    supportai_queries = [
+        "common/gsql/supportai/Scan_For_Updates.gsql",
+        "common/gsql/supportai/Update_Vertices_Processing_Status.gsql",
+        "common/gsql/supportai/Selected_Set_Display.gsql",
+        "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display.gsql",
+        "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display.gsql",
+        "common/gsql/supportai/retrievers/Chunk_Sibling_Search.gsql",
+        "common/gsql/supportai/retrievers/Content_Similarity_Search.gsql",
+        "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search.gsql",
+        "common/gsql/supportai/retrievers/GraphRAG_Community_Search.gsql",
+    ]
+
     if "- VERTEX ResolvedEntity" in current_schema:
         schema_res="Schema already exists, skipped"
     else:
@@ -53,6 +65,13 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
                 """USE GLOBAL\nimport package gds\ninstall function gds.**"""
             )
             logger.info(f"Done installing GDS library with status {q_res}")
+
+            supportai_queries.extend([
+                "common/gsql/supportai/retrievers/Content_Similarity_Vector_Search.gsql",
+                "common/gsql/supportai/retrievers/Chunk_Sibling_Vector_Search.gsql",
+                "common/gsql/supportai/retrievers/GraphRAG_Community_Vector_Search.gsql",
+                "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Vector_Search.gsql",
+            ])
         else:
             raise Exception(f"Vector feature is not supported by the current TigerGraph version: {ver}")
 
@@ -67,18 +86,6 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
                 graphname, index
             )
         )
-
-    supportai_queries = [
-        "common/gsql/supportai/Scan_For_Updates.gsql",
-        "common/gsql/supportai/Update_Vertices_Processing_Status.gsql",
-        "common/gsql/supportai/Selected_Set_Display.gsql",
-        "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display.gsql",
-        "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display.gsql",
-        "common/gsql/supportai/retrievers/Chunk_Sibling_Search.gsql",
-        "common/gsql/supportai/retrievers/Content_Similarity_Search.gsql",
-        "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search.gsql",
-        "common/gsql/supportai/retrievers/GraphRAG_Community_Search.gsql",
-    ]
 
     for filename in supportai_queries:
         logger.info(f"Creating supportai query {filename}")

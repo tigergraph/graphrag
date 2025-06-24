@@ -20,8 +20,8 @@ class EventualConsistencyChecker:
         cleanup_interval_seconds,
         graphname,
         embedding_service: EmbeddingModel,
+        embedding_store: EmbeddingStore,
         embedding_indices: List[str],
-        embedding_stores: Dict[str, EmbeddingStore],
         conn: TigerGraphConnectionProxy,
         extractor: BaseExtractor,
         batch_size = 10,
@@ -35,7 +35,7 @@ class EventualConsistencyChecker:
         self.vertex_field = "vertex_id"
         self.embedding_service = embedding_service
         self.embedding_indices = embedding_indices
-        self.embedding_stores = embedding_stores
+        self.embedding_store = embedding_store
         self.extractor = extractor
         self.batch_size = batch_size
         self.run_forever = run_forever
@@ -216,18 +216,16 @@ class EventualConsistencyChecker:
         )[0]["@@v_and_text"]
 
     def _remove_existing_entries(self, v_type, vertex_ids):
-        vector_index = "tigergraph"
         LogWriter.info(f"Remove existing entries with vertex_ids in {str(vertex_ids)}")
-        self.embedding_stores[vector_index].remove_embeddings(
+        self.embedding_store.remove_embeddings(
             expr=f"{self.vertex_field} in {str(vertex_ids)}"
         )
 
     def _process_content(self, v_type, vertex_ids_content_map):
-        vector_index = "tigergraph"
         LogWriter.info(f"Embedding content from vertex type: {v_type}")
         for vertex_id, content in vertex_ids_content_map.items():
             if content:
-                self.embedding_stores[vector_index].add_embeddings(
+                self.embedding_store.add_embeddings(
                     [(text, [])], [{self.vertex_field: vertex_id}]
                 )
 
@@ -284,9 +282,8 @@ class EventualConsistencyChecker:
                 LogWriter.info(f"No cleanup needed for current batch of vertex type {v_type}")
 
     def _cleanup_nonexistent_vertices(self, v_type, non_existent_vertices):
-        vector_index = "tigergraph"
         for vertex_id in non_existent_vertices:
-            self.embedding_stores[vector_index].remove_embeddings(
+            self.embedding_store.remove_embeddings(
                 expr=f"{self.vertex_field} == '{vertex_id}'"
             )
 

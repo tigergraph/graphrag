@@ -77,12 +77,15 @@ def initialize_eventual_consistency_checker(
         maj, minor, patch = conn.getVer().split(".")
         if  maj >= "4" and minor >= "2":
             # TigerGraph native vector support
-            index_stores = {}
-            index_stores["tigergraph"] = TigerGraphEmbeddingStore(
+            embedding_store = TigerGraphEmbeddingStore(
                 conn,
                 embedding_service,
                 support_ai_instance=False,
             )
+        index_names = graphrag_config.get(
+            "indexes",
+            ["Document", "DocumentChunk", "Entity", "Relationship", "Concept"],
+        )
 
         if graphrag_config.get("extractor") == "llm":
             from common.extractors import LLMEntityRelationshipExtractor
@@ -96,8 +99,8 @@ def initialize_eventual_consistency_checker(
             cleanup_interval_seconds,
             graphname,
             embedding_service,
+            embedding_store,
             index_names,
-            index_stores,
             conn,
             extractor,
             batch_size,
