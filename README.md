@@ -55,7 +55,7 @@ The quickest way to access TigerGraph GraphRAG is to deploy its docker image wit
 * Step 2: Set up configurations
 
   Next, in the same directory as the Docker Compose file is in, create and fill in the following configuration files:
-  * [configs/db_config.json](https://raw.githubusercontent.com/tigergraph/ecosys/refs/heads/master/tutorials/graphrag/configs/server_config.json)
+  * [configs/server_config.json](https://raw.githubusercontent.com/tigergraph/ecosys/refs/heads/master/tutorials/graphrag/configs/server_config.json)
   * [configs/nginx.conf](https://raw.githubusercontent.com/tigergraph/ecosys/refs/heads/master/tutorials/graphrag/configs/nginx.conf)
 
 * Step 3 (Optional): Configure Logging Level in Dockerfile
@@ -94,7 +94,7 @@ This line can be changed to support different logging levels.
 #### Configurations
 
 ##### LLM provider configuration
-In the `configs/llm_config.json` file, copy JSON config template from below for your LLM provider, and fill out the appropriate fields. Only one provider is needed.
+In the `llm_config` section of `configs/server_config.json` file, copy JSON config template from below for your LLM provider, and fill out the appropriate fields. Only one provider is needed.
 
 * OpenAI
 In addition to the `OPENAI_API_KEY`, `llm_model` and `model_name` can be edited to match your specific configuration details.
