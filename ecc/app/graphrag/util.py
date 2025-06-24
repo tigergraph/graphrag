@@ -84,6 +84,7 @@ async def init(
     # add louvain to queries
     q = [x.split(".gsql")[0] for x in glob("common/gsql/graphrag/louvain/*")]
     requried_queries.extend(q)
+    logger.info(f"Installing queries needed for GraphRAG all together")
     await install_queries(requried_queries, conn)
 
     # extractor

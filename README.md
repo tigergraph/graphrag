@@ -99,30 +99,31 @@ In the `llm_config` section of `configs/server_config.json` file, copy JSON conf
 * OpenAI
 In addition to the `OPENAI_API_KEY`, `llm_model` and `model_name` can be edited to match your specific configuration details.
 
-    ```json
-    {
-        "llm_config": {
-            "embedding_service": {
-                "embedding_model_service": "openai",
-                "model_name": "text-embedding-3-small",
-                "authentication_configuration": {
-                    "OPENAI_API_KEY": "YOUR_OPENAI_API_KEY_HERE"
-                }
-            },
-            "completion_service": {
-                "llm_service": "openai",
-                "llm_model": "gpt-4.1-mini",
-                "authentication_configuration": {
-                    "OPENAI_API_KEY": "YOUR_OPENAI_API_KEY_HERE"
-                },
-                "model_kwargs": {
-                    "temperature": 0
-                },
-                "prompt_path": "./app/prompts/openai_gpt4/"
+```json
+{
+    "llm_config": {
+        "embedding_service": {
+            "embedding_model_service": "openai",
+            "model_name": "text-embedding-3-small",
+            "authentication_configuration": {
+                "OPENAI_API_KEY": "YOUR_OPENAI_API_KEY_HERE"
             }
+        },
+        "completion_service": {
+            "llm_service": "openai",
+            "llm_model": "gpt-4.1-mini",
+            "authentication_configuration": {
+                "OPENAI_API_KEY": "YOUR_OPENAI_API_KEY_HERE"
+            },
+            "model_kwargs": {
+                "temperature": 0
+            },
+            "prompt_path": "./app/prompts/openai_gpt4/"
         }
     }
-    ```
+}
+```
+
 * GCP
 
 Follow the GCP authentication information found here: https://cloud.google.com/docs/authentication/application-default-credentials#GAC and create a Service Account with VertexAI credentials. Then add the following to the docker run command:
@@ -133,213 +134,216 @@ Follow the GCP authentication information found here: https://cloud.google.com/d
 
 And your JSON config should follow as:
 
-    ```json
-    {
-        "llm_config": {
-            "embedding_service": {
-                "embedding_model_service": "vertexai",
-                "model_name": "GCP-text-bison",
-                "authentication_configuration": {}
+```json
+{
+    "llm_config": {
+        "embedding_service": {
+            "embedding_model_service": "vertexai",
+            "model_name": "GCP-text-bison",
+            "authentication_configuration": {}
+        },
+        "completion_service": {
+            "llm_service": "vertexai",
+            "llm_model": "text-bison",
+            "model_kwargs": {
+                "temperature": 0
             },
-            "completion_service": {
-                "llm_service": "vertexai",
-                "llm_model": "text-bison",
-                "model_kwargs": {
-                    "temperature": 0
-                },
-                "prompt_path": "./app/prompts/gcp_vertexai_palm/"
-            }
+            "prompt_path": "./app/prompts/gcp_vertexai_palm/"
         }
     }
-    ```
+}
+```
 
 * Azure
 
 In addition to the `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `azure_deployment`, `llm_model` and `model_name` can be edited to match your specific configuration details.
 
-    ```json
-    {
-        "llm_config": {
-            "embedding_service": {
-                "embedding_model_service": "azure",
-                "model_name": "GPT35Turbo",
-                "azure_deployment":"YOUR_EMBEDDING_DEPLOYMENT_HERE",
-                "authentication_configuration": {
-                    "OPENAI_API_TYPE": "azure",
-                    "OPENAI_API_VERSION": "2022-12-01",
-                    "AZURE_OPENAI_ENDPOINT": "YOUR_AZURE_ENDPOINT_HERE",
-                    "AZURE_OPENAI_API_KEY": "YOUR_AZURE_API_KEY_HERE"
-                }
-            },
-            "completion_service": {
-                "llm_service": "azure",
-                "azure_deployment": "YOUR_COMPLETION_DEPLOYMENT_HERE",
-                "openai_api_version": "2023-07-01-preview",
-                "llm_model": "gpt-35-turbo-instruct",
-                "authentication_configuration": {
-                    "OPENAI_API_TYPE": "azure",
-                    "AZURE_OPENAI_ENDPOINT": "YOUR_AZURE_ENDPOINT_HERE",
-                    "AZURE_OPENAI_API_KEY": "YOUR_AZURE_API_KEY_HERE"
-                },
-                "model_kwargs": {
-                    "temperature": 0
-                },
-                "prompt_path": "./app/prompts/azure_open_ai_gpt35_turbo_instruct/"
+```json
+{
+    "llm_config": {
+        "embedding_service": {
+            "embedding_model_service": "azure",
+            "model_name": "GPT35Turbo",
+            "azure_deployment":"YOUR_EMBEDDING_DEPLOYMENT_HERE",
+            "authentication_configuration": {
+                "OPENAI_API_TYPE": "azure",
+                "OPENAI_API_VERSION": "2022-12-01",
+                "AZURE_OPENAI_ENDPOINT": "YOUR_AZURE_ENDPOINT_HERE",
+                "AZURE_OPENAI_API_KEY": "YOUR_AZURE_API_KEY_HERE"
             }
+        },
+        "completion_service": {
+            "llm_service": "azure",
+            "azure_deployment": "YOUR_COMPLETION_DEPLOYMENT_HERE",
+            "openai_api_version": "2023-07-01-preview",
+            "llm_model": "gpt-35-turbo-instruct",
+            "authentication_configuration": {
+                "OPENAI_API_TYPE": "azure",
+                "AZURE_OPENAI_ENDPOINT": "YOUR_AZURE_ENDPOINT_HERE",
+                "AZURE_OPENAI_API_KEY": "YOUR_AZURE_API_KEY_HERE"
+            },
+            "model_kwargs": {
+                "temperature": 0
+            },
+            "prompt_path": "./app/prompts/azure_open_ai_gpt35_turbo_instruct/"
         }
     }
+}
     ```
 
 * AWS Bedrock
-    ```json
-    {
-        "llm_config": {
-            "embedding_service": {
-                "embedding_model_service": "bedrock",
-                "model_name":"amazon.titan-embed-text-v1",
-                "authentication_configuration": {
-                    "AWS_ACCESS_KEY_ID": "ACCESS_KEY",
-                    "AWS_SECRET_ACCESS_KEY": "SECRET"
-                }
-            },
-            "completion_service": {
-                "llm_service": "bedrock",
-                "llm_model": "anthropic.claude-3-haiku-20240307-v1:0",
-                "authentication_configuration": {
-                    "AWS_ACCESS_KEY_ID": "ACCESS_KEY",
-                    "AWS_SECRET_ACCESS_KEY": "SECRET"
-                },
-                "model_kwargs": {
-                    "temperature": 0,
-                },
-                "prompt_path": "./app/prompts/aws_bedrock_claude3haiku/"
+
+```json
+{
+    "llm_config": {
+        "embedding_service": {
+            "embedding_model_service": "bedrock",
+            "model_name":"amazon.titan-embed-text-v1",
+            "authentication_configuration": {
+                "AWS_ACCESS_KEY_ID": "ACCESS_KEY",
+                "AWS_SECRET_ACCESS_KEY": "SECRET"
             }
+        },
+        "completion_service": {
+            "llm_service": "bedrock",
+            "llm_model": "anthropic.claude-3-haiku-20240307-v1:0",
+            "authentication_configuration": {
+                "AWS_ACCESS_KEY_ID": "ACCESS_KEY",
+                "AWS_SECRET_ACCESS_KEY": "SECRET"
+            },
+            "model_kwargs": {
+                "temperature": 0,
+            },
+            "prompt_path": "./app/prompts/aws_bedrock_claude3haiku/"
         }
     }
-    ```
+}
+```
 
 * Ollama
-    ```json
-    {
-        "llm_config": {
-            "embedding_service": {
-                "embedding_model_service": "openai",
-                "model_name": "GPT-4o",
-                "authentication_configuration": {
-                    "OPENAI_API_KEY": ""
-                }
-            },
-            "completion_service": {
-                "llm_service": "ollama",
-                "llm_model": "calebfahlgren/natural-functions",
-                "model_kwargs": {
-                    "temperature": 0.0000001
-                },
-                "prompt_path": "./app/prompts/openai_gpt4/"
+
+```json
+{
+    "llm_config": {
+        "embedding_service": {
+            "embedding_model_service": "openai",
+            "model_name": "GPT-4o",
+            "authentication_configuration": {
+                "OPENAI_API_KEY": ""
             }
+        },
+        "completion_service": {
+            "llm_service": "ollama",
+            "llm_model": "calebfahlgren/natural-functions",
+            "model_kwargs": {
+                "temperature": 0.0000001
+            },
+            "prompt_path": "./app/prompts/openai_gpt4/"
         }
     }
-    ```
+}
+```
 
 * Hugging Face
 
 Example configuration for a model on Hugging Face with a dedicated endpoint is shown below. Please specify your configuration details:\
 
-    ```json
-    {
-        "llm_config": {
-            "embedding_service": {
-                "embedding_model_service": "openai",
-                "model_name": "llama3-8b",
-                "authentication_configuration": {
-                    "OPENAI_API_KEY": ""
-                }
-            },
-            "completion_service": {
-                "llm_service": "huggingface",
-                "llm_model": "hermes-2-pro-llama-3-8b-lpt",
-                "endpoint_url": "https:endpoints.huggingface.cloud",
-                "authentication_configuration": {
-                    "HUGGINGFACEHUB_API_TOKEN": ""
-                },
-                "model_kwargs": {
-                    "temperature": 0.1
-                },
-                "prompt_path": "./app/prompts/openai_gpt4/"
+```json
+{
+    "llm_config": {
+        "embedding_service": {
+            "embedding_model_service": "openai",
+            "model_name": "llama3-8b",
+            "authentication_configuration": {
+                "OPENAI_API_KEY": ""
             }
+        },
+        "completion_service": {
+            "llm_service": "huggingface",
+            "llm_model": "hermes-2-pro-llama-3-8b-lpt",
+            "endpoint_url": "https:endpoints.huggingface.cloud",
+            "authentication_configuration": {
+                "HUGGINGFACEHUB_API_TOKEN": ""
+            },
+            "model_kwargs": {
+                "temperature": 0.1
+            },
+            "prompt_path": "./app/prompts/openai_gpt4/"
         }
     }
-    ```
+}
+```
 
 Example configuration for a model on Hugging Face with a serverless endpoint is shown below. Please specify your configuration details:
 
-    ```json
-    {
-        "llm_config": {
-            "embedding_service": {
-                "embedding_model_service": "openai",
-                "model_name": "Llama3-70b",
-                "authentication_configuration": {
-                    "OPENAI_API_KEY": ""
-                }
-            },
-            "completion_service": {
-                "llm_service": "huggingface",
-                "llm_model": "meta-llama/Meta-Llama-3-70B-Instruct",
-                "authentication_configuration": {
-                    "HUGGINGFACEHUB_API_TOKEN": ""
-                },
-                "model_kwargs": {
-                    "temperature": 0.1
-                },
-                "prompt_path": "./app/prompts/llama_70b/"
+```json
+{
+    "llm_config": {
+        "embedding_service": {
+            "embedding_model_service": "openai",
+            "model_name": "Llama3-70b",
+            "authentication_configuration": {
+                "OPENAI_API_KEY": ""
             }
+        },
+        "completion_service": {
+            "llm_service": "huggingface",
+            "llm_model": "meta-llama/Meta-Llama-3-70B-Instruct",
+            "authentication_configuration": {
+                "HUGGINGFACEHUB_API_TOKEN": ""
+            },
+            "model_kwargs": {
+                "temperature": 0.1
+            },
+            "prompt_path": "./app/prompts/llama_70b/"
         }
     }
-    ```
+}
+```
 
 * Groq
-    ```json
-    {
-        "llm_config": {
-            "embedding_service": {
-                "embedding_model_service": "openai",
-                "model_name": "mixtral-8x7b-32768",
-                "authentication_configuration": {
-                    "OPENAI_API_KEY": ""
-                }
-            },
-            "completion_service": {
-                "llm_service": "groq",
-                "llm_model": "mixtral-8x7b-32768",
-                "authentication_configuration": {
-                    "GROQ_API_KEY": ""
-                },
-                "model_kwargs": {
-                    "temperature": 0.1
-                },
-                "prompt_path": "./app/prompts/openai_gpt4/"
+
+```json
+{
+    "llm_config": {
+        "embedding_service": {
+            "embedding_model_service": "openai",
+            "model_name": "mixtral-8x7b-32768",
+            "authentication_configuration": {
+                "OPENAI_API_KEY": ""
             }
+        },
+        "completion_service": {
+            "llm_service": "groq",
+            "llm_model": "mixtral-8x7b-32768",
+            "authentication_configuration": {
+                "GROQ_API_KEY": ""
+            },
+            "model_kwargs": {
+                "temperature": 0.1
+            },
+            "prompt_path": "./app/prompts/openai_gpt4/"
         }
     }
-    ```
+}
+```
 
 ##### DB configuration
 Copy the below into `configs/server_config.json` and edit the `hostname` and `getToken` fields to match your database's configuration. If token authentication is enabled in TigerGraph, set `getToken` to `true`. Set the timeout, memory threshold, and thread limit parameters as desired to control how much of the database's resources are consumed when answering a question.
 
-    ```json
-    {
-        "db_config": {
-            "hostname": "http://tigergraph",
-            "restppPort": "9000",
-            "gsPort": "14240",
-            "getToken": false,
-            "default_timeout": 300,
-            "default_mem_threshold": 5000,
-            "default_thread_limit": 8
-        }
+```json
+{
+    "db_config": {
+        "hostname": "http://tigergraph",
+        "restppPort": "9000",
+        "gsPort": "14240",
+        "getToken": false,
+        "default_timeout": 300,
+        "default_mem_threshold": 5000,
+        "default_thread_limit": 8
     }
-    ```
+}
+```
 
 ##### GraphRAG configuration
 Copy the below code into `configs/server_config.json`. You shouldn’t need to change anything unless you change the port of the chat history service in the Docker Compose file.
@@ -347,29 +351,29 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 `reuse_embedding` to `true` will skip re-generating the embedding if it already exists.
 `ecc` and `chat_history_api` are the addresses of internal components of GraphRAG.If you use the Docker Compose file as is, you don’t need to change them.
 
-    ```json
-    {
-        "graphrag_config": {
-            "reuse_embedding": false,
-            "ecc": "http://eventual-consistency-service:8001",
-            "chat_history_api": "http://chat-history:8002"
-        }
+```json
+{
+    "graphrag_config": {
+        "reuse_embedding": false,
+        "ecc": "http://eventual-consistency-service:8001",
+        "chat_history_api": "http://chat-history:8002"
     }
-
+}
+```
 
 ##### Chat configuration
 Copy the below code into `configs/server_config.json`. You shouldn’t need to change anything unless you change the port of the chat history service in the Docker Compose file.
 
-    ```json
-    {
-        "chat-history": {
-            "apiPort":"8002",
-            "dbPath": "chats.db",
-            "dbLogPath": "db.log",
-            "logPath": "requestLogs.jsonl",
-            "conversationAccessRoles": ["superuser", "globaldesigner"]
-        }
+```json
+{
+    "chat-history": {
+        "apiPort":"8002",
+        "dbPath": "chats.db",
+        "dbLogPath": "db.log",
+        "logPath": "requestLogs.jsonl",
+        "conversationAccessRoles": ["superuser", "globaldesigner"]
     }
+}
 ```
 
 ##### Enable openCypher Query Generation in InquiryAI
