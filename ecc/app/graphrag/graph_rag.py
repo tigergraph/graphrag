@@ -79,7 +79,7 @@ async def chunk_docs(
     Creates and starts one worker for each document
     in the docs channel.
     """
-    logger.info("Reading from docs channel")
+    logger.info("Chunk Processing Start")
     doc_tasks = []
     async with asyncio.TaskGroup() as grp:
         while True:
@@ -94,7 +94,7 @@ async def chunk_docs(
             except Exception:
                 raise
 
-    logger.info("chunk_docs done")
+    logger.info("Chunk Processing End")
 
     # close the extract chan -- chunk_doc is the only sender
     # and chunk_doc calls are kicked off from here
@@ -109,7 +109,7 @@ async def upsert(upsert_chan: Channel):
     (func, args) <- q.get()
     """
 
-    logger.info("Reading from upsert channel")
+    logger.info("Data Upserting Start")
     # consume task queue
     async with asyncio.TaskGroup() as grp:
         while True:
@@ -123,13 +123,13 @@ async def upsert(upsert_chan: Channel):
             except Exception:
                 raise
 
-    logger.info("upsert done")
+    logger.info("Data Upserting End")
     logger.info("closing load_q chan")
     load_q.close()
 
 
 async def load(conn: AsyncTigerGraphConnection):
-    logger.info("Reading from load_q")
+    logger.info("Data Loading Start")
     dd = lambda: defaultdict(dd)  # infinite default dict
     batch_size = 500
     # while the load q is still open or has contents
@@ -190,6 +190,7 @@ async def load(conn: AsyncTigerGraphConnection):
     # TODO: flush q if it's not empty
     if not load_q.empty():
         raise Exception(f"load_q not empty: {load_q.qsize()}", flush=True)
+    logger.info("Data Loading End")
 
 
 async def embed(
@@ -200,7 +201,7 @@ async def embed(
     chan expects:
     (v_id, content, index_name) <- q.get()
     """
-    logger.info("Reading from embed channel")
+    logger.info("Embedding Processing Start")
     async with asyncio.TaskGroup() as grp:
         # consume task queue
         while True:
@@ -224,7 +225,7 @@ async def embed(
             except Exception:
                 raise
 
-    logger.info(f"embed done")
+    logger.info("Embedding Processing End")
 
 
 async def extract(
@@ -239,7 +240,7 @@ async def extract(
     chan expects:
     (chunk , chunk_id) <- q.get()
     """
-    logger.info("Reading from extract channel")
+    logger.info("Entity Extration Start")
     # consume task queue
     async with asyncio.TaskGroup() as grp:
         while True:
@@ -253,7 +254,7 @@ async def extract(
             except Exception:
                 raise
 
-    logger.info(f"extract done")
+    logger.info("Entity Extration End")
 
     logger.info("closing upsert and embed chan")
     upsert_chan.close()
@@ -268,7 +269,7 @@ async def stream_entities(
     """
     Streams entity IDs from the grpah
     """
-    logger.info("streaming entities")
+    logger.info("Entity Streaming Start")
     for i in range(ttl_batches):
         ids = await stream_ids(conn, "Entity", i, ttl_batches)
         if ids["error"]:
@@ -280,7 +281,7 @@ async def stream_entities(
             if len(i) > 0:
                 await entity_chan.put((i, "Entity"))
 
-    logger.info("stream_enities done")
+    logger.info("Entity Streaming End")
     # close the docs chan -- this function is the only sender
     logger.info("closing entities chan")
     entity_chan.close()
@@ -298,6 +299,7 @@ async def resolve_entities(
 
     Copies edges between entities to their respective ResolvedEntities
     """
+    logger.info("Entity Resolving Start")
     async with asyncio.TaskGroup() as grp:
         # for every entity
         while True:
@@ -311,6 +313,7 @@ async def resolve_entities(
                 break
             except Exception:
                 raise
+    logger.info("Entity Resolving End")
     logger.info("closing upsert_chan")
     upsert_chan.close()
     logger.info("resolve_entities done")
@@ -321,12 +324,12 @@ async def resolve_relationships(
     """
     Copy RELATIONSHIP edges to RESOLVED_RELATIONSHIP
     """
-    logger.info("Running ResolveRelationships")
+    logger.info("Relationship Resolving Start")
     async with tg_sem:
         res = await conn.runInstalledQuery(
             "ResolveRelationships"
         )
-    logger.info("resolve_relationships done")
+    logger.info("Relationship Resolving End")
 
 async def communities(conn: AsyncTigerGraphConnection, comm_process_chan: Channel):
     """

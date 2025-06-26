@@ -151,7 +151,17 @@ class VertexAI_PaLM_Embedding(EmbeddingModel):
         super().__init__(config, model_name=config.get("model_name", "VertexAI PaLM"))
         from langchain.embeddings import VertexAIEmbeddings
 
-        self.embeddings = VertexAIEmbeddings()
+        self.embeddings = VertexAIEmbeddings(model_name=model_name)
+
+
+class GenAI_Embedding(EmbeddingModel):
+    """Google GenAI Embedding Model"""
+
+    def __init__(self, config):
+        super().__init__(config, model_name=config.get("model_name", "gemini-embedding-exp-03-07"))
+        from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
+        self.embeddings = GoogleGenerativeAIEmbeddings(model=model_name)
 
 
 class AWS_Bedrock_Embedding(EmbeddingModel):

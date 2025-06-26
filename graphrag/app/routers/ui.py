@@ -110,6 +110,7 @@ def add_feedback(
             json=message.model_dump(),
             headers={"Authorization": f"Basic {auth}"},
         )
+        logger.info(f"chat: feedback res: {res}")
         res.raise_for_status()
     except Exception as e:
         exc = traceback.format_exc()
@@ -134,6 +135,7 @@ async def get_user_conversations(
                 f"{graphrag_config['chat_history_api']}/user/{user_id}",
                 headers={"Authorization": f"Basic {auth}"},
             )
+            logger.info(f"chat: user conversation res: {res.json()}")
             res.raise_for_status()
     except Exception as e:
         exc = traceback.format_exc()
@@ -158,6 +160,7 @@ async def get_conversation_contents(
                 f"{graphrag_config['chat_history_api']}/conversation/{conversation_id}",
                 headers={"Authorization": f"Basic {auth}"},
             )
+            logger.info(f"chat: user conversation content: {res}")
             res.raise_for_status()
     except Exception as e:
         exc = traceback.format_exc()
@@ -180,6 +183,7 @@ async def get_conversation_feedback(
                 f"{graphrag_config['chat_history_api']}/get_feedback",
                 headers={"Authorization": f"Basic {auth}"},
             )
+            logger.info(f"chat: conversation feedback: {res}")
             res.raise_for_status()
     except httpx.HTTPStatusError as e:
         logger.error(f"HTTP error occurred: {e}")
@@ -282,6 +286,7 @@ async def write_message_to_history(message: Message, usr_auth: str):
                 res = await client.post(
                     f"{ch}/conversation", headers=headers, json=message.model_dump()
                 )
+                logger.info(f"chat: writ message res: {message.model_dump()}")
                 res.raise_for_status()
         except Exception:  # catch all exceptions to log them, but don't raise
             exc = traceback.format_exc()

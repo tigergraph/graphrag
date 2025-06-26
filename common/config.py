@@ -16,6 +16,7 @@ from common.llm_services import (
     AWSBedrock,
     AzureOpenAI,
     GoogleVertexAI,
+    GoogleGenAI,
     Groq,
     HuggingFaceEndpoint,
     LLM_Model,
@@ -85,6 +86,8 @@ elif llm_config["embedding_service"]["embedding_model_service"].lower() == "azur
     embedding_service = AzureOpenAI_Ada002(llm_config["embedding_service"])
 elif llm_config["embedding_service"]["embedding_model_service"].lower() == "vertexai":
     embedding_service = VertexAI_PaLM_Embedding(llm_config["embedding_service"])
+elif llm_config["embedding_service"]["embedding_model_service"].lower() == "genai":
+    embedding_service = GenAI_Embedding(llm_config["embedding_service"])
 elif llm_config["embedding_service"]["embedding_model_service"].lower() == "bedrock":
     embedding_service = AWS_Bedrock_Embedding(llm_config["embedding_service"])
 else:
@@ -99,6 +102,8 @@ def get_llm_service(llm_config) -> LLM_Model:
         return AWS_SageMaker_Endpoint(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "vertexai":
         return GoogleVertexAI(llm_config["completion_service"])
+    elif llm_config["completion_service"]["llm_service"].lower() == "genai":
+        return GoogleGenAI(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "bedrock":
         return AWSBedrock(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "groq":
