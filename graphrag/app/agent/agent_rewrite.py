@@ -2,9 +2,9 @@
 import logging
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
-from langchain.pydantic_v1 import BaseModel, Field
 
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ class TigerGraphAgentRewriter:
 
         re_write_prompt = PromptTemplate(
             template="""You are a question re-writer that converts an input question to a better version that is optimized \
-for AI agent question answering. Look at the initial and formulate an improved question. \n
+for AI agent question answering. Look at the initial and formulate an improved question but avoid to add unnecessary context for entities. \n
 Here is the initial question:
 {question}
 Format your response in the following manner {format_instructions}""",

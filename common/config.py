@@ -9,6 +9,7 @@ from common.embeddings.embedding_services import (
     AzureOpenAI_Ada002,
     OpenAI_Embedding,
     VertexAI_PaLM_Embedding,
+    GenAI_Embedding,
 )
 from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
 from common.llm_services import (
@@ -134,4 +135,3 @@ if os.getenv("INIT_EMBED_STORE", "true") == "true":
         support_ai_instance=True,
     )
     service_status["embedding_store"] = {"status": "ok", "error": None}
-

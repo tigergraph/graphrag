@@ -16,6 +16,7 @@ from common.llm_services import (
     AWSBedrock,
     AzureOpenAI,
     GoogleVertexAI,
+    GoogleGenAI,
     Groq,
     HuggingFaceEndpoint,
     Ollama,
@@ -63,14 +64,15 @@ class TigerGraphAgent:
         self.model_name = embedding_model.model_name
         self.embedding_model = embedding_model
         self.embedding_store = embedding_store
+        if self.embedding_store.conn.graphname != self.conn.graphname:
+            self.embedding_store.set_graphname(self.conn.graphname)
 
         self.mq2s = MapQuestionToSchema(
-            self.conn, self.llm.model, self.llm.map_question_schema_prompt
+            self.conn, self.llm
         )
         self.gen_func = GenerateFunction(
             self.conn,
-            self.llm.model,
-            self.llm.generate_function_prompt,
+            self.llm,
             embedding_model,
             embedding_store,
         )
@@ -176,6 +178,9 @@ def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retr
     elif llm_config["completion_service"]["llm_service"].lower() == "vertexai":
         llm_service_name = "vertexai"
         llm_provider = GoogleVertexAI(llm_config["completion_service"])
+    elif llm_config["completion_service"]["llm_service"].lower() == "genai":
+        llm_service_name = "genai"
+        llm_provider = GoogleGenAI(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "bedrock":
         llm_service_name = "bedrock"
         llm_provider = AWSBedrock(llm_config["completion_service"])

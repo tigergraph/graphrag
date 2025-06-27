@@ -1,11 +1,10 @@
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from pydantic import BaseModel, Field
 from common.logs.logwriter import LogWriter
+from common.logs.log import req_id_cv
 from pyTigerGraph.pyTigerGraph import TigerGraphConnection
 import logging
-from common.logs.log import req_id_cv
-
-from langchain.pydantic_v1 import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 

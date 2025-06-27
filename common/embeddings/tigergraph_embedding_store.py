@@ -277,7 +277,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         return
 
     def retrieve_similar(self, query_embedding, top_k=10, filter_expr: str = None, vertex_types: List[str] = ["DocumentChunk"]):
-        res = retrieve_similar_with_score(query_embedding, top_k=top_k, filter_expr=filter_expr, vertex_types=vertex_types)
+        res = self.retrieve_similar_with_score(query_embedding, top_k=top_k, filter_expr=filter_expr, vertex_types=vertex_types)
         similar = [x[0] for x in res]
         return similar
 

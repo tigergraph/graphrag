@@ -6,7 +6,6 @@ from common.py_schemas import CandidateScore, CandidateGenerator
 
 from langchain_core.output_parsers import StrOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field, validator
 from langchain.output_parsers import OutputFixingParser
 
 import re

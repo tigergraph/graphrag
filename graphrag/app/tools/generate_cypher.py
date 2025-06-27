@@ -12,8 +12,8 @@ class GenerateCypher(BaseTool):
     """GenerateCypher Tool.
     Tool to generate and execute the appropriate Cypher query for the question.
     """
-    name = "GenerateCypher"
-    description = "Generates a Cypher query for the question."
+    name: str = "GenerateCypher"
+    description: str = "Generates a Cypher query for the question."
     conn: TigerGraphConnectionProxy = None
     llm: LLM = None
 

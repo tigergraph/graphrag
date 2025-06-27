@@ -124,7 +124,37 @@ In addition to the `OPENAI_API_KEY`, `llm_model` and `model_name` can be edited 
 }
 ```
 
-* GCP
+* Google GenAI
+
+Get your Gemini API key via https://aistudio.google.com/app/apikey.
+
+```json
+{
+    "llm_config": {
+        "embedding_service": {
+            "embedding_model_service": "genai",
+            "model_name": "models/gemini-embedding-exp-03-07",
+            "dimensions": 1536,
+            "authentication_configuration": {
+                "GOOGLE_API_KEY": "YOUR_GOOGLE_API_KEY_HERE"
+            }
+        },
+        "completion_service": {
+            "llm_service": "genai",
+            "llm_model": "gemini-2.5-flash",
+            "authentication_configuration": {
+                "GOOGLE_API_KEY": "YOUR_GOOGLE_API_KEY_HERE"
+            },
+            "model_kwargs": {
+                "temperature": 0
+            },
+            "prompt_path": "./common/prompts/google_gemini/"
+        }
+    }
+}
+```
+
+* GCP VertexAI
 
 Follow the GCP authentication information found here: https://cloud.google.com/docs/authentication/application-default-credentials#GAC and create a Service Account with VertexAI credentials. Then add the following to the docker run command:
 

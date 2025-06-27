@@ -1,8 +1,8 @@
 import logging
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
-from langchain.pydantic_v1 import BaseModel, Field
-from langchain.callbacks import get_openai_callback
+from langchain_community.callbacks.manager import get_openai_callback
+from pydantic import BaseModel, Field
 from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
 

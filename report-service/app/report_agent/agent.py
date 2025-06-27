@@ -2,10 +2,10 @@ from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.llm_services.base_llm import LLM_Model
 from common.py_schemas.tool_io_schemas import ReportSections, ReportSection
 
-
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser, StrOutputParser
-from langchain.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
+
 
 class Report(BaseModel):
     report: str = Field(description="A drareport based on the answers received from the data analyst. Include citations by adding `[x]` where x is the function call that was used to determine the answer.")
