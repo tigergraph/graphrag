@@ -54,7 +54,6 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   message,
 }) => {
   const [showResult, setShowResult] = useState<boolean>(false);
-  const [showUsage, setShowUsage] = useState<boolean>(false);
   const [showGraphVis, setShowGraphVis] = useState<boolean>(false);
   const [showTableVis, setShowTableVis] = useState<boolean>(false);
 
@@ -77,7 +76,6 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
             <Interactions
               message={message} 
               showExplain={():any => setShowResult(prev => !prev)}
-              showUsage={():any => setShowUsage(prev => !prev)}
               showTable={():any  => setShowTableVis(prev => !prev)}
               showGraph={():any  => setShowGraphVis(prev => !prev)}
             />
@@ -118,19 +116,6 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
               <span
                 className="absolute right-2 bottom-1 cursor-pointer"
                 onClick={() => setShowResult(false)}
-              >
-                <IoIosCloseCircleOutline />
-              </span>
-            </div>
-          ) : null}
-
-          {showUsage ? (
-            <div className="text-[11px] rounded-md bg-[#ececec] dark:bg-shadeA mt-3 p-4 leading-4 relative">
-              <strong>Usage:</strong><br/> 
-              {message.query_sources?.usage_data}
-              <span
-                className="absolute right-2 bottom-1 cursor-pointer"
-                onClick={() => setShowUsage(false)}
               >
                 <IoIosCloseCircleOutline />
               </span>

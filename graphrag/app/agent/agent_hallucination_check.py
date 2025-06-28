@@ -1,6 +1,8 @@
 import logging
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_community.callbacks.manager import get_openai_callback
+
 from pydantic import BaseModel, Field
 from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
@@ -46,6 +48,14 @@ class TigerGraphAgentHallucinationCheck:
         # Chain
         rag_chain = prompt | self.llm.model | hallucination_parser
 
-        prediction = rag_chain.invoke({"context": context, "generation": generation})
+        usage_data = {}
+        with get_openai_callback() as cb:
+            prediction = rag_chain.invoke({"context": context, "generation": generation})
+
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            logger.info(f"check_hallucination usage: {usage_data}")
         LogWriter.info(f"request_id={req_id_cv.get()} EXIT check_hallucination")
         return prediction

@@ -16,7 +16,6 @@ const GRAPHRAG_URL = "";
 interface Interactions {
   message?: any;
   showExplain: () => boolean;
-  showUsage: () => boolean;
   showTable: () => boolean;
   showGraph: () => boolean;
 }
@@ -24,7 +23,6 @@ interface Interactions {
 export const Interactions: FC<Interactions> = ({ 
   message,
   showExplain,
-  showUsage,
   showTable,
   showGraph,
 }: Interactions) => {
@@ -100,15 +98,7 @@ export const Interactions: FC<Interactions> = ({
             <span className="text-xs">Explain</span>
           </div>
 
-          <div
-            className="w-auto h-[28px] bg-shadeA flex items-center justify-center rounded-sm mr-1 px-2 cursor-pointer"
-            onClick={() => showUsage()}
-          >
-            <LuInfo className="text-[15px] mr-1" />
-            <span className="text-xs">Usage</span>
-          </div>
-
-          <div className="w-[28px] h-[28px] bg-shadeA flex items-center justify-center rounded-sm mr-1 cursor-pointer" onClick={() => showGraph()}>
+          <div className="w-[28px] h-[28px] bg-shadeA flex items-center justify-center rounded-sm ml-5 mr-1 cursor-pointer" onClick={() => showGraph()}>
             <PiGraph className="text-[15px]" />
           </div>
 

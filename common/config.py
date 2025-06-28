@@ -64,12 +64,20 @@ llm_config = server_config.get("llm_config")
 graphrag_config = server_config.get("graphrag_config")
 
 if db_config is None:
-    raise Exception("graphrag_config is not found in SERVER_CONFIG")
+    raise Exception("db_config is not found in SERVER_CONFIG")
 if llm_config is None:
-    raise Exception("graphrag_config is not found in SERVER_CONFIG")
+    raise Exception("llm_config is not found in SERVER_CONFIG")
+
+completion_config = llm_config.get("completion_service")
+if completion_config is None:
+    raise Exception("completion_service is not found in llm_config")
+embedding_config = llm_config.get("embedding_service")
+if embedding_config is None:
+    raise Exception("embedding_service is not found in llm_config")
+embedding_dimension = embedding_config.get("dimensions", 1536)
 
 if graphrag_config is None:
-    graphrag_config = {"reuse_embedding", true}
+    graphrag_config = {"reuse_embedding", True}
 if "chunker" not in graphrag_config:
     graphrag_config["chunker"] = "semantic"
 if "extractor" not in graphrag_config:

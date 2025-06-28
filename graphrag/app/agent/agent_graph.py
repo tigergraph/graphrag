@@ -311,7 +311,6 @@ class TigerGraphAgentGraph:
         """
         Run the agent supportai search.
         """
-
         if self.supportai_retriever == "hybridsearch":
             return self.hybrid_search(state)
         elif self.supportai_retriever == "similaritysearch":
@@ -337,7 +336,7 @@ class TigerGraphAgentGraph:
             logger.debug_pii(
                 f"""request_id={req_id_cv.get()} Got result: {state["context"]["result"]}"""
             )
-            answer, usage_data = step.generate_answer(
+            answer = step.generate_answer(
                 state["question"], state["context"]["result"]
             )
         elif state["lookup_source"] == "inquiryai":
@@ -350,13 +349,13 @@ class TigerGraphAgentGraph:
                 logger.error(f"Failed to serialize context to JSON: {e}")
                 raise ValueError("Invalid context data format. Unable to convert to JSON.")
 
-            answer, usage_data = step.generate_answer(state["question"], context_data_str)
+            answer = step.generate_answer(state["question"], context_data_str)
 
         elif state["lookup_source"] == "cypher":
             logger.debug_pii(
                 f"""request_id={req_id_cv.get()} Got result: {state["context"]["answer"]}"""
             )
-            answer, usage_data = step.generate_answer(state["question"], state["context"]["answer"])
+            answer = step.generate_answer(state["question"], state["context"]["answer"])
         logger.debug_pii(
             f"request_id={req_id_cv.get()} Generated answer: {answer.generated_answer}"
         )
@@ -366,8 +365,7 @@ class TigerGraphAgentGraph:
 
             citations = [re.sub(r"_chunk_\d+", "", x) for x in answer.citation]
             state["context"]["reasoning"] = list(set(citations))
-        state["context"]["usage_data"] = ', '.join(f'{k}: {v}' for k, v in usage_data.items())
-            
+
         try:
             resp = GraphRAGResponse(
                 natural_language_response=answer.generated_answer,

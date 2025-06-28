@@ -17,7 +17,7 @@ class TigerGraphAgentGenerator:
     def __init__(self, llm_model):
         self.llm = llm_model
 
-    def generate_answer(self, question: str, context: str) -> tuple[str, dict]:
+    def generate_answer(self, question: str, context: str) -> dict:
         """Generate an answer based on the question and context.
         Args:
             question: str: The question to generate an answer for.
@@ -54,7 +54,7 @@ class TigerGraphAgentGenerator:
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-     
+            logger.info(f"generate_answer usage: {usage_data}")
         LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_answer")
 
-        return generation, usage_data
+        return generation
