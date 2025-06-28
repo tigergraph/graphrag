@@ -4,7 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field, validator
+from langchain_community.callbacks.manager import get_openai_callback
+
 
 from supportai.retrievers import BaseRetriever
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
@@ -98,12 +99,19 @@ class GraphRAGRetriever(BaseRetriever):
 
         chain = ANSWER_PROMPT | model | answer_parser
 
-        answer = await chain.ainvoke(
-            {
-                "question": question,
-                "context": context,
-            }
-        )
+        usage_data = {}
+        with get_openai_callback() as cb:
+            answer = await chain.ainvoke(
+                {
+                    "question": question,
+                    "context": context,
+                }
+            )
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            self.logger.info(f"generate_candidate usage: {usage_data}")
 
         return answer
     

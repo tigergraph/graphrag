@@ -54,12 +54,11 @@ class TigerGraphAgent:
         self.embedding_store = embedding_store
 
         self.mq2s = MapQuestionToSchema(
-            self.conn, self.llm.model, self.llm.map_question_schema_prompt
+            self.conn, self.llm
         )
         self.gen_func = GenerateFunction(
             self.conn,
-            self.llm.model,
-            self.llm.generate_function_prompt,
+            self.llm,
             embedding_model,
             embedding_store,
         )

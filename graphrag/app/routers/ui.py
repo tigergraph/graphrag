@@ -312,7 +312,6 @@ async def graph_query(
         prev_id = None
         while True:
             data = q
-            logger.info(f"Retrieving answer for chat \"{data}\"")
 
             # make message from data
             message = Message(
@@ -397,7 +396,6 @@ async def chat(
     try:
         while True:
             data = await websocket.receive_text()
-            logger.info(f"Retrieving answer for chat \"{data}\"")
 
             # make message from data
             message = Message(

@@ -9,6 +9,7 @@ from common.embeddings.embedding_services import (
     AzureOpenAI_Ada002,
     OpenAI_Embedding,
     VertexAI_PaLM_Embedding,
+    GenAI_Embedding,
 )
 from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
 from common.llm_services import (
@@ -16,6 +17,7 @@ from common.llm_services import (
     AWSBedrock,
     AzureOpenAI,
     GoogleVertexAI,
+    GoogleGenAI,
     Groq,
     HuggingFaceEndpoint,
     LLM_Model,
@@ -62,12 +64,20 @@ llm_config = server_config.get("llm_config")
 graphrag_config = server_config.get("graphrag_config")
 
 if db_config is None:
-    raise Exception("graphrag_config is not found in SERVER_CONFIG")
+    raise Exception("db_config is not found in SERVER_CONFIG")
 if llm_config is None:
-    raise Exception("graphrag_config is not found in SERVER_CONFIG")
+    raise Exception("llm_config is not found in SERVER_CONFIG")
+
+completion_config = llm_config.get("completion_service")
+if completion_config is None:
+    raise Exception("completion_service is not found in llm_config")
+embedding_config = llm_config.get("embedding_service")
+if embedding_config is None:
+    raise Exception("embedding_service is not found in llm_config")
+embedding_dimension = embedding_config.get("dimensions", 1536)
 
 if graphrag_config is None:
-    graphrag_config = {"reuse_embedding", true}
+    graphrag_config = {"reuse_embedding", True}
 if "chunker" not in graphrag_config:
     graphrag_config["chunker"] = "semantic"
 if "extractor" not in graphrag_config:
@@ -85,6 +95,8 @@ elif llm_config["embedding_service"]["embedding_model_service"].lower() == "azur
     embedding_service = AzureOpenAI_Ada002(llm_config["embedding_service"])
 elif llm_config["embedding_service"]["embedding_model_service"].lower() == "vertexai":
     embedding_service = VertexAI_PaLM_Embedding(llm_config["embedding_service"])
+elif llm_config["embedding_service"]["embedding_model_service"].lower() == "genai":
+    embedding_service = GenAI_Embedding(llm_config["embedding_service"])
 elif llm_config["embedding_service"]["embedding_model_service"].lower() == "bedrock":
     embedding_service = AWS_Bedrock_Embedding(llm_config["embedding_service"])
 else:
@@ -99,6 +111,8 @@ def get_llm_service(llm_config) -> LLM_Model:
         return AWS_SageMaker_Endpoint(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "vertexai":
         return GoogleVertexAI(llm_config["completion_service"])
+    elif llm_config["completion_service"]["llm_service"].lower() == "genai":
+        return GoogleGenAI(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "bedrock":
         return AWSBedrock(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "groq":
@@ -129,4 +143,3 @@ if os.getenv("INIT_EMBED_STORE", "true") == "true":
         support_ai_instance=True,
     )
     service_status["embedding_store"] = {"status": "ok", "error": None}
-

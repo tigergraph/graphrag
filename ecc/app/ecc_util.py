@@ -5,6 +5,7 @@ from common.llm_services import (
     AWSBedrock,
     AzureOpenAI,
     GoogleVertexAI,
+    GoogleGenAI,
     Groq,
     HuggingFaceEndpoint,
     Ollama,
@@ -50,6 +51,8 @@ def get_llm_service():
         llm_provider = AWS_SageMaker_Endpoint(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "vertexai":
         llm_provider = GoogleVertexAI(llm_config["completion_service"])
+    elif llm_config["completion_service"]["llm_service"].lower() == "genai":
+        llm_provider = GoogleGenAI(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "bedrock":
         llm_provider = AWSBedrock(llm_config["completion_service"])
     elif llm_config["completion_service"]["llm_service"].lower() == "groq":

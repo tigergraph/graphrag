@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional
 
-from langchain.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 from langchain_community.graphs.graph_document import Node as BaseNode
 from langchain_community.graphs.graph_document import Relationship as BaseRelationship
 

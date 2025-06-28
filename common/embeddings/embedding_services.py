@@ -4,6 +4,8 @@ import time
 from typing import List
 
 from langchain.schema.embeddings import Embeddings
+from langchain_community.embeddings.openai import OpenAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
@@ -17,7 +19,7 @@ class EmbeddingModel(Embeddings):
     Implements connections to the desired embedding API.
     """
 
-    def __init__(self, config: dict, model_name: str, base_url: str = None):
+    def __init__(self, config: dict, model_name: str):
         """Initialize an EmbeddingModel
         Read JSON config file and export the details as environment variables.
         """
@@ -27,9 +29,8 @@ class EmbeddingModel(Embeddings):
             ]
         self.embeddings = None
         self.model_name = model_name
-        self.base_url = config.get("base_url")
         LogWriter.info(
-            f"request_id={req_id_cv.get()} instantiated OpenAI model_name={model_name}"
+            f"request_id={req_id_cv.get()} instantiated AI model_name={model_name}"
         )
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
@@ -47,7 +48,10 @@ class EmbeddingModel(Embeddings):
 
         try:
             LogWriter.info(f"request_id={req_id_cv.get()} ENTRY embed_documents()")
-            docs = self.embeddings.embed_documents(texts)
+            if isinstance(self.embeddings, GoogleGenerativeAIEmbeddings):
+                docs = self.embeddings.embed_documents(texts, output_dimensionality=self.dimensions)
+            else:
+                docs = self.embeddings.embed_documents(texts)
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT embed_documents()")
             metrics.llm_success_response_total.labels(self.model_name).inc()
             return docs
@@ -78,7 +82,10 @@ class EmbeddingModel(Embeddings):
             logger.debug_pii(
                 f"request_id={req_id_cv.get()} embed_query() embedding question={question}"
             )
-            query_embedding = self.embeddings.embed_query(question)
+            if isinstance(self.embeddings, GoogleGenerativeAIEmbeddings):
+                query_embedding = self.embeddings.embed_query(question, output_dimensionality=self.dimensions)
+            else:
+                query_embedding = self.embeddings.embed_query(question)
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT embed_query()")
             metrics.llm_success_response_total.labels(self.model_name).inc()
             return query_embedding
@@ -105,8 +112,13 @@ class EmbeddingModel(Embeddings):
         # metrics.llm_inprogress_requests.labels(self.model_name).inc()
 
         # try:
+        LogWriter.info(f"request_id={req_id_cv.get()} ENTRY aembed_query()")
         logger.debug_pii(f"aembed_query() embedding question={question}")
-        query_embedding = await self.embeddings.aembed_query(question)
+        if isinstance(self.embeddings, GoogleGenerativeAIEmbeddings):
+            query_embedding = await self.embeddings.aembed_query(question, output_dimensionality=self.dimensions)
+        else:
+            query_embedding = await self.embeddings.aembed_query(question)
+        LogWriter.info(f"request_id={req_id_cv.get()} EXIT aembed_query()")
         # metrics.llm_success_response_total.labels(self.model_name).inc()
         return query_embedding
         # except Exception as e:
@@ -138,10 +150,8 @@ class OpenAI_Embedding(EmbeddingModel):
         super().__init__(
             config, model_name=config.get("model_name", "text-embedding-3-small")
         )
-        # from langchain_openai import OpenAIEmbeddings
-        from langchain_community.embeddings.openai import OpenAIEmbeddings
 
-        self.embeddings = OpenAIEmbeddings(model=self.model_name, base_url=self.base_url)
+        self.embeddings = OpenAIEmbeddings(model=self.model_name, base_url=config.get("base_url"))
 
 
 class VertexAI_PaLM_Embedding(EmbeddingModel):
@@ -151,7 +161,18 @@ class VertexAI_PaLM_Embedding(EmbeddingModel):
         super().__init__(config, model_name=config.get("model_name", "VertexAI PaLM"))
         from langchain.embeddings import VertexAIEmbeddings
 
-        self.embeddings = VertexAIEmbeddings()
+        self.embeddings = VertexAIEmbeddings(model_name=self.model_name)
+
+
+class GenAI_Embedding(EmbeddingModel):
+    """Google GenAI Embedding Model"""
+
+    def __init__(self, config):
+        super().__init__(config, model_name=config.get("model_name", "gemini-embedding-exp-03-07"))
+
+        self.embeddings = GoogleGenerativeAIEmbeddings(model=self.model_name)
+        self.dimensions = config.get("dimensions", 1536)
+
 
 
 class AWS_Bedrock_Embedding(EmbeddingModel):

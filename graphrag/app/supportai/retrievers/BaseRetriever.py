@@ -6,8 +6,9 @@ from common.py_schemas import CandidateScore, CandidateGenerator
 
 from langchain_core.output_parsers import StrOutputParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field, validator
 from langchain.output_parsers import OutputFixingParser
+from langchain_community.callbacks.manager import get_openai_callback
+
 
 import re
 import logging
@@ -67,7 +68,15 @@ class BaseRetriever:
 
         chain = keyword_prompt | model | keyword_parser
 
-        answer = chain.invoke({"question": question})
+        usage_data = {}
+        with get_openai_callback() as cb:
+            answer = chain.invoke({"question": question})
+
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            self.logger.info(f"question_to_keywords usage: {usage_data}")
 
         if verbose:
             self.logger.info(f"Extracted keywords \"{answer}\" from question \"{question}\" by LLM")
@@ -94,7 +103,15 @@ class BaseRetriever:
         chain = QUESTION_PROMPT | model | question_parser
         #chain = QUESTION_PROMPT | model
 
-        answer = chain.invoke({"question": question})
+        usage_data = {}
+        with get_openai_callback() as cb:
+            answer = chain.invoke({"question": question})
+
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            self.logger.info(f"expand_question usage: {usage_data}")
 
         if verbose:
             self.logger.info(f"Expanded question \"{question}\" from LLM: {answer}")
@@ -119,7 +136,15 @@ class BaseRetriever:
 
         chain = prompt | model | output_parser
 
-        generated = chain.invoke({"question": question, "sources": retrieved})
+        usage_data = {}
+        with get_openai_callback() as cb:
+            generated = chain.invoke({"question": question, "sources": retrieved})
+
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            self.logger.info(f"generate_response usage: {usage_data}")
 
         return {"response": generated, "retrieved": retrieved}
 
@@ -144,7 +169,15 @@ class BaseRetriever:
 
         chain = prompt | model | output_parser
 
-        generated = chain.invoke({"question": text})
+        usage_data = {}
+        with get_openai_callback() as cb:
+            generated = chain.invoke({"question": text})
+
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            self.logger.info(f"hyde_embedding usage: {usage_data}")
 
         return self._generate_embedding(generated, str_mode)
 

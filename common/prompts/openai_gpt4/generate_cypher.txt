@@ -1,0 +1,60 @@
+You're an expert in OpenCypher programming. Given the following schema: {schema}, what is the OpenCypher query that retrieves the answer for question: {question}.
+If there're multiple words in the question having same meaning then remove the duplication.
+Only include attributes that are found in the schema. Never include any attributes that are not found in the schema.
+Use attributes instead of primary id if attribute name is more similar to the keyword type in the question.
+Use as less vertex type, edge type and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
+Do not return attributes that are not explicitly mentioned in the question. If a vertex type is mentioned in the question, only return the vertex.
+Never use directed edge pattern in the OpenCypher query. Always use and create query using undirected pattern. Always ensure the edge used starts from and ends with correct vertex types matching the schema.
+Always use double quotes for strings instead of single quotes.
+Use alias for ORDER BY if any, and make sure the same alias is used in both RETURN and ORDER BY. Always add ASC or DESC for ORDER BY based on data type.
+
+Only use the Supported Clauses, Operators, Functions and Expressions below but do not use any of the Unsupported Features, Functions or Syntax Limitations below:
+
+Supported Clauses:
+MATCH / OPTIONAL MATCH / MANDATORY MATCH: Match patterns in the graph.
+WHERE: Filter results.
+RETURN / WITH: Project query results, alias fields, chain query parts.
+ORDER BY / SKIP / LIMIT: Control output order, offset, and size.
+DELETE / DETACH DELETE: Delete nodes/edges.
+
+Supported Operators:
+Mathematical: +, -, *, /, %, ^ (exponent)
+Comparison: =, <, <=, >, >=, <>, IS NULL, IS NOT NULL
+Boolean: AND, OR, NOT, XOR
+String/List: CONTAINS, STARTS WITH, ENDS WITH, IN, DISTINCT, [ ] (subscript), . (property access)
+
+Supported Functions:
+Aggregation: count(), sum(), avg(), min(), max(), stDev(), stDevP()
+Math: abs(), sqrt(), log(), exp(), sin(), cos(), tan(), radians(), degrees()
+String: left(), right(), substring(), replace(), trim(), toLower(), toUpper(), split()
+List: head(), last(), size(), range(), coalesce(), tail()
+Others: id(), elementId(), labels(), properties(), timestamp()
+
+Supported Expressions:
+CASE: Conditional logic.
+
+Unsupported Features:
+Clauses Not Yet Supported
+CALL, CREATE, MERGE, REMOVE, SET, UNION, UNION ALL, UNWIND
+
+Unsupported Functions:
+collect(), exists(), keys(), nodes(), relationships(), length(), percentileCont(), percentileDisc(), startNode(), endNode(), reverse() (list form)
+
+Syntax Limitations:
+WITH clause must group by exactly one vertex variable.
+Path variables (e.g. p = (...)) not supported.
+MATCH must reference variables from prior WITH.
+Disconnected MATCH fragments not supported.
+
+Additionally, you cannot use the following clauses:
+CREATE
+MERGE
+REMOVE
+UNION
+UNION ALL
+UNWIND
+SET
+
+Make sure to have correct attribute names in the OpenCypher query and not to name result aliases that are vertex or edge types, operator or function names, and other reserved keywords.
+
+ONLY write the OpenCypher query in the response. Do not include any other information in the response.

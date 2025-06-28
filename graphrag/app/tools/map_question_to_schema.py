@@ -1,10 +1,10 @@
 from langchain.tools import BaseTool
-from langchain.llms.base import LLM
 from langchain.tools.base import ToolException
-from langchain.chains import LLMChain
+from langchain.llms.base import LLM
 from langchain.prompts import PromptTemplate
-from langchain.output_parsers import PydanticOutputParser
-from langchain.pydantic_v1 import BaseModel, Field, validator
+from langchain_core.output_parsers import PydanticOutputParser
+from langchain_community.callbacks.manager import get_openai_callback
+
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.py_schemas import MapQuestionToSchemaResponse, MapAttributeToAttributeResponse
 from typing import List, Dict
@@ -22,14 +22,14 @@ class MapQuestionToSchema(BaseTool):
     Tool to map questions to their datatypes in the database. Should be executed before GenerateFunction.
     """
 
-    name = "MapQuestionToSchema"
-    description = "Always run first to map the query to the graph's schema. GenerateFunction before using MapQuestionToSchema"
-    conn: "TigerGraphConnectionProxy" = None
+    name: str = "MapQuestionToSchema"
+    description: str = "Always run first to map the query to the graph's schema. GenerateFunction before using MapQuestionToSchema"
+    conn: TigerGraphConnectionProxy = None
     llm: LLM = None
     prompt: str = None
     handle_tool_error: bool = True
 
-    def __init__(self, conn, llm, prompt):
+    def __init__(self, conn, llm):
         """Initialize MapQuestionToSchema.
         Args:
             conn (TigerGraphConnectionProxy):
@@ -43,7 +43,7 @@ class MapQuestionToSchema(BaseTool):
         logger.debug(f"request_id={req_id_cv.get()} MapQuestionToSchema instantiated")
         self.conn = conn
         self.llm = llm
-        self.prompt = prompt
+
 
     def _run(self, query: str, conversation: List[Dict[str, str]]) -> str:
         """Run the tool.
@@ -55,7 +55,7 @@ class MapQuestionToSchema(BaseTool):
         parser = PydanticOutputParser(pydantic_object=MapQuestionToSchemaResponse)
 
         RESTATE_QUESTION_PROMPT = PromptTemplate(
-            template=self.prompt,
+            template=self.llm.map_question_schema_prompt,
             input_variables=[
                 "question",
                 "conversation",
@@ -67,7 +67,7 @@ class MapQuestionToSchema(BaseTool):
             partial_variables={"format_instructions": parser.get_format_instructions()},
         )
 
-        restate_chain = LLMChain(llm=self.llm, prompt=RESTATE_QUESTION_PROMPT)
+        restate_chain = RESTATE_QUESTION_PROMPT | self.llm.model | parser
 
         vertices = self.conn.getVertexTypes()
         edges = self.conn.getEdgeTypes()
@@ -86,23 +86,23 @@ class MapQuestionToSchema(BaseTool):
             edge_info = {"edge": edge, "source": source_vertex, "target": target_vertex}
             edges_info.append(edge_info)
 
-        restate_q = restate_chain.apply(
-            [
+        usage_data = {}
+        with get_openai_callback() as cb:
+            parsed_q = restate_chain.invoke(
                 {
                     "vertices": vertices,
                     "verticesAttrs": vertices_info,
                     "edges": edges,
                     "edgesInfo": edges_info,
                     "question": query,
-                    "conversation": conversation
+                    "conversation": conversation,
                 }
-            ]
-        )[0]["text"]
-
-        logger.debug(f"request_id={req_id_cv.get()} MapQuestionToSchema applied")
-        # logger.info(f"restate_q: {restate_q}")
-
-        parsed_q = parser.invoke(restate_q)
+            )
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+        # logger.info(f"parsed_q: {parsed_q}")
 
         logger.debug_pii(
             f"request_id={req_id_cv.get()} MapQuestionToSchema parsed for question={query} into normalized_form={parsed_q}"
@@ -124,38 +124,46 @@ class MapQuestionToSchema(BaseTool):
             },
         )
 
-        attr_map_chain = LLMChain(llm=self.llm, prompt=ATTR_MAP_PROMPT)
-        for vertex in parsed_q.target_vertex_attributes.keys():
-            map_attr = attr_map_chain.apply(
-                [
-                    {
-                        "parsed_attrs": parsed_q.target_vertex_attributes[vertex],
-                        "real_attrs": [attr[0] for attr in self.conn.getVertexAttrs(vertex)],
-                    }
+        attr_map_chain = ATTR_MAP_PROMPT | self.llm.model | attr_parser
+        if parsed_q.target_vertex_attributes:
+            for vertex in parsed_q.target_vertex_attributes.keys():
+                with get_openai_callback() as cb:
+                    parsed_map = attr_map_chain.invoke(
+                        {
+                            "parsed_attrs": parsed_q.target_vertex_attributes[vertex],
+                            "real_attrs": [attr[0] for attr in self.conn.getVertexAttrs(vertex)],
+                        }
+                    ).attr_map
+                    usage_data["input_tokens"] += cb.prompt_tokens
+                    usage_data["output_tokens"] += cb.completion_tokens
+                    usage_data["total_tokens"] += cb.total_tokens
+                    usage_data["cost"] += cb.total_cost
+                parsed_q.target_vertex_attributes[vertex] = [
+                    parsed_map.get(x) for x in list(parsed_q.target_vertex_attributes[vertex])
                 ]
-            )[0]["text"]
-            parsed_map = attr_parser.invoke(map_attr).attr_map
-            parsed_q.target_vertex_attributes[vertex] = [
-                parsed_map.get(x) for x in list(parsed_q.target_vertex_attributes[vertex])
-            ]
 
-        logger.debug(f"request_id={req_id_cv.get()} MapVertexAttributes applied")
+            logger.debug(f"request_id={req_id_cv.get()} MapVertexAttributes applied")
 
-        for edge in parsed_q.target_edge_attributes.keys():
-            map_attr = attr_map_chain.apply(
-                [
-                    {
-                        "parsed_attrs": parsed_q.target_edge_attributes[edge],
-                        "real_attrs": self.conn.getEdgeAttrs(edge),
-                    }
+        if parsed_q.target_edge_attributes:
+            for edge in parsed_q.target_edge_attributes.keys():
+                with get_openai_callback() as cb:
+                    parsed_map = attr_map_chain.invoke(
+                        {
+                            "parsed_attrs": parsed_q.target_edge_attributes[edge],
+                            "real_attrs": self.conn.getEdgeAttrs(edge),
+                        }
+                    ).attr_map
+                    usage_data["input_tokens"] += cb.prompt_tokens
+                    usage_data["output_tokens"] += cb.completion_tokens
+                    usage_data["total_tokens"] += cb.total_tokens
+                    usage_data["cost"] += cb.total_cost
+                parsed_q.target_edge_attributes[edge] = [
+                    parsed_map[x] for x in list(parsed_q.target_edge_attributes[edge])
                 ]
-            )[0]["text"]
-            parsed_map = attr_parser.invoke(map_attr).attr_map
-            parsed_q.target_edge_attributes[edge] = [
-                parsed_map[x] for x in list(parsed_q.target_edge_attributes[edge])
-            ]
 
-        logger.debug(f"request_id={req_id_cv.get()} MapEdgeAttributes applied")
+            logger.debug(f"request_id={req_id_cv.get()} MapEdgeAttributes applied")
+
+        logger.info(f"map_question_to_schema usage: {usage_data}")
 
         try:
             validate_schema(

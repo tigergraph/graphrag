@@ -1,16 +1,16 @@
 import logging
 import os
 
-from langchain_openai.chat_models import ChatOpenAI
-
 from common.llm_services import LLM_Model
+from langchain_google_genai import ChatGoogleGenerativeAI
+
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 
 logger = logging.getLogger(__name__)
 
 
-class OpenAI(LLM_Model):
+class GoogleGenAI(LLM_Model):
     def __init__(self, config):
         super().__init__(config)
         for auth_detail in config["authentication_configuration"].keys():
@@ -19,11 +19,12 @@ class OpenAI(LLM_Model):
             ]
 
         model_name = config["llm_model"]
-        base_url = config.get("base_url")
-        self.llm = ChatOpenAI(
+        self.llm = ChatGoogleGenerativeAI(
             temperature=config["model_kwargs"]["temperature"],
-            model_name=model_name,
-            base_url=base_url
+            model=model_name,
+            max_tokens=None,
+            timeout=None,
+            max_retries=2,
         )
         self.prompt_path = config["prompt_path"]
         LogWriter.info(

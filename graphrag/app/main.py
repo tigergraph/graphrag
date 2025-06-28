@@ -44,6 +44,8 @@ excluded_metrics_paths = ("/docs", "/openapi.json", "/metrics")
 
 logger = logging.getLogger(__name__)
 
+logger.info("In main.py")
+
 
 async def get_basic_auth_credentials(request: Request):
     auth_header = request.headers.get("Authorization")

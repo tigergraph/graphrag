@@ -130,7 +130,7 @@ class TigerGraphAgentGraph:
             return state
         except MapQuestionToSchemaException as e:
             state["context"] = {"error": True}
-            if state["error_history"] is None:
+            if "error_history" not in state:
                 state["error_history"] = []
             state["error_history"].append({"error_message": str(e), "error_step": "generate_function"})
 
@@ -152,7 +152,7 @@ class TigerGraphAgentGraph:
             state["context"] = step
         except Exception as e:
             state["context"] = {"error": True}
-            if state["error_history"] is None:
+            if "error_history" not in state:
                 state["error_history"] = []
             state["error_history"].append({"error_message": str(e), "error_step": "generate_function"})
         state["lookup_source"] = "inquiryai"
@@ -311,7 +311,6 @@ class TigerGraphAgentGraph:
         """
         Run the agent supportai search.
         """
-
         if self.supportai_retriever == "hybridsearch":
             return self.hybrid_search(state)
         elif self.supportai_retriever == "similaritysearch":
@@ -366,7 +365,7 @@ class TigerGraphAgentGraph:
 
             citations = [re.sub(r"_chunk_\d+", "", x) for x in answer.citation]
             state["context"]["reasoning"] = list(set(citations))
-            
+
         try:
             resp = GraphRAGResponse(
                 natural_language_response=answer.generated_answer,

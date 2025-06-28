@@ -2,13 +2,12 @@ import json
 import logging
 from typing import Dict, List, Optional, Type, Union
 
-from langchain.chains import LLMChain
 from langchain.llms.base import LLM
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import PydanticOutputParser
 from langchain.prompts import PromptTemplate
-from langchain.pydantic_v1 import BaseModel, Field, validator
 from langchain.tools import BaseTool
 from langchain.tools.base import ToolException
+from langchain_community.callbacks.manager import get_openai_callback
 
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.embedding_services import EmbeddingModel
@@ -33,17 +32,16 @@ class GenerateFunction(BaseTool):
     Tool to generate and execute the appropriate function call for the question.
     """
 
-    name = "GenerateFunction"
-    description = "Generates and executes a function call on the database. Always use MapQuestionToSchema before this tool."
+    name: str = "GenerateFunction"
+    description: str = "Generates and executes a function call on the database. Always use MapQuestionToSchema before this tool."
     conn: TigerGraphConnectionProxy = None
     llm: LLM = None
-    prompt: str = None
     handle_tool_error: bool = True
     embedding_model: EmbeddingModel = None
     embedding_store: EmbeddingStore = None
     args_schema: Type[MapQuestionToSchemaResponse] = MapQuestionToSchemaResponse
 
-    def __init__(self, conn, llm, prompt, embedding_model, embedding_store):
+    def __init__(self, conn, llm, embedding_model, embedding_store):
         """Initialize GenerateFunction.
         Args:
             conn (TigerGraphConnection):
@@ -61,7 +59,6 @@ class GenerateFunction(BaseTool):
         logger.debug(f"request_id={req_id_cv.get()} GenerateFunction instantiated")
         self.conn = conn
         self.llm = llm
-        self.prompt = prompt
         self.embedding_model = embedding_model
         self.embedding_store = embedding_store
 
@@ -122,7 +119,7 @@ class GenerateFunction(BaseTool):
         func_parser = PydanticOutputParser(pydantic_object=GenerateFunctionResponse)
 
         PROMPT = PromptTemplate(
-            template=self.prompt,
+            template=self.llm.generate_function_prompt,
             input_variables=[
                 "question",
                 "vertex_types",
@@ -170,31 +167,37 @@ class GenerateFunction(BaseTool):
             LogWriter.warning(f"request_id={req_id_cv.get()} WARN no documents found")
             raise NoDocumentsFoundException
 
-        inputs = [
-            {
-                "question": question,
-                "vertex_types": target_vertex_types,
-                "edge_types": target_edge_types,
-                "vertex_attributes": target_vertex_attributes,
-                "vertex_ids": target_vertex_ids,
-                "edge_attributes": target_edge_attributes,
-                "doc1": docs[0].page_content,
-                "doc2": docs[1].page_content if len(docs) > 1 else "",
-                "doc3": docs[2].page_content if len(docs) > 2 else "",
-                "doc4": docs[3].page_content if len(docs) > 3 else "",
-                "doc5": docs[4].page_content if len(docs) > 4 else "",
-                "doc6": docs[5].page_content if len(docs) > 5 else "",
-                "doc7": docs[6].page_content if len(docs) > 6 else "",
-                "doc8": docs[7].page_content if len(docs) > 7 else "",
-            }
-        ]
+        inputs = {
+            "question": question,
+            "vertex_types": target_vertex_types,
+            "edge_types": target_edge_types,
+            "vertex_attributes": target_vertex_attributes,
+            "vertex_ids": target_vertex_ids,
+            "edge_attributes": target_edge_attributes,
+            "doc1": docs[0].page_content,
+            "doc2": docs[1].page_content if len(docs) > 1 else "",
+            "doc3": docs[2].page_content if len(docs) > 2 else "",
+            "doc4": docs[3].page_content if len(docs) > 3 else "",
+            "doc5": docs[4].page_content if len(docs) > 4 else "",
+            "doc6": docs[5].page_content if len(docs) > 5 else "",
+            "doc7": docs[6].page_content if len(docs) > 6 else "",
+            "doc8": docs[7].page_content if len(docs) > 7 else "",
+        }
 
         logger.debug(f"request_id={req_id_cv.get()} retrieved documents={docs}")
 
-        chain = LLMChain(llm=self.llm, prompt=PROMPT)
-        generated = chain.apply(inputs)[0]["text"]
+        chain = PROMPT | self.llm.model | func_parser
+        usage_data = {}
+        with get_openai_callback() as cb:
+            generated = chain.invoke(**inputs)
+
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            logger.info(f"generate_function usage: {usage_data}")
+
         logger.debug(f"request_id={req_id_cv.get()} generated function")
-        generated = func_parser.invoke(generated)
         try:
             parsed_func = validate_function_call(
                 self.conn, generated.connection_func_call, valid_function_calls

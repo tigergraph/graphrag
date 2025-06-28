@@ -2,9 +2,11 @@
 import logging
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_community.callbacks.manager import get_openai_callback
+
+from pydantic import BaseModel, Field
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
-from langchain.pydantic_v1 import BaseModel, Field
 
 
 logger = logging.getLogger(__name__)
@@ -29,7 +31,7 @@ class TigerGraphAgentRewriter:
 
         re_write_prompt = PromptTemplate(
             template="""You are a question re-writer that converts an input question to a better version that is optimized \
-for AI agent question answering. Look at the initial and formulate an improved question. \n
+for AI agent question answering. Look at the initial and formulate an improved question but avoid to add unnecessary context for entities. \n
 Here is the initial question:
 {question}
 Format your response in the following manner {format_instructions}""",
@@ -43,6 +45,14 @@ Format your response in the following manner {format_instructions}""",
         # Chain
         question_rewriter = re_write_prompt | self.llm.model | rewrite_parser
 
-        generation = question_rewriter.invoke({"question": question})
+        usage_data = {}
+        with get_openai_callback() as cb:
+            generation = question_rewriter.invoke({"question": question})
+
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            logger.info(f"rewrite_question usage: {usage_data}")
         LogWriter.info(f"request_id={req_id_cv.get()} EXIT rewrite_question")
         return generation.rewritten_question

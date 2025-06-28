@@ -1,4 +1,5 @@
 import logging
+from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.output_parsers import StrOutputParser
 from langchain.prompts import PromptTemplate
 from langchain.tools import BaseTool
@@ -12,8 +13,8 @@ class GenerateCypher(BaseTool):
     """GenerateCypher Tool.
     Tool to generate and execute the appropriate Cypher query for the question.
     """
-    name = "GenerateCypher"
-    description = "Generates a Cypher query for the question."
+    name: str = "GenerateCypher"
+    description: str = "Generates a Cypher query for the question."
     conn: TigerGraphConnectionProxy = None
     llm: LLM = None
 
@@ -93,7 +94,16 @@ Edge Types:
         logger.debug_pii("Prompt to LLM:\n" + PROMPT.invoke({"question": question, "schema": schema}).to_string())
 
         chain = PROMPT | self.llm.model | StrOutputParser()
-        out = chain.invoke({"question": question, "schema": schema}).strip("```cypher").strip("```")
+        usage_data = {}
+        with get_openai_callback() as cb:
+            out = chain.invoke({"question": question, "schema": schema}).strip("```cypher").strip("```")
+
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            logger.info(f"generate_cypher usage: {usage_data}")
+
         query_header = "USE GRAPH " + self.conn.graphname + " "+ "\n" + "INTERPRET OPENCYPHER QUERY () {" + "\n"
         query_footer = "\n}"
         return query_header + out + query_footer

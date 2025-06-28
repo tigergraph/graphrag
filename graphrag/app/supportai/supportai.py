@@ -5,6 +5,7 @@ import logging
 
 from pyTigerGraph import TigerGraphConnection
 
+from common.config import embedding_dimension
 from common.py_schemas.schemas import (
     # GraphRAGResponse,
     CreateIngestConfig,
@@ -53,6 +54,11 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
             file_path = "common/gsql/supportai/SupportAI_Schema_Native_Vector.gsql"
             with open(file_path, "r") as f:
                 schema = f.read()
+            if embedding_dimension != 1536:
+                schema = schema.replace(
+                    "dimension=1536",
+                    f"dimension={embedding_dimension}",
+                )
             schema_res += " "
             schema_res += conn.gsql(
                 """USE GRAPH {}\n{}\nRUN SCHEMA_CHANGE JOB add_supportai_vector""".format(

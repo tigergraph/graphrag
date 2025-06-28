@@ -111,7 +111,7 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
 
           {showResult ? (
             <div className="text-[11px] rounded-md bg-[#ececec] dark:bg-shadeA mt-3 p-4 leading-4 relative">
-              <strong>Reasoning:</strong> 
+              <strong>Reasoning:</strong><br/>
               {getReasoning(message)}
               <span
                 className="absolute right-2 bottom-1 cursor-pointer"

@@ -1,11 +1,12 @@
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_community.callbacks.manager import get_openai_callback
+
+from pydantic import BaseModel, Field
 from common.logs.logwriter import LogWriter
+from common.logs.log import req_id_cv
 from pyTigerGraph.pyTigerGraph import TigerGraphConnection
 import logging
-from common.logs.log import req_id_cv
-
-from langchain.pydantic_v1 import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,14 @@ class TigerGraphAgentRouter:
         )
 
         question_router = prompt | self.llm.model | router_parser
-        res = question_router.invoke({"question": question, "v_types": v_types, "e_types": e_types})
+        usage_data = {}
+        with get_openai_callback() as cb:
+            res = question_router.invoke({"question": question, "v_types": v_types, "e_types": e_types})
+
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            logger.info(f"route_question usage: {usage_data}")
         LogWriter.info(f"request_id={req_id_cv.get()} EXIT route_question with {res}")
         return res
