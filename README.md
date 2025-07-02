@@ -219,7 +219,7 @@ In addition to the `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `azure_d
         }
     }
 }
-    ```
+```
 
 * AWS Bedrock
 
@@ -276,7 +276,7 @@ In addition to the `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `azure_d
 
 * Hugging Face
 
-Example configuration for a model on Hugging Face with a dedicated endpoint is shown below. Please specify your configuration details:\
+Example configuration for a model on Hugging Face with a dedicated endpoint is shown below. Please specify your configuration details:
 
 ```json
 {

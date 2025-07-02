@@ -138,9 +138,10 @@ class MapQuestionToSchema(BaseTool):
                     usage_data["output_tokens"] += cb.completion_tokens
                     usage_data["total_tokens"] += cb.total_tokens
                     usage_data["cost"] += cb.total_cost
-                parsed_q.target_vertex_attributes[vertex] = [
-                    parsed_map.get(x) for x in list(parsed_q.target_vertex_attributes[vertex])
-                ]
+                if parsed_map:
+                    parsed_q.target_vertex_attributes[vertex] = [
+                        parsed_map.get(x) for x in list(parsed_q.target_vertex_attributes[vertex])
+                    ]
 
             logger.debug(f"request_id={req_id_cv.get()} MapVertexAttributes applied")
 
@@ -157,9 +158,10 @@ class MapQuestionToSchema(BaseTool):
                     usage_data["output_tokens"] += cb.completion_tokens
                     usage_data["total_tokens"] += cb.total_tokens
                     usage_data["cost"] += cb.total_cost
-                parsed_q.target_edge_attributes[edge] = [
-                    parsed_map[x] for x in list(parsed_q.target_edge_attributes[edge])
-                ]
+                if parsed_map:
+                    parsed_q.target_edge_attributes[edge] = [
+                        parsed_map[x] for x in list(parsed_q.target_edge_attributes[edge])
+                    ]
 
             logger.debug(f"request_id={req_id_cv.get()} MapEdgeAttributes applied")
 

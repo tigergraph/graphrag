@@ -1,4 +1,5 @@
 import logging
+from typing import Iterable
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_core.output_parsers import StrOutputParser
 from langchain.prompts import PromptTemplate
@@ -17,6 +18,7 @@ class GenerateCypher(BaseTool):
     description: str = "Generates a Cypher query for the question."
     conn: TigerGraphConnectionProxy = None
     llm: LLM = None
+    schema_rep: str = None
 
     def __init__(self, conn: TigerGraphConnectionProxy, llm):
         """Initialize GenerateCypher.
@@ -31,8 +33,12 @@ class GenerateCypher(BaseTool):
         super().__init__()
         self.conn = conn
         self.llm = llm
+        self.schema_rep = ""
 
     def _generate_schema_rep(self):
+        if self.schema_rep:
+            logger.info(f"Reusing existing schema rep")
+            return self.schema_rep
         verts = self.conn.getVertexTypes()
         edges = self.conn.getEdgeTypes()
         vertex_schema = []
@@ -63,16 +69,16 @@ class GenerateCypher(BaseTool):
                 edge_info = f"""From Vertex: {from_vertex}\n\tTo Vertex: {to_vertex}"""
                 edge_schema.append(f"""{edge}\n\t{edge_info}\n\tEdge direction: {direction}\n\tAttributes: \n\t\t{attributes}""")
 
-        schema_rep = f"""The schema of the graph is as follows:
+        self.schema_rep = f"""The schema of the graph is as follows:
 Vertex Types:
 {chr(10).join(vertex_schema)}
 
 Edge Types:
 {chr(10).join(edge_schema)}
 """
-        return schema_rep
+        return self.schema_rep
         
-    def generate_cypher(self, question: str) -> str:
+    def generate_cypher(self, question: str, history: Iterable[str]) -> str:
         """Generate Cypher query for the question.
         Args:
             question (str):
@@ -85,18 +91,19 @@ Edge Types:
             template=self.llm.generate_cypher_prompt,
             input_variables=[
                 "question",
-                "schema"
+                "schema",
+                "history"
             ]
         )
 
         schema = self._generate_schema_rep()
     
-        logger.debug_pii("Prompt to LLM:\n" + PROMPT.invoke({"question": question, "schema": schema}).to_string())
+        logger.debug_pii("Prompt to LLM:\n" + PROMPT.invoke({"question": question, "schema": schema, "history": history}).to_string())
 
         chain = PROMPT | self.llm.model | StrOutputParser()
         usage_data = {}
         with get_openai_callback() as cb:
-            out = chain.invoke({"question": question, "schema": schema}).strip("```cypher").strip("```")
+            out = chain.invoke({"question": question, "schema": schema, "history": history}).strip("```cypher").strip("```")
 
             usage_data["input_tokens"] = cb.prompt_tokens
             usage_data["output_tokens"] = cb.completion_tokens
@@ -108,7 +115,7 @@ Edge Types:
         query_footer = "\n}"
         return query_header + out + query_footer
     
-    def _run(self, question: str):
+    def _run(self, question: str, history: Iterable[str]):
         """Run the GenerateCypher tool.
         Args:
             question (str):
@@ -117,7 +124,7 @@ Edge Types:
             str:
                 Cypher query for the question.
         """
-        return self.generate_cypher(question)
+        return self.generate_cypher(question, history)
     
-    def _arun(self, question: str):
+    def _arun(self, question: str, history: Iterable[str]):
         raise NotImplementedError("Asynchronous execution is not supported for this tool.")
