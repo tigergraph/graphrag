@@ -367,6 +367,21 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         logger.info(f"Returning {result}")
         return set(result)
 
+    def list_registered_documents(
+        self,
+        graphname: str = None,
+        only_custom: bool = False,
+        output_fields: List[str] = ["*"],
+    ):
+        if only_custom and graphname:
+            PASS
+        elif only_custom:
+            PASS
+        elif graphname:
+            PASS
+        else:
+            PASS
+        return []
 
     def query(self, expr: str, output_fields: List[str]):
         """Get output fields with expression

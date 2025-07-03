@@ -130,7 +130,7 @@ class TigerGraphAgentGraph:
             return state
         except MapQuestionToSchemaException as e:
             state["context"] = {"error": True}
-            if "error_history" not in state:
+            if "error_history" not in state or state["error_history"] is None:
                 state["error_history"] = []
             state["error_history"].append({"error_message": str(e), "error_step": "generate_function"})
 
@@ -152,7 +152,7 @@ class TigerGraphAgentGraph:
             state["context"] = step
         except Exception as e:
             state["context"] = {"error": True}
-            if "error_history" not in state:
+            if "error_history" not in state or state["error_history"] is None:
                 state["error_history"] = []
             state["error_history"].append({"error_message": str(e), "error_step": "generate_function"})
         state["lookup_source"] = "inquiryai"
@@ -192,7 +192,7 @@ class TigerGraphAgentGraph:
                 "cypher": cypher,
                 "answer": json_str
             }
-            if state["error_history"] is None:
+            if "error_history" not in state or state["error_history"] is None:
                 state["error_history"] = []
             
             state["error_history"].append({"error_message": response, "error_step": "generate_cypher"})
