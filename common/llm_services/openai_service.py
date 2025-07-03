@@ -47,6 +47,14 @@ class OpenAI(LLM_Model):
             return super().generate_cypher_prompt
 
     @property
+    def generate_gsql_prompt(self):
+        filepath = self.prompt_path + "generate_gsql.txt"
+        if os.path.exists(filepath):
+            return self._read_prompt_file(filepath)
+        else:
+            return super().generate_gsql_prompt
+
+    @property
     def entity_relationship_extraction_prompt(self):
         return self._read_prompt_file(
             self.prompt_path + "entity_relationship_extraction.txt"

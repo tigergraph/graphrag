@@ -11,19 +11,19 @@ from common.db.connections import get_schema_ver
 logger = logging.getLogger(__name__)
 
 
-class GenerateCypher(BaseTool):
-    """GenerateCypher Tool.
-    Tool to generate and execute the appropriate Cypher query for the question.
+class GenerateGSQL(BaseTool):
+    """GenerateGSQL Tool.
+    Tool to generate and execute the appropriate GSQL query for the question.
     """
-    name: str = "GenerateCypher"
-    description: str = "Generates a Cypher query for the question."
+    name: str = "GenerateGSQL"
+    description: str = "Generates a GSQL query for the question."
     conn: TigerGraphConnectionProxy = None
     llm: LLM = None
     schema_rep: str = None
-    schema_ver: int = None
+    schema_ver: int = 0
 
     def __init__(self, conn: TigerGraphConnectionProxy, llm):
-        """Initialize GenerateCypher.
+        """Initialize GenerateGSQL.
         Args:
             conn (TigerGraphConnection):
                 pyTigerGraph TigerGraphConnection connection to the appropriate database/graph with correct permissions
@@ -36,11 +36,11 @@ class GenerateCypher(BaseTool):
         self.conn = conn
         self.llm = llm
         self.schema_rep = ""
-        self.schema_ver = -1
-
+        self.schema_ver = 0
+    
     def _generate_schema_rep(self):
         schema_ver = get_schema_ver(self.conn)
-        if schema_ver is not None and self.schema_ver == schema_ver:
+        if self.schema_rep and self.schema_ver == schema_ver:
             logger.info(f"Reusing existing schema rep for schema version {schema_ver}")
             return self.schema_rep
         verts = self.conn.getVertexTypes()
@@ -80,20 +80,22 @@ Vertex Types:
 Edge Types:
 {chr(10).join(edge_schema)}
 """
-        self.schema_ver = schema_ver if schema_ver is not None else -1
+        self.schema_ver = schema_ver
         return self.schema_rep
         
-    def generate_cypher(self, question: str, history: Iterable[str]) -> str:
-        """Generate Cypher query for the question.
+    def generate_gsql(self, question: str, history: Iterable[str]) -> str:
+        """Generate GSQL query for the question.
         Args:
             question (str):
-                question to generate the Cypher query for.
+                question to generate the GSQL query for.
+            history (Iterable[str]):
+                conversation history for context.
         Returns:
             str:
-                Cypher query for the question.
+                GSQL query for the question.
         """
         PROMPT = PromptTemplate(
-            template=self.llm.generate_cypher_prompt,
+            template=self.llm.generate_gsql_prompt,
             input_variables=[
                 "question",
                 "schema",
@@ -108,28 +110,30 @@ Edge Types:
         chain = PROMPT | self.llm.model | StrOutputParser()
         usage_data = {}
         with get_openai_callback() as cb:
-            out = chain.invoke({"question": question, "schema": schema, "history": history}).strip("```cypher").strip("```")
+            out = chain.invoke({"question": question, "schema": schema, "history": history}).strip("```gsql").strip("```")
 
             usage_data["input_tokens"] = cb.prompt_tokens
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-            logger.info(f"generate_cypher usage: {usage_data}")
+            logger.info(f"generate_gsql usage: {usage_data}")
 
-        query_header = "USE GRAPH " + self.conn.graphname + " "+ "\n" + "INTERPRET OPENCYPHER QUERY () {" + "\n"
+        query_header = "USE GRAPH " + self.conn.graphname + " "+ "\n" + "INTERPRET QUERY () FOR GRAPH " + self.conn.graphname + " {" + "\n"
         query_footer = "\n}"
         return query_header + out + query_footer
     
     def _run(self, question: str, history: Iterable[str]):
-        """Run the GenerateCypher tool.
+        """Run the GenerateGSQL tool.
         Args:
             question (str):
-                question to generate the Cypher query for.
+                question to generate the GSQL query for.
+            history (Iterable[str]):
+                conversation history for context.
         Returns:
             str:
-                Cypher query for the question.
+                GSQL query for the question.
         """
-        return self.generate_cypher(question, history)
+        return self.generate_gsql(question, history)
     
     def _arun(self, question: str, history: Iterable[str]):
-        raise NotImplementedError("Asynchronous execution is not supported for this tool.")
+        raise NotImplementedError("Asynchronous execution is not supported for this tool.") 

@@ -17,11 +17,12 @@ class TigerGraphAgentGenerator:
     def __init__(self, llm_model):
         self.llm = llm_model
 
-    def generate_answer(self, question: str, context: str) -> dict:
+    def generate_answer(self, question: str, context: str, query: str = "") -> dict:
         """Generate an answer based on the question and context.
         Args:
             question: str: The question to generate an answer for.
             context: str: The context to generate an answer from.
+            query: str: The original query used to fetch the conext.
         Returns:
             str: The answer to the question.
         """
@@ -31,7 +32,7 @@ class TigerGraphAgentGenerator:
 
         prompt = PromptTemplate(
             template=self.llm.chatbot_response_prompt,
-            input_variables=["question", "context"],
+            input_variables=["question", "context", "query"],
             partial_variables={
                 "format_instructions": answer_parser.get_format_instructions()
             }
@@ -40,6 +41,7 @@ class TigerGraphAgentGenerator:
         full_prompt = prompt.format(
             question=question,
             context=context,
+            query=query,
             format_instructions=answer_parser.get_format_instructions()
         )
 
@@ -48,7 +50,7 @@ class TigerGraphAgentGenerator:
 
         usage_data = {}
         with get_openai_callback() as cb:
-            generation = rag_chain.invoke({"question": question, "context": context})
+            generation = rag_chain.invoke({"question": question, "context": context, "query": query})
 
             usage_data["input_tokens"] = cb.prompt_tokens
             usage_data["output_tokens"] = cb.completion_tokens

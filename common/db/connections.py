@@ -160,3 +160,43 @@ def elevate_db_connection_to_token(host, username, password, graphname, async_co
                 conn.restppUrl = conn.restppUrl+"/restpp"
 
     return conn
+
+def get_schema_ver(conn: TigerGraphConnectionProxy) -> int:
+    """Retrieves the schema version of the graph by running an interpreted query.
+
+    Returns:
+        The schema version as an integer.
+    """
+    logger.info("entry: _get_schema_ver")
+
+    # Create the interpreted query to get schema version
+    query_text = f'INTERPRET QUERY () FOR GRAPH {conn.graphname} {{ PRINT "OK"; }}'
+
+    try:
+        # Run the interpreted query
+        #result = self.conn.runInterpretedQuery(query_text)
+        if conn._version_greater_than_4_0():
+            ret = conn._post(conn.gsUrl + "/gsql/v1/queries/interpret",
+                            params={}, data=query_text, authMode="pwd", resKey="version",
+                            headers={'Content-Type': 'text/plain'})
+        else:
+            ret = conn._post(conn.gsUrl + "/gsqlserver/interpreted_query", data=query_text,
+                            params={}, authMode="pwd", resKey="version")
+
+        schema_version_int = None
+        if ret and "version" in ret:
+            version_info = ret["version"]
+            if isinstance(version_info, dict) and "schema" in version_info:
+                schema_version = version_info["schema"]
+                try:
+                    schema_version_int = int(schema_version)
+                except (ValueError, TypeError):
+                    logger.warning(f"Schema version '{schema_version}' could not be converted to integer")
+        if schema_version_int is None:
+            logger.warning("Schema version not found in query result")
+        logger.info("exit: _get_schema_ver")
+        return schema_version_int
+
+    except Exception as e:
+        logger.error(f"Error getting schema version: {str(e)}")
+        raise Exception(f"Failed to get schema version: {str(e)}")

@@ -163,14 +163,22 @@ class TigerGraphAgentGraph:
         Run the agent cypher generator.
         """
         self.emit_progress("Generating the Cypher to answer your question")
-        cypher = self.cypher_gen._run(state["question"])
-        logger.info(f"cypher: {cypher}")
+        gen_history = []
+        response_json = None
 
-        response = self.db_connection.gsql(cypher)
-        response_lines = response.split("\n")
-        try:
+        for i in range(3):
+            cypher = self.cypher_gen._run(state["question"], gen_history)
+            logger.info(f"cypher: {cypher}")
+
+            response = self.db_connection.gsql(cypher)
+            response_lines = response.split("\n")
             json_str = "\n".join(response_lines[1:])
-            response_json = json.loads(json_str)
+            try:
+                response_json = json.loads(json_str)
+                break
+            except Exception as e:
+                gen_history.append(f"{i}: {cypher}\n\tError: {json_str}\n")
+        if response_json:
             state["context"] = {
                 "answer": response_json["results"][0],
                 "cypher": cypher,
@@ -178,10 +186,11 @@ class TigerGraphAgentGraph:
                     cypher
                 ),
             }
-        except Exception as e:
+        else:
             state["context"] = {
                 "error": True,
                 "cypher": cypher,
+                "answer": json_str
             }
             if state["error_history"] is None:
                 state["error_history"] = []
@@ -355,7 +364,7 @@ class TigerGraphAgentGraph:
             logger.debug_pii(
                 f"""request_id={req_id_cv.get()} Got result: {state["context"]["answer"]}"""
             )
-            answer = step.generate_answer(state["question"], state["context"]["answer"])
+            answer = step.generate_answer(state["question"], state["context"]["answer"], state["context"]["cypher"])
         logger.debug_pii(
             f"request_id={req_id_cv.get()} Generated answer: {answer.generated_answer}"
         )
