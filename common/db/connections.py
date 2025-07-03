@@ -184,14 +184,12 @@ def get_schema_ver(conn: TigerGraphConnectionProxy) -> int:
                             params={}, authMode="pwd", resKey="version")
 
         schema_version_int = None
-        if ret and "version" in ret:
-            version_info = ret["version"]
-            if isinstance(version_info, dict) and "schema" in version_info:
-                schema_version = version_info["schema"]
-                try:
-                    schema_version_int = int(schema_version)
-                except (ValueError, TypeError):
-                    logger.warning(f"Schema version '{schema_version}' could not be converted to integer")
+        if isinstance(ret, dict) and "schema" in ret:
+            schema_version = ret["schema"]
+            try:
+                schema_version_int = int(schema_version)
+            except (ValueError, TypeError):
+                logger.warning(f"Schema version '{schema_version}' could not be converted to integer")
         if schema_version_int is None:
             logger.warning("Schema version not found in query result")
         logger.info("exit: _get_schema_ver")

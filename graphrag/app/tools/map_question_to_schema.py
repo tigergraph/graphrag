@@ -30,6 +30,8 @@ class MapQuestionToSchema(BaseTool):
     prompt: str = None
     handle_tool_error: bool = True
     schema_ver: int = None
+    vertices: list[str] = None
+    edges: list[str] = None
     vertices_info: list[dict] = None
     edges_info: list[dict] = None
 
@@ -49,6 +51,8 @@ class MapQuestionToSchema(BaseTool):
         self.conn = conn
         self.llm = llm
         self.schema_ver = -1
+        self.vertices = []
+        self.edges = []
         self.vertices_info = []
         self.edges_info = []
 
@@ -80,28 +84,30 @@ class MapQuestionToSchema(BaseTool):
         schema_ver = get_schema_ver(self.conn)
         if schema_ver is None or self.schema_ver != schema_ver:
             self.schema_ver = schema_ver if schema_ver is not None else -1
-            vertices = self.conn.getVertexTypes()
-            edges = self.conn.getEdgeTypes()
+            self.vertices = self.conn.getVertexTypes()
+            self.edges = self.conn.getEdgeTypes()
 
-            for vertex in vertices:
+            for vertex in self.vertices:
                 vertex_attrs = self.conn.getVertexAttrs(vertex)
                 attributes = [attr[0] for attr in vertex_attrs]
                 vertex_info = {"vertex": vertex, "attributes": attributes}
                 self.vertices_info.append(vertex_info)
 
-            for edge in edges:
+            for edge in self.edges:
                 source_vertex = self.conn.getEdgeSourceVertexType(edge)
                 target_vertex = self.conn.getEdgeTargetVertexType(edge)
                 edge_info = {"edge": edge, "source": source_vertex, "target": target_vertex}
                 self.edges_info.append(edge_info)
+        else:
+            logger.info(f"Reusing existing schema rep for schema version {schema_ver}")
 
         usage_data = {}
         with get_openai_callback() as cb:
             parsed_q = restate_chain.invoke(
                 {
-                    "vertices": vertices,
+                    "vertices": self.vertices,
                     "verticesAttrs": self.vertices_info,
-                    "edges": edges,
+                    "edges": self.edges,
                     "edgesInfo": self.edges_info,
                     "question": query,
                     "conversation": conversation,
