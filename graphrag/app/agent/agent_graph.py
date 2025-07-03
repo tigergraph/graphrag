@@ -175,6 +175,7 @@ class TigerGraphAgentGraph:
             json_str = "\n".join(response_lines[1:])
             try:
                 response_json = json.loads(json_str)
+                break
             except Exception as e:
                 gen_history.append(f"{i}: {cypher}\n\tError: {json_str}\n")
         if response_json:

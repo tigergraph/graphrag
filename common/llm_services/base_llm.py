@@ -25,13 +25,18 @@ class LLM_Model:
     @property
     def generate_cypher_prompt(self):
         """Property to get the prompt for the GenerateCypher tool."""
-        prompt = """You're an expert in OpenCypher programming. Given the following schema: {schema}, what is the OpenCypher query that retrieves the {question}
+        prompt = """You're an expert in OpenCypher programming. Given the following schema, what is the OpenCypher query that retrieves the {question}
                     Only include attributes that are found in the schema. Never include any attributes that are not found in the schema.
                     Use attributes instead of primary id if attribute name is closer to the keyword type in the question.
                     Use as less vertex type, edge type and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
                     Do not return attributes that are not explicitly mentioned in the question. If a vertex type is mentioned in the question, only return the vertex.
                     Never use directed edge pattern in the OpenCypher query. Always use and create query using undirected pattern.
                     Always use double quotes for strings instead of single quotes.
+
+                    Avoid generating invalid OpenCypher queries based on the errors from history below.
+
+                    Schema: {schema}
+                    History: {history}
 
                     You cannot use the following clauses:
                     OPTIONAL MATCH
@@ -46,6 +51,42 @@ class LLM_Model:
                     Make sure to have correct attribute names in the OpenCypher query and not to name result aliases that are vertex or edge types.
 
                     ONLY write the OpenCypher query in the response. Do not include any other information in the response."""
+        return prompt
+
+    @property
+    def generate_gsql_prompt(self):
+        """Property to get the prompt for the GenerateGSQL tool."""
+        prompt = """You're an expert in GSQL (Graph SQL) programming for TigerGraph. Given the following schema: {schema}, what is the GSQL query that retrieves the answer for question: {question}
+                    Only include attributes that are found in the schema. Never include any attributes that are not found in the schema.
+                    Use attributes instead of primary id if attribute name is more similar to the keyword type in the question.
+                    Use as few vertex types, edge types and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
+                    Do not return attributes that are not explicitly mentioned in the question. If a vertex type is mentioned in the question, only return the vertex.
+                    Always use double quotes for strings instead of single quotes.
+                    Use alias for ORDER BY if any, and make sure the alias or attributes used in ORDER BY is also in PRINT. Always add ASC or DESC for ORDER BY based on data type.
+
+                    Avoid generating invalid GSQL queries based on the errors from history below.
+
+                    Schema: {schema}
+                    History: {history}
+
+                    Additionally, you cannot use the following clauses:
+                    CREATE
+                    DELETE
+                    INSERT
+                    UPDATE
+                    UPSERT
+
+                    Here's some commonly used abbreviations:
+                    dt -> date
+                    pct -> percentage
+                    qty -> quantity
+                    lng -> longitude
+                    cm -> Contract Manufacturer
+
+                    Always make the GSQL query returns the entity in the original question together with the data to be queried.
+                    Make sure to have correct attribute names in the GSQL query and not to name result aliases that are vertex or edge types, operator or function names, and other reserved keywords, always construct alias with multiple words connected with underscore.
+
+                    ONLY write the GSQL query in the response. Do not include any other information in the response."""
         return prompt
 
     @property
