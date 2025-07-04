@@ -133,6 +133,7 @@ if os.getenv("INIT_EMBED_STORE", "true") == "true":
         password=db_config.get("password", "tigergraph"),
         gsPort=db_config.get("gsPort", "14240"),
         restppPort=db_config.get("restppPort", "9000"),
+        graphname=db_config.get("graphname", "MyGraph"),
     )
     if db_config.get("getToken"):
         conn.getToken()

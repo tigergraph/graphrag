@@ -29,6 +29,11 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
     ):
         self.embedding_service = embedding_service
         self.support_ai_instance = support_ai_instance
+
+        if isinstance(conn.apiToken, tuple):
+            token = conn.apiToken[0]
+        elif isinstance(conn.apiToken, str):
+            token = conn.apiToken
         self.conn = TigerGraphConnection(
                 host=conn.host,
                 username=conn.username,
@@ -41,9 +46,8 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                 certPath=conn.certPath,
                 sslPort = conn.sslPort,
                 jwtToken = conn.jwtToken,
+                apiToken = token,
              )
-        if conn.apiToken:
-            self.conn.getToken()
 
         tg_version = self.conn.getVer()
         ver = tg_version.split(".")
@@ -53,8 +57,10 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                 """USE GLOBAL\nimport package gds\ninstall function gds.**"""
             )
             logger.info(f"Done installing GDS library with status {q_res}")
-            if not conn.graphname == "MyGraph":
-                self.install_vector_queries()
+            if self.conn.graphname and not self.conn.graphname == "MyGraph":
+                current_schema = self.conn.gsql(f"USE GRAPH {self.conn.graphname}\n ls")
+                if "- embedding(Dimension=" in current_schema:
+                    self.install_vector_queries()
             logger.info(f"TigerGraph embedding store is initialized with graph {self.conn.graphname}")
         else:
             raise Exception(f"Current TigerGraph version {ver} does not support vector feature!")
@@ -85,9 +91,9 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         #TBD
         if need_install and False:
             logger.info(f"Installing supportai queries all together")
-            query_res = conn.gsql(
+            query_res = self.conn.gsql(
                 """USE GRAPH {}\nINSTALL QUERY ALL\n""".format(
-                    conn.graphname
+                    self.conn.graphname
                 )
             )
             logger.info(f"Done installing supportai query all with status {query_res}")
@@ -96,9 +102,18 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
 
     def set_graphname(self, graphname):
         self.conn.graphname = graphname
-        self.install_vector_queries()
+        if self.conn.apiToken or self.conn.jwtToken:
+            self.conn.getToken()
+        if self.conn.graphname and not self.conn.graphname == "MyGraph":
+            current_schema = self.conn.gsql(f"USE GRAPH {self.conn.graphname}\n ls")
+            if "- embedding(Dimension=" in current_schema:
+                self.install_vector_queries()
 
     def set_connection(self, conn):
+        if isinstance(conn.apiToken, tuple):
+            token = conn.apiToken[0]
+        elif isinstance(conn.apiToken, str):
+            token = conn.apiToken
         self.conn = TigerGraphConnection(
                 host=conn.host,
                 username=conn.username,
@@ -111,9 +126,8 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                 certPath=conn.certPath,
                 sslPort = conn.sslPort,
                 jwtToken = conn.jwtToken,
+                apiToken = token,
              )
-        if conn.apiToken:
-            self.conn.getToken()
 
         self.install_vector_queries()
 
