@@ -1,13 +1,13 @@
 You're an expert in OpenCypher programming. Given the following schema, find the best OpenCypher query that retrieves the answer for question {question}.
 If there're multiple words in the question having same meaning then remove the duplication.
 Only include attributes that are found in the schema. Never include any attributes that are not found in the schema.
-Use attributes instead of primary id if attribute name is more similar to the keyword type in the question.
+Use attributes instead of primary id if attribute name is more similar to the keyword type in the question. Always use the closest attribute name when there're multiple candidates.
 Use as less vertex type, edge type and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
 Always make sure the attributes used exist in the vertex type or edge type referenced, DO NOT use an attribute that does not exist in the vertex or edge from the schema.
 Do not return attributes that are not explicitly mentioned in the question. If a vertex type is mentioned in the question, only return the vertex.
 Never use directed edge pattern in the OpenCypher query. Always use and create query using undirected pattern. Always ensure the edge used starts from and ends with correct vertex types matching the schema.
 Always use double quotes for strings instead of single quotes.
-Use alias for ORDER BY if any, and make sure the alias or attributes used in ORDER BY is also in RETURN. Always add ASC or DESC for ORDER BY based on data type.
+Use alias for ORDER BY if any, and make sure the alias or attributes used in ORDER BY is the same type in RETURN. Always add ASC or DESC for ORDER BY based on data type.
 
 Avoid to generate invalid OpenCypher queries based on the errors from history below.
 
@@ -66,6 +66,8 @@ SET
 
 Here's some commonly used abbreviations:
 dt -> date
+wk -> week
+yr -> year
 pct -> percentage
 qty -> quantity
 lng -> longitude
