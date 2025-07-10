@@ -8,7 +8,7 @@ CREATE OR REPLACE DISTRIBUTED QUERY Content_Similarity_Vector_Search(STRING v_ty
   MapAccum<STRING, STRING> @@final_retrieval;
   
   vset = {v_type};
-  result = SELECT v FROM vset:v POST-ACCUM @@topk_set += Similarity_Results(v, 1 - gds.vector.distance(query_vector, v.embedding, "COSINE"));
+  result = SELECT v FROM vset:v WHERE v.embedding.size() > 0 POST-ACCUM @@topk_set += Similarity_Results(v, 1 - gds.vector.distance(query_vector, v.embedding, "COSINE"));
 
   FOREACH item IN @@topk_set DO
     @@start_set += item.v;

@@ -13,7 +13,7 @@ CREATE OR REPLACE DISTRIBUTED QUERY Chunk_Sibling_Vector_Search(STRING v_type,
   SetAccum<VertexTypes> @@sibling_set_type;
   
   all_chunks = {v_type};
-  result = SELECT v FROM all_chunks:v POST-ACCUM @@topk_set += Similarity_Results(v, 1 - gds.vector.distance(query_vector, v.embedding, "COSINE"));
+  result = SELECT v FROM all_chunks:v WHERE v.embedding.size() > 0 POST-ACCUM @@topk_set += Similarity_Results(v, 1 - gds.vector.distance(query_vector, v.embedding, "COSINE"));
 
   FOREACH item IN @@topk_set DO
     @@start_set += item.v;

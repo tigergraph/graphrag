@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
@@ -31,6 +32,9 @@ def get_db_connection_id_token(
             tgCloud=True,
             sslPort=14240,
         )
+        asyncio.run(conn.customizeHeader(
+            timeout=db_config["default_timeout"] * 1000, responseSize=5000000
+        ))
     else:
         conn = TigerGraphConnection(
             host=db_config["hostname"],
@@ -39,13 +43,17 @@ def get_db_connection_id_token(
             tgCloud=True,
             sslPort=14240,
         )
-    conn.customizeHeader(
-        timeout=db_config["default_timeout"] * 1000, responseSize=5000000
-    )
-    conn = TigerGraphConnectionProxy(conn, auth_mode="id_token")
+        conn.customizeHeader(
+            timeout=db_config["default_timeout"] * 1000, responseSize=5000000
+        )
+
+        conn = TigerGraphConnectionProxy(conn, auth_mode="token")
 
     try:
-        conn.gsql("USE GRAPH " + graphname)
+        if async_conn:
+            asyncio.run(conn.gsql("USE GRAPH " + graphname))
+        else:
+            conn.gsql("USE GRAPH " + graphname)
     except HTTPError:
         LogWriter.error("Failed to connect to TigerGraph. Incorrect ID Token.")
         raise HTTPException(
@@ -160,6 +168,7 @@ def elevate_db_connection_to_token(host, username, password, graphname, async_co
                 conn.restppUrl = conn.restppUrl+"/restpp"
 
     return conn
+
 
 def get_schema_ver(conn: TigerGraphConnectionProxy) -> int:
     """Retrieves the schema version of the graph by running an interpreted query.

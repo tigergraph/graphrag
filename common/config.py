@@ -77,11 +77,17 @@ if embedding_config is None:
 embedding_dimension = embedding_config.get("dimensions", 1536)
 
 if graphrag_config is None:
-    graphrag_config = {"reuse_embedding", True}
+    graphrag_config = {"reuse_embedding": True}
 if "chunker" not in graphrag_config:
     graphrag_config["chunker"] = "semantic"
 if "extractor" not in graphrag_config:
     graphrag_config["extractor"] = "llm"
+
+reuse_embedding = graphrag_config.get("reuse_embedding", True)
+doc_process_switch = graphrag_config.get("doc_process_switch", True)
+entity_extraction_switch = graphrag_config.get("entity_extraction_switch", doc_process_switch)
+entity_resolution_switch = graphrag_config.get("entity_resolution_switch", entity_extraction_switch)
+community_detection_switch = graphrag_config.get("community_detection_switch", entity_resolution_switch)
 
 if "model_name" not in llm_config or "model_name" not in llm_config["embedding_service"]:
     if "model_name" not in llm_config:
@@ -133,7 +139,7 @@ if os.getenv("INIT_EMBED_STORE", "true") == "true":
         password=db_config.get("password", "tigergraph"),
         gsPort=db_config.get("gsPort", "14240"),
         restppPort=db_config.get("restppPort", "9000"),
-        graphname=db_config.get("graphname", "MyGraph"),
+        graphname=db_config.get("graphname", ""),
     )
     if db_config.get("getToken"):
         conn.getToken()
