@@ -6,14 +6,15 @@ import time
 import logging
 from contextlib import asynccontextmanager
 from threading import Thread
-from typing import Annotated, Callable
+from typing import Callable
 
 import asyncio
 import graphrag
 import supportai
 from eventual_consistency_checker import EventualConsistencyChecker
-from fastapi import BackgroundTasks, Depends, FastAPI, Response, status
-from fastapi.security.http import HTTPBase
+from fastapi import BackgroundTasks, Depends, FastAPI, Request, Response, status, HTTPException
+from fastapi.security.http import HTTPBasicCredentials, HTTPAuthorizationCredentials
+from base64 import b64decode
 
 from common.config import (
     db_config,
@@ -21,9 +22,8 @@ from common.config import (
     embedding_service,
     get_llm_service,
     llm_config,
-    security,
 )
-from common.db.connections import elevate_db_connection_to_token
+from common.db.connections import elevate_db_connection_to_token, get_db_connection_id_token
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
 from common.logs.logwriter import LogWriter
@@ -95,15 +95,15 @@ def initialize_eventual_consistency_checker(
             raise ValueError("Invalid extractor type")
 
         checker = EventualConsistencyChecker(
-            process_interval_seconds,
-            cleanup_interval_seconds,
+            graphrag_config.get("process_interval_seconds", 300),
+            graphrag_config.get("cleanup_interval_seconds", 300),
             graphname,
             embedding_service,
             embedding_store,
             index_names,
             conn,
             extractor,
-            batch_size,
+            graphrag_config.get("batch_size", 100),
         )
         consistency_checkers[graphname] = checker
 
@@ -127,6 +127,25 @@ def start_func_in_thread(f: Callable, *args, **kwargs):
     thread.start()
     LogWriter.info(f'Thread started for function: "{f.__name__}"')
 
+def auth_credentials(
+    request: Request,
+):
+    auth = request.headers.get("Authorization")
+    if not auth:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing Authorization header")
+
+    scheme, credentials = auth.split(" ")
+    if scheme == "Bearer":
+        credentials = HTTPAuthorizationCredentials(scheme=scheme, credentials=credentials)
+        return credentials
+
+    elif scheme == "Basic":
+        username, password = b64decode(credentials).decode().split(":")
+        credentials = HTTPBasicCredentials(username=username, password=password)
+        return credentials
+    else:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unsupported auth scheme")
+
 
 @app.get("/")
 def root():
@@ -139,16 +158,25 @@ def consistency_status(
     graphname: str,
     ecc_method: str,
     background: BackgroundTasks,
-    credentials: Annotated[HTTPBase, Depends(security)],
     response: Response,
+    credentials = Depends(auth_credentials),
 ):
-    conn = elevate_db_connection_to_token(
-        db_config.get("hostname"),
-        credentials.username,
-        credentials.password,
-        graphname,
-        async_conn=True
-    )
+    if isinstance(credentials, HTTPBasicCredentials):
+        conn = elevate_db_connection_to_token(
+            db_config.get("hostname"),
+            credentials.username,
+            credentials.password,
+            graphname,
+            async_conn=True
+        )
+    elif isinstance(credentials, HTTPAuthorizationCredentials):
+        conn = get_db_connection_id_token(
+            graphname,
+            credentials.credentials,
+            async_conn=True
+        )
+    else:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
     asyncio.run(conn.customizeHeader(
         timeout=db_config.get("default_timeout", 300) * 1000, responseSize=5000000

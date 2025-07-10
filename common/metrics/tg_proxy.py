@@ -39,8 +39,6 @@ class TigerGraphConnectionProxy:
         if self.auth_mode == "pwd":
             return self.original_req(method, url, authMode, *args, **kwargs)
         else:
-            url = re.sub(r"/gsqlserver/", "/api/gsql-server/", url)
-            url = re.sub(r"/restpp/", "/api/restpp/", url)
             return self.original_req(method, url, "token", *args, **kwargs)
 
     def _runInstalledQuery(self, query_name, params, usePost=False):

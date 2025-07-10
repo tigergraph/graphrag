@@ -64,13 +64,6 @@ UNION ALL
 UNWIND
 SET
 
-Here's some commonly used abbreviations:
-dt -> date
-pct -> percentage
-qty -> quantity
-lng -> longitude
-cm -> Contract Manufacturer
-
 Always make the cypher query returns the entity in the original question together with the data to be queried.
 Make sure to have correct attribute names in the OpenCypher query and not to name result aliases that are vertex or edge types, operator or function names, and other reserved keywords, always construct alias with multiple words connected with underscore.
 

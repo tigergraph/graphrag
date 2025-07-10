@@ -24,7 +24,7 @@ from graphrag.util import (
 )
 from pyTigerGraph import AsyncTigerGraphConnection
 
-from common.config import embedding_service, graphrag_config
+from common.config import embedding_service, graphrag_config, entity_extraction_switch, entity_resolution_switch, community_detection_switch, doc_process_switch
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.extractors.BaseExtractor import BaseExtractor
 
@@ -246,9 +246,10 @@ async def extract(
         while True:
             try:
                 item = await extract_chan.get()
-                grp.create_task(
-                    workers.extract(upsert_chan, embed_chan, extractor, conn, *item)
-                )
+                if entity_extraction_switch:
+                    grp.create_task(
+                        workers.extract(upsert_chan, embed_chan, extractor, conn, *item)
+                    )
             except ChannelClosed:
                 break
             except Exception:
@@ -476,9 +477,6 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
     extractor, embedding_store = await init(conn)
     init_start = time.perf_counter()
 
-    doc_process_switch = True
-    entity_resolution_switch = True
-    community_detection_switch = True
     if doc_process_switch:
         logger.info("Doc Processing Start")
         docs_chan = Channel(1)
@@ -514,17 +512,18 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
 
     # Type Resolution
     type_start = time.perf_counter()
-    logger.info("Type Processing Start")
-    res = await add_rels_between_types(conn)
-    if res.get("error", False):
-        logger.error(f"Error adding relationships between types: {res}")
-    else:
-        logger.info(f"Added relationships between types: {res}")
+    if entity_extraction_switch:
+        logger.info("Type Processing Start")
+        res = await add_rels_between_types(conn)
+        if res.get("error", False):
+            logger.error(f"Error adding relationships between types: {res}")
+        else:
+            logger.info(f"Added relationships between types: {res}")
     logger.info("Type Processing End")
     type_end = time.perf_counter()
+
     # Entity Resolution
     entity_start = time.perf_counter()
-
     if entity_resolution_switch:
         logger.info("Entity Processing Start")
         while not await check_embedding_rebuilt(conn, "Entity"):
@@ -551,12 +550,11 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
         await upsert_chan.join()
         #Resolve relationsihps
         await resolve_relationships(conn)
-
+        while not await check_all_ents_resolved(conn):
+            logger.info(f"Waiting for resolved entites to finish loading")
+            await asyncio.sleep(1)
     entity_end = time.perf_counter()
     logger.info("Entity Processing End")
-    while not await check_all_ents_resolved(conn):
-        logger.info(f"Waiting for resolved entites to finish loading")
-        await asyncio.sleep(1)
 
     # Community Detection
     community_start = time.perf_counter()
@@ -583,7 +581,6 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
         await embed_chan.join()
         logger.info("Join upsert_chan")
         await upsert_chan.join()
-
     community_end = time.perf_counter()
     logger.info("Community Processing End")
 

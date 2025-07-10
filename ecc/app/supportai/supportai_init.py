@@ -7,7 +7,7 @@ import httpx
 from aiochannel import Channel
 from pyTigerGraph import TigerGraphConnection
 
-from common.config import embedding_service
+from common.config import embedding_service, entity_extraction_switch, doc_process_switch
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.extractors.BaseExtractor import BaseExtractor
 from supportai import workers
@@ -152,9 +152,10 @@ async def extract(
     # consume task queue
     async with asyncio.TaskGroup() as sp:
         async for item in extract_chan:
-            sp.create_task(
-                workers.extract(upsert_chan, embed_chan, extractor, conn, *item)
-            )
+            if entity_extraction_switch:
+                sp.create_task(
+                    workers.extract(upsert_chan, embed_chan, extractor, conn, *item)
+                )
 
     logger.info(f"extract done")
 
@@ -180,8 +181,6 @@ async def run(
 
     extractor, embedding_store = await init(conn)
     init_start = time.perf_counter()
-
-    doc_process_switch = True
 
     if doc_process_switch:
         logger.info("Doc Processing Start")
