@@ -39,33 +39,28 @@ export function Login() {
   const [token, setToken] = useState(localStorage.getItem("site") || "");
   const navigate = useNavigate();
 
-  useEffect(() => console.log(localStorage), []);
+  useEffect(() => {
+    const parseStore = JSON.parse(localStorage.getItem("site") || "{}");
+    setUser(parseStore);
+  }, []);
 
   const loginAction = async (data: z.infer<typeof formSchema>) => {
-    console.log(data);
-    try {
-      const creds = btoa(data.email + ":" + data.password);
-      const response = await fetch(WS_URL, {
-        method: "POST",
-        headers: {
-          Authorization: "Basic " + creds,
-          "Content-Type": "application/json",
-        },
-      });
-      const res = await response.json();
-      console.log(res);
-      if (res) {
-        setUser(res);
-        setToken(res);
-        localStorage.setItem("site", JSON.stringify(res));
-        localStorage.setItem("creds", creds);
-        localStorage.setItem("username", data.email);
-        navigate("/chat");
-        return;
-      }
-      throw new Error(res.message);
-    } catch (err) {
-      console.error(err);
+    const creds = btoa(`${data.email}:${data.password}`);
+    localStorage.setItem("creds", creds);
+
+    const res = await fetch("/ui/ui-login", {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${creds}`,
+      },
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      localStorage.setItem("site", JSON.stringify(data));
+      navigate("/chat");
+    } else {
+      // setError("Invalid credentials"); // This line was removed from the new_code, so it's removed here.
     }
   };
 

@@ -16,63 +16,38 @@ export const KnowledgeGraphPro = ({ data }) => {
       const parseData = JSON.parse(data);
       setEdges(parseData);
       // do i need to parse for question 'show me 5 transacitons with details'
-      console.log('\n\n\n\n\n\n\n\n\n\n PARSED STRING', parseData);
 
-    //   {
-    //     "rlt": [
-    //         {
-    //             "v_id": "4218196001337",
-    //             "v_type": "Card",
-    //             "attributes": {
-    //                 "Transaction_Count": 2564,
-    //                 "Total_Transaction_Amount": 163226.2,
-    //                 "Maximum_Transaction_Amount": 3389.92,
-    //                 "Minimum_Transaction_Amount": 1.01,
-    //                 "Average_Transaction_Amount": 63.66081123244933
-    //             }
-    //         }
-    //     ]
-    // }
+      //   {
+      //     "rlt": [
+      //         {
+      //             "v_id": "4218196001337",
+      //             "v_type": "Card",
+      //             "attributes": {
+      //                 "Transaction_Count": 2564,
+      //                 "Total_Transaction_Amount": 163226.2,
+      //                 "Maximum_Transaction_Amount": 3389.92,
+      //                 "Minimum_Transaction_Amount": 1.01,
+      //                 "Average_Transaction_Amount": 63.66081123244933
+      //             }
+      //         }
+      //     ]
+      // }
 
-      // console.log('\n\n\n\n\n\n\n\n\n\n PARSED edges length', edges.length);
       // if (parseData.length > 0) {
       //   // YES THERE ARE 5 from question 'show me 5 transacitons with details'
       //   const setresults = parseData[1]["@@edges"];
-      //   console.log('\n\n\n\n\n\n\n\n\n\n @@edges', setresults);
       //   // ^ this is valid for question 'what cards have more than 800 transactions between april 1 2021 to august 1 2021'
       //   // set the nodess and edges state here
       // } else null
+    } else if (Array.isArray(data)) {
+      // YES THERE ARE 5 from question 'show me 5 transacitons with details'
+      const setresults = data[1]["@@edges"];
+      // ^ this is valid for question 'what cards have more than 800 transactions between april 1 2021 to august 1 2021'
+      setEdges(setresults);
+    } else {
+      // Handle object data directly
+      setEdges(data);
     }
-
-    if (typeof data === 'object') {
-      // console.log('\n\n\n\n\n\n\n\n\n\n length', data.length);
-      if (data.length > 1) {
-        const setresults = data[1]["@@edges"];
-        console.log('\n\n\n\n\n\n\n\n\n\n @@edges2', setresults);
-        // setEdges(setresults);
-        // setdataArray({
-        //   "nodes": nodez,
-        //   "edgez": getEdgez
-        // })
-      } else {
-        const setresults = data["@@edges"];
-        setEdges(setresults);
-        console.log('\n\n\n\n\n\n\n\n\n\n OBJECT edges', data);
-        // THIS is a valid response for 'How do I run PageRank?'
-      }
-    }
-
-    // setvId(sdata[0]?.rlt[0]?.v_id);
-    // if (typeof sdata === 'object') {
-    //   if (sdata.length > 1) {
-    //     const setresults = sdata[1]["@@edges"];
-    //     setEdges(setresults);
-    //     setdataArray({
-    //       "nodes": nodez,
-    //       "edgez": getEdgez
-    //     })
-    //   } else null
-    // }
   }, [data]);
 
   useEffect(() => {
