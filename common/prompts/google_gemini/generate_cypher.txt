@@ -1,12 +1,22 @@
-You're an expert in OpenCypher programming. Given the following schema: {schema}, what is the OpenCypher query that retrieves the answer for question: {question}.
+You're an expert in OpenCypher programming. Given the following schema, find the best OpenCypher query that retrieves the answer for question {question}.
 If there're multiple words in the question having same meaning then remove the duplication.
+Always carefully distinguish entity value from entity type. For example, "MAC LOB" is referring to a LOB named "MAC" because there is a vertex type Lob matching the word "LOB".
 Only include attributes that are found in the schema. Never include any attributes that are not found in the schema.
-Use attributes instead of primary id if attribute name is more similar to the keyword type in the question.
+Use attributes instead of primary id if attribute name is more similar to the keyword type in the question. Always use the closest attribute name when there're multiple candidates.
 Use as less vertex type, edge type and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
+Always make sure the attributes used exist in the vertex type or edge type referenced, DO NOT use an attribute that does not exist in the vertex or edge from the schema.
 Do not return attributes that are not explicitly mentioned in the question. If a vertex type is mentioned in the question, only return the vertex.
+Always include the entity from the WHERE clause to the final RETURN result. Use vertex name instead of ID whenever available.
 Never use directed edge pattern in the OpenCypher query. Always use and create query using undirected pattern. Always ensure the edge used starts from and ends with correct vertex types matching the schema.
 Always use double quotes for strings instead of single quotes.
-Use alias for ORDER BY if any, and make sure the same alias is used in both RETURN and ORDER BY. Always add ASC or DESC for ORDER BY based on data type.
+Always convert strings to lower case using toLower() function for string comparision in WHERE clause.
+Use alias for ORDER BY if any, avoid using short alias names especially single letter alias, always use meaningful words connected by underscore.
+Always make sure the alias or attributes used in ORDER BY is the same type in RETURN. Always add ASC or DESC for ORDER BY based on data type.
+
+Avoid to generate invalid OpenCypher queries based on the errors from history below.
+
+Schema: {schema}
+History: {history}
 
 Only use the Supported Clauses, Operators, Functions and Expressions below but do not use any of the Unsupported Features, Functions or Syntax Limitations below:
 
@@ -33,6 +43,9 @@ Others: id(), elementId(), labels(), properties(), timestamp()
 Supported Expressions:
 CASE: Conditional logic.
 
+Supported Operators:
+Comparison: IS NULL, IS NOT NULL
+
 Unsupported Features:
 Clauses Not Yet Supported
 CALL, CREATE, MERGE, REMOVE, SET, UNION, UNION ALL, UNWIND
@@ -55,6 +68,17 @@ UNION ALL
 UNWIND
 SET
 
-Make sure to have correct attribute names in the OpenCypher query and not to name result aliases that are vertex or edge types, operator or function names, and other reserved keywords.
+Here's some commonly used abbreviations:
+dt -> date
+wk -> week
+yr -> year
+pct -> percentage
+qty -> quantity
+lng -> longitude
+cm -> Contract Manufacturer
+
+Always make the cypher query returns the entity in the original question together with the data to be queried.
+Make sure to have correct attribute names in the OpenCypher query and not to name result aliases that are vertex or edge types, operator or function names, and other reserved keywords, always construct alias with multiple words connected with underscore.
+Always validate the syntax for the generated OpenCypher query before writing to response.
 
 ONLY write the OpenCypher query in the response. Do not include any other information in the response.
