@@ -91,7 +91,7 @@ export const KnowledgeTablPro = ({ data }) => {
             const cols = Object.keys(firstRow);
             setColumns(cols);
             setTableData(firstValue);
-          } else {
+      } else {
             setColumns([]);
             setTableData([]);
           }
@@ -175,16 +175,16 @@ export const KnowledgeTablPro = ({ data }) => {
       {dataType === 'cypher' && tableData.length > 0 ? (
         <>
           <Table className="text-[11px]">
-            <TableHeader>
-              <TableRow>
+        <TableHeader>
+          <TableRow>
                 {columns.map((column) => (
                   <TableHead key={column} className="w-[100px] text-[11px]">
                     {column}
                   </TableHead>
                 ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
               {tableData.slice(startIndex, endIndex).map((item: any, index: number) => (
                 <TableRow key={index}>
                   {columns.map((column) => (
@@ -243,34 +243,34 @@ export const KnowledgeTablPro = ({ data }) => {
                   <TableCell className="text-left text-[11px]">{item.from_id}</TableCell>
                 </TableRow>
               ))}
-            </TableBody>
-          </Table>
+        </TableBody>
+      </Table>
           {edges.length > rowsPerPage && (
             <Pagination className="text-[11px]">
-              <PaginationContent>
-                <PaginationItem>
-                  <PaginationPrevious
-                    className={
-                      startIndex === 0 ? "pointer-events-none opacity-50" : undefined
-                    }
-                    onClick={() => {
-                      setStartIndex(startIndex - rowsPerPage);
-                      setEndIndex(endIndex - rowsPerPage);
-                    }} />
-                </PaginationItem>
+        <PaginationContent>
+          <PaginationItem>
+            <PaginationPrevious
+              className={
+                startIndex === 0 ? "pointer-events-none opacity-50" : undefined
+              }
+              onClick={() => {
+                setStartIndex(startIndex - rowsPerPage);
+                setEndIndex(endIndex - rowsPerPage);
+              }} />
+          </PaginationItem>
 
-                <PaginationItem>
-                  <PaginationNext
-                    className={
+          <PaginationItem>
+            <PaginationNext
+              className={
                       endIndex >= edges.length ? "pointer-events-none opacity-50" : undefined
-                    }
-                    onClick={() => {
+              }
+              onClick={() => {
                       setStartIndex(startIndex + rowsPerPage);
                       setEndIndex(endIndex + rowsPerPage);
-                    }} />
-                </PaginationItem>
-              </PaginationContent>
-            </Pagination>
+              }} />
+          </PaginationItem>
+        </PaginationContent>
+      </Pagination>
           )}
         </>
       ) : (

@@ -6,7 +6,7 @@ Use attributes instead of primary id if attribute name is more similar to the ke
 Use as less vertex type, edge type and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
 Always make sure the attributes used exist in the vertex type or edge type referenced, DO NOT use an attribute that does not exist in the vertex or edge from the schema.
 Do not return attributes that are not explicitly mentioned in the question. If a vertex type is mentioned in the question, only return the vertex.
-Always include the entity from the WHERE clause to the final RETURN result. Use vertex name instead of ID whenever available.
+Always return the entity from the WHERE clause together with the final result in the RETURN statement. Use vertex name instead of ID whenever available.
 Never use directed edge pattern in the OpenCypher query. Always use and create query using undirected pattern. Always ensure the edge used starts from and ends with correct vertex types matching the schema.
 Always use double quotes for strings instead of single quotes.
 Always convert strings to lower case using toLower() function for string comparision in WHERE clause.

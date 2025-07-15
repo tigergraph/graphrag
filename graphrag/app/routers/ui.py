@@ -379,7 +379,7 @@ async def graph_query(
     try:
         # Load conversation history if conversation_id is provided
         conversation_history = await load_conversation_history(conversation_id, auth) if conversation_id else []
-        
+
         # Use provided conversation ID or generate new one
         if not conversation_id or conversation_id == "new":
             convo_id = str(uuid.uuid4())
@@ -387,12 +387,12 @@ async def graph_query(
         else:
             convo_id = conversation_id
             LogWriter.info(f"Continuing conversation with ID: {convo_id}")
-    
+
         # create agent
         # get retrieval pattern to use
         rag_pattern = "hybridsearch"
         agent = make_agent(graphname, conn, use_cypher, supportai_retriever=rag_pattern)
-    
+
         prev_id = None
         data = q
 
@@ -418,7 +418,7 @@ async def graph_query(
 
         # save message
         message = Message(
-           conversation_id=convo_id,
+            conversation_id=convo_id,
             message_id=str(uuid.uuid4()),
             parent_id=prev_id,
             model=llm_config["model_name"],

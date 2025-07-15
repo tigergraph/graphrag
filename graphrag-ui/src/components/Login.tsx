@@ -49,16 +49,16 @@ export function Login() {
     localStorage.setItem("creds", creds);
 
     const res = await fetch("/ui/ui-login", {
-      method: "POST",
-      headers: {
+        method: "POST",
+        headers: {
         Authorization: `Basic ${creds}`,
-      },
-    });
+        },
+      });
 
     if (res.ok) {
       const data = await res.json();
       localStorage.setItem("site", JSON.stringify(data));
-      navigate("/chat");
+        navigate("/chat");
     } else {
       // setError("Invalid credentials"); // This line was removed from the new_code, so it's removed here.
     }

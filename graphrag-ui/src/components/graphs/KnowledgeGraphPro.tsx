@@ -17,21 +17,21 @@ export const KnowledgeGraphPro = ({ data }) => {
       setEdges(parseData);
       // do i need to parse for question 'show me 5 transacitons with details'
 
-      //   {
-      //     "rlt": [
-      //         {
-      //             "v_id": "4218196001337",
-      //             "v_type": "Card",
-      //             "attributes": {
-      //                 "Transaction_Count": 2564,
-      //                 "Total_Transaction_Amount": 163226.2,
-      //                 "Maximum_Transaction_Amount": 3389.92,
-      //                 "Minimum_Transaction_Amount": 1.01,
-      //                 "Average_Transaction_Amount": 63.66081123244933
-      //             }
-      //         }
-      //     ]
-      // }
+    //   {
+    //     "rlt": [
+    //         {
+    //             "v_id": "4218196001337",
+    //             "v_type": "Card",
+    //             "attributes": {
+    //                 "Transaction_Count": 2564,
+    //                 "Total_Transaction_Amount": 163226.2,
+    //                 "Maximum_Transaction_Amount": 3389.92,
+    //                 "Minimum_Transaction_Amount": 1.01,
+    //                 "Average_Transaction_Amount": 63.66081123244933
+    //             }
+    //         }
+    //     ]
+    // }
 
       // if (parseData.length > 0) {
       //   // YES THERE ARE 5 from question 'show me 5 transacitons with details'
@@ -41,10 +41,10 @@ export const KnowledgeGraphPro = ({ data }) => {
       // } else null
     } else if (Array.isArray(data)) {
       // YES THERE ARE 5 from question 'show me 5 transacitons with details'
-      const setresults = data[1]["@@edges"];
+        const setresults = data[1]["@@edges"];
       // ^ this is valid for question 'what cards have more than 800 transactions between april 1 2021 to august 1 2021'
       setEdges(setresults);
-    } else {
+      } else {
       // Handle object data directly
       setEdges(data);
     }

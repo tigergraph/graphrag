@@ -211,10 +211,10 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
             content: lastMessage.data,
             response_type: "progress"
           });
-          setState((prev) => {
-            const newPrevMsg = prev.messages.slice(0, -1);
-            return {...prev, messages: [...newPrevMsg, botMessage]};  
-          });
+      setState((prev) => {
+        const newPrevMsg = prev.messages.slice(0, -1);
+        return {...prev, messages: [...newPrevMsg, botMessage]};  
+      });
         }
       }
     }
