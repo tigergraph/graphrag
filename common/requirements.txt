@@ -78,7 +78,7 @@ jsonpath-python==1.0.6
 jsonpointer==3.0.0
 kiwisolver==1.4.8
 langchain==0.3.26
-langchain-core==0.3.66
+langchain-core==0.3.69
 langchain_google_genai==2.1.8
 langchain-community==0.3.26
 langchain-experimental==0.3.5rc1
