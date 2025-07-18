@@ -3,6 +3,7 @@ import os
 import time
 from typing import List
 
+from langchain.schema.embeddings import Embeddings
 from langchain_openai import OpenAIEmbeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
@@ -13,7 +14,7 @@ from common.metrics.prometheus_metrics import metrics
 logger = logging.getLogger(__name__)
 
 
-class EmbeddingModel():
+class EmbeddingModel(Embeddings):
     """EmbeddingModel.
     Implements connections to the desired embedding API.
     """
