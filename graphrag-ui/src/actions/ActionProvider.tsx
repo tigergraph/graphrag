@@ -43,7 +43,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
     onOpen: () => {
       queryGraphragWs2(localStorage.getItem("creds")!);
       console.log("WebSocket connection established to " + WS_URL);
-      sendMessage(localStorage.getItem("ragPattern") || "hybridsearch");
+      sendMessage(localStorage.getItem("ragPattern") || "Hybrid Search");
     },
   });
 

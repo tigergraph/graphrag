@@ -11,7 +11,7 @@ from agent.Q import DONE, Q
 from langgraph.graph import END, StateGraph
 from pyTigerGraph.common.exception import TigerGraphException
 from supportai.retrievers import (HybridRetriever, SimilarityRetriever,
-                                  SiblingRetriever, GraphRAGRetriever)
+                                  SiblingRetriever, CommunityRetriever)
 from tools import MapQuestionToSchemaException
 from typing_extensions import TypedDict
 
@@ -64,7 +64,7 @@ class TigerGraphAgentGraph:
         self.q = q
 
         self.supportai_enabled = True
-        self.supportai_retriever = supportai_retriever.lower()
+        self.supportai_retriever = supportai_retriever.lower().replace(" ", "")
         try:
             self.db_connection.getQueryMetadata("GraphRAG_Hybrid_Search")
         except TigerGraphException as e:
@@ -261,7 +261,7 @@ class TigerGraphAgentGraph:
     
     def sibling_search(self, state):
         """
-        Run the agent sibling search.
+        Run the agent sibling contextual search.
         """
         self.emit_progress("Searching the knowledge graph")
         retriever = SiblingRetriever(
@@ -287,12 +287,12 @@ class TigerGraphAgentGraph:
         state["lookup_source"] = "supportai"
         return state
     
-    def graphrag_search(self, state):
+    def community_search(self, state):
         """
-        Run the agent graphrag search.
+        Run the agent graphrag community search.
         """
         self.emit_progress("Searching the knowledge graph")
-        retriever = GraphRAGRetriever(
+        retriever = CommunityRetriever(
             self.embedding_model,
             self.embedding_store,
             self.llm_provider.model,
@@ -324,10 +324,10 @@ class TigerGraphAgentGraph:
             return self.hybrid_search(state)
         elif self.supportai_retriever == "similaritysearch":
             return self.similarity_search(state)
-        elif self.supportai_retriever == "siblingsearch":
+        elif self.supportai_retriever == "contextualsearch":
             return self.sibling_search(state)
-        elif self.supportai_retriever == "graphrag":
-            return self.graphrag_search(state)
+        elif self.supportai_retriever == "communitysearch":
+            return self.community_search(state)
         else:
             raise ValueError(f"Invalid supportai retriever: {self.supportai_retriever}")
     

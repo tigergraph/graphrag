@@ -28,7 +28,7 @@ partial_variables={"format_instructions": answer_parser.get_format_instructions(
 )
 
 
-class GraphRAGRetriever(BaseRetriever):
+class CommunityRetriever(BaseRetriever):
     def __init__(
         self,
         embedding_service,
