@@ -16,7 +16,7 @@ from supportai.retrievers import (
     HybridRetriever,
     SimilarityRetriever,
     SiblingRetriever,
-    GraphRAGRetriever
+    CommunityRetriever
 )
 
 from common.config import (
@@ -183,7 +183,7 @@ def search(
             query.method_params["expand"],
             query.method_params["verbose"],
         )
-    elif query.method.lower() == "sibling":
+    elif query.method.lower() == "contextual":
         if "index" not in query.method_params:
             raise Exception("Index name not provided")
         retriever = SiblingRetriever(
@@ -204,8 +204,8 @@ def search(
             embedding_service, embedding_store, get_llm_service(llm_config), conn
         )
         res = retriever.search(query.question, query.method_params["top_k"])
-    elif query.method.lower() == "graphrag":
-        retriever = GraphRAGRetriever(
+    elif query.method.lower() == "community":
+        retriever = CommunityRetriever(
             embedding_service, embedding_store, get_llm_service(llm_config), conn
         )
         if "with_chunk" not in query.method_params:
@@ -286,7 +286,7 @@ def answer_question(
             query.method_params["combine"],
             query.method_params["verbose"],
         )
-    elif query.method.lower() == "sibling":
+    elif query.method.lower() == "contextual":
         if "index" not in query.method_params:
             raise Exception("Index name not provided")
         retriever = SiblingRetriever(
@@ -309,8 +309,8 @@ def answer_question(
         )
         res = retriever.retrieve_answer(query.question, query.method_params["top_k"])
 
-    elif query.method.lower() == "graphrag":
-        retriever = GraphRAGRetriever(
+    elif query.method.lower() == "community":
+        retriever = CommunityRetriever(
             embedding_service, embedding_store, get_llm_service(llm_config), conn
         )
         if "with_chunk" not in query.method_params:

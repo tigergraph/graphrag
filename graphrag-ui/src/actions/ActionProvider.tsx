@@ -91,7 +91,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
       console.log("WebSocket connection established to " + WS_URL);
       
       // Send RAG pattern
-      sendMessage(localStorage.getItem("ragPattern") || "hybridsearch");
+      sendMessage(localStorage.getItem("ragPattern") || "Hybrid Search");
       
       // Send conversation ID (or "new" for new conversation)
       const conversationId = conversationManager.getCurrentConversationId();

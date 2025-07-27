@@ -22,7 +22,7 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
   const [store, setStore] = useState<any>();
   const [currentDate, setCurrentDate] = useState('');
   const [selectedGraph, setSelectedGraph] = useState(localStorage.getItem("selectedGraph") || 'pyTigerGraphRAG');
-  const [ragPattern, setRagPattern] = useState(localStorage.getItem("ragPattern") || 'HybridSearch');
+  const [ragPattern, setRagPattern] = useState(localStorage.getItem("ragPattern") || 'Hybrid Search');
 
   useEffect(() => {
     const parseStore = JSON.parse(localStorage.getItem("site") || "{}");
@@ -65,10 +65,10 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
               </DropdownMenuTrigger>
 
               <DropdownMenuContent className="w-56">
-                <DropdownMenuLabel>Select a RAG Pattern</DropdownMenuLabel>
+                <DropdownMenuLabel>Select a GraphRAG Pattern</DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  {["SimilaritySearch", "SiblingSearch", "HybridSearch", "GraphRAG"].map((f, i) => (
+                  {["Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
                     <DropdownMenuItem key={i} onSelect={() => handleSelectRag(f)}>
                       {/* <User className="mr-2 h-4 w-4" /> */}
                       <span>{f}</span>
