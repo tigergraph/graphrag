@@ -1,3 +1,0 @@
-Copyright (c) 2025 TigerGraph, Inc.
-You can get the full official license text here:
-https://www.apache.org/licenses/LICENSE-2.0.txt
