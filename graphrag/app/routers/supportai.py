@@ -238,6 +238,8 @@ def search(
             query.method_params["with_doc"],
             query.method_params["verbose"],
         )
+    else:
+        raise Exception(f"Method {query.method} not implemented")
     return res
 
 
