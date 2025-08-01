@@ -62,6 +62,22 @@ class CommunityRetriever(BaseRetriever):
                 },
                 usePost=True
             )
+
+            # Include similarity search results
+            if with_chunk or with_doc:
+                start_set = self._generate_start_set(questions, ["DocumentChunk"], top_k, similarity_threshold)
+
+                self._check_query_install("Content_Similarity_Search")
+                resp = self.conn.runInstalledQuery(
+                    "Content_Similarity_Search",
+                    params = {
+                        "json_list_vts": str(start_set),
+                        "v_type": "DocumentChunk",
+                        "verbose": verbose,
+                    },
+                    usePost=True
+                )
+                res[0]["final_retrieval"]["Similarity_Context"] = [resp[0]["final_retrieval"][x] for x in resp[0]["final_retrieval"]]
         else:
             query_vector = self._generate_embedding(question)
 

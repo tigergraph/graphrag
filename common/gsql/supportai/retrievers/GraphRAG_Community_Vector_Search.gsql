@@ -37,6 +37,10 @@ CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Community_Vector_Search(LIST<FLOAT>
               ACCUM s.@children += c
               POST-ACCUM @@verbose_info += ("community_level_"+to_string(i-1) -> s.@children);
       END;
+      start_chunks = vectorSearch({DocumentChunk.embedding}, query_vector, top_k);
+      extra_selected_comms = SELECT m FROM start_chunks:dc -(CONTAINS_ENTITY>)- Entity:v -(RESOLVES_TO>)- ResolvedEntity:r -(IN_COMMUNITY>)- Community:m;
+      selected_comms = selected_comms UNION extra_selected_comms;
+
       IF with_doc THEN
           related_chunks = SELECT c FROM Content:c -(<HAS_CONTENT)- Document:d -(HAS_CHILD>)- DocumentChunk:dc -(CONTAINS_ENTITY>)- Entity:v -(RESOLVES_TO>)- ResolvedEntity:r -(IN_COMMUNITY>)- selected_comms:m
               ACCUM m.@context += c.text, m.@children += d
