@@ -90,7 +90,7 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
               </DropdownMenuTrigger>
 
             <DropdownMenuContent className="w-56">
-              <DropdownMenuLabel>Select a Graph</DropdownMenuLabel>
+              <DropdownMenuLabel>Select a KnowledgeGraph</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
                 {store?.graphs.map((f, i) => (
