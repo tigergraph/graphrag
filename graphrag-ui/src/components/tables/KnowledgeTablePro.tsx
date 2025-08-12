@@ -27,10 +27,12 @@ interface Post {
 export const KnowledgeTablPro = ({ data }) => {
   const [theme, setTheme] = useState(localStorage.getItem("vite-ui-theme"));
   const ref = useRef<any | null>(null);
-  const [edges, setEdges] = useState([]);
+  const [edges, setEdges] = useState<any[]>([]);
   const [dataArray, setdataArray] = useState<any>();
   const [vId, setvId] = useState<any>();
-
+  const [tableData, setTableData] = useState<any[]>([]);
+  const [columns, setColumns] = useState<string[]>([]);
+  const [dataType, setDataType] = useState<string>(''); // 'gsql' or 'cypher'
 
   const rowsPerPage = 10;
   // const [sdata, setData] = useState<Post[]>([]);
@@ -55,40 +57,90 @@ export const KnowledgeTablPro = ({ data }) => {
 
 
   useEffect(() => {
-    // console.log('data', data);
-    if (typeof data === 'string') {
-      // do i need to parse for question 'show me 5 transacitons with details'
-      // const parseData = JSON.parse(data);
-      // setEdges(parseData);
-      // do i need to parse for question 'show me 5 transacitons with details'
-      console.log('\n\n\n\n\n\n\n\n\n\n data', data);
-      // console.log('\n\n\n\n\n\n\n\n\n\n PARSED STRING', parseData);
-      // setEdges(parseData);
-      // console.log('\n\n\n\n\n\n\n\n\n\n PARSED edges length', edges.length);
-      // if (parseData.length > 0) {
-      //   // YES THERE ARE 5 from question 'show me 5 transacitons with details'
-      //   const setresults = parseData[1]["@@edges"];
-      //   console.log('\n\n\n\n\n\n\n\n\n\n @@edges', setresults);
-      //   // ^ this is valid for question 'what cards have more than 800 transactions between april 1 2021 to august 1 2021'
-      //   // set the nodess and edges state here
-      // } else null
+    if (!data) {
+      setTableData([]);
+      setColumns([]);
+      setDataType('');
+      setEdges([]);
+      return;
     }
 
-    if (typeof data === 'object') {
-      // console.log('\n\n\n\n\n\n\n\n\n\n length', data.length);
-      if (data.length > 1) {
-        const setresults = data[1]["@@edges"];
-        console.log('\n\n\n\n\n\n\n\n\n\n @@edges2', setresults);
-        // setEdges(setresults);
-        // setdataArray({
-        //   "nodes": nodez,
-        //   "edgez": getEdgez
-        // })
+    // Handle string data
+    if (typeof data === 'string') {
+      setDataType('gsql');
+      setTableData([]);
+      setColumns([]);
+      setEdges([]);
+      return;
+    }
+
+    // Handle Cypher query results (answer field) - these are objects with data arrays
+    if (typeof data === 'object' && !Array.isArray(data)) {
+      // Check if this is Cypher data (object with array values like {"T": [...]})
+      const dictKeys = Object.keys(data);
+      if (dictKeys.length > 0) {
+        const firstKey = dictKeys[0];
+        const firstValue = data[firstKey];
+        if (Array.isArray(firstValue)) {
+          setDataType('cypher');
+          setEdges([]); // Clear GSQL edges for Cypher data
+          
+          if (firstValue.length > 0) {
+            // Extract column names from the first row
+            const firstRow = firstValue[0];
+            const cols = Object.keys(firstRow);
+            setColumns(cols);
+            setTableData(firstValue);
       } else {
-        const setresults = data["@@edges"];
-        console.log('\n\n\n\n\n\n\n\n\n\n OBJECT setresults', setresults);
+            setColumns([]);
+            setTableData([]);
+          }
+          return; // Exit early for Cypher data
+        }
+      }
+      
+      // Handle GSQL results (object with @@edges)
+      setDataType('gsql');
+      setTableData([]);
+      setColumns([]);
+      setEdges([]);
+      
+      // Look for @@edges in the data
+      let setresults: any[] | null = null;
+      
+      // Check if data is an array and look for @@edges in each item
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          if (item && typeof item === 'object' && item['@@edges']) {
+            setresults = item['@@edges'];
+            break;
+          }
+        }
+      } else if (data['@@edges']) {
+        // Direct @@edges in the object
+        setresults = data['@@edges'];
+      }
+      
+      if (setresults && Array.isArray(setresults)) {
         setEdges(setresults);
-        // THIS is a valid response for 'How do I run PageRank?'
+        
+        // Extract columns from the first edge if available
+        if (setresults.length > 0 && setresults[0]) {
+          const firstEdge = setresults[0];
+          const cols = Object.keys(firstEdge);
+          setColumns(cols);
+          setTableData(setresults);
+        }
+      } else {
+        // No @@edges found, try to use the data directly as table data
+        if (Array.isArray(data)) {
+          if (data.length > 0) {
+            const firstItem = data[0];
+            const cols = Object.keys(firstItem);
+            setColumns(cols);
+            setTableData(data);
+          }
+        }
       }
     }
   }, [data]);
@@ -120,26 +172,81 @@ export const KnowledgeTablPro = ({ data }) => {
 
  return (
   <>
-      <Table>
+      {dataType === 'cypher' && tableData.length > 0 ? (
+        <>
+          <Table className="text-[11px]">
         <TableHeader>
           <TableRow>
-            <TableHead className="w-[100px]">e_type</TableHead>
-            <TableHead>from_id</TableHead>
+                {columns.map((column) => (
+                  <TableHead key={column} className="w-[100px] text-[11px]">
+                    {column}
+                  </TableHead>
+                ))}
           </TableRow>
         </TableHeader>
         <TableBody>
-          {edges.slice(startIndex, endIndex).map((item:any) => {
-            return <>
-              <TableRow>
-                <TableCell className="text-left">{item.e_type}</TableCell>
-                <TableCell className="text-left">{item.from_id}</TableCell>
-              </TableRow>
-            </>
-          })}
+              {tableData.slice(startIndex, endIndex).map((item: any, index: number) => (
+                <TableRow key={index}>
+                  {columns.map((column) => (
+                    <TableCell key={column} className="text-left text-[11px]">
+                      {typeof item[column] === 'object' ? 
+                        JSON.stringify(item[column]) : 
+                        String(item[column] || '')
+                      }
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {tableData.length > rowsPerPage && (
+            <Pagination className="text-[11px]">
+              <PaginationContent>
+                <PaginationItem>
+                  <PaginationPrevious
+                    className={
+                      startIndex === 0 ? "pointer-events-none opacity-50" : undefined
+                    }
+                    onClick={() => {
+                      setStartIndex(startIndex - rowsPerPage);
+                      setEndIndex(endIndex - rowsPerPage);
+                    }} />
+                </PaginationItem>
 
+                <PaginationItem>
+                  <PaginationNext
+                    className={
+                      endIndex >= tableData.length ? "pointer-events-none opacity-50" : undefined
+                    }
+                    onClick={() => {
+                      setStartIndex(startIndex + rowsPerPage);
+                      setEndIndex(endIndex + rowsPerPage);
+                    }} />
+                </PaginationItem>
+              </PaginationContent>
+            </Pagination>
+          )}
+        </>
+      ) : dataType === 'gsql' && edges.length > 0 ? (
+        <>
+          <Table className="text-[11px]">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-[100px] text-[11px]">e_type</TableHead>
+                <TableHead className="text-[11px]">from_id</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {edges.slice(startIndex, endIndex).map((item: any, index: number) => (
+                <TableRow key={index}>
+                  <TableCell className="text-left text-[11px]">{item.e_type}</TableCell>
+                  <TableCell className="text-left text-[11px]">{item.from_id}</TableCell>
+                </TableRow>
+              ))}
         </TableBody>
       </Table>
-      <Pagination>
+          {edges.length > rowsPerPage && (
+            <Pagination className="text-[11px]">
         <PaginationContent>
           <PaginationItem>
             <PaginationPrevious
@@ -155,15 +262,22 @@ export const KnowledgeTablPro = ({ data }) => {
           <PaginationItem>
             <PaginationNext
               className={
-                endIndex === 100 ? "pointer-events-none opacity-50" : undefined
+                      endIndex >= edges.length ? "pointer-events-none opacity-50" : undefined
               }
               onClick={() => {
-                setStartIndex(startIndex + rowsPerPage); //10
-                setEndIndex(endIndex + rowsPerPage); //10 + 10 = 20
+                      setStartIndex(startIndex + rowsPerPage);
+                      setEndIndex(endIndex + rowsPerPage);
               }} />
           </PaginationItem>
         </PaginationContent>
       </Pagination>
+          )}
+        </>
+      ) : (
+        <div className="text-center py-8 text-gray-500 text-[11px]">
+          No data available to display in table format
+        </div>
+      )}
 
 
     {/* {typeof data} */}

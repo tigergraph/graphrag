@@ -44,7 +44,7 @@ export const Interactions: FC<Interactions> = ({
 
   return (
     <div className="flex mt-3">
-      {message.query_sources?.result || message.query_sources?.cypher ? (
+      {(message.query_sources?.result || message.query_sources?.cypher || message.query_sources?.answer) ? (
         <>
           <div
             className="w-[28px] h-[28px] bg-shadeA flex items-center justify-center rounded-sm mr-1 cursor-pointer"

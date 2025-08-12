@@ -16,7 +16,6 @@ export const KnowledgeGraphPro = ({ data }) => {
       const parseData = JSON.parse(data);
       setEdges(parseData);
       // do i need to parse for question 'show me 5 transacitons with details'
-      console.log('\n\n\n\n\n\n\n\n\n\n PARSED STRING', parseData);
 
     //   {
     //     "rlt": [
@@ -34,45 +33,21 @@ export const KnowledgeGraphPro = ({ data }) => {
     //     ]
     // }
 
-      // console.log('\n\n\n\n\n\n\n\n\n\n PARSED edges length', edges.length);
       // if (parseData.length > 0) {
       //   // YES THERE ARE 5 from question 'show me 5 transacitons with details'
       //   const setresults = parseData[1]["@@edges"];
-      //   console.log('\n\n\n\n\n\n\n\n\n\n @@edges', setresults);
       //   // ^ this is valid for question 'what cards have more than 800 transactions between april 1 2021 to august 1 2021'
       //   // set the nodess and edges state here
       // } else null
-    }
-
-    if (typeof data === 'object') {
-      // console.log('\n\n\n\n\n\n\n\n\n\n length', data.length);
-      if (data.length > 1) {
+    } else if (Array.isArray(data)) {
+      // YES THERE ARE 5 from question 'show me 5 transacitons with details'
         const setresults = data[1]["@@edges"];
-        console.log('\n\n\n\n\n\n\n\n\n\n @@edges2', setresults);
-        // setEdges(setresults);
-        // setdataArray({
-        //   "nodes": nodez,
-        //   "edgez": getEdgez
-        // })
+      // ^ this is valid for question 'what cards have more than 800 transactions between april 1 2021 to august 1 2021'
+      setEdges(setresults);
       } else {
-        const setresults = data["@@edges"];
-        setEdges(setresults);
-        console.log('\n\n\n\n\n\n\n\n\n\n OBJECT edges', data);
-        // THIS is a valid response for 'How do I run PageRank?'
-      }
+      // Handle object data directly
+      setEdges(data);
     }
-
-    // setvId(sdata[0]?.rlt[0]?.v_id);
-    // if (typeof sdata === 'object') {
-    //   if (sdata.length > 1) {
-    //     const setresults = sdata[1]["@@edges"];
-    //     setEdges(setresults);
-    //     setdataArray({
-    //       "nodes": nodez,
-    //       "edgez": getEdgez
-    //     })
-    //   } else null
-    // }
   }, [data]);
 
   useEffect(() => {

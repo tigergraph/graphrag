@@ -14,6 +14,7 @@
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import re
@@ -208,6 +209,34 @@ async def get_conversation_feedback(
     return res.json()
 
 
+@router.delete(route_prefix + "/conversation/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Delete a conversation and all its messages."""
+    creds = creds[1]
+    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.delete(
+                f"{graphrag_config['chat_history_api']}/conversation/{conversation_id}",
+                headers={"Authorization": f"Basic {auth}"},
+            )
+            res.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error occurred: {e}")
+        raise HTTPException(status_code=e.response.status_code, detail="Failed to delete conversation")
+    except Exception as e:
+        exc = traceback.format_exc()
+        logger.debug_pii(
+            f"/conversation/{conversation_id} DELETE request_id={req_id_cv.get()} Exception Trace:\n{exc}"
+        )
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    return {"message": "Conversation deleted successfully"}
+
+
 async def emit_progress(agent: TigerGraphAgent, ws: WebSocket):
     # loop on q until done token emit events through ws
     msg = None
@@ -287,6 +316,53 @@ async def run_agent(
     return resp
 
 
+async def load_conversation_history(conversation_id: str, usr_auth: str) -> list[dict[str, str]]:
+    """
+    Load conversation history from the chat history service.
+    Returns a list of dicts with 'query' and 'response' keys.
+    """
+    if not conversation_id or conversation_id == "new":
+        return []
+    
+    ch = graphrag_config.get("chat_history_api")
+    if ch is None:
+        LogWriter.info("chat-history not enabled, returning empty history")
+        return []
+    
+    headers = {"Authorization": f"Basic {usr_auth}"}
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(
+                f"{ch}/conversation/{conversation_id}",
+                headers=headers,
+            )
+            res.raise_for_status()
+            conversation_data = res.json()
+            
+            # Convert conversation messages to the format expected by the agent
+            history = []
+            for msg in conversation_data.get("messages", []):
+                if msg.get("role") == "user":
+                    # Find the corresponding system response
+                    for response_msg in conversation_data.get("messages", []):
+                        if (response_msg.get("role") == "system" and 
+                            response_msg.get("parent_id") == msg.get("message_id")):
+                            history.append({
+                                "query": msg.get("content", ""),
+                                "response": response_msg.get("content", "")
+                            })
+                            break
+            
+            LogWriter.info(f"Loaded {len(history)} conversation history entries for conversation {conversation_id}")
+            return history
+            
+    except Exception as e:
+        exc = traceback.format_exc()
+        logger.debug_pii(f"Error loading conversation history for {conversation_id}\nException Trace:\n{exc}")
+        LogWriter.warning(f"Failed to load conversation history for {conversation_id}: {e}")
+        return []
+
+
 async def write_message_to_history(message: Message, usr_auth: str):
     ch = graphrag_config.get("chat_history_api")
     if ch is not None:
@@ -309,60 +385,69 @@ async def graph_query(
     graphname: str,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     q: str | None = None,
+    conversation_id: str | None = None,
 ):
     creds = creds[1]
     auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
     _, conn = ws_basic_auth(auth, graphname)
     try:
-        # create convo_id
-        conversation_history = []  # TODO: go get history instead of starting from 0
-        convo_id = str(uuid.uuid4())
-    
+        # Load conversation history if conversation_id is provided
+        conversation_history = await load_conversation_history(conversation_id, auth) if conversation_id else []
+
+        # Use provided conversation ID or generate new one
+        if not conversation_id or conversation_id == "new":
+            convo_id = str(uuid.uuid4())
+            LogWriter.info(f"Starting new conversation with ID: {convo_id}")
+        else:
+            convo_id = conversation_id
+            LogWriter.info(f"Continuing conversation with ID: {convo_id}")
+
         # create agent
         # get retrieval pattern to use
         rag_pattern = "hybridsearch"
         agent = make_agent(graphname, conn, use_cypher, supportai_retriever=rag_pattern)
-    
+
         prev_id = None
-        while True:
-            data = q
+        data = q
 
-            # make message from data
-            message = Message(
-                conversation_id=convo_id,
-                message_id=str(uuid.uuid4()),
-                parent_id=prev_id,
-                model=llm_config["model_name"],
-                content=data,
-                role=Role.USER,
-            )
-            # save message
-            prev_id = message.message_id
+        # make message from data
+        message = Message(
+            conversation_id=convo_id,
+            message_id=str(uuid.uuid4()),
+            parent_id=prev_id,
+            model=llm_config["model_name"],
+            content=data,
+            role=Role.USER,
+        )
+        # save message
+        await write_message_to_history(message, auth)
+        prev_id = message.message_id
 
-            # generate response and keep track of response time
-            start = time.monotonic()
-            resp = await run_agent(
-                agent, data, conversation_history, graphname, None
-            )
-            elapsed = time.monotonic() - start
+        # generate response and keep track of response time
+        start = time.monotonic()
+        resp = await run_agent(
+            agent, data, conversation_history, graphname, None
+        )
+        elapsed = time.monotonic() - start
 
-            # save message
-            message = Message(
-               conversation_id=convo_id,
-                message_id=str(uuid.uuid4()),
-                parent_id=prev_id,
-                model=llm_config["model_name"],
-                content=resp.natural_language_response,
-                role=Role.SYSTEM,
-                response_time=elapsed,
-                answered_question=resp.answered_question,
-                response_type=resp.response_type,
-                query_sources=resp.query_sources,
-            )
-            prev_id = message.message_id
+        # save message
+        message = Message(
+            conversation_id=convo_id,
+            message_id=str(uuid.uuid4()),
+            parent_id=prev_id,
+            model=llm_config["model_name"],
+            content=resp.natural_language_response,
+            role=Role.SYSTEM,
+            response_time=elapsed,
+            answered_question=resp.answered_question,
+            response_type=resp.response_type,
+            query_sources=resp.query_sources,
+        )
+        await write_message_to_history(message, auth)
+        prev_id = message.message_id
 
-            # reply
-            return message.model_dump_json()
+        # reply
+        return message.model_dump_json()
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
@@ -370,19 +455,19 @@ async def graph_query(
         )
         raise e
 
-    return res.json()
-
 @router.websocket(route_prefix + "/{graphname}/chat")
 async def chat(
     graphname: str,
     websocket: WebSocket
 ):
     """
-    TODO:
-    the text received from the UI should be a Message().
-        We need the conversation ID to
-            initially retrieve the convo
-            update the convo
+    WebSocket endpoint for chat functionality with conversation history support.
+    
+    Expected message flow:
+    1. Authentication (base64 encoded username:password)
+    2. RAG pattern (e.g., "hybridsearch", "similaritysearch", etc.)
+    3. Conversation ID (or "new" for new conversation)
+    4. User messages
     """
     if service_status["embedding_store"]["error"]:
         return HTTPException(
@@ -397,13 +482,27 @@ async def chat(
     usr_auth = await websocket.receive_text()
     _, conn = ws_basic_auth(usr_auth, graphname)
 
-    # create convo_id
-    conversation_history = []  # TODO: go get history instead of starting from 0
-    convo_id = str(uuid.uuid4())
+    # Get RAG pattern
+    rag_pattern = await websocket.receive_text()
+    
+    # Get conversation ID
+    conversation_id = await websocket.receive_text()
+    
+    # Load conversation history if not a new conversation
+    conversation_history = await load_conversation_history(conversation_id, usr_auth)
+    
+    # Use provided conversation ID or generate new one
+    if conversation_id == "new" or not conversation_id:
+        convo_id = str(uuid.uuid4())
+        LogWriter.info(f"Starting new conversation with ID: {convo_id}")
+    else:
+        convo_id = conversation_id
+        LogWriter.info(f"Continuing conversation with ID: {convo_id}")
+
+    # Send conversation ID to frontend
+    await websocket.send_text(json.dumps({"conversation_id": convo_id}))
 
     # create agent
-    # get retrieval pattern to use
-    rag_pattern = await websocket.receive_text()
     agent = make_agent(graphname, conn, use_cypher, ws=websocket, supportai_retriever=rag_pattern)
 
     prev_id = None

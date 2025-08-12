@@ -49,58 +49,60 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
   return (
     <div className={layout}>
       {/* {layout === "fp" && ( */}
-        <div className="border-b border-gray-300 dark:border-[#3D3D3D] h-[70px] flex justify-end items-center bg-white dark:bg-background z-50 rounded-tr-lg">
-          <div className="text-sm pl-5 mr-auto">{currentDate}</div>
+        <div className="border-b border-gray-300 dark:border-[#3D3D3D] h-[70px] flex items-center bg-white dark:bg-background z-50 rounded-tr-lg px-5">
+          <div className="text-sm mr-8">{currentDate}</div>
 
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild className="mr-20">
-              <Button
-                variant="outline"
-                className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-white dark:bg-background z-50 rounded-tr-lg"
-              >
-                <img src="/graph-icon.svg" alt="" className="mr-2" />
-                {ragPattern} <MdKeyboardArrowDown className="text-2xl" />
-              </Button>
-            </DropdownMenuTrigger>
+          <div className="flex gap-4 mr-auto">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-white dark:bg-background z-50 rounded-tr-lg"
+                >
+                  <img src="/graph-icon.svg" alt="" className="mr-2" />
+                  {ragPattern} <MdKeyboardArrowDown className="text-2xl" />
+                </Button>
+              </DropdownMenuTrigger>
+
+              <DropdownMenuContent className="w-56">
+                <DropdownMenuLabel>Select a GraphRAG Pattern</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuGroup>
+                  {["Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
+                    <DropdownMenuItem key={i} onSelect={() => handleSelectRag(f)}>
+                      {/* <User className="mr-2 h-4 w-4" /> */}
+                      <span>{f}</span>
+                      {/* <DropdownMenuShortcut>⇧⌘P</DropdownMenuShortcut> */}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-white dark:bg-background z-50 rounded-tr-lg"
+                >
+                  <img src="/graph-icon.svg" alt="" className="mr-2" />
+                  {selectedGraph} <MdKeyboardArrowDown className="text-2xl" />
+                </Button>
+              </DropdownMenuTrigger>
 
             <DropdownMenuContent className="w-56">
-              <DropdownMenuLabel>Select a GraphRAG Pattern</DropdownMenuLabel>
+              <DropdownMenuLabel>Select a KnowledgeGraph</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
-                {["Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
-                  <DropdownMenuItem key={i} onSelect={() => handleSelectRag(f)}>
-                    {/* <User className="mr-2 h-4 w-4" /> */}
+                {store?.graphs.map((f, i) => (
+                  <DropdownMenuItem key={i} onSelect={() => handleSelect(f)}>
                     <span>{f}</span>
-                    {/* <DropdownMenuShortcut>⇧⌘P</DropdownMenuShortcut> */}
                   </DropdownMenuItem>
                 ))}
               </DropdownMenuGroup>
             </DropdownMenuContent>
           </DropdownMenu>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild className="mr-20">
-              <Button
-                variant="outline"
-                className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-white dark:bg-background z-50 rounded-tr-lg"
-              >
-                <img src="/graph-icon.svg" alt="" className="mr-2" />
-                {selectedGraph} <MdKeyboardArrowDown className="text-2xl" />
-              </Button>
-            </DropdownMenuTrigger>
-
-          <DropdownMenuContent className="w-56">
-            <DropdownMenuLabel>Select a Graph</DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuGroup>
-              {store?.graphs.map((f, i) => (
-                <DropdownMenuItem key={i} onSelect={() => handleSelect(f)}>
-                  <span>{f}</span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
+          </div>
+        </div>
       
       <SelectedGraphContext.Provider value={selectedGraph}>
         <Chatbot

@@ -57,6 +57,31 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   const [showGraphVis, setShowGraphVis] = useState<boolean>(false);
   const [showTableVis, setShowTableVis] = useState<boolean>(false);
 
+  // Error handling functions
+  const handleShowExplain = () => {
+    if (!message.query_sources?.reasoning) {
+      return false;
+    }
+    setShowResult(prev => !prev);
+    return true;
+  };
+
+  const handleShowGraph = () => {
+    if (!message.query_sources?.result) {
+      return false;
+    }
+    setShowGraphVis(prev => !prev);
+    return true;
+  };
+
+  const handleShowTable = () => {
+    if (!message.query_sources?.result && !message.query_sources?.answer) {
+      return false;
+    }
+    setShowTableVis(prev => !prev);
+    return true;
+  };
+
   return (
     <>
       {typeof message === "string" ? (
@@ -75,9 +100,9 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
             )}
             <Interactions
               message={message} 
-              showExplain={():any => setShowResult(prev => !prev)}
-              showTable={():any  => setShowTableVis(prev => !prev)}
-              showGraph={():any  => setShowGraphVis(prev => !prev)}
+              showExplain={handleShowExplain}
+              showTable={handleShowTable}
+              showGraph={handleShowGraph}
             />
           </div>
 
@@ -86,7 +111,13 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
               {/* {message.query_sources?.result ? <pre>{JSON.stringify(message.query_sources?.result, null, 2)}</pre> : null} */}
               {/* <pre>{JSON.stringify(message, null, 2)}</pre> */}
               <div className="relative w-full h-[550px] my-10 border border-solid border-[#000]">
-                {message.query_sources?.result ? (<KnowledgeGraphPro data={message.query_sources?.result} />) : null}
+                {message.query_sources?.result ? (
+                  <KnowledgeGraphPro data={message.query_sources?.result} />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-gray-500">
+                    No graph data available
+                  </div>
+                )}
               </div>
               {/* <Dialog>
                 <DialogTrigger className="absolute top-[200px] left-[20px]"><ImEnlarge2 /></DialogTrigger>
@@ -105,14 +136,26 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
 
           {showTableVis ? (
             <div className="relative w-full h-[550px] my-10 border border-solid border-[#000] my-10 h-auto">
-              {message.query_sources?.result ? (<KnowledgeTablPro data={message.query_sources?.result} />) : null}
+              {message.query_sources?.result ? (
+                <KnowledgeTablPro data={message.query_sources?.result} />
+              ) : message.query_sources?.answer ? (
+                <KnowledgeTablPro data={message.query_sources?.answer} />
+              ) : (
+                <div className="flex items-center justify-center h-full text-gray-500">
+                  No table data available
+                </div>
+              )}
             </div>
           ) : null}
 
           {showResult ? (
             <div className="text-[11px] rounded-md bg-[#ececec] dark:bg-shadeA mt-3 p-4 leading-4 relative">
               <strong>Reasoning:</strong><br/>
-              {getReasoning(message)}
+              {message.query_sources?.reasoning ? (
+                getReasoning(message)
+              ) : (
+                <span className="text-gray-500">No reasoning data available</span>
+              )}
               <span
                 className="absolute right-2 bottom-1 cursor-pointer"
                 onClick={() => setShowResult(false)}

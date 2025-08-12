@@ -52,6 +52,7 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { FaPaperclip } from "react-icons/fa6";
 import { useEffect } from "react";
+import { conversationManager } from "../actions/ActionProvider";
 
 // TODO make dynamic
 const WS_HISTORY_URL = "/ui/user";
@@ -102,6 +103,10 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
   // eslint-disable-next-line
   // @ts-ignore
   const resumeConvo = async (id):any => {
+    // Load conversation into conversation manager
+    conversationManager.loadConversation(id);
+    
+    // Store conversation data for the chat component
     const creds = localStorage.getItem("creds");
     const settings = {
       method: 'GET',
@@ -113,6 +118,12 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
     const response = await fetch(`${WS_CONVO_URL}/${id}`, settings);
     const data = await response.json();
     setConversationId2(data);
+    
+    // Store the conversation data in localStorage for the chat component
+    localStorage.setItem('selectedConversationData', JSON.stringify(data));
+    
+    // Reload the page to restart the WebSocket connection with the new conversation ID
+    window.location.reload();
   }
 
   const renderConvoHistory = () => {
@@ -332,7 +343,13 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
         </div>
       </div>
 
-      <div className="gradient rounded-lg h-[44px] flex items-center justify-center mx-5 mt-5 text-white">
+      <div 
+        className="gradient rounded-lg h-[44px] flex items-center justify-center mx-5 mt-5 text-white cursor-pointer"
+        onClick={() => {
+          conversationManager.startNewConversation();
+          window.location.reload();
+        }}
+      >
         + New Chat
       </div>
 

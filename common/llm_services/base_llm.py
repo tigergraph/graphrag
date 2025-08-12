@@ -39,7 +39,7 @@ class LLM_Model:
     @property
     def generate_cypher_prompt(self):
         """Property to get the prompt for the GenerateCypher tool."""
-        prompt = """You're an expert in OpenCypher programming. Given the following schema, what is the OpenCypher query that retrieves the {question}
+        prompt = """You're an expert in OpenCypher programming. Given the following schema and history, what is the OpenCypher query that retrieves the {question}
                     Only include attributes that are found in the schema. Never include any attributes that are not found in the schema.
                     Use attributes instead of primary id if attribute name is closer to the keyword type in the question.
                     Use as less vertex type, edge type and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
