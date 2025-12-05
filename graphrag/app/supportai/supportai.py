@@ -648,42 +648,47 @@ def ingest(
             }
         elif ingest_config.get("data_source") == "server":
             try:
-                processed_files = []
                 data_source_id = ingest_config.get("data_source_id", "DocumentContent")
-                if ingest_config.get("server_jobs"):
-                    for doc_data in ingest_config.get("server_jobs"):
-                        if not doc_data.get("doc_id") or not doc_data.get("content"):
-                            continue
-                        if doc_data.get("image_data"):
-                            payload = {
-                                "doc_id": doc_data.get("doc_id", ""),
-                                "doc_type": "image",
-                                "image_data": doc_data.get("image_data", ""),
-                                "image_format": doc_data.get("image_format", "jpg"),
-                                "parent_doc": doc_data.get("parent_doc", ""),
-                                "page_number": doc_data.get("page_number", 0),
-                                "position": doc_data.get("position", 0),
-                                "content": ""
-                            }
-                        else:
-                            payload = {
-                                "doc_id": doc_data.get("doc_id", ""),
-                                "doc_type": doc_data.get("doc_type", "markdown"),
-                                "content": doc_data.get("content", "")
-                            }
-                        payload_json = json.dumps(payload)
-                        conn.runLoadingJobWithData(payload_json, data_source_id, loader_info.load_job_id)
-                        processed_files.append({
-                            'file_path': doc_data.get("doc_id", ""),
-                            'parent_doc': doc_data.get("parent_doc", ""),
-                        })
-                        logger.info(f"Data uploading done for doc_id: {doc_data.get('doc_id', 'unknown')}")
+                
+                # Read from temporary folder's JSONL file
+                temp_folder = ingest_config.get("temp_folder")
+                if not temp_folder or not os.path.exists(temp_folder):
+                    raise Exception(f"Temporary folder not found: {temp_folder}")
+                
+                # Read the entire JSONL file as a string
+                jsonl_file = os.path.join(temp_folder, "processed_documents.jsonl")
+                if not os.path.exists(jsonl_file):
+                    raise Exception(f"JSONL file not found: {jsonl_file}")
+                
+                logger.info(f"Reading JSONL file: {jsonl_file}")
+                
+                # Read entire JSONL content
+                with open(jsonl_file, 'r', encoding='utf-8') as f:
+                    jsonl_content = f.read()
+                
+                # Load all documents in one call - runLoadingJobWithData supports JSONL format
+                conn.runLoadingJobWithData(jsonl_content, data_source_id, loader_info.load_job_id)
+                
+                # Count documents for reporting
+                doc_count = sum(1 for line in jsonl_content.strip().split('\n') if line.strip())
+                logger.info(f"Successfully ingested {doc_count} documents from JSONL")
+                
+                # Clean up temp folder after successful ingestion
+                try:
+                    import shutil
+                    shutil.rmtree(temp_folder)
+                    logger.info(f"Cleaned up temporary folder: {temp_folder}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to cleanup temp folder {temp_folder}: {cleanup_error}")
+                    
             except Exception as e:
                 raise Exception(f"Error during server markdown extraction and TigerGraph loading: {e}")
             return {
                 "job_name": loader_info.load_job_id,
-                "summary": processed_files
+                "summary": f"Successfully ingested {doc_count} documents from JSONL",
+                "document_count": doc_count
             }
+
         else:
             raise Exception("Data source and file format combination not implemented")
     else:
