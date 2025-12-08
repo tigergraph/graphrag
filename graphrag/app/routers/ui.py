@@ -61,7 +61,7 @@ from common.py_schemas.schemas import (
     ResponseType,
     Role,
 )
-
+from common.utils.text_extractors import TextExtractor
 logger = logging.getLogger(__name__)
 
 use_cypher = os.getenv("USE_CYPHER", "false").lower() == "true"
@@ -989,6 +989,7 @@ async def clear_uploaded_files(
     graphname: str,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     filename: str | None = None,
+    session_id: str | None = None,
 ):
     """
     Clear uploaded files for a specific graphname.
@@ -996,6 +997,7 @@ async def clear_uploaded_files(
     Parameters:
     - graphname: The graph name whose files to clear
     - filename: If provided, only delete this specific file. Otherwise, delete all files.
+    - session_id: Optional session ID to delete processed content from temp folder
     """
     try:
         upload_dir = os.path.join("uploads", graphname)
@@ -1008,9 +1010,21 @@ async def clear_uploaded_files(
             }
         
         deleted_files = []
+        text_extractor = TextExtractor()
         
         if filename:
-            # Delete specific file
+            # Delete processed content from JSONL FIRST if session_id provided
+            if session_id:
+                temp_folder = os.path.join("uploads", "ingestion_temp", graphname, session_id)
+                if os.path.exists(temp_folder):
+                    logger.info(f"Deleting processed content for {filename} from temp folder")
+                    result = text_extractor.delete_file_from_jsonl(temp_folder, filename)
+                    if result.get('success'):
+                        logger.info(f"Removed {result.get('removed_count', 0)} processed documents for {filename}")
+                    else:
+                        logger.warning(f"Failed to remove processed content: {result.get('error', 'Unknown error')}")
+            
+            # Then delete the original file
             file_path = os.path.join(upload_dir, filename)
             if os.path.exists(file_path) and os.path.isfile(file_path):
                 os.remove(file_path)
@@ -1321,6 +1335,7 @@ async def delete_cloud_downloads(
     graphname: str,
     credentials: Annotated[HTTPBase, Depends(security)],
     filename: str = None,
+    session_id: str = None,
 ):
     """
     Delete downloaded cloud files for a specific graph.
@@ -1328,6 +1343,7 @@ async def delete_cloud_downloads(
     Parameters:
     - graphname: The graph name whose downloaded files to clear
     - filename: If provided, only delete this specific file. Otherwise, delete all files.
+    - session_id: Optional session ID to delete processed content from temp folder
     """
     try:
         download_dir = os.path.join("downloaded_files_cloud", graphname)
@@ -1340,9 +1356,21 @@ async def delete_cloud_downloads(
             }
         
         deleted_files = []
+        text_extractor = TextExtractor()
         
         if filename:
-            # Delete specific file
+            # Delete processed content from JSONL FIRST if session_id provided
+            if session_id:
+                temp_folder = os.path.join("uploads", "ingestion_temp", graphname, session_id)
+                if os.path.exists(temp_folder):
+                    logger.info(f"Deleting processed content for {filename} from temp folder")
+                    result = text_extractor.delete_file_from_jsonl(temp_folder, filename)
+                    if result.get('success'):
+                        logger.info(f"Removed {result.get('removed_count', 0)} processed documents for {filename}")
+                    else:
+                        logger.warning(f"Failed to remove processed content: {result.get('error', 'Unknown error')}")
+            
+            # Then delete the original file
             file_path = os.path.join(download_dir, filename)
             if os.path.exists(file_path) and os.path.isfile(file_path):
                 os.remove(file_path)
@@ -1378,4 +1406,5 @@ async def delete_cloud_downloads(
         logger.error(f"Error deleting cloud downloads for graph {graphname}: {e}")
         logger.debug_pii(f"Delete error trace:\n{exc}")
         raise HTTPException(status_code=500, detail=f"Error deleting files: {str(e)}")
+
 

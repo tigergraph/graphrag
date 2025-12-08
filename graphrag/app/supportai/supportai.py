@@ -337,9 +337,9 @@ def create_ingest(
     conn: TigerGraphConnection,
 ):
     # Check for invalid combination of multi format and non-s3 data source
-    if ingest_config.data_source.lower() in ["bda", "server"] and ingest_config.get("file_format", "").lower() != "multi":
-        logger.warning(f"File format {ingest_config.get('file_format', '').lower()} is not supported for data source {ingest_config.data_source.lower()}")
-        ingest_config["file_format"] = "multi"
+    if ingest_config.data_source.lower() in ["bda", "server"] and ingest_config.file_format.lower() != "multi":
+        logger.warning(f"File format {ingest_config.file_format.lower()} is not supported for data source {ingest_config.data_source.lower()}")
+        ingest_config.file_format = "multi"
 
     res_ingest_config = {"data_source": ingest_config.data_source.lower()}
     res_ingest_config["file_format"] = ingest_config.file_format.lower()
@@ -485,18 +485,29 @@ def create_ingest(
         if data_path is None:
             raise Exception("Data path not provided for server processing")
         try:
+            # Create temp folder BEFORE processing so extractor can save directly
+            temp_session_id = str(uuid.uuid4())
+            temp_folder = os.path.join("uploads", "ingestion_temp", graphname, temp_session_id)
+            
+            # Process files and save immediately to temp folder (memory efficient)
             extractor = TextExtractor()
-            server_processing_result = extractor.process_folder(data_path, graphname=graphname)
+            server_processing_result = extractor.process_folder(
+                data_path, 
+                graphname=graphname,
+                temp_folder=temp_folder  # Extractor saves files as it processes
+            )
             if server_processing_result.get("statusCode") != 200:
                 raise Exception(f"Server folder processing failed: {server_processing_result}")
-            else:
-                logger.info(f"Server folder processing completed successfully: {server_processing_result}")
+            
+            doc_count = server_processing_result.get("num_documents", 0)
+            logger.info(f"Server folder processing completed: {server_processing_result.get('message')}")
 
-            res_ingest_config["server_jobs"] = server_processing_result.get("documents", [])
+            res_ingest_config["temp_session_id"] = temp_session_id
+            res_ingest_config["temp_folder"] = temp_folder
+            res_ingest_config["file_count"] = doc_count
             res_ingest_config["data_source_id"] = "DocumentContent"
-            # Use a placeholder path that doesn't start with "/" to avoid pyTigerGraph treating it as a file
-            # The actual folder path is stored in server_jobs, this is just for the API call
-            res["data_path"] = "in_response"
+            # Use a placeholder path to indicate temp storage
+            res["data_path"] = "in_temp_storage"
             res["data_source_id"] = res_ingest_config
         except Exception as e:
             raise Exception(f"Error during server folder processing: {e}")
