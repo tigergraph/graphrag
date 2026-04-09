@@ -137,6 +137,8 @@ class TextExtractor:
             '.xml': 'application/xml',
             '.jpeg': 'image/jpeg',
             '.jpg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
             '.jsonl': 'application/x-jsonlines'
         }
 
