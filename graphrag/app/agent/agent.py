@@ -129,6 +129,13 @@ class TigerGraphAgent:
                 logger.error(f"Failed to serialize input_data to JSON: {e}")
                 raise ValueError("Invalid input data format. Unable to convert to JSON.")
 
+            def _safe_serialize(obj, max_len=3000):
+                try:
+                    s = json.dumps(obj, default=str)
+                except Exception:
+                    s = str(obj)
+                return s[:max_len] if len(s) > max_len else s
+
             agent_steps = []
             step_start = time.time()
             prev_output = input_data["input"]
@@ -138,13 +145,6 @@ class TigerGraphAgent:
                 for key, value in output.items():
                     step_end = time.time()
                     step_duration = round(step_end - step_start, 3)
-
-                    def _safe_serialize(obj, max_len=3000):
-                        try:
-                            s = json.dumps(obj, default=str)
-                        except Exception:
-                            s = str(obj)
-                        return s[:max_len] if len(s) > max_len else s
 
                     agent_steps.append({
                         "node": key,

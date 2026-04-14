@@ -7,7 +7,6 @@ import {
   LuChevronUp,
   LuCopy,
   LuDownload,
-  LuClock,
   LuWrench,
   LuBookOpen,
   LuActivity,
