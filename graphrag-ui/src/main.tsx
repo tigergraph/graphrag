@@ -4,6 +4,7 @@ import "./index.css";
 import { Outlet, RouterProvider, createBrowserRouter, Navigate } from "react-router-dom";
 import Chat from "./pages/Chat";
 import ChatDialog from "./pages/ChatDialog.tsx";
+import TraceLogs from "./pages/TraceLogs.tsx";
 import SetupLayout from "./pages/setup/SetupLayout.tsx";
 import KGAdmin from "./pages/setup/KGAdmin.tsx";
 import IngestGraph from "./pages/setup/IngestGraph.tsx";
@@ -55,6 +56,10 @@ const router = createBrowserRouter([
       {
         path: "/preferences",
         element: <RequireAuth><ChatDialog /></RequireAuth>,
+      },
+      {
+        path: "/trace",
+        element: <RequireAuth><TraceLogs /></RequireAuth>,
       },
       {
         path: "/setup",

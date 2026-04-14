@@ -10,6 +10,8 @@ import {
 } from "@/components/ui/dialog"
 import { ImEnlarge2 } from "react-icons/im";
 import { IoIosCloseCircleOutline } from "react-icons/io";
+import { LuActivity } from "react-icons/lu";
+import { useNavigate } from "react-router-dom";
 import { Interactions } from "./Interact";
 import { KnowledgeGraphPro } from "./graphs/KnowledgeGraphPro";
 import { KnowledgeTablPro } from "./tables/KnowledgeTablePro";
@@ -127,6 +129,7 @@ const AuthenticatedImage: FC<{ src: string; alt: string }> = ({ src, alt }) => {
 export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   message,
 }) => {
+  const navigate = useNavigate();
   const [showResult, setShowResult] = useState<boolean>(false);
   const [showGraphVis, setShowGraphVis] = useState<boolean>(false);
   const [showTableVis, setShowTableVis] = useState<boolean>(false);
@@ -191,6 +194,17 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
               showTable={handleShowTable}
               showGraph={handleShowGraph}
             />
+            {(message.response_type !== "progress" && (message.query_sources?.result || message.query_sources?.reasoning)) && (
+              <button
+                className="flex items-center gap-1.5 mt-2 text-blue-600 dark:text-blue-400 text-sm hover:underline cursor-pointer"
+                onClick={() => {
+                  navigate("/trace", { state: { message, userQuery: message.userQuery || "" } });
+                }}
+              >
+                <LuActivity className="w-4 h-4" />
+                View Trace
+              </button>
+            )}
           </div>
 
           {showGraphVis ? (

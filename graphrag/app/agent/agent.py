@@ -129,14 +129,30 @@ class TigerGraphAgent:
                 logger.error(f"Failed to serialize input_data to JSON: {e}")
                 raise ValueError("Invalid input data format. Unable to convert to JSON.")
 
+            agent_steps = []
+            step_start = time.time()
+
             for output in self.agent.stream({"question": input_data["input"], "conversation": input_data["conversation"]}):
 
                 for key, value in output.items():
-                    # logger.info(f"testing steps {key}: {value}")
-                    LogWriter.info(f"request_id={req_id_cv.get()} executed node {key}")
+                    step_end = time.time()
+                    step_duration = round(step_end - step_start, 3)
+                    agent_steps.append({
+                        "node": key,
+                        "duration_s": step_duration,
+                    })
+                    LogWriter.info(
+                        f"request_id={req_id_cv.get()} executed node {key} ({step_duration}s)"
+                    )
+                    step_start = step_end
+
+            answer = value["answer"]
+            if answer.query_sources is None:
+                answer.query_sources = {}
+            answer.query_sources["agent_steps"] = agent_steps
 
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT question_for_agent")
-            return value["answer"]
+            return answer
         except Exception as e:
             metrics.llm_query_error_total.labels(self.model_name).inc()
             LogWriter.error(f"request_id={req_id_cv.get()} FAILURE question_for_agent")
