@@ -146,13 +146,12 @@ class TigerGraphAgent:
                     )
                     step_start = step_end
 
-            answer = value["answer"]
-            if answer.query_sources is None:
-                answer.query_sources = {}
-            answer.query_sources["agent_steps"] = agent_steps
+            if value["answer"].query_sources is None:
+                value["answer"].query_sources = {}
+            value["answer"].query_sources["agent_steps"] = agent_steps
 
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT question_for_agent")
-            return answer
+            return value["answer"]
         except Exception as e:
             metrics.llm_query_error_total.labels(self.model_name).inc()
             LogWriter.error(f"request_id={req_id_cv.get()} FAILURE question_for_agent")
