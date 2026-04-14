@@ -131,16 +131,28 @@ class TigerGraphAgent:
 
             agent_steps = []
             step_start = time.time()
+            prev_output = input_data["input"]
 
             for output in self.agent.stream({"question": input_data["input"], "conversation": input_data["conversation"]}):
 
                 for key, value in output.items():
                     step_end = time.time()
                     step_duration = round(step_end - step_start, 3)
+
+                    def _safe_serialize(obj, max_len=3000):
+                        try:
+                            s = json.dumps(obj, default=str)
+                        except Exception:
+                            s = str(obj)
+                        return s[:max_len] if len(s) > max_len else s
+
                     agent_steps.append({
                         "node": key,
                         "duration_s": step_duration,
+                        "input": _safe_serialize(prev_output),
+                        "output": _safe_serialize(value),
                     })
+                    prev_output = value
                     LogWriter.info(
                         f"request_id={req_id_cv.get()} executed node {key} ({step_duration}s)"
                     )

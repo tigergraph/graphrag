@@ -102,26 +102,23 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
 
   const query = userQuery || message?.originalQuery || message?.query || "N/A";
   const qs = message?.query_sources || {};
-  const responseType = message?.response_type || "";
   const totalResponseTime = message?.response_time || 0;
   const ts = now.toLocaleTimeString();
 
   // ── Tool Calls ──────────────────────────────────────────────────────────
-  // query_sources.agent_steps = array of { node, duration_s } from the
-  // actual LangGraph agent execution (collected in agent.py)
   const toolCalls: ToolCallEntry[] = [];
-  const agentSteps: { node: string; duration_s: number }[] =
+  const agentSteps: { node: string; duration_s: number; input?: string; output?: string }[] =
     qs.agent_steps || [];
 
   if (agentSteps.length > 0) {
-    agentSteps.forEach((step: { node: string; duration_s: number }, i: number) => {
+    agentSteps.forEach((step, i: number) => {
       toolCalls.push({
         id: i + 1,
         name: step.node,
         timestamp: ts,
         durationMs: Math.round(step.duration_s * 1000),
-        input: "",
-        output: "",
+        input: safeJson(step.input),
+        output: safeJson(step.output),
       });
     });
   }
