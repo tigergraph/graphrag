@@ -70,6 +70,28 @@ from common.py_schemas.schemas import (
 
 logger = logging.getLogger(__name__)
 
+TRACE_LOGS_DIR = os.environ.get("TRACE_LOGS_DIR", "/code/trace_logs")
+
+def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float):
+    try:
+        os.makedirs(TRACE_LOGS_DIR, exist_ok=True)
+        trace_data = {
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "user_query": user_query,
+            "response_time": elapsed,
+            "response_type": resp.response_type,
+            "answered_question": resp.answered_question,
+            "query_sources": resp.query_sources,
+            "natural_language_response": resp.natural_language_response,
+            "timestamp": time.time(),
+        }
+        filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
+        with open(filepath, "w") as f:
+            json.dump(trace_data, f, default=str)
+    except Exception:
+        logger.warning(f"Failed to save trace log for message {message_id}", exc_info=True)
+
 # Validated graph name path parameter — rejects path traversal characters
 ValidGraphName = Annotated[str, Path(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 
@@ -336,6 +358,40 @@ def add_feedback(
         raise e
 
     return {"message": "feedback saved", "message_id": message.message_id}
+
+
+@router.get(route_prefix + "/trace/{message_id}")
+def get_trace_log(message_id: str):
+    filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Trace log not found")
+    with open(filepath, "r") as f:
+        return json.load(f)
+
+
+@router.get(route_prefix + "/traces/{conversation_id}")
+def list_trace_logs(conversation_id: str):
+    if not os.path.isdir(TRACE_LOGS_DIR):
+        return []
+    traces = []
+    for filename in os.listdir(TRACE_LOGS_DIR):
+        if not filename.endswith(".json"):
+            continue
+        filepath = os.path.join(TRACE_LOGS_DIR, filename)
+        try:
+            with open(filepath, "r") as f:
+                data = json.load(f)
+            if data.get("conversation_id") == conversation_id:
+                traces.append({
+                    "message_id": data.get("message_id"),
+                    "user_query": data.get("user_query"),
+                    "response_time": data.get("response_time"),
+                    "timestamp": data.get("timestamp"),
+                })
+        except Exception:
+            continue
+    traces.sort(key=lambda t: t.get("timestamp", 0))
+    return traces
 
 
 @router.post(route_prefix + "/{graphname}/create_graph")
@@ -1074,6 +1130,7 @@ async def graph_query(
             query_sources=resp.query_sources,
         )
         await write_message_to_history(message, auth)
+        _save_trace_log(message.message_id, convo_id, data, resp, elapsed)
         prev_id = message.message_id
 
         # reply
@@ -1200,6 +1257,7 @@ async def chat(
                 query_sources=resp.query_sources,
             )
             await write_message_to_history(message, usr_auth)
+            _save_trace_log(message.message_id, convo_id, data, resp, elapsed)
             prev_id = message.message_id
 
             # reply
