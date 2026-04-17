@@ -129,34 +129,80 @@ class TigerGraphAgent:
                 logger.error(f"Failed to serialize input_data to JSON: {e}")
                 raise ValueError("Invalid input data format. Unable to convert to JSON.")
 
-            def _safe_serialize(obj, max_len=3000):
+            def _safe(obj):
                 try:
-                    s = json.dumps(obj, default=str)
+                    return json.dumps(obj, default=str)
                 except Exception:
-                    s = str(obj)
-                return s[:max_len] if len(s) > max_len else s
+                    return str(obj)
+
+            def _node_output(node, state):
+                """Extract the meaningful output that this node produced."""
+                _LOOKUP_LABELS = {"inquiryai": "db_search", "supportai": "vector_search"}
+                lookup = state.get("lookup_source", "")
+                lookup = _LOOKUP_LABELS.get(lookup, lookup)
+
+                if node == "entry":
+                    return ""
+                elif node == "map_question_to_schema":
+                    return _safe({"schema_mapping": str(state.get("schema_mapping", ""))})
+                elif node == "generate_function":
+                    ctx = state.get("context", {})
+                    return _safe({
+                        "context": ctx if isinstance(ctx, dict) else str(ctx),
+                        "lookup_source": lookup,
+                    })
+                elif node == "generate_cypher":
+                    ctx = state.get("context", {})
+                    return _safe({
+                        "cypher": ctx.get("cypher", "") if isinstance(ctx, dict) else "",
+                        "reasoning": ctx.get("reasoning", "") if isinstance(ctx, dict) else "",
+                        "result": ctx.get("result", "") if isinstance(ctx, dict) else "",
+                        "lookup_source": lookup,
+                    })
+                elif node == "supportai":
+                    ctx = state.get("context", {})
+                    return _safe({
+                        "context": ctx if isinstance(ctx, dict) else str(ctx),
+                        "lookup_source": lookup,
+                    })
+                elif node == "generate_answer":
+                    ans = state.get("answer")
+                    return _safe({
+                        "natural_language_response": getattr(ans, "natural_language_response", "") if ans else "",
+                        "answered_question": getattr(ans, "answered_question", False) if ans else False,
+                        "response_type": getattr(ans, "response_type", "") if ans else "",
+                    })
+                elif node in ("greet", "apologize"):
+                    ans = state.get("answer")
+                    return getattr(ans, "natural_language_response", "") if ans else ""
+                return _safe(state)
 
             agent_steps = []
             step_start = time.time()
-            prev_output = input_data["input"]
+            prev_state = {"question": input_data["input"], "conversation": input_data["conversation"]}
 
             for output in self.agent.stream({"question": input_data["input"], "conversation": input_data["conversation"]}):
 
                 for key, value in output.items():
                     step_end = time.time()
                     step_duration = round(step_end - step_start, 3)
-
                     agent_steps.append({
                         "node": key,
                         "duration_s": step_duration,
-                        "input": _safe_serialize(prev_output),
-                        "output": _safe_serialize(value),
+                        "input": _safe(prev_state),
+                        "output": _node_output(key, value),
                     })
-                    prev_output = value
+                    prev_state = value
                     LogWriter.info(
                         f"request_id={req_id_cv.get()} executed node {key} ({step_duration}s)"
                     )
                     step_start = step_end
+
+            # Backfill entry with routing decision
+            if len(agent_steps) >= 2 and agent_steps[0]["node"] == "entry":
+                next_node = agent_steps[1]["node"]
+                _ROUTE_LABELS = {"supportai": "vector_search", "map_question_to_schema": "db_search", "lookup_history": "history_lookup"}
+                agent_steps[0]["output"] = _safe({"routing_decision": _ROUTE_LABELS.get(next_node, next_node)})
 
             if value["answer"].query_sources is None:
                 value["answer"].query_sources = {}

@@ -1,5 +1,5 @@
-import { FC, useState, useMemo } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { FC, useState, useMemo, useEffect } from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   LuArrowLeft,
@@ -18,7 +18,7 @@ import remarkGfm from "remark-gfm";
 
 interface TraceLogEntry {
   id: number;
-  type: "tool_call" | "tool_result" | "citation";
+  type: "tool_call" | "citation";
   timestamp: string;
   label: string;
   detail?: string;
@@ -75,24 +75,35 @@ function formatDuration(seconds: number): string {
   return `${seconds.toFixed(2)}s`;
 }
 
-function safeJson(obj: any, maxLen = 2000): string {
+function safeJson(obj: any): string {
   if (obj == null) return "N/A";
   if (typeof obj === "string") {
     try {
-      const parsed = JSON.parse(obj);
-      const pretty = JSON.stringify(parsed, null, 2);
-      return pretty.length > maxLen ? pretty.slice(0, maxLen) + "\n…truncated" : pretty;
+      return JSON.stringify(JSON.parse(obj), null, 2);
     } catch {
-      return obj.length > maxLen ? obj.slice(0, maxLen) + "\n…truncated" : obj;
+      return obj;
     }
   }
   try {
-    const s = JSON.stringify(obj, null, 2);
-    return s.length > maxLen ? s.slice(0, maxLen) + "\n…truncated" : s;
+    return JSON.stringify(obj, null, 2);
   } catch {
     return String(obj);
   }
 }
+
+const NODE_LABELS: Record<string, string> = {
+  entry: "Entry",
+  supportai: "SupportAI",
+  map_question_to_schema: "Map Question to Schema",
+  generate_function: "Generate Function",
+  generate_cypher: "Generate Cypher",
+  generate_answer: "Generate Answer",
+  lookup_history: "Lookup History",
+  merge_history_context: "Merge History Context",
+  rewrite_question: "Rewrite Question",
+  apologize: "Apologize",
+  greet: "Greet",
+};
 
 function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
   const now = new Date();
@@ -113,7 +124,7 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
     agentSteps.forEach((step, i: number) => {
       toolCalls.push({
         id: i + 1,
-        name: step.node,
+        name: NODE_LABELS[step.node] || step.node,
         timestamp: ts,
         durationMs: Math.round(step.duration_s * 1000),
         input: safeJson(step.input),
@@ -160,14 +171,15 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
       id: logId++,
       type: "tool_call",
       timestamp: tc.timestamp,
-      label: `${tc.name} - Input`,
+      label: `${tc.name} — Input`,
       content: tc.input,
+      durationMs: tc.durationMs,
     });
     logs.push({
       id: logId++,
-      type: "tool_result",
+      type: "citation",
       timestamp: tc.timestamp,
-      label: `${tc.name} - Result`,
+      label: `${tc.name} — Output`,
       content: tc.output,
     });
   });
@@ -283,7 +295,7 @@ const ExpandableRow: FC<{
       </div>
       {open && content && (
         <div className="px-4 pb-3 text-sm text-muted-foreground border-t border-border pt-3">
-          <pre className="whitespace-pre-wrap font-sans">{content}</pre>
+          <pre className="whitespace-pre-wrap font-sans overflow-auto max-h-[500px]">{content}</pre>
         </div>
       )}
     </div>
@@ -294,24 +306,19 @@ const ExpandableRow: FC<{
 
 const LogsPanel: FC<{ trace: TraceData }> = ({ trace }) => {
   const [collapsed, setCollapsed] = useState(false);
-  const toolCount = trace.logs.filter(
-    (l) => l.type === "tool_call" || l.type === "tool_result"
-  ).length;
-  const citationCount = trace.citations.length;
-  const totalEvents = trace.logs.length;
 
   return (
     <div>
       <div className="flex items-center justify-between mb-4 text-sm">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-muted-foreground">
-            {trace.logs.length} log entries ({totalEvents} events)
+            {trace.logs.length} agent steps
           </span>
           <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 text-xs px-2 py-0.5 rounded-full">
-            Tools ({toolCount})
+            Nodes ({trace.toolCalls.length})
           </span>
           <span className="bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs px-2 py-0.5 rounded-full">
-            Citations ({citationCount})
+            Citations ({trace.citations.length})
           </span>
         </div>
         <button
@@ -323,52 +330,36 @@ const LogsPanel: FC<{ trace: TraceData }> = ({ trace }) => {
       </div>
 
       <div className="space-y-0">
-        {trace.logs.map((log) => {
-          const isToolCall = log.type === "tool_call";
-          const isToolResult = log.type === "tool_result";
-
-          const dotColor = isToolResult
-            ? "bg-emerald-500"
-            : "bg-blue-500";
-          const iconBg = isToolResult
-            ? "text-emerald-600 dark:text-emerald-400"
-            : "text-blue-600 dark:text-blue-400";
-          const typeLabel = isToolCall
-            ? "Tool Call"
-            : "Tool Result";
-
-          return (
-            <div key={log.id} className="flex items-start gap-3">
-              <div className="flex flex-col items-center pt-5">
-                <div className={`w-2.5 h-2.5 rounded-full ${dotColor}`} />
-                <div className="w-px h-full bg-border min-h-[20px]" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <ExpandableRow
-                  content={log.content}
-                  defaultOpen={!collapsed && log.id === 0}
-                >
-                  <span className={`text-xs font-medium ${iconBg}`}>
-                    {isToolCall && <LuWrench className="inline w-3.5 h-3.5 mr-1" />}
-                    {isToolResult && "✓ "}
-                    {typeLabel}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {log.timestamp}
-                  </span>
-                  <span className="text-sm font-medium truncate">
-                    {log.label}
-                  </span>
-                  {log.durationMs && (
-                    <span className="text-xs text-emerald-600 dark:text-emerald-400">
-                      ({log.durationMs}ms)
-                    </span>
-                  )}
-                </ExpandableRow>
-              </div>
+        {trace.logs.map((log) => (
+          <div key={log.id} className="flex items-start gap-3">
+            <div className="flex flex-col items-center pt-5">
+              <div className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+              <div className="w-px h-full bg-border min-h-[20px]" />
             </div>
-          );
-        })}
+            <div className="flex-1 min-w-0">
+              <ExpandableRow
+                content={log.content}
+                defaultOpen={!collapsed && log.id === 0}
+              >
+                <span className="text-xs font-medium text-blue-600 dark:text-blue-400">
+                  <LuWrench className="inline w-3.5 h-3.5 mr-1" />
+                  Node
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {log.timestamp}
+                </span>
+                <span className="text-sm font-medium truncate">
+                  {log.label}
+                </span>
+                {log.durationMs != null && log.durationMs > 0 && (
+                  <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                    ({log.durationMs}ms)
+                  </span>
+                )}
+              </ExpandableRow>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -408,15 +399,15 @@ const ToolCallExpandable: FC<{ tc: ToolCallEntry }> = ({ tc }) => {
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
               Input
             </p>
-            <pre className="bg-[#1e1e2e] dark:bg-[#0d1117] text-emerald-300 text-xs rounded-lg p-4 overflow-auto max-h-[300px] whitespace-pre-wrap">
+            <pre className="bg-[#1e1e2e] dark:bg-[#0d1117] text-emerald-300 text-xs rounded-lg p-4 overflow-auto max-h-[500px] whitespace-pre-wrap">
               {tc.input || "N/A"}
             </pre>
           </div>
           <div>
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
-              Result
+              Output
             </p>
-            <pre className="bg-[#1e1e2e] dark:bg-[#0d1117] text-blue-300 text-xs rounded-lg p-4 overflow-auto max-h-[300px] whitespace-pre-wrap">
+            <pre className="bg-[#1e1e2e] dark:bg-[#0d1117] text-blue-300 text-xs rounded-lg p-4 overflow-auto max-h-[500px] whitespace-pre-wrap">
               {tc.output || "N/A"}
             </pre>
           </div>
@@ -512,8 +503,34 @@ const TimelinePanel: FC<{ trace: TraceData }> = ({ trace }) => (
 const TraceLogs: FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const message = location.state?.message;
-  const userQuery = location.state?.userQuery;
+  const { messageId } = useParams<{ messageId: string }>();
+
+  const stateMessage = location.state?.message;
+  const stateUserQuery = location.state?.userQuery;
+
+  const [apiData, setApiData] = useState<any>(null);
+  const [loading, setLoading] = useState(!stateMessage);
+
+  useEffect(() => {
+    if (stateMessage || !messageId) return;
+    setLoading(true);
+    fetch(`/ui/trace/${messageId}`)
+      .then((res) => {
+        if (!res.ok) throw new Error("Not found");
+        return res.json();
+      })
+      .then((data) => setApiData(data))
+      .catch(() => setApiData(null))
+      .finally(() => setLoading(false));
+  }, [messageId, stateMessage]);
+
+  const message = stateMessage || (apiData ? {
+    content: apiData.natural_language_response,
+    response_time: apiData.response_time,
+    response_type: apiData.response_type,
+    query_sources: apiData.query_sources,
+  } : null);
+  const userQuery = stateUserQuery || apiData?.user_query;
 
   const trace = useMemo(
     () => buildTraceFromMessage(message, userQuery),
@@ -535,6 +552,14 @@ const TraceLogs: FC = () => {
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <p className="text-muted-foreground">Loading trace data...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background">
