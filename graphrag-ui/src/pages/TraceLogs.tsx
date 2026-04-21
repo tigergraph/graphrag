@@ -71,7 +71,6 @@ interface TraceData {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatDuration(seconds: number): string {
-  if (seconds < 1) return `${(seconds * 1000).toFixed(0)}ms`;
   return `${seconds.toFixed(2)}s`;
 }
 
@@ -353,7 +352,7 @@ const LogsPanel: FC<{ trace: TraceData }> = ({ trace }) => {
                 </span>
                 {log.durationMs != null && log.durationMs > 0 && (
                   <span className="text-xs text-emerald-600 dark:text-emerald-400">
-                    ({log.durationMs}ms)
+                    ({formatDuration(log.durationMs / 1000)})
                   </span>
                 )}
               </ExpandableRow>
@@ -383,7 +382,7 @@ const ToolCallExpandable: FC<{ tc: ToolCallEntry }> = ({ tc }) => {
         <div className="flex items-center gap-2 ml-2 shrink-0">
           {tc.durationMs > 0 && (
             <span className="bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 text-xs font-medium px-2 py-0.5 rounded-full">
-              {tc.durationMs}ms
+              {formatDuration(tc.durationMs / 1000)}
             </span>
           )}
           {open ? (
@@ -489,7 +488,7 @@ const TimelinePanel: FC<{ trace: TraceData }> = ({ trace }) => (
         </div>
         <div className="flex flex-col items-start gap-1">
           <span className="bg-blue-600 text-white text-xs font-bold px-3 py-1 rounded-full">
-            {item.durationMs}ms
+            {formatDuration(item.durationMs / 1000)}
           </span>
           <span className="text-sm text-muted-foreground">{item.name}</span>
         </div>
