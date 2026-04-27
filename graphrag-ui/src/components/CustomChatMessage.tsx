@@ -10,7 +10,6 @@ import {
 } from "@/components/ui/dialog"
 import { ImEnlarge2 } from "react-icons/im";
 import { IoIosCloseCircleOutline } from "react-icons/io";
-import { useNavigate } from "react-router-dom";
 import { Interactions } from "./Interact";
 import { KnowledgeGraphPro } from "./graphs/KnowledgeGraphPro";
 import { KnowledgeTablPro } from "./tables/KnowledgeTablePro";
@@ -128,7 +127,6 @@ const AuthenticatedImage: FC<{ src: string; alt: string }> = ({ src, alt }) => {
 export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   message,
 }) => {
-  const navigate = useNavigate();
   const [showResult, setShowResult] = useState<boolean>(false);
   const [showGraphVis, setShowGraphVis] = useState<boolean>(false);
   const [showTableVis, setShowTableVis] = useState<boolean>(false);
@@ -193,9 +191,9 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
               showTable={handleShowTable}
               showGraph={handleShowGraph}
               onViewTrace={() => {
-                navigate(`/trace/${message.messageId || message.message_id || ""}`, {
-                  state: { message, userQuery: message.userQuery || "" },
-                });
+                const messageId = message.messageId || message.message_id || "";
+                // No noopener — browser copies sessionStorage to the new tab automatically.
+                window.open(`/trace/${messageId}`, "_blank");
               }}
             />
           </div>

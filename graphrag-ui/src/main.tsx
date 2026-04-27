@@ -26,6 +26,7 @@ const RequireAuth = ({ children }: { children: any }) => {
   return children;
 };
 
+
 const Layout = () => {
   useIdleTimeout();
   return (

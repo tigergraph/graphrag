@@ -10,6 +10,8 @@ import {
   LuWrench,
   LuBookOpen,
   LuActivity,
+  LuCoins,
+  LuInfo,
 } from "react-icons/lu";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -27,6 +29,17 @@ interface TraceLogEntry {
   step?: number;
 }
 
+interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost: number;
+}
+
+interface LlmCall extends TokenUsage {
+  caller_name: string;
+}
+
 interface ToolCallEntry {
   id: number;
   name: string;
@@ -34,6 +47,7 @@ interface ToolCallEntry {
   durationMs: number;
   input?: string;
   output?: string;
+  usage?: TokenUsage & { calls?: LlmCall[] };
 }
 
 interface CitationEntry {
@@ -65,12 +79,14 @@ interface TraceData {
   toolCalls: ToolCallEntry[];
   citations: CitationEntry[];
   timeline: TimelineStep[];
+  tokenUsage: TokenUsage;
   finalResponse: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function formatDuration(seconds: number): string {
+  if (seconds < 0.01) return `${Math.round(seconds * 1000)}ms`;
   return `${seconds.toFixed(2)}s`;
 }
 
@@ -116,8 +132,13 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
 
   // ── Tool Calls ──────────────────────────────────────────────────────────
   const toolCalls: ToolCallEntry[] = [];
-  const agentSteps: { node: string; duration_s: number; input?: string; output?: string }[] =
-    qs.agent_steps || [];
+  const agentSteps: {
+    node: string;
+    duration_s: number;
+    input?: string;
+    output?: string;
+    usage?: TokenUsage & { calls?: LlmCall[] };
+  }[] = qs.agent_steps || [];
 
   if (agentSteps.length > 0) {
     agentSteps.forEach((step, i: number) => {
@@ -128,6 +149,7 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
         durationMs: Math.round(step.duration_s * 1000),
         input: safeJson(step.input),
         output: safeJson(step.output),
+        usage: step.usage,
       });
     });
   }
@@ -197,6 +219,22 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
   const llmThinking = Math.max(0, totalResponseTime - totalToolSec);
   const endTime = new Date(now.getTime() + totalResponseTime * 1000);
 
+  // ── Token usage totals ─────────────────────────────────────────────────
+  const serverTotal = qs.token_usage as TokenUsage | undefined;
+  const tokenUsage: TokenUsage = serverTotal || agentSteps.reduce(
+    (acc, s) => {
+      const u = s.usage;
+      if (!u) return acc;
+      return {
+        input_tokens: acc.input_tokens + (u.input_tokens || 0),
+        output_tokens: acc.output_tokens + (u.output_tokens || 0),
+        total_tokens: acc.total_tokens + (u.total_tokens || 0),
+        cost: acc.cost + (u.cost || 0),
+      };
+    },
+    { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: 0 } as TokenUsage
+  );
+
   return {
     originalQuery: query,
     conversationContext: [`user: ${query}`],
@@ -213,8 +251,19 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
     toolCalls,
     citations,
     timeline,
+    tokenUsage,
     finalResponse: message?.content || "",
   };
+}
+
+function formatCost(cost: number): string {
+  if (!cost) return "$0.00";
+  if (cost < 0.01) return `$${cost.toFixed(6)}`;
+  return `$${cost.toFixed(4)}`;
+}
+
+function formatNumber(n: number): string {
+  return (n || 0).toLocaleString();
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -380,6 +429,14 @@ const ToolCallExpandable: FC<{ tc: ToolCallEntry }> = ({ tc }) => {
           <span className="text-xs text-muted-foreground">{tc.timestamp}</span>
         </div>
         <div className="flex items-center gap-2 ml-2 shrink-0">
+          {tc.usage && tc.usage.total_tokens > 0 && (
+            <span
+              className="bg-purple-100 dark:bg-purple-900/40 text-purple-700 dark:text-purple-300 text-xs font-medium px-2 py-0.5 rounded-full"
+              title={`Input ${tc.usage.input_tokens} / Output ${tc.usage.output_tokens} / Cost ${formatCost(tc.usage.cost)}`}
+            >
+              {formatNumber(tc.usage.total_tokens)} tokens
+            </span>
+          )}
           {tc.durationMs > 0 && (
             <span className="bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 text-xs font-medium px-2 py-0.5 rounded-full">
               {formatDuration(tc.durationMs / 1000)}
@@ -394,6 +451,37 @@ const ToolCallExpandable: FC<{ tc: ToolCallEntry }> = ({ tc }) => {
       </div>
       {open && (
         <div className="px-4 pb-4 space-y-3">
+          {tc.usage && tc.usage.total_tokens > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                LLM Usage
+              </p>
+              <div className="grid grid-cols-4 gap-2">
+                <div className="bg-muted rounded-md p-2">
+                  <div className="text-[10px] text-muted-foreground uppercase">Input</div>
+                  <div className="text-sm font-semibold">{formatNumber(tc.usage.input_tokens)}</div>
+                </div>
+                <div className="bg-muted rounded-md p-2">
+                  <div className="text-[10px] text-muted-foreground uppercase">Output</div>
+                  <div className="text-sm font-semibold">{formatNumber(tc.usage.output_tokens)}</div>
+                </div>
+                <div className="bg-muted rounded-md p-2">
+                  <div className="text-[10px] text-muted-foreground uppercase">Total</div>
+                  <div className="text-sm font-semibold">{formatNumber(tc.usage.total_tokens)}</div>
+                </div>
+                <div className="bg-muted rounded-md p-2">
+                  <div className="text-[10px] text-muted-foreground uppercase">Cost</div>
+                  <div className="text-sm font-semibold">{formatCost(tc.usage.cost)}</div>
+                </div>
+              </div>
+              {tc.usage.calls && tc.usage.calls.length > 0 && (
+                <div className="mt-2 text-xs text-muted-foreground">
+                  {tc.usage.calls.length} LLM call{tc.usage.calls.length !== 1 ? "s" : ""}:{" "}
+                  {tc.usage.calls.map((c) => c.caller_name).join(", ")}
+                </div>
+              )}
+            </div>
+          )}
           <div>
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
               Input
@@ -497,6 +585,142 @@ const TimelinePanel: FC<{ trace: TraceData }> = ({ trace }) => (
   </div>
 );
 
+const TokenOverviewPanel: FC<{ trace: TraceData }> = ({ trace }) => {
+  const usage = trace.tokenUsage;
+  const nodesWithUsage = trace.toolCalls.filter(
+    (tc) => tc.usage && tc.usage.total_tokens > 0
+  );
+
+  return (
+    <div className="space-y-5">
+      {/* Totals */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="bg-card border border-border rounded-lg p-4">
+          <div className="text-xs text-muted-foreground uppercase tracking-wide">
+            Input Tokens
+          </div>
+          <div className="text-2xl font-bold text-blue-600 dark:text-blue-400 mt-1">
+            {formatNumber(usage.input_tokens)}
+          </div>
+        </div>
+        <div className="bg-card border border-border rounded-lg p-4">
+          <div className="text-xs text-muted-foreground uppercase tracking-wide">
+            Output Tokens
+          </div>
+          <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400 mt-1">
+            {formatNumber(usage.output_tokens)}
+          </div>
+        </div>
+        <div className="bg-card border border-border rounded-lg p-4">
+          <div className="text-xs text-muted-foreground uppercase tracking-wide">
+            Total Tokens
+          </div>
+          <div className="text-2xl font-bold text-purple-600 dark:text-purple-400 mt-1">
+            {formatNumber(usage.total_tokens)}
+          </div>
+        </div>
+        <div className="bg-card border border-border rounded-lg p-4">
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground uppercase tracking-wide">
+            Est. Cost
+            <span className="relative group inline-flex">
+              <LuInfo className="w-3.5 h-3.5 cursor-help text-muted-foreground hover:text-foreground transition-colors" />
+              <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 rounded-lg bg-popover border border-border text-popover-foreground text-xs font-normal normal-case tracking-normal shadow-lg px-3 py-2 opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-50 leading-relaxed">
+                Cost is estimated based on the model's published per-token pricing. Actual billing may differ.
+                <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-border" />
+              </span>
+            </span>
+          </div>
+          <div className="text-2xl font-bold text-amber-600 dark:text-amber-400 mt-1">
+            {formatCost(usage.cost)}
+          </div>
+          <div className="text-[10px] text-muted-foreground mt-0.5">estimated</div>
+        </div>
+      </div>
+
+      {/* Per-node breakdown */}
+      <div className="bg-card border border-border rounded-lg overflow-hidden">
+        <div className="px-4 py-3 border-b border-border">
+          <h3 className="text-sm font-semibold">Usage by Node</h3>
+        </div>
+        {nodesWithUsage.length === 0 ? (
+          <p className="px-4 py-6 text-sm text-muted-foreground text-center">
+            No LLM usage recorded for this trace.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50 text-xs text-muted-foreground uppercase">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Node</th>
+                  <th className="px-4 py-2 text-right font-medium">Input</th>
+                  <th className="px-4 py-2 text-right font-medium">Output</th>
+                  <th className="px-4 py-2 text-right font-medium">Total</th>
+                  <th className="px-4 py-2 text-right font-medium">
+                    <span className="inline-flex items-center justify-end gap-1.5">
+                      Est. Cost
+                      <span className="relative group inline-flex">
+                        <LuInfo className="w-3.5 h-3.5 cursor-help text-muted-foreground hover:text-foreground transition-colors" />
+                        <span className="pointer-events-none absolute bottom-full right-0 mb-2 w-56 rounded-lg bg-popover border border-border text-popover-foreground text-xs font-normal normal-case tracking-normal shadow-lg px-3 py-2 opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-50 leading-relaxed">
+                          Cost is estimated based on the model's published per-token pricing. Actual billing may differ.
+                        </span>
+                      </span>
+                    </span>
+                  </th>
+                  <th className="px-4 py-2 text-left font-medium">LLM Calls</th>
+                </tr>
+              </thead>
+              <tbody>
+                {nodesWithUsage.map((tc) => (
+                  <tr key={tc.id} className="border-t border-border">
+                    <td className="px-4 py-2 font-medium">{tc.name}</td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {formatNumber(tc.usage!.input_tokens)}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {formatNumber(tc.usage!.output_tokens)}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums font-semibold">
+                      {formatNumber(tc.usage!.total_tokens)}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {formatCost(tc.usage!.cost)}
+                    </td>
+                    <td className="px-4 py-2 text-xs text-muted-foreground">
+                      {tc.usage!.calls && tc.usage!.calls.length > 0
+                        ? tc.usage!.calls.map((c) => c.caller_name).join(", ")
+                        : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="bg-muted/40 font-semibold">
+                <tr className="border-t border-border">
+                  <td className="px-4 py-2">Total</td>
+                  <td className="px-4 py-2 text-right tabular-nums">
+                    {formatNumber(usage.input_tokens)}
+                  </td>
+                  <td className="px-4 py-2 text-right tabular-nums">
+                    {formatNumber(usage.output_tokens)}
+                  </td>
+                  <td className="px-4 py-2 text-right tabular-nums">
+                    {formatNumber(usage.total_tokens)}
+                  </td>
+                  <td className="px-4 py-2 text-right tabular-nums">
+                    <span title="Estimated — calculated by LangChain based on model pricing">
+                      {formatCost(usage.cost)}
+                    </span>
+                  </td>
+                  <td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 const TraceLogs: FC = () => {
@@ -537,7 +761,13 @@ const TraceLogs: FC = () => {
   );
 
   const handleBack = () => {
-    navigate(-1);
+    // Trace opens in a new tab — closing it returns the user to the chat tab.
+    // If the tab cannot be closed (e.g. opened via direct link), fall back to navigate.
+    if (window.opener || window.history.length <= 1) {
+      window.close();
+    } else {
+      navigate(-1);
+    }
   };
 
   const handleDownload = () => {
@@ -571,7 +801,7 @@ const TraceLogs: FC = () => {
               className="flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400 hover:underline mb-1"
             >
               <LuArrowLeft className="w-4 h-4" />
-              Back to Chat
+              Close &amp; Back to Chat
             </button>
             <h1 className="text-xl font-semibold">Trace Logs</h1>
           </div>
@@ -682,6 +912,18 @@ const TraceLogs: FC = () => {
             >
               Timeline
             </TabsTrigger>
+            <TabsTrigger
+              value="tokens"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5"
+            >
+              <LuCoins className="w-4 h-4 mr-1.5" />
+              Token Overview
+              {trace.tokenUsage.total_tokens > 0 && (
+                <span className="ml-1.5 bg-muted text-muted-foreground text-xs px-1.5 py-0.5 rounded-full">
+                  {formatNumber(trace.tokenUsage.total_tokens)}
+                </span>
+              )}
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="logs" className="pt-4">
@@ -695,6 +937,9 @@ const TraceLogs: FC = () => {
           </TabsContent>
           <TabsContent value="timeline" className="pt-4">
             <TimelinePanel trace={trace} />
+          </TabsContent>
+          <TabsContent value="tokens" className="pt-4">
+            <TokenOverviewPanel trace={trace} />
           </TabsContent>
         </Tabs>
 

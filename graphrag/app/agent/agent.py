@@ -11,7 +11,7 @@ from tools import GenerateCypher, GenerateFunction, MapQuestionToSchema
 from common.config import embedding_service, embedding_store, llm_config, get_completion_config, get_chat_config, get_llm_service
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.embedding_services import EmbeddingModel
-from common.llm_services.base_llm import LLM_Model
+from common.llm_services.base_llm import LLM_Model, start_usage_collection, get_collected_usage
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics
@@ -181,17 +181,47 @@ class TigerGraphAgent:
             step_start = time.time()
             prev_state = {"question": input_data["input"], "conversation": input_data["conversation"]}
 
+            # Start collecting LLM usage so we can attribute tokens/cost per node.
+            start_usage_collection()
+
             for output in self.agent.stream({"question": input_data["input"], "conversation": input_data["conversation"]}):
 
                 for key, value in output.items():
                     step_end = time.time()
                     step_duration = round(step_end - step_start, 3)
+
+                    # Grab usage accumulated during this node and reset for next node.
+                    node_usage = get_collected_usage() or []
+                    input_tokens = sum(int(u.get("input_tokens", 0) or 0) for u in node_usage)
+                    output_tokens = sum(int(u.get("output_tokens", 0) or 0) for u in node_usage)
+                    total_tokens = sum(int(u.get("total_tokens", 0) or 0) for u in node_usage)
+                    cost = sum(float(u.get("cost", 0) or 0) for u in node_usage)
+
                     agent_steps.append({
                         "node": key,
                         "duration_s": step_duration,
                         "input": _safe(prev_state),
                         "output": _node_output(key, value),
+                        "usage": {
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "total_tokens": total_tokens,
+                            "cost": cost,
+                            "calls": [
+                                {
+                                    "caller_name": u.get("caller_name"),
+                                    "input_tokens": u.get("input_tokens", 0),
+                                    "output_tokens": u.get("output_tokens", 0),
+                                    "total_tokens": u.get("total_tokens", 0),
+                                    "cost": u.get("cost", 0),
+                                }
+                                for u in node_usage
+                            ],
+                        },
                     })
+                    # Reset the collector for the next node.
+                    start_usage_collection()
+
                     prev_state = value
                     LogWriter.info(
                         f"request_id={req_id_cv.get()} executed node {key} ({step_duration}s)"
@@ -207,6 +237,15 @@ class TigerGraphAgent:
             if value["answer"].query_sources is None:
                 value["answer"].query_sources = {}
             value["answer"].query_sources["agent_steps"] = agent_steps
+
+            # Aggregate total LLM usage across all nodes for the Token Overview UI.
+            total_usage = {
+                "input_tokens": sum(int(s.get("usage", {}).get("input_tokens", 0) or 0) for s in agent_steps),
+                "output_tokens": sum(int(s.get("usage", {}).get("output_tokens", 0) or 0) for s in agent_steps),
+                "total_tokens": sum(int(s.get("usage", {}).get("total_tokens", 0) or 0) for s in agent_steps),
+                "cost": sum(float(s.get("usage", {}).get("cost", 0) or 0) for s in agent_steps),
+            }
+            value["answer"].query_sources["token_usage"] = total_usage
 
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT question_for_agent")
             return value["answer"]
