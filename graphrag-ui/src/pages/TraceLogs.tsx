@@ -266,6 +266,17 @@ function formatNumber(n: number): string {
   return (n || 0).toLocaleString();
 }
 
+function formatCallerNames(calls: { caller_name: string }[]): string {
+  if (!calls || calls.length === 0) return "—";
+  const counts: Record<string, number> = {};
+  calls.forEach((c) => {
+    counts[c.caller_name] = (counts[c.caller_name] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([name, count]) => (count > 1 ? `${name} ×${count}` : name))
+    .join(", ");
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 const StatusBadge: FC<{ status: string }> = ({ status }) => {
@@ -474,12 +485,12 @@ const ToolCallExpandable: FC<{ tc: ToolCallEntry }> = ({ tc }) => {
                   <div className="text-sm font-semibold">{formatCost(tc.usage.cost)}</div>
                 </div>
               </div>
-              {tc.usage.calls && tc.usage.calls.length > 0 && (
-                <div className="mt-2 text-xs text-muted-foreground">
-                  {tc.usage.calls.length} LLM call{tc.usage.calls.length !== 1 ? "s" : ""}:{" "}
-                  {tc.usage.calls.map((c) => c.caller_name).join(", ")}
-                </div>
-              )}
+                {tc.usage.calls && tc.usage.calls.length > 0 && (
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    {tc.usage.calls.length} LLM call{tc.usage.calls.length !== 1 ? "s" : ""}:{" "}
+                    {formatCallerNames(tc.usage.calls)}
+                  </div>
+                )}
             </div>
           )}
           <div>
@@ -687,7 +698,7 @@ const TokenOverviewPanel: FC<{ trace: TraceData }> = ({ trace }) => {
                     </td>
                     <td className="px-4 py-2 text-xs text-muted-foreground">
                       {tc.usage!.calls && tc.usage!.calls.length > 0
-                        ? tc.usage!.calls.map((c) => c.caller_name).join(", ")
+                        ? formatCallerNames(tc.usage!.calls)
                         : "—"}
                     </td>
                   </tr>
