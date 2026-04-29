@@ -742,13 +742,23 @@ const TraceLogs: FC = () => {
   const stateMessage = location.state?.message;
   const stateUserQuery = location.state?.userQuery;
 
+  // Check sessionStorage for message stored by the opener tab before API fetch.
+  const sessionKey = messageId ? `trace_msg_${messageId}` : null;
+  const sessionRaw = sessionKey ? sessionStorage.getItem(sessionKey) : null;
+  const sessionMessage = sessionRaw ? JSON.parse(sessionRaw) : null;
+
+  const resolvedMessage = stateMessage || sessionMessage;
+
   const [apiData, setApiData] = useState<any>(null);
-  const [loading, setLoading] = useState(!stateMessage);
+  const [loading, setLoading] = useState(!resolvedMessage);
 
   useEffect(() => {
-    if (stateMessage || !messageId) return;
+    if (resolvedMessage || !messageId) return;
     setLoading(true);
-    fetch(`/ui/trace/${messageId}`)
+    const creds = sessionStorage.getItem("creds");
+    fetch(`/ui/trace/${messageId}`, {
+      headers: { Authorization: `Basic ${creds}` },
+    })
       .then((res) => {
         if (!res.ok) throw new Error("Not found");
         return res.json();
@@ -756,15 +766,15 @@ const TraceLogs: FC = () => {
       .then((data) => setApiData(data))
       .catch(() => setApiData(null))
       .finally(() => setLoading(false));
-  }, [messageId, stateMessage]);
+  }, [messageId, resolvedMessage]);
 
-  const message = stateMessage || (apiData ? {
+  const message = resolvedMessage || (apiData ? {
     content: apiData.natural_language_response,
     response_time: apiData.response_time,
     response_type: apiData.response_type,
     query_sources: apiData.query_sources,
   } : null);
-  const userQuery = stateUserQuery || apiData?.user_query;
+  const userQuery = stateUserQuery || sessionMessage?.userQuery || apiData?.user_query;
 
   const trace = useMemo(
     () => buildTraceFromMessage(message, userQuery),
@@ -817,10 +827,6 @@ const TraceLogs: FC = () => {
             <h1 className="text-xl font-semibold">Trace Logs</h1>
           </div>
           <div className="flex items-center gap-3">
-            <StatusBadge status={trace.status} />
-            <span className="text-xs text-muted-foreground hidden sm:inline">
-              Session: {trace.sessionId}
-            </span>
             <button
               onClick={handleDownload}
               className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"

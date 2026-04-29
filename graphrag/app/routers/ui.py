@@ -361,37 +361,16 @@ def add_feedback(
 
 
 @router.get(route_prefix + "/trace/{message_id}")
-def get_trace_log(message_id: str):
+def get_trace_log(
+    message_id: str,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
     filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Trace log not found")
     with open(filepath, "r") as f:
         return json.load(f)
 
-
-@router.get(route_prefix + "/traces/{conversation_id}")
-def list_trace_logs(conversation_id: str):
-    if not os.path.isdir(TRACE_LOGS_DIR):
-        return []
-    traces = []
-    for filename in os.listdir(TRACE_LOGS_DIR):
-        if not filename.endswith(".json"):
-            continue
-        filepath = os.path.join(TRACE_LOGS_DIR, filename)
-        try:
-            with open(filepath, "r") as f:
-                data = json.load(f)
-            if data.get("conversation_id") == conversation_id:
-                traces.append({
-                    "message_id": data.get("message_id"),
-                    "user_query": data.get("user_query"),
-                    "response_time": data.get("response_time"),
-                    "timestamp": data.get("timestamp"),
-                })
-        except Exception:
-            continue
-    traces.sort(key=lambda t: t.get("timestamp", 0))
-    return traces
 
 
 @router.post(route_prefix + "/{graphname}/create_graph")
@@ -1130,7 +1109,7 @@ async def graph_query(
             query_sources=resp.query_sources,
         )
         await write_message_to_history(message, auth)
-        _save_trace_log(message.message_id, convo_id, data, resp, elapsed)
+        await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed)
         prev_id = message.message_id
 
         # reply
@@ -1257,7 +1236,7 @@ async def chat(
                 query_sources=resp.query_sources,
             )
             await write_message_to_history(message, usr_auth)
-            _save_trace_log(message.message_id, convo_id, data, resp, elapsed)
+            await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed)
             prev_id = message.message_id
 
             # reply

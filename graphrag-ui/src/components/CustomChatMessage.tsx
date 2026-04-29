@@ -192,7 +192,9 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
               showGraph={handleShowGraph}
               onViewTrace={() => {
                 const messageId = message.messageId || message.message_id || "";
-                // No noopener — browser copies sessionStorage to the new tab automatically.
+                // Store message in sessionStorage so the new tab reads it directly
+                // without needing an authenticated API fetch (which triggers browser auth dialog).
+                sessionStorage.setItem(`trace_msg_${messageId}`, JSON.stringify(message));
                 window.open(`/trace/${messageId}`, "_blank");
               }}
             />
