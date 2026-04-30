@@ -613,9 +613,22 @@ def extract_text_from_file(file_path, graphname=None):
         if extension in ['.txt', '.md']:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read().strip()
-        elif extension in ['.html', '.htm', '.csv']:
+        elif extension in ['.html', '.htm']:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read().strip()
+        elif extension == '.csv':
+            raw = file_path.read_bytes()
+            # utf-8-sig handles UTF-8 with BOM (common Excel CSV export)
+            try:
+                return raw.decode('utf-8-sig').strip()
+            except UnicodeDecodeError:
+                pass
+            # Fall back to chardet detection
+            import chardet
+            detected = chardet.detect(raw)
+            encoding = detected.get('encoding') if detected.get('confidence', 0) >= 0.5 else None
+            # latin-1 as final fallback — never raises DecodeError
+            return raw.decode(encoding or 'latin-1').strip()
         elif extension == '.json':
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
