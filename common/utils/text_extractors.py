@@ -137,6 +137,8 @@ class TextExtractor:
             '.xml': 'application/xml',
             '.jpeg': 'image/jpeg',
             '.jpg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
             '.jsonl': 'application/x-jsonlines'
         }
 
@@ -687,7 +689,7 @@ def get_doc_type_from_extension(extension):
 
 def get_supported_extensions():
     """Get list of supported file extensions."""
-    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls'}
+    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.doc', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls', '.jsonl'}
 
 def is_supported_file(file_path):
     """Check if a file is supported for text extraction."""
