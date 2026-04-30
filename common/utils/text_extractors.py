@@ -631,10 +631,20 @@ def extract_text_from_file(file_path, graphname=None):
                 xl = pd.ExcelFile(file_path)
             sheet_texts = []
             for sheet_name in xl.sheet_names:
-                df = xl.parse(sheet_name)
+                # Always read with header=None so no data row is silently
+                # consumed as column names for headerless spreadsheets.
+                df = xl.parse(sheet_name, header=None)
                 if df.empty:
                     continue
                 df = df.fillna('')
+                # Detect header row: first row is all non-empty strings with
+                # no purely numeric values → treat as column names.
+                first_row = df.iloc[0]
+                if all(isinstance(v, str) and v.strip() for v in first_row):
+                    df.columns = first_row.tolist()
+                    df = df.iloc[1:].reset_index(drop=True)
+                else:
+                    df.columns = [f"Column {i + 1}" for i in range(len(df.columns))]
                 sheet_md = df.to_markdown(index=False)
                 sheet_texts.append(f"## Sheet: {sheet_name}\n\n{sheet_md}")
             return "\n\n".join(sheet_texts) if sheet_texts else "[Excel file is empty or contains no data]"
