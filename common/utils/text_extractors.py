@@ -137,8 +137,6 @@ class TextExtractor:
             '.xml': 'application/xml',
             '.jpeg': 'image/jpeg',
             '.jpg': 'image/jpeg',
-            '.png': 'image/png',
-            '.gif': 'image/gif',
             '.jsonl': 'application/x-jsonlines'
         }
 
@@ -290,7 +288,7 @@ class TextExtractor:
                     'error': result.get('error', 'Unknown error')
                 })
 
-        logger.info(f"Prepared {len(processed_files_info)} files ({len(jsonl_files_copied)} JSONL copied, {len(files_to_process)} converted), {total_docs} total documents")
+        logger.info(f"Processed {len(processed_files_info)} files, extracted {total_docs} total documents")
         logger.info(f"Created {len([f for f in processed_files_info if f.get('status') == 'success'])} JSONL files in {temp_folder}")
 
         return {
@@ -624,6 +622,22 @@ def extract_text_from_file(file_path, graphname=None):
             import docx
             doc = docx.Document(file_path)
             return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        elif extension in ['.xlsx', '.xls']:
+            import pandas as pd
+            engine = 'openpyxl' if extension == '.xlsx' else 'xlrd'
+            try:
+                xl = pd.ExcelFile(file_path, engine=engine)
+            except Exception:
+                xl = pd.ExcelFile(file_path)
+            sheet_texts = []
+            for sheet_name in xl.sheet_names:
+                df = xl.parse(sheet_name)
+                if df.empty:
+                    continue
+                df = df.fillna('')
+                sheet_md = df.to_markdown(index=False)
+                sheet_texts.append(f"## Sheet: {sheet_name}\n\n{sheet_md}")
+            return "\n\n".join(sheet_texts) if sheet_texts else "[Excel file is empty or contains no data]"
         elif extension == '.xml':
             import xml.etree.ElementTree as ET
             tree = ET.parse(file_path)
@@ -663,7 +677,7 @@ def get_doc_type_from_extension(extension):
 
 def get_supported_extensions():
     """Get list of supported file extensions."""
-    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.xml', '.jpeg', '.jpg', '.png', '.gif'}
+    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls'}
 
 def is_supported_file(file_path):
     """Check if a file is supported for text extraction."""

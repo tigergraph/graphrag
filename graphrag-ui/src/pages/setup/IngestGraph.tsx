@@ -1006,6 +1006,16 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                       ? `Upload destination: uploads/${ingestGraphName}/`
                       : ""}
                   </p>
+                  {selectedFiles && Array.from(selectedFiles).some((f) =>
+                    [".csv", ".xlsx", ".xls"].includes(f.name.slice(f.name.lastIndexOf(".")).toLowerCase())
+                  ) && (
+                    <div className="flex items-start gap-2 mt-2 p-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700">
+                      <span className="text-amber-500 mt-0.5 shrink-0">ℹ️</span>
+                      <p className="text-xs text-amber-700 dark:text-amber-300">
+                        CSV and Excel files will be treated as unstructured text documents.
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex gap-2">
