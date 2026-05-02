@@ -34,7 +34,6 @@ from graphrag.util import (
     stream_ids,
     tg_sem,
     upsert_batch,
-    add_rels_between_types
 )
 from pyTigerGraph import AsyncTigerGraphConnection
 
@@ -506,16 +505,10 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
     init_end = time.perf_counter()
     logger.info("Doc Processing End")
 
-    # Type Resolution
+    # Type Resolution — IS_HEAD_OF / HAS_TAIL writes happen inline in
+    # the per-relationship extract step (workers.py); no post-processing
+    # query needed.
     type_start = time.perf_counter()
-    if entity_extraction_switch:
-        logger.info("Type Processing Start")
-        res = await add_rels_between_types(conn)
-        if res.get("error", False):
-            logger.error(f"Error adding relationships between types: {res}")
-        else:
-            logger.info(f"Added relationships between types: {res}")
-    logger.info("Type Processing End")
     type_end = time.perf_counter()
 
     # Community Detection

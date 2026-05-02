@@ -235,6 +235,7 @@ class TextExtractor:
 
         files_to_process = []
         jsonl_files_copied = []
+        cached_jsonl_skipped = []
         for file_path in safe_walk(folder_path_obj):
             if file_path.is_file():
                 if file_path.name.startswith(('.', '~', '$')) or 'BROMIUM' in file_path.name.upper():
@@ -252,9 +253,41 @@ class TextExtractor:
                     })
                     logger.info(f"Copied JSONL file directly: {file_path.name} ({num_lines} documents)")
                 elif file_ext in self.supported_extensions:
-                    files_to_process.append(file_path)
+                    # If a previous run (e.g. schema extraction) already
+                    # produced a matching JSONL in *temp_folder*, reuse
+                    # it instead of re-converting the source file. This
+                    # saves the per-file PDF / image conversion cost
+                    # when the user uploaded sample files via the
+                    # Initialize Graph dialog and is now ingesting them.
+                    cached_jsonl = os.path.join(
+                        temp_folder, f"{file_path.stem}.jsonl"
+                    )
+                    if os.path.exists(cached_jsonl):
+                        try:
+                            num_lines = sum(
+                                1 for _ in open(cached_jsonl, 'r', encoding='utf-8')
+                            )
+                        except Exception:
+                            num_lines = 0
+                        cached_jsonl_skipped.append({
+                            'file_path': str(file_path),
+                            'num_documents': num_lines,
+                            'jsonl_file': os.path.basename(cached_jsonl),
+                            'status': 'success',
+                            'cached': True,
+                        })
+                        logger.info(
+                            f"Reusing cached JSONL for {file_path.name} "
+                            f"({num_lines} documents) — skipping re-conversion"
+                        )
+                    else:
+                        files_to_process.append(file_path)
 
-        logger.info(f"Found {len(files_to_process)} files to process, {len(jsonl_files_copied)} JSONL files copied directly")
+        logger.info(
+            f"Found {len(files_to_process)} files to process, "
+            f"{len(jsonl_files_copied)} JSONL files copied directly, "
+            f"{len(cached_jsonl_skipped)} skipped via cached JSONL"
+        )
 
         semaphore = asyncio.Semaphore(max_concurrent)
 
@@ -265,8 +298,10 @@ class TextExtractor:
         tasks = [process_with_semaphore(fp) for fp in files_to_process]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        processed_files_info = list(jsonl_files_copied)
-        total_docs = sum(f['num_documents'] for f in jsonl_files_copied)
+        processed_files_info = list(jsonl_files_copied) + list(cached_jsonl_skipped)
+        total_docs = sum(
+            f['num_documents'] for f in jsonl_files_copied + cached_jsonl_skipped
+        )
 
         for result in results:
             if isinstance(result, Exception):
@@ -457,54 +492,64 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
                 "content": markdown_content,
                 "position": 0
             }]
-        image_entries = []
-        image_counter = 0
-        for img_ref in image_refs:
-            try:
-                img_path = Path(img_ref["path"])  # convert to Path
-                image_id = img_ref["image_id"]
-                # Image description
-                description = describe_image_with_llm(str(img_path))
-                markdown_content = insert_description_by_id(
-                    markdown_content,
-                    image_id,
-                    description
-                )
-                # Convert image to base64
-                pil_image = PILImage.open(img_path)
-                buffer = io.BytesIO()
+        # Phase 1 — describe + base64-encode every image in parallel.
+        # Each worker hits Bedrock for the description and reads the
+        # image off disk, so they're I/O-bound; a small thread pool
+        # cuts wall-clock proportionally for image-heavy PDFs.
+        # Markdown mutations stay in phase 2 (next loop) because
+        # insert_description_by_id / replace_path_with_tg_protocol
+        # mutate the same shared string and must run in deterministic
+        # order. Concurrency cap is intentionally small to stay below
+        # Bedrock's per-account throttle.
+        image_workers = int(os.environ.get("PDF_IMAGE_CONCURRENCY", "8"))
 
+        def _describe_and_encode(img_ref: dict) -> dict:
+            """Run on a worker thread. Returns one of:
+              * ``{"ok": True, "img_ref", "description", "image_base64",
+                  "width", "height"}``
+              * ``{"ok": False, "img_ref", "error"}``
+            Never raises.
+            """
+            try:
+                img_path = Path(img_ref["path"])
+                description = describe_image_with_llm(str(img_path))
+                pil_image = PILImage.open(img_path)
                 if pil_image.mode != "RGB":
                     pil_image = pil_image.convert("RGB")
-
+                buffer = io.BytesIO()
                 pil_image.save(buffer, format="JPEG", quality=95)
                 image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-                image_counter += 1
-                image_doc_id = f"{base_doc_id}_image_{image_counter}".lower()
-
-                # Replace file path with tg:// protocol reference in markdown
-                markdown_content = replace_path_with_tg_protocol(
-                    markdown_content,
-                    image_id,
-                    image_doc_id
-                )
-
-                image_entries.append({
-                    "doc_id": image_doc_id,
-                    "doc_type": "image",
-                    "image_description": description,
-                    "image_data": image_base64,
-                    "image_format": "jpg",
-                    "parent_doc": base_doc_id,
-                    "page_number": 0,
+                return {
+                    "ok": True,
+                    "img_ref": img_ref,
+                    "description": description,
+                    "image_base64": image_base64,
                     "width": pil_image.width,
                     "height": pil_image.height,
-                    "position": image_counter
-                })
+                }
+            except Exception as img_error:  # noqa: BLE001 — keep going
+                return {"ok": False, "img_ref": img_ref, "error": img_error}
 
-            except Exception as img_error:
-                logger.warning(f"Failed to process image {img_ref.get('path')}: {img_error}")
+        if image_refs:
+            with ThreadPoolExecutor(
+                max_workers=max(1, min(image_workers, len(image_refs)))
+            ) as ex:
+                # executor.map preserves input ordering, which is what
+                # the markdown-mutation phase below relies on.
+                described = list(ex.map(_describe_and_encode, image_refs))
+        else:
+            described = []
+
+        # Phase 2 — apply markdown mutations and build image_entries
+        # in deterministic order using the parallel results.
+        image_entries: list[dict] = []
+        image_counter = 0
+        for d in described:
+            img_ref = d["img_ref"]
+            if not d.get("ok"):
+                logger.warning(
+                    f"Failed to process image {img_ref.get('path')}: {d.get('error')}"
+                )
                 failed_path = img_ref.get("path", "")
                 if failed_path:
                     markdown_content = re.sub(
@@ -512,6 +557,30 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
                         "",
                         markdown_content,
                     )
+                continue
+
+            image_id = img_ref["image_id"]
+            markdown_content = insert_description_by_id(
+                markdown_content, image_id, d["description"]
+            )
+
+            image_counter += 1
+            image_doc_id = f"{base_doc_id}_image_{image_counter}".lower()
+            markdown_content = replace_path_with_tg_protocol(
+                markdown_content, image_id, image_doc_id
+            )
+            image_entries.append({
+                "doc_id": image_doc_id,
+                "doc_type": "image",
+                "image_description": d["description"],
+                "image_data": d["image_base64"],
+                "image_format": "jpg",
+                "parent_doc": base_doc_id,
+                "page_number": 0,
+                "width": d["width"],
+                "height": d["height"],
+                "position": image_counter,
+            })
 
         # FINAL CLEANUP — delete folder after processing everything
         if image_output_folder.exists() and image_output_folder.is_dir():

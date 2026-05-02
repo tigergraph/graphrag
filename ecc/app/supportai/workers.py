@@ -303,34 +303,10 @@ async def extract(
                 )
             )
 
-            # upsert the edge between the two entities
-            await upsert_chan.put(
-                (
-                    util.upsert_edge,
-                    (
-                        conn,
-                        "Entity",  # src_type
-                        util.process_id(edge.source.id),  # src_id
-                        "IS_HEAD_OF",  # edgeType
-                        "RelationshipType",  # tgt_type
-                        edge.type,  # tgt_id
-                    ),
-                )
-            )
-            await upsert_chan.put(
-                (
-                    util.upsert_edge,
-                    (
-                        conn,
-                        "RelationshipType",  # src_type
-                        edge.type, # src_id
-                        "HAS_TAIL",  # edgeType
-                        "Entity",  # tgt_type
-                        util.process_id(edge.target.id),  # tgt_id
-                    ),
-                )
-            )
-
+            # IS_HEAD_OF / HAS_TAIL are meta-schema edges between
+            # EntityType ↔ RelationshipType — not written here per
+            # Entity instance. Legacy supportai ECC paths without
+            # per-instance entity_type info skip the meta-layer.
             # link the relationship to the chunk it came from
             logger.info("extract writes mentions edge to upsert")
             await upsert_chan.put(

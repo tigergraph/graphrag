@@ -12,7 +12,7 @@ from supportai import workers
 from pyTigerGraph import TigerGraphConnection
 
 from common.config import (
-    embedding_service,
+    get_embedding_service,
     graphrag_config,
     get_llm_service,
     get_completion_config,
@@ -122,7 +122,7 @@ async def init(
 
     embedding_store = TigerGraphEmbeddingStore(
         conn,
-        embedding_service,
+        get_embedding_service(),
         support_ai_instance=True,
     )
     embedding_store.set_graphname(conn.graphname)

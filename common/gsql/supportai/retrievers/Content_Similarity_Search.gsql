@@ -44,6 +44,12 @@ CREATE OR REPLACE DISTRIBUTED QUERY Content_Similarity_Search(STRING json_list_v
             @@final_retrieval += (s.id -> s.definition)
           ELSE IF s.type == "Community" THEN
             @@final_retrieval += (s.id -> s.description)
+          ELSE IF s.type != "DocumentChunk" AND s.type != "Document"
+                  AND s.type != "Content" AND s.type != "Image"
+                  AND s.type != "EntityType" THEN
+            // Domain vertex type — surface "<TypeName>: <id>" so the
+            // LLM sees the schema-aware label.
+            @@final_retrieval += (s.id -> s.type + ": " + replace(s.id, "_", " "))
           END;
     
   @@verbose_info += ("start_set" -> @@start_set_type);

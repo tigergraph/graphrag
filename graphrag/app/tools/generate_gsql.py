@@ -20,6 +20,7 @@ from langchain.tools import BaseTool
 from langchain.llms.base import LLM
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.db.connections import get_schema_ver
+from common.db.schema_utils import read_type_metadata
 from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
 
@@ -60,14 +61,22 @@ class GenerateGSQL(BaseTool):
             return self.schema_rep
         verts = self.conn.getVertexTypes()
         edges = self.conn.getEdgeTypes()
+        try:
+            entity_descs, rel_defs = read_type_metadata(self.conn)
+        except Exception as exc:
+            logger.warning(f"read_type_metadata failed: {exc}")
+            entity_descs, rel_defs = {}, {}
         vertex_schema = []
         for vert in verts:
             primary_id = self.conn.getVertexType(vert)["PrimaryId"]["AttributeName"]
-            attributes = "\n\t\t".join([attr["AttributeName"] + " of type " + attr["AttributeType"]["Name"] 
+            attributes = "\n\t\t".join([attr["AttributeName"] + " of type " + attr["AttributeType"]["Name"]
                                         for attr in self.conn.getVertexType(vert)["Attributes"]])
             if attributes == "":
                 attributes = "No attributes"
-            vertex_schema.append(f"{vert}\n\tPrimary Id Attribute: {primary_id}\n\tAttributes: \n\t\t{attributes}")
+            defn_line = ""
+            if entity_descs.get(vert):
+                defn_line = f"\n\tDefinition: {entity_descs[vert]}"
+            vertex_schema.append(f"{vert}{defn_line}\n\tPrimary Id Attribute: {primary_id}\n\tAttributes: \n\t\t{attributes}")
 
         edge_schema = []
         for edge in edges:
@@ -75,18 +84,21 @@ class GenerateGSQL(BaseTool):
             to_vertex = self.conn.getEdgeType(edge)["ToVertexTypeName"]
             direction = "Directed" if self.conn.getEdgeType(edge)["IsDirected"] else "Undirected"
             #reverse_edge = conn.getEdgeType(edge)["Config"].get("REVERSE_EDGE")
-            attributes = "\n\t\t".join([attr["AttributeName"] + " of type " + attr["AttributeType"]["Name"] 
+            attributes = "\n\t\t".join([attr["AttributeName"] + " of type " + attr["AttributeType"]["Name"]
                                         for attr in self.conn.getEdgeType(edge)["Attributes"]])
             if attributes == "":
                 attributes = "No attributes"
+            defn_line = ""
+            if rel_defs.get(edge):
+                defn_line = f"\n\tDefinition: {rel_defs[edge]}"
             if from_vertex == "*" or to_vertex == "*":
                 edge_pairs = self.conn.getEdgeType(edge)["EdgePairs"]
                 for an_edge in edge_pairs:
                     edge_info = f"""From Vertex: {an_edge["From"]}\n\tTo Vertex: {an_edge["To"]}"""
-                    edge_schema.append(f"""{edge}\n\t{edge_info}\n\tEdge direction: {direction}\n\tAttributes: \n\t\t{attributes}""")
+                    edge_schema.append(f"""{edge}{defn_line}\n\t{edge_info}\n\tEdge direction: {direction}\n\tAttributes: \n\t\t{attributes}""")
             else:
                 edge_info = f"""From Vertex: {from_vertex}\n\tTo Vertex: {to_vertex}"""
-                edge_schema.append(f"""{edge}\n\t{edge_info}\n\tEdge direction: {direction}\n\tAttributes: \n\t\t{attributes}""")
+                edge_schema.append(f"""{edge}{defn_line}\n\t{edge_info}\n\tEdge direction: {direction}\n\tAttributes: \n\t\t{attributes}""")
 
         self.schema_rep = f"""The schema of the graph {self.conn.graphname} is as follows:
 Vertex Types:

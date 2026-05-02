@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.4.0]
+
+### Added
+- **Schema-aware initialization** at *Initialize Knowledge Graph* time, with three modes: skip schema, generate a draft from sample documents, or paste a GSQL schema. Drafts are reviewed in a form-mode editor before being applied as a single atomic schema-change job that never drops existing types.
+- **Schema-aware extraction**: when an extracted entity or relationship matches a declared domain type or pair, ECC populates the domain vertex / edge directly. A configurable strict mode drops non-schema extractions instead of falling back to the raw `Entity` layer.
+- **Typed-relationship metadata layer** (`EntityType` / `RelationshipType` vertices linked by `IS_HEAD_OF` / `HAS_TAIL`) carrying type names and human-readable definitions; available to retrievers and to the chat agent. The layer auto-fills from extracted free-text types when no domain types are declared (with case / suffix / plural deduplication), and is restricted to declared types only when a domain schema exists.
+- **Customizable schema-extraction prompt** in the `/prompts` API alongside the existing chatbot, entity-relationship, community-summarization, and query-generation prompts. Per-graph overrides supported.
+- **Schema definitions threaded into LLM prompts** for query generation (Cypher / GSQL) and entity-relationship extraction, so the model sees per-type descriptions alongside the schema rep.
+- **JSONL caching shared between schema extraction and ingest** — files uploaded for schema extraction are reused by the ingest flow without re-conversion.
+- **Parallel image description** during PDF processing (default 8 workers, env-overridable).
+- **Async embedding-store initialization** — service startup no longer blocks on the TigerGraph connection; status surfaces as `initializing` / `ok` / `error`.
+
+### Changed
+- **All customizable prompts now ship as in-code defaults**, packaged inside the LLM service. Provider prompt directories are kept (empty) for backward compatibility; per-graph and global overrides still win when present.
+- **`prompt_path` is a top-level `llm_config` field**, applied across LLM-prompted services automatically. Per-service `prompt_path` entries are still honored on disk but no longer needed.
+- **Permissive schema parser** accepts both `DIRECTED` and `UNDIRECTED` edges and rejects names that collide with GraphRAG structural types or GSQL keywords.
+- **Server-side prompt validation**: `/prompts` POST rejects edits missing required placeholders and auto-escapes stray `{token}` occurrences in user content.
+- **`apply_proposal` reports a real failure** when the GSQL server returns a known error marker, instead of falsely reporting success.
+- **TigerGraph embedding store skips redundant GDS install** when the `gds.vector` package is already installed, eliminating multi-minute catalog-lock stalls on container restart.
+- **TigerGraph version mismatch** raises a clear `ValueError` at ECC startup instead of leaving the embedding store undefined.
+- **`check_embedding_store_status()`** in the inquiryai / supportai routers raises HTTP 503 instead of swallowing the exception.
+- **Bedrock `max_tokens` is auto-defaulted** per model family (Claude 3.x = 4096, Sonnet 3.5+ / 4.x = 8192, Titan / Cohere / Llama at their published caps), so schema extraction and other large-output prompts no longer truncate at the langchain-aws built-in 1024 default. Explicit `model_kwargs.max_tokens` and the existing `token_limit` config field both override the auto-default.
+- **Hybrid / similarity retrievers surface domain vertex types** in the LLM context with a `<TypeName>: <id>` label, so type-aware questions (e.g. "which companies …") receive properly grounded answers.
+
+### Removed
+- **`RELATIONSHIP_TYPE` edge** between `EntityType` vertices — superseded by `IS_HEAD_OF` + `HAS_TAIL` through `RelationshipType`.
+
+### Configuration
+- New `graphrag_config` keys: `schema_max_sample_files` (default 5), `schema_max_total_mb` (default 50), `strict_mode` (default false).
+- New env var: `PDF_IMAGE_CONCURRENCY` (default 8).
+
+> Implementation-level details for v1.4.0 (parser internals, endpoint contracts, dialog state machine, prompt-resolution chain, schema-aware ECC worker logic, etc.) live in `dev/plans/graphrag/v1.4.0_implementation_notes.md`.
+
 ## [1.3.1]
 
 ### Changed

@@ -73,5 +73,8 @@ def describe_image_with_llm(file_path):
         response = langchain_client.invoke(messages)
         return response.content if hasattr(response, "content") else str(response)
     except Exception as e:
+        error_str = str(e).lower()
+        if "throttl" in error_str or "rate" in error_str or "too many" in error_str:
+            raise  # Let caller retry on rate limit
         logger.error(f"Failed to describe image with LLM: {str(e)}")
         return "Image: Error processing image description"

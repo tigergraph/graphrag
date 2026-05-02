@@ -33,7 +33,7 @@ from base64 import b64decode
 from common.config import (
     db_config,
     graphrag_config,
-    embedding_service,
+    get_embedding_service,
     get_llm_service,
     get_completion_config,
     get_graphrag_config,
@@ -92,12 +92,17 @@ def initialize_eventual_consistency_checker(
 
     try:
         maj, minor, patch = conn.getVer().split(".")
-        if  maj >= "4" and minor >= "2":
+        if maj >= "4" and minor >= "2":
             # TigerGraph native vector support
             embedding_store = TigerGraphEmbeddingStore(
                 conn,
-                embedding_service,
+                get_embedding_service(),
                 support_ai_instance=False,
+            )
+        else:
+            raise ValueError(
+                f"TigerGraph version {maj}.{minor}.{patch} is not supported. "
+                "Requires >= 4.2."
             )
         graph_cfg = get_graphrag_config(graphname)
         index_names = graph_cfg.get(
@@ -108,7 +113,9 @@ def initialize_eventual_consistency_checker(
         if graph_cfg.get("extractor") == "llm":
             from common.extractors import LLMEntityRelationshipExtractor
 
-            extractor = LLMEntityRelationshipExtractor(get_llm_service(get_completion_config()))
+            extractor = LLMEntityRelationshipExtractor(
+                get_llm_service(get_completion_config(graphname))
+            )
         else:
             raise ValueError("Invalid extractor type")
 
@@ -116,7 +123,7 @@ def initialize_eventual_consistency_checker(
             graph_cfg.get("process_interval_seconds", 300),
             graph_cfg.get("cleanup_interval_seconds", 300),
             graphname,
-            embedding_service,
+            get_embedding_service(),
             embedding_store,
             index_names,
             conn,

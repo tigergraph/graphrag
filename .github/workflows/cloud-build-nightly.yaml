@@ -3,6 +3,15 @@ name: GraphRAG Build Cloud Nightly
 on:
   push:
     branches: [ "cloud-dev" ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE*'
+      - '.github/CODEOWNERS'
   workflow_dispatch:
 
 env:

@@ -30,6 +30,11 @@ from common.config import (
     get_completion_config,
     get_graphrag_config,
 )
+from common.db.schema_utils import (
+    is_structural_type,
+    read_existing_schema_async,
+    read_type_metadata_async,
+)
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
 from common.extractors import GraphExtractor, LLMEntityRelationshipExtractor
@@ -61,7 +66,6 @@ REQUIRED_QUERIES = [
     "common/gsql/graphrag/StreamChunkContent",
     "common/gsql/graphrag/SetEpochProcessing",
     "common/gsql/graphrag/get_vertices_or_remove",
-    "common/gsql/supportai/create_entity_type_relationships",
 ]
 load_q = reusable_channel.ReuseableChannel()
 
@@ -142,7 +146,68 @@ async def init(
     if graph_cfg.get("extractor") == "graphrag":
         extractor = GraphExtractor()
     elif graph_cfg.get("extractor") == "llm":
-        extractor = LLMEntityRelationshipExtractor(get_llm_service(get_completion_config()))
+        # Read the live schema directly (without going through the
+        # proposal-flow SchemaProposal type). This intentionally
+        # supports graphs whose domain types were created outside of
+        # the proposal flow — admin UI, prior releases,
+        # external migration scripts — as long as the domain types
+        # and the EntityType / RelationshipType metadata are on the
+        # graph, ECC will use them.
+        try:
+            existing = await read_existing_schema_async(conn)
+        except Exception as exc:
+            logger.warning(f"Loading live schema for extractor failed: {exc}")
+            from common.db.schema_utils import ExistingSchema
+            existing = ExistingSchema()
+        try:
+            entity_descs, rel_defs = await read_type_metadata_async(conn)
+        except Exception as exc:
+            logger.warning(f"Loading type metadata for extractor failed: {exc}")
+            entity_descs, rel_defs = {}, {}
+
+        # Filter to domain types (drop GraphRAG structural types and
+        # any pair whose endpoint touches a structural vertex).
+        domain_vertex_types = sorted(
+            v for v in existing.vertex_types if not is_structural_type(v)
+        )
+        domain_edge_endpoints: dict = {}
+        for edge_name, pairs in existing.edge_pairs.items():
+            if is_structural_type(edge_name):
+                continue
+            domain_pairs = [
+                (s, t)
+                for s, t in pairs
+                if not is_structural_type(s) and not is_structural_type(t)
+            ]
+            if domain_pairs:
+                domain_edge_endpoints[edge_name] = domain_pairs
+        domain_edge_types = sorted(domain_edge_endpoints.keys())
+
+        # Trim the descriptions to domain types only.
+        domain_entity_defs = {
+            vt: entity_descs[vt]
+            for vt in domain_vertex_types
+            if entity_descs.get(vt)
+        }
+        domain_rel_defs = {
+            et: rel_defs[et]
+            for et in domain_edge_types
+            if rel_defs.get(et)
+        }
+
+        # Strict-mode comes from graphrag_config; default false (legacy
+        # fallback to plain Entity vertices for non-domain extractions).
+        strict_mode = bool(graph_cfg.get("strict_mode", False))
+
+        extractor = LLMEntityRelationshipExtractor(
+            get_llm_service(get_completion_config(conn.graphname)),
+            allowed_entity_types=domain_vertex_types or None,
+            allowed_relationship_types=domain_edge_types or None,
+            strict_mode=strict_mode,
+            entity_type_definitions=domain_entity_defs,
+            relationship_type_definitions=domain_rel_defs,
+            domain_edge_endpoints=domain_edge_endpoints,
+        )
     else:
         raise ValueError("Invalid extractor type")
 
@@ -214,6 +279,55 @@ def process_id(v_id: str):
         return ""
 
     return v_id
+
+
+# Suffixes the LLM commonly tacks onto type labels without adding
+# semantic distinction. Stripped during meta-layer normalization so
+# ``Company_Type``, ``Company_Class``, ``Company_Entity`` collapse onto
+# the same canonical name.
+_TYPE_SUFFIXES = ("_type", "_class", "_entity", "_data", "_info", "_record")
+
+
+def normalize_type_name(name: str) -> str:
+    """Normalize an LLM-emitted vertex / edge type label so trivial
+    variants collapse onto a single canonical id.
+
+    Applies in order:
+
+    1. ``process_id`` (lowercase, whitespace → ``-``, strip parens).
+    2. Strip a single trailing semantic-suffix from
+       :data:`_TYPE_SUFFIXES` (e.g. ``company_type`` → ``company``).
+    3. Singularize trailing ``ies`` → ``y`` (``companies`` →
+       ``company``); strip a single trailing ``s`` only when the
+       preceding char is a consonant other than ``s``, ``i``, or ``u``
+       (``reports`` → ``report``; preserves ``series``, ``status``,
+       ``news``, ``business``).
+
+    Used only for the EntityType / RelationshipType meta-layer in
+    Case 1 (no domain types declared) — instance ids stay
+    untouched. Synonym consolidation (``Company`` vs ``Corporation``)
+    is out of scope for this deterministic pass.
+    """
+    base = process_id(name)
+    if not base:
+        return ""
+    for suffix in _TYPE_SUFFIXES:
+        if base.endswith(suffix) and len(base) > len(suffix):
+            base = base[: -len(suffix)]
+            break
+    # Singularize defensively. Length thresholds keep short words
+    # whose final ``s`` / ``ies`` is part of the singular stem
+    # (``News``, ``Series``, ``Bus``, ``Status``, ``Yes``).
+    if base.endswith("ies") and len(base) > 6:
+        base = base[:-3] + "y"
+    elif (
+        base.endswith("s")
+        and len(base) > 4
+        and base[-2] not in "siu"
+        and not base[-2].isdigit()
+    ):
+        base = base[:-1]
+    return base
 
 
 async def upsert_vertex(
@@ -318,17 +432,6 @@ async def get_commuinty_children(conn, i: int, c: str):
 
     return descrs
 
-
-async def add_rels_between_types(conn):
-    try:
-        async with tg_sem:
-            resp = await conn.runInstalledQuery(
-                "create_entity_type_relationships"
-            )
-    except Exception as e:
-        logger.error(f"Check Vert EntityType err:\n{e}")
-        return {"error": True, "message": e}        
-    return resp[0]
 
 async def check_vertex_has_desc(conn, i: int):
     try:

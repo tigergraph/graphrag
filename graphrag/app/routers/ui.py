@@ -53,6 +53,9 @@ from tools.validation_utils import MapQuestionToSchemaException
 
 from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
 from common.db.connections import get_db_connection_pwd_manual
+from common.db import schema_utils as schema_utils_mod
+from common.db import schema_extraction as schema_extraction_mod
+from common.utils.text_extractors import TextExtractor
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
@@ -387,11 +390,24 @@ def create_graph(
 def init_graph(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict | None, Body()] = None,
 ):
     """
     Initialize a TigerGraph knowledge graph with GraphRAG schema.
-    This initializes the graph with SupportAI/GraphRAG schema, indexes, and queries.
-    Uses HTTP Basic Authentication to get credentials and create a connection.
+
+    The structural GraphRAG schema (Document, DocumentChunk, Entity,
+    EntityType, RelationshipType, Content, Community, Image and their
+    structural edges) is always created if missing.
+
+    Optionally accepts a JSON body with a domain-schema proposal:
+
+        {"schema_gsql": "ADD VERTEX Company(...);  ADD DIRECTED EDGE PUBLISHES(FROM Company, TO Report);"}
+
+    When ``schema_gsql`` is provided, the pasted text is parsed
+    permissively (``ADD`` form *or* ``gsql ls`` output), structural-type
+    collisions and dangling pairs are silently dropped, the diff against
+    the current graph is computed, and the additive delta is applied as a
+    single atomic ``SCHEMA_CHANGE JOB``. Existing types are never dropped.
     """
     try:
         # Extract credentials from the dependency (same pattern as other endpoints)
@@ -404,9 +420,41 @@ def init_graph(
         resp = supportai.init_supportai(conn, graphname)
         schema_res, index_res, query_res = resp[0], resp[1], resp[2]
 
+        domain_schema_status: dict | None = None
+        schema_gsql = (payload or {}).get("schema_gsql") if isinstance(payload, dict) else None
+        if isinstance(schema_gsql, str) and schema_gsql.strip():
+            LogWriter.info(f"Applying domain schema proposal for graph: {graphname}")
+            proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
+            proposal.drop_dangling_pairs()
+            domain_schema_status = schema_utils_mod.apply_proposal(
+                conn, graphname, proposal
+            )
+            LogWriter.info(
+                f"Domain schema status for {graphname}: "
+                f"{domain_schema_status['status']} "
+                f"({len(domain_schema_status['statements'])} stmts)"
+            )
+            # apply_proposal returns status=error when the gsql output
+            # contains a known failure marker. Surface it as a 5xx so
+            # the caller doesn't falsely think the schema landed.
+            if domain_schema_status.get("status") == "error":
+                LogWriter.error(
+                    f"Domain schema apply failed for {graphname}: "
+                    f"{domain_schema_status.get('error')}"
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "message": "Domain schema apply failed",
+                        "error": domain_schema_status.get("error"),
+                        "gsql_output": domain_schema_status.get("gsql_output", "")[:1000],
+                        "statements": domain_schema_status.get("statements", []),
+                    },
+                )
+
         LogWriter.info(f"Graph initialization completed for: {graphname}")
 
-        return {
+        result = {
             "status": "success",
             "message": f"Graph '{graphname}' initialized successfully",
             "graphname": graphname,
@@ -415,6 +463,9 @@ def init_graph(
             "index_creation_status": json.dumps(index_res),
             "query_creation_status": json.dumps(query_res),
         }
+        if domain_schema_status is not None:
+            result["domain_schema_status"] = domain_schema_status
+        return result
 
     except Exception as e:
         LogWriter.error(f"Error initializing graph {graphname}: {str(e)}")
@@ -423,6 +474,179 @@ def init_graph(
             "message": f"Failed to initialize graph '{graphname}': {str(e)}",
             "details": str(e)
         }
+
+
+@router.post(route_prefix + "/{graphname}/convert_sample_files")
+async def convert_sample_files(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    files: Annotated[list[UploadFile], File(description="Sample documents (≤5)")],
+):
+    """
+    Step 1/2 of the sample-doc schema extraction flow:
+
+    Save uploaded sample files to ``uploads/<graphname>/`` and convert
+    each to JSONL under ``uploads/ingestion_temp/<graphname>/``. Files
+    are persisted so the Ingest Document dialog can reuse them, and
+    the JSONL cache means a subsequent Ingest run won't re-convert.
+
+    Returns the list of saved filenames so the caller can pass them
+    to ``POST /ui/<graph>/extract_schema_from_jsonl``.
+
+    No LLM call. Caps come from ``graphrag_config``:
+      * ``schema_max_sample_files`` (default 5)
+      * ``schema_max_total_mb`` (default 50)
+    """
+    max_files = int(graphrag_config.get("schema_max_sample_files", 5))
+    max_total_mb = int(graphrag_config.get("schema_max_total_mb", 50))
+    max_total_bytes = max_total_mb * 1024 * 1024
+    per_file_max_bytes = 10 * 1024 * 1024  # 10 MB per file (Phase 1 cap)
+
+    if len(files) > max_files:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files: got {len(files)}, max is {max_files}.",
+        )
+    if not files:
+        raise HTTPException(status_code=400, detail="No files supplied.")
+
+    upload_dir = os.path.join("uploads", graphname)
+    os.makedirs(upload_dir, exist_ok=True)
+    temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+    os.makedirs(temp_folder, exist_ok=True)
+
+    saved_basenames: list[str] = []
+    total_bytes = 0
+    for f in files:
+        data = await f.read()
+        if len(data) > per_file_max_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"File {f.filename} exceeds the 10 MB per-file cap."
+                ),
+            )
+        total_bytes += len(data)
+        if total_bytes > max_total_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Total upload exceeds {max_total_mb} MB cap."
+                ),
+            )
+        safe_name = os.path.basename(f.filename or "sample")
+        target = os.path.join(upload_dir, safe_name)
+        with open(target, "wb") as out:
+            out.write(data)
+        saved_basenames.append(safe_name)
+
+    extractor = TextExtractor()
+    try:
+        result = await extractor._process_folder_async(
+            upload_dir, graphname, temp_folder
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Text extraction failed: {exc}",
+        )
+
+    LogWriter.info(
+        f"Converted sample files for {graphname}: {len(files)} uploaded, "
+        f"{result.get('num_documents', 0)} docs in JSONL"
+    )
+    return {
+        "status": "success",
+        "graphname": graphname,
+        "saved_files": list(saved_basenames),
+        "num_documents": result.get("num_documents", 0),
+    }
+
+
+@router.post(route_prefix + "/{graphname}/extract_schema_from_jsonl")
+def extract_schema_from_jsonl(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict | None, Body()] = None,
+):
+    """
+    Step 2/2 of the sample-doc schema extraction flow:
+
+    Read the previously-converted JSONLs (from ``convert_sample_files``)
+    and run the schema-extraction LLM over them. Returns the proposed
+    domain schema as GSQL plus a structured proposal dict for the
+    form-mode editor.
+
+    Body:
+        ``{"filenames": ["report1.pdf", "report2.docx"]}``
+    The endpoint reads ``uploads/ingestion_temp/<graphname>/<stem>.jsonl``
+    for each name. If ``filenames`` is absent or empty, every JSONL in
+    the temp folder is consumed.
+    """
+    temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+    if not os.path.isdir(temp_folder):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No converted JSONLs found for graph {graphname}. "
+                "Run convert_sample_files first."
+            ),
+        )
+
+    requested = []
+    if isinstance(payload, dict):
+        requested = payload.get("filenames") or []
+
+    if requested:
+        jsonl_paths = []
+        for name in requested:
+            stem = os.path.splitext(os.path.basename(name))[0]
+            p = os.path.join(temp_folder, f"{stem}.jsonl")
+            if os.path.exists(p):
+                jsonl_paths.append(p)
+    else:
+        jsonl_paths = [
+            os.path.join(temp_folder, fn)
+            for fn in os.listdir(temp_folder)
+            if fn.endswith(".jsonl")
+        ]
+
+    samples: list[dict] = []
+    for jp in jsonl_paths:
+        with open(jp, "r", encoding="utf-8") as jf:
+            for line in jf:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    samples.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+
+    if not samples:
+        raise HTTPException(
+            status_code=400,
+            detail="No extractable text in the converted files.",
+        )
+
+    LogWriter.info(
+        f"Running schema extraction LLM for {graphname} "
+        f"({len(jsonl_paths)} JSONLs, {len(samples)} doc parts)"
+    )
+    llm_service = get_llm_service(get_completion_config(graphname))
+    gsql_text = schema_extraction_mod.extract_schema_gsql(
+        llm_service, samples
+    )
+    proposal = schema_utils_mod.parse_gsql_schema(gsql_text)
+    proposal.drop_dangling_pairs()
+    return {
+        "status": "success",
+        "graphname": graphname,
+        "schema_gsql": gsql_text,
+        "preview_gsql": schema_utils_mod.emit_preview_gsql(proposal),
+        "proposal": proposal.to_dict(),
+        "summary": schema_utils_mod.summarize(proposal),
+    }
 
 
 @router.post(route_prefix + "/{graphname}/rebuild_graph")
@@ -2156,6 +2380,28 @@ def _prepare_llm_config(llm_config_data: dict):
             if isinstance(svc, dict) and svc.get("region_name") == top_region:
                 del svc["region_name"]
 
+    # Normalize prompt_path: promote from completion_service to top
+    # level, strip per-service copies if identical (same pattern as
+    # auth / region). The UI doesn't expose per-service prompt_paths;
+    # in practice all services share the completion value.
+    if "prompt_path" not in llm_config_data:
+        completion_svc = llm_config_data.get("completion_service")
+        if isinstance(completion_svc, dict) and "prompt_path" in completion_svc:
+            llm_config_data["prompt_path"] = completion_svc["prompt_path"]
+
+    top_prompt_path = llm_config_data.get("prompt_path")
+    if top_prompt_path:
+        # Embedding excluded — embedding services never use prompt_path.
+        for svc_key in ["completion_service", "multimodal_service", "chat_service"]:
+            svc = llm_config_data.get(svc_key)
+            if isinstance(svc, dict) and svc.get("prompt_path") == top_prompt_path:
+                del svc["prompt_path"]
+        # If embedding_service somehow has a prompt_path on disk, strip
+        # it — it's never read.
+        emb = llm_config_data.get("embedding_service")
+        if isinstance(emb, dict) and "prompt_path" in emb:
+            del emb["prompt_path"]
+
     return llm_config_data, graphname, scope
 
 
@@ -2504,35 +2750,57 @@ async def save_graphrag_config(
         raise HTTPException(status_code=500, detail=f"Failed to save GraphRAG config: {str(e)}")
 
 
+#: Per-prompt-type list of regex patterns that mark the start of the
+#: placeholder-variables block. The first matching pattern wins.
+#: Patterns are tried in order so the canonical Markdown headers
+#: (``## Inputs`` / ``## Data``) match first; legacy patterns are
+#: kept as fallbacks for any older saved files.
+_TEMPLATE_VAR_MARKERS = {
+    "chatbot_response": [
+        r'(?ms)^##\s*Inputs\b.*$',
+        r'(?ms)^Question:\s*\{question\}.*$',
+    ],
+    "entity_relationship": [
+        # No placeholders in the entity-relationship system prompt.
+        # The whole content is editable.
+    ],
+    "community_summarization": [
+        r'(?ms)^##\s*Data\b.*$',
+        r'(?ms)^##\s*Inputs\b.*$',
+        r'(?ms)^#######\s*-Data-.*$',
+    ],
+    "query_generation": [
+        r'(?ms)^##\s*Inputs\b.*$',
+        r'(?ms)^\{format_instructions\}.*$',
+    ],
+    "schema_extraction": [
+        r'(?ms)^##\s*Inputs\b.*$',
+    ],
+}
+
+
 def split_prompt_template(prompt_content: str, prompt_type: str) -> dict:
+    """Split a prompt into editable prose and the trailing placeholder
+    block that users should not modify.
+
+    The placeholder block — everything from a canonical marker to end
+    of file — is preserved verbatim so the saved file always renders
+    with the original ``{placeholder}`` set even when the user's edit
+    inadvertently removes them from the prose. POST ``/prompts``
+    re-concatenates ``editable_content + "\\n\\n" + template_variables``
+    on save.
+
+    Returns ``{"editable_content": str, "template_variables": str}``.
     """
-    Split prompt into editable content and template variables that users should not modify.
-    Returns: {"editable_content": str, "template_variables": str}
-    """
-    if prompt_type == "chatbot_response":
-        pattern = r'(Question: \{question\}.*?)$'
-        match = re.search(pattern, prompt_content, re.DOTALL)
+    for pattern in _TEMPLATE_VAR_MARKERS.get(prompt_type, []):
+        match = re.search(pattern, prompt_content)
         if match:
-            template_vars = match.group(1).strip()
-            editable = prompt_content[:match.start()].strip()
-            return {"editable_content": editable, "template_variables": template_vars}
-
-    elif prompt_type == "query_generation":
-        pattern = r'(\{format_instructions\}.*?)$'
-        match = re.search(pattern, prompt_content, re.DOTALL)
-        if match:
-            template_vars = match.group(1).strip()
-            editable = prompt_content[:match.start()].strip()
-            return {"editable_content": editable, "template_variables": template_vars}
-
-    elif prompt_type == "community_summarization":
-        pattern = r'(#######\s*-Data-.*?)$'
-        match = re.search(pattern, prompt_content, re.DOTALL)
-        if match:
-            template_vars = match.group(1).strip()
-            editable = prompt_content[:match.start()].strip()
-            return {"editable_content": editable, "template_variables": template_vars}
-
+            template_vars = prompt_content[match.start():].strip()
+            editable = prompt_content[:match.start()].rstrip()
+            return {
+                "editable_content": editable,
+                "template_variables": template_vars,
+            }
     return {"editable_content": prompt_content, "template_variables": ""}
 
 
@@ -2547,42 +2815,63 @@ async def get_prompts(
     """
     try:
         access_level = _require_prompt_access(credentials, graphname)
-        active_config = get_chat_config(graphname)
-        default_prompt_path = active_config.get("prompt_path", "./common/prompts/openai_gpt4/")
+        chat_cfg = dict(get_chat_config(graphname))
+        completion_cfg = dict(get_completion_config(graphname))
+        if graphname:
+            chat_cfg["graphname"] = graphname
+            completion_cfg["graphname"] = graphname
+
+        # ``chatbot_response`` is consumed by the chat agent and must
+        # resolve through the chat service's ``prompt_path``. Every
+        # other prompt is consumed by completion-side code paths
+        # (entity / relationship extraction, schema extraction,
+        # community summarization, schema mapping) and resolves
+        # through the completion service's ``prompt_path``. When no
+        # ``chat_service`` is configured, ``get_chat_config`` already
+        # falls back to ``completion_service`` so this routing stays
+        # correct for single-service deployments.
+        chat_llm = get_llm_service(chat_cfg)
+        completion_llm = get_llm_service(completion_cfg)
+
+        # Each entry: (LLM service, base_llm property name). The
+        # property's resolution chain is graph-override →
+        # ``prompt_path`` file → hardcoded default in base_llm.py, so
+        # this single delegation gives the editor the right text in
+        # every case.
+        _PROMPT_SOURCE = {
+            "chatbot_response":
+                (chat_llm, "chatbot_response_prompt"),
+            "entity_relationship":
+                (completion_llm, "entity_relationship_extraction_prompt"),
+            "community_summarization":
+                (completion_llm, "community_summarize_prompt"),
+            "query_generation":
+                (completion_llm, "map_question_schema_prompt"),
+            "schema_extraction":
+                (completion_llm, "schema_extraction_prompt"),
+        }
+
+        def _get_prompt(prompt_type: str) -> dict:
+            svc, prop = _PROMPT_SOURCE[prompt_type]
+            try:
+                text = getattr(svc, prop, "") or ""
+            except Exception as exc:
+                logger.warning(
+                    f"Falling back to empty content for {prompt_type}: {exc}"
+                )
+                text = ""
+            if not text:
+                return {"editable_content": "", "template_variables": ""}
+            return split_prompt_template(text, prompt_type)
+
+        prompts = {pt: _get_prompt(pt) for pt in _PROMPT_SOURCE}
+
+        default_prompt_path = chat_cfg.get(
+            "prompt_path", "./common/prompts/openai_gpt4/"
+        )
         if default_prompt_path.startswith("./"):
             default_prompt_path = default_prompt_path[2:]
         default_prompt_path = default_prompt_path.rstrip("/")
-
-        # Per-graph prompt overrides directory (only contains customized files)
-        graph_prompt_dir = f"configs/graph_configs/{graphname}/prompts" if graphname else None
-
-        def _resolve_prompt_file(filename: str) -> str | None:
-            """Find prompt file: graph override first, then default."""
-            if graph_prompt_dir:
-                graph_file = os.path.join(graph_prompt_dir, filename)
-                if os.path.exists(graph_file):
-                    return graph_file
-            default_file = os.path.join(default_prompt_path, filename)
-            if os.path.exists(default_file):
-                return default_file
-            return None
-
-        def _read_prompt(filename: str, prompt_type: str) -> dict:
-            filepath = _resolve_prompt_file(filename)
-            if filepath:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    return split_prompt_template(f.read(), prompt_type)
-            return {"editable_content": "", "template_variables": ""}
-
-        prompts = {}
-        prompts["chatbot_response"] = _read_prompt("chatbot_response.txt", "chatbot_response")
-        prompts["entity_relationship"] = _read_prompt("entity_relationship_extraction.txt", "entity_relationship")
-        prompts["community_summarization"] = _read_prompt("community_summarization.txt", "community_summarization")
-
-        query_gen = _read_prompt("map_question_to_schema.txt", "query_generation")
-        if not query_gen["editable_content"]:
-            query_gen = _read_prompt("query_generation.txt", "query_generation")
-        prompts["query_generation"] = query_gen
 
         # Graph-admin (chatbot_only) only sees chatbot_response
         if access_level == "chatbot_only":
@@ -2591,7 +2880,7 @@ async def get_prompts(
         return {
             "prompts": prompts,
             "prompt_path": default_prompt_path,
-            "configured_provider": active_config.get("llm_service", "openai")
+            "configured_provider": chat_cfg.get("llm_service", "openai"),
         }
 
     except HTTPException:
@@ -2644,44 +2933,86 @@ async def save_prompts(
             os.makedirs(graph_prompt_dir, exist_ok=True)
             prompt_path = graph_prompt_dir
         else:
-            # Global: seed persistent dir from defaults if needed
-            default_prompt_path = get_chat_config().get("prompt_path", "./common/prompts/openai_gpt4/")
-            if default_prompt_path.startswith("./"):
-                default_prompt_path = default_prompt_path[2:]
-            default_prompt_path = default_prompt_path.rstrip("/")
-
+            # Global: route writes to the persistent override dir
+            # ``configs/prompts/`` so user edits survive container
+            # restarts. The dir starts empty — base_llm.py serves the
+            # hardcoded default for every prompt the user hasn't
+            # touched.
+            #
+            # ``prompt_path`` lives at the top level of ``llm_config``
+            # and is injected into every service that doesn't override
+            # it (mirrors the ``authentication_configuration`` /
+            # ``region_name`` pattern). One write here suffices for
+            # every consumer (chatbot_response via chat_service,
+            # entity_relationship / schema_extraction via
+            # completion_service, multimodal via multimodal_service).
             persistent_prompt_dir = "configs/prompts"
-            if not default_prompt_path.startswith("configs/"):
-                os.makedirs(persistent_prompt_dir, exist_ok=True)
-                if os.path.exists(default_prompt_path):
-                    for fname in os.listdir(default_prompt_path):
-                        src = os.path.join(default_prompt_path, fname)
-                        dst = os.path.join(persistent_prompt_dir, fname)
-                        if os.path.isfile(src) and not os.path.exists(dst):
-                            shutil.copy2(src, dst)
-                from common.config import reload_llm_config, _config_file_lock
-                with _config_file_lock:
-                    with open(SERVER_CONFIG, "r") as f:
-                        server_cfg = json.load(f)
-                    server_cfg["llm_config"]["completion_service"]["prompt_path"] = f"./{persistent_prompt_dir}/"
+            os.makedirs(persistent_prompt_dir, exist_ok=True)
+            new_path = f"./{persistent_prompt_dir}/"
+
+            from common.config import reload_llm_config, _config_file_lock, SERVER_CONFIG
+            # Acquire the lock to read-modify-write the server config,
+            # then RELEASE before calling ``reload_llm_config()`` —
+            # reload acquires the same lock internally, so calling it
+            # while held would deadlock.
+            changed = False
+            with _config_file_lock:
+                with open(SERVER_CONFIG, "r") as f:
+                    server_cfg = json.load(f)
+                llm_cfg = server_cfg.setdefault("llm_config", {})
+                if (llm_cfg.get("prompt_path") or "").rstrip("/") != new_path.rstrip("/"):
+                    llm_cfg["prompt_path"] = new_path
+                    changed = True
+                # Strip per-service copies — they're redundant once the
+                # top-level field is set. Keeps the config clean and
+                # avoids stale per-service entries shadowing future
+                # global changes. ``embedding_service`` is included
+                # only to scrub stray legacy entries; embedding models
+                # never read prompt_path.
+                for svc_key in (
+                    "completion_service",
+                    "chat_service",
+                    "multimodal_service",
+                    "embedding_service",
+                ):
+                    svc = llm_cfg.get(svc_key)
+                    if isinstance(svc, dict) and "prompt_path" in svc:
+                        del svc["prompt_path"]
+                        changed = True
+                if changed:
                     temp_file = f"{SERVER_CONFIG}.tmp"
                     with open(temp_file, "w") as f:
                         json.dump(server_cfg, f, indent=2)
                     os.replace(temp_file, SERVER_CONFIG)
+            if changed:
                 reload_llm_config()
-                prompt_path = persistent_prompt_dir
-            else:
-                prompt_path = default_prompt_path
+            prompt_path = persistent_prompt_dir
 
         prompt_type_to_file = {
             "chatbot_response": "chatbot_response.txt",
             "entity_relationship": "entity_relationship_extraction.txt",
             "community_summarization": "community_summarization.txt",
             "query_generation": "map_question_to_schema.txt",
+            "schema_extraction": "schema_extraction.txt",
         }
 
         if prompt_type not in prompt_type_to_file:
             raise HTTPException(status_code=400, detail=f"Invalid prompt_type: {prompt_type}")
+
+        # Gatekeepers — escape stray ``{token}`` occurrences (so user
+        # examples like ``{example}`` don't crash str.format at call
+        # time) and reject saves that miss a required placeholder.
+        from common.utils.prompt_validation import validate_and_escape_prompt
+        content, missing = validate_and_escape_prompt(content, prompt_type)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Prompt is missing required placeholders: "
+                    + ", ".join("{" + m + "}" for m in missing)
+                    + ". Add them to the prompt before saving."
+                ),
+            )
 
         file_path = os.path.join(prompt_path, prompt_type_to_file[prompt_type])
         temp_file = f"{file_path}.tmp"
@@ -2694,8 +3025,9 @@ async def save_prompts(
             "entity_relationship": "Entity relationship prompt saved successfully",
             "community_summarization": "Community summarization prompt saved successfully",
             "query_generation": "Schema instructions prompt saved successfully",
+            "schema_extraction": "Schema extraction prompt saved successfully",
         }
-        return {"status": "success", "message": messages[prompt_type]}
+        return {"status": "success", "message": messages.get(prompt_type, "Prompt saved successfully")}
 
     except HTTPException:
         raise

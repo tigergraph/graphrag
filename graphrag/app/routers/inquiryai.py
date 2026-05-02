@@ -10,7 +10,7 @@ from fastapi import (APIRouter, Depends, HTTPException, Request,
 from fastapi.security.http import HTTPBase
 from tools.validation_utils import MapQuestionToSchemaException
 
-from common.config import embedding_service, embedding_store, session_handler, service_status
+from common.config import get_embedding_service, get_embedding_store, session_handler, service_status
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
@@ -26,11 +26,14 @@ security = HTTPBase(scheme="basic", auto_error=False)
 
 
 def check_embedding_store_status():
-    if service_status["embedding_store"]["error"]:
-        return HTTPException(
-            status_code=503,
-            detail=service_status["embedding_store"]["error"]
-        )
+    """Validate embedding store is ready, raising 503 if not.
+
+    Also returns the store instance so callers can use it directly.
+    """
+    try:
+        return get_embedding_store(timeout=0)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/{graphname}/query")
@@ -59,7 +62,7 @@ def retrieve_answer(
     try:
         resp = agent.question_for_agent(query.query)
         # Note: tg:// protocol conversion happens in agent_graph.py
-        pmetrics.llm_success_response_total.labels(embedding_service.model_name).inc()
+        pmetrics.llm_success_response_total.labels(get_embedding_service().model_name).inc()
     except MapQuestionToSchemaException:
         resp.natural_language_response = (
             "A schema mapping error occurred. Please try rephrasing your question."
@@ -69,7 +72,7 @@ def retrieve_answer(
         LogWriter.warning(
             f"/{graphname}/query request_id={req_id_cv.get()} agent execution failed due to MapQuestionToSchemaException"
         )
-        pmetrics.llm_query_error_total.labels(embedding_service.model_name).inc()
+        pmetrics.llm_query_error_total.labels(get_embedding_service().model_name).inc()
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/{graphname}/query request_id={req_id_cv.get()} Exception Trace:\n{exc}"
@@ -89,7 +92,7 @@ def retrieve_answer(
         logger.debug_pii(
             f"/{graphname}/query request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        pmetrics.llm_query_error_total.labels(embedding_service.model_name).inc()
+        pmetrics.llm_query_error_total.labels(get_embedding_service().model_name).inc()
 
     return resp
 
@@ -148,7 +151,7 @@ def retrieve_answer_with_chathistory(
                 resp.natural_language_response
             )
         
-        pmetrics.llm_success_response_total.labels(embedding_service.model_name).inc()
+        pmetrics.llm_success_response_total.labels(get_embedding_service().model_name).inc()
 
         conversation_history.append(
             {"query": query.query, "response": resp.natural_language_response}
@@ -163,7 +166,7 @@ def retrieve_answer_with_chathistory(
         LogWriter.warning(
             f"/{graphname}/query_with_history request_id={req_id_cv.get()} agent execution failed due to MapQuestionToSchemaException"
         )
-        pmetrics.llm_query_error_total.labels(embedding_service.model_name).inc()
+        pmetrics.llm_query_error_total.labels(get_embedding_service().model_name).inc()
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/{graphname}/query_with_history request_id={req_id_cv.get()} Exception Trace:\n{exc}"
@@ -184,7 +187,7 @@ def retrieve_answer_with_chathistory(
         logger.debug_pii(
             f"/{graphname}/query_with_history request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        pmetrics.llm_query_error_total.labels(embedding_service.model_name).inc()
+        pmetrics.llm_query_error_total.labels(get_embedding_service().model_name).inc()
 
     return resp
 
@@ -196,13 +199,13 @@ def list_registered_queries(
     check_embedding_store_status()
     conn = conn.state.conn
     if conn.getVer().split(".")[0] <= "3":
-        query_descs = embedding_store.list_registered_documents(
+        query_descs = get_embedding_store().list_registered_documents(
             graphname=graphname,
             only_custom=True,
             output_fields=["function_header", "text"],
         )
     else:
-        queries = embedding_store.list_registered_documents(
+        queries = get_embedding_store().list_registered_documents(
             graphname=graphname, only_custom=True, output_fields=["function_header"]
         )
         if not queries:
@@ -218,7 +221,7 @@ def get_query_embedding(graphname, query: NaturalLanguageQuery):
         f"/{graphname}/getqueryembedding request_id={req_id_cv.get()} question={query.query}"
     )
 
-    return embedding_service.embed_query(query.query)
+    return get_embedding_service().embed_query(query.query)
 
 
 @router.post("/{graphname}/register_docs")
@@ -235,7 +238,7 @@ def register_docs(
         conn.echo()
     except Exception as e:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    logger.debug(f"Using embedding store: {embedding_store}")
+    logger.debug(f"Using embedding store: {get_embedding_store()}")
     results = []
 
     if not isinstance(query_list, list):
@@ -246,9 +249,9 @@ def register_docs(
             f"/{graphname}/register_docs request_id={req_id_cv.get()} registering {query_info.function_header}"
         )
 
-        vec = embedding_service.embed_query(query_info.docstring)
+        vec = get_embedding_service().embed_query(query_info.docstring)
         param_types = conn.getQueryMetadata(query_info.function_header)["input"]
-        res = embedding_store.add_embeddings(
+        res = get_embedding_store().add_embeddings(
             [(query_info.docstring + 
                   ".\nRun with runInstalledQuery('" +
                   query_info.function_header +
@@ -384,7 +387,7 @@ def upsert_docs(
                 try:
                     # expr = f"function_header in ['{query_info.function_header}']"
                     expr = f"function_header == '{query_info.function_header}'"
-                    id = embedding_store.get_pks(expr)
+                    id = get_embedding_store().get_pks(expr)
                     if id:
                         id = str(id[0])
                         logger.info(
@@ -405,8 +408,8 @@ def upsert_docs(
                 f"/{graphname}/upsert_docs request_id={req_id_cv.get()} upserting document(s)"
             )
             param_types = conn.getQueryMetadata(query_info.function_header)["input"]
-            vec = embedding_service.embed_query(query_info.docstring)
-            res = embedding_store.upsert_embeddings(
+            vec = get_embedding_service().embed_query(query_info.docstring)
+            res = get_embedding_store().upsert_embeddings(
                 id,
                 [(query_info.docstring + 
                   ".\nRun with runInstalledQuery('" +
@@ -468,10 +471,10 @@ def delete_docs(
     # Call the remove_embeddings method based on provided IDs or expression
     try:
         if expr:
-            res = embedding_store.remove_embeddings(expr=expr)
+            res = get_embedding_store().remove_embeddings(expr=expr)
             return res
         elif ids:
-            res = embedding_store.remove_embeddings(ids=ids)
+            res = get_embedding_store().remove_embeddings(ids=ids)
             return res
         else:
             raise HTTPException(
@@ -492,8 +495,8 @@ def retrieve_docs(
         f"/{graphname}/retrieve_docs request_id={req_id_cv.get()} top_k={top_k} question={query.query}"
     )
     check_embedding_store_status()
-    return embedding_store.retrieve_similar(
-        embedding_service.embed_query(query.query), top_k=top_k
+    return get_embedding_store().retrieve_similar(
+        get_embedding_service().embed_query(query.query), top_k=top_k
     )
 
 

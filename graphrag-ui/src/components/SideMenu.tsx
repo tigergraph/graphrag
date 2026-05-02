@@ -9,6 +9,7 @@ import { HiOutlineChatBubbleOvalLeft } from "react-icons/hi2";
 import { MdKeyboardArrowDown, MdKeyboardArrowUp } from "react-icons/md";
 import { IoIosArrowForward } from "react-icons/io";
 import { useTheme } from "@/components/ThemeProvider";
+import { safeJson } from "@/utils/safeJson";
 import { GoGear } from "react-icons/go";
 import { useState } from "react";
 import {
@@ -98,7 +99,7 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
         return;
       }
 
-      const data = await response.json();
+      const data = await safeJson(response);
 
       if (!Array.isArray(data) || data.length === 0) {
         setConversationId([]);
@@ -120,7 +121,7 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
           if (!response2.ok) {
             return null;
           }
-          const content = await response2.json();
+          const content = await safeJson(response2);
 
           // Get the most recent message timestamp for sorting
           let lastUpdateTime = item.update_ts || item.create_ts;
@@ -204,7 +205,7 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
         return;
       }
 
-      const data = await response.json();
+      const data = await safeJson(response);
       setConversationId2(data);
 
       // Store the conversation data in sessionStorage for the chat component

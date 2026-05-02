@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # src: https://github.com/microsoft/graphrag/blob/main/graphrag/index/graph/extractors/summarize/prompts.py
 
-id_pat = re.compile(r"[_\d]*")
+id_pat = re.compile(r"(_\d+)+$")
 
 
 class CommunitySummarizer:
