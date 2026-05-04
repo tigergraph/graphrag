@@ -75,6 +75,15 @@ TRACE_LOGS_DIR = os.environ.get("TRACE_LOGS_DIR", "/code/trace_logs")
 def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float):
     try:
         os.makedirs(TRACE_LOGS_DIR, exist_ok=True)
+
+        # Strip chunk text from query_sources to keep trace files small.
+        # final_retrieval contains the full text of every retrieved chunk.
+        query_sources = dict(resp.query_sources) if resp.query_sources else {}
+        result = query_sources.get("result")
+        if isinstance(result, dict) and "final_retrieval" in result:
+            result = {k: v for k, v in result.items() if k != "final_retrieval"}
+            query_sources = {**query_sources, "result": result}
+
         trace_data = {
             "message_id": message_id,
             "conversation_id": conversation_id,
@@ -82,7 +91,7 @@ def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp
             "response_time": elapsed,
             "response_type": resp.response_type,
             "answered_question": resp.answered_question,
-            "query_sources": resp.query_sources,
+            "query_sources": query_sources,
             "natural_language_response": resp.natural_language_response,
             "timestamp": time.time(),
         }
