@@ -156,10 +156,6 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
 
   // ── Citations ───────────────────────────────────────────────────────────
   const rawReasoning = qs.reasoning;
-  const finalRetrieval =
-    typeof qs.result === "object" && qs.result?.final_retrieval
-      ? qs.result.final_retrieval
-      : null;
   const citations: CitationEntry[] = [];
 
   if (rawReasoning && Array.isArray(rawReasoning)) {
@@ -169,17 +165,11 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
       const cited = raw.startsWith("* ");
       const chunkName = raw.replace(/^\*\s*/, "");
 
-      let chunkText = "";
-      if (finalRetrieval && finalRetrieval[chunkName]) {
-        const val = finalRetrieval[chunkName];
-        chunkText = Array.isArray(val) ? val.join("\n\n") : String(val);
-      }
-
       citations.push({
         id: i + 1,
         source: chunkName,
         cited,
-        text: chunkText,
+        text: "",
       });
     });
   }
@@ -524,47 +514,25 @@ const ToolCallsPanel: FC<{ trace: TraceData }> = ({ trace }) => (
 );
 
 
-const CitationRow: FC<{ c: CitationEntry }> = ({ c }) => {
-  const [open, setOpen] = useState(false);
-  return (
-    <div
-      className={`rounded-lg mb-2 overflow-hidden ${
-        c.cited
-          ? "bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800"
-          : "bg-orange-50 dark:bg-orange-900/15 border border-orange-200 dark:border-orange-800"
-      }`}
-    >
-      <div
-        className="flex items-center justify-between px-4 py-3 cursor-pointer"
-        onClick={() => setOpen((p) => !p)}
-      >
-        <div className="flex items-center gap-3 flex-1 min-w-0">
-          <LuBookOpen className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
-          <span className="text-sm font-semibold truncate">
-            [{c.source}]
-          </span>
-          {c.cited && (
-            <span className="bg-red-500 text-white text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0">
-              Cited
-            </span>
-          )}
-        </div>
-        <div className="ml-2 shrink-0">
-          {open ? (
-            <LuChevronUp className="w-4 h-4 text-muted-foreground" />
-          ) : (
-            <LuChevronDown className="w-4 h-4 text-muted-foreground" />
-          )}
-        </div>
-      </div>
-      {open && (
-        <div className="px-4 pb-4 text-sm text-foreground/80 whitespace-pre-wrap border-t border-amber-200 dark:border-amber-800 pt-3">
-          {c.text || "No content retrieved for this chunk."}
-        </div>
+const CitationRow: FC<{ c: CitationEntry }> = ({ c }) => (
+  <div
+    className={`rounded-lg mb-2 ${
+      c.cited
+        ? "bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800"
+        : "bg-orange-50 dark:bg-orange-900/15 border border-orange-200 dark:border-orange-800"
+    }`}
+  >
+    <div className="flex items-center gap-3 px-4 py-3">
+      <LuBookOpen className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
+      <span className="text-sm font-semibold truncate">[{c.source}]</span>
+      {c.cited && (
+        <span className="bg-red-500 text-white text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0">
+          Cited
+        </span>
       )}
     </div>
-  );
-};
+  </div>
+);
 
 const CitationsPanel: FC<{ trace: TraceData }> = ({ trace }) => (
   <div className="space-y-2">
