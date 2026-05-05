@@ -1006,16 +1006,32 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                       ? `Upload destination: uploads/${ingestGraphName}/`
                       : ""}
                   </p>
-                  {selectedFiles && Array.from(selectedFiles).some((f) =>
-                    [".csv", ".xlsx", ".xls"].includes(f.name.slice(f.name.lastIndexOf(".")).toLowerCase())
-                  ) && (
-                    <div className="flex items-start gap-2 mt-2 p-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700">
-                      <span className="text-amber-500 mt-0.5 shrink-0">ℹ️</span>
-                      <p className="text-xs text-amber-700 dark:text-amber-300">
-                        CSV and Excel files will be treated as unstructured text documents.
-                      </p>
-                    </div>
-                  )}
+                  {selectedFiles && (() => {
+                    const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".pdf", ".docx", ".doc", ".html", ".htm", ".json", ".csv", ".xlsx", ".xls", ".xml", ".jpeg", ".jpg", ".png", ".gif", ".jsonl"]);
+                    const files = Array.from(selectedFiles);
+                    const unsupported = files.filter((f) => !SUPPORTED_EXTENSIONS.has(f.name.slice(f.name.lastIndexOf(".")).toLowerCase()));
+                    const hasCsvExcel = files.some((f) => [".csv", ".xlsx", ".xls"].includes(f.name.slice(f.name.lastIndexOf(".")).toLowerCase()));
+                    return (
+                      <>
+                        {unsupported.length > 0 && (
+                          <div className="flex items-start gap-2 mt-2 p-2 rounded-md bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700">
+                            <span className="text-red-500 mt-0.5 shrink-0">⚠️</span>
+                            <p className="text-xs text-red-700 dark:text-red-300">
+                              Unsupported file type{unsupported.length > 1 ? "s" : ""}: <strong>{unsupported.map((f) => f.name).join(", ")}</strong>. These files will be skipped during ingestion.
+                            </p>
+                          </div>
+                        )}
+                        {hasCsvExcel && (
+                          <div className="flex items-start gap-2 mt-2 p-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700">
+                            <span className="text-amber-500 mt-0.5 shrink-0">ℹ️</span>
+                            <p className="text-xs text-amber-700 dark:text-amber-300">
+                              CSV and Excel files will be treated as unstructured text documents.
+                            </p>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
 
                 <div className="flex gap-2">
