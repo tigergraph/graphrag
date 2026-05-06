@@ -36,6 +36,7 @@ from tools import MapQuestionToSchemaException
 from typing_extensions import TypedDict
 
 from common.logs.log import req_id_cv
+from common.metrics.prometheus_metrics import metrics as pmetrics
 from common.py_schemas import GraphRAGResponse, MapQuestionToSchemaResponse
 from common.llm_services.aws_bedrock_service import AWSBedrock
 from common.config import get_graphrag_config
@@ -498,6 +499,15 @@ class TigerGraphAgentGraph:
         state["chosen_retriever_reason"] = chosen_reason
         state["chosen_retriever_source"] = chosen_source
 
+        # Phase 1.5 — telemetry: count selection by method + source so operators
+        # can see the auto-vs-manual distribution and rules-vs-llm hit rate.
+        try:
+            pmetrics.llm_method_selection_total.labels(
+                selected_method=method, selection_source=chosen_source
+            ).inc()
+        except Exception:  # noqa: BLE001 - metrics must never break the request path
+            pass
+
         if method == "hybridsearch":
             result_state = self.hybrid_search(state)
         elif method == "similaritysearch":
@@ -516,6 +526,21 @@ class TigerGraphAgentGraph:
             ctx["chosen_retriever"] = method
             ctx["chosen_retriever_reason"] = chosen_reason
             ctx["chosen_retriever_source"] = chosen_source
+
+            # Phase 1.5 — out-of-corpus short-circuit (single-method partial).
+            # If the chosen retriever returned no usable results, mark the
+            # context so generate_answer skips the LLM call and returns an
+            # honest "couldn't find relevant info" message instead of letting
+            # the model hallucinate from empty/off-topic context.
+            result = ctx.get("result") if isinstance(ctx.get("result"), dict) else {}
+            final_retrieval = result.get("final_retrieval") if isinstance(result, dict) else None
+            if not final_retrieval:
+                ctx["out_of_corpus"] = True
+                self.emit_progress(
+                    f"No relevant information found in the knowledge graph "
+                    f"for {method} search"
+                )
+
             result_state["context"] = ctx
 
         return result_state
@@ -534,6 +559,33 @@ class TigerGraphAgentGraph:
             logger.debug_pii(
                 f"""request_id={req_id_cv.get()} Got result: {state["context"]["result"]}"""
             )
+
+            # Phase 1.5 — out-of-corpus short-circuit. supportai_search flagged
+            # the context as having no usable retrieval results; produce an
+            # honest "couldn't find" answer instead of letting the LLM
+            # hallucinate from empty context.
+            if isinstance(state.get("context"), dict) and state["context"].get("out_of_corpus"):
+                method = state.get("chosen_retriever") or self.supportai_retriever
+                label = self._METHOD_DISPLAY_NAMES.get(method, method)
+                ooc_msg = (
+                    "I couldn't find relevant information about this topic in "
+                    "the knowledge graph (using "
+                    f"{label} search). The corpus may not cover this question — "
+                    "try rephrasing or asking about a topic the documents discuss."
+                )
+                resp = GraphRAGResponse(
+                    natural_language_response=ooc_msg,
+                    answered_question=False,
+                    response_type="supportai",
+                    query_sources=state["context"],
+                )
+                state["answer"] = resp
+                logger.info(
+                    f"request_id={req_id_cv.get()} out-of-corpus short-circuit "
+                    f"(method={method})"
+                )
+                return state
+
             context = state["context"]["result"]["final_retrieval"]
             citations = sorted(list(context.keys()))
             answer = step.generate_answer(

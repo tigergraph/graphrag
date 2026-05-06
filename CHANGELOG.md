@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.4.0]
+
+### Added
+- **Auto retrieval method selection** — new "Auto" option in the chat dropdown picks among Similarity / Contextual / Hybrid / Community per question
+  - Two-stage selector: deterministic regex rules cover common cases; LLM fallback handles the rest with a subset-aware prompt
+  - Selection visible via a chip below each bot reply (method, reason, auto/manual)
+  - Manual method selection still works as override during the transition
+- **Method selection telemetry** — Prometheus counter `llm_method_selection_total` with `selected_method` and `selection_source` labels
+- **Out-of-corpus short-circuit** — when the chosen retriever returns no results, the system returns an honest "couldn't find relevant info" message instead of letting the LLM hallucinate from empty context
+
 ## [1.3.1]
 
 ### Changed
