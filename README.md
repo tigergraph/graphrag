@@ -43,6 +43,14 @@
     - [Ollama](#ollama)
     - [Hugging Face](#hugging-face)
     - [Groq](#groq)
+- [Tuning Guideline](#tuning-guideline)
+  - [Tune in the right order](#1-tune-in-the-right-order)
+  - [Chunking](#2-chunking--get-the-granularity-right)
+  - [Extraction](#3-extraction--make-the-graph-clean-before-tuning-retrieval)
+  - [Retrieval](#4-retrieval--match-context-size-to-the-question)
+  - [Prompts](#5-prompts--last-resort-biggest-leverage-when-the-rest-is-right)
+  - [Performance / cost knobs](#6-performance--cost-knobs)
+  - [A working tuning loop](#7-a-working-tuning-loop)
 - [Customization and Extensibility](#customization-and-extensibility)
   - [Test Your Code Changes](#test-your-code-changes)
     - [Testing with Pytest](#testing-with-pytest)
@@ -55,8 +63,9 @@
 ---
 
 ## Releases
-* **2/28/2026**: GraphRAG v1.2.0 released. Added Admin UI for graph initialization, document ingestion, and knowledge graph rebuild, along with many other improvements and bug fixes. See [release notes](https://github.com/tigergraph/graphrag/releases/tag/v1.2.0) for details.
-* **9/22/2025**: GraphRAG is available now officially v1.1 (v1.1.0). AWS Bedrock support is completed with BDA integration for multimodal document ingestion. See [release notes](https://github.com/tigergraph/graphrag/releases/tag/v1.1.0) for details.
+* **4/10/2026**: GraphRAG v1.3.0 released. Added an admin configuration UI with role-based access and per-graph chatbot LLM override, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.3.0) for details.
+* **2/28/2026**: GraphRAG v1.2.0 released. Added Admin UI for graph initialization, document ingestion, and knowledge graph rebuild, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.2.0) for details.
+* **9/22/2025**: GraphRAG is available now officially v1.1 (v1.1.0). AWS Bedrock support is completed with BDA integration for multimodal document ingestion. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.1.0) for details.
 * **6/18/2025**: GraphRAG is available now officially v1.0 (v1.0.0). TigerGraph database is the only graph and vector storagge supported.
 Please see [Release Notes](https://docs.tigergraph.com/tg-graphrag/current/release-notes/) for details.
 
@@ -873,6 +882,112 @@ Example configuration for a model on Hugging Face with a serverless endpoint is 
     }
 }
 ```
+
+[Go back to top](#top)
+
+---
+
+## Tuning Guideline
+
+GraphRAG answer quality, latency, and LLM cost are sensitive to a small set of parameters and prompts. This section is a high-level strategy — adjust *one knob at a time*, run the same set of evaluation questions before and after each change, and keep what helps. Detailed parameter descriptions live in [GraphRAG configuration](#graphrag-configuration).
+
+### 1. Tune in the right order
+
+A common mistake is tuning retrieval and prompts before the underlying graph is good. Work bottom-up:
+
+1. **Chunking** — fix how the source documents are split.
+2. **Extraction** — fix what entities / relationships are pulled from each chunk.
+3. **Retrieval** — pick the right context for each question.
+4. **Response prompts** — shape the final answer.
+
+A bad answer at step 4 is rarely fixed by editing the response prompt; usually it's caused by step 1, 2, or 3.
+
+### 2. Chunking — get the granularity right
+
+| Symptom | Likely cause | Tweak |
+| --- | --- | --- |
+| Answers cite irrelevant facts from elsewhere in the same chunk | chunks too large | drop `chunk_size` (`character` / `markdown` / `html` / `recursive` chunkers); raise `threshold` (`semantic`) so it splits more aggressively |
+| Answers miss context that's clearly in the source | chunks too small or no overlap | raise `chunk_size`; bump `overlap_size` (default 1/8 of `chunk_size`); lower `threshold` (`semantic`) |
+| Tables / figures get fragmented | wrong chunker for the source | use `markdown` for markdown / docs converted to markdown; use `html` for HTML pages with structure; use `regex` with a custom `pattern` for structured logs |
+| Cross-section reasoning fails | no overlap | increase `overlap_size` to ~25% of `chunk_size` |
+
+Default starting point for prose: `chunker: "semantic"`, `threshold: 0.95`, `chunker_config.method: "percentile"`. Move to `markdown` chunker with `chunk_size: 2048` and `overlap_size: 256` if your source is markdown-heavy and table integrity matters.
+
+### 3. Extraction — make the graph clean before tuning retrieval
+
+The extraction prompt drives what becomes a vertex / edge. Two failure modes show up:
+
+- **Document-structure noise** — the graph fills up with layout artifacts (page numbers, section headers, table captions, chart labels) instead of domain entities. This crushes downstream retrieval because the LLM has to wade through structural junk.
+- **Generic abstractions** — over-merged or under-specified buckets (e.g. an "entity" or "record" type that swallows everything) instead of the concrete domain types you actually care about. For example, in a financial corpus you want `Company`, `Fund`, `Account`, `Person`, `Filing`, `Risk` — not a single `record` bin.
+
+Today's primary lever is the **entity-extraction prompt**:
+
+- **Customize the prompt for your domain** via Settings → *Customize Prompts* → entity extraction. Tell the LLM explicitly what counts and what doesn't. For a financial domain: *"Extract concrete real-world entities (companies, people, funds, accounts, filings, transactions, risks). Ignore document layout (page numbers, headers/footers, tables, captions, figures, navigation menus)."*
+- **Add 1–2 short domain examples** in the prompt. Even one well-chosen exemplar (an extracted entity with type and definition) dramatically improves consistency across chunks.
+- **List the canonical edge verbs you want.** Encourage `PUBLISHES`, `OWNS`, `ISSUES`, `MANAGES`, `REPORTS_ON` in the relationship-extraction prompt rather than letting the LLM emit ad-hoc nominal phrases.
+
+If extraction quality is still poor after iterating on the prompt, the next-best option today is to clear the graph's domain types and re-ingest with the improved prompt — schema growth is currently driven entirely by what extraction produces. (A schema-aware initialization flow that lets you supply a curated schema up front is on the roadmap.)
+
+### 4. Retrieval — match context size to the question
+
+Three knobs interact: `top_k`, `num_hops`, `num_seen_min`. Also `chunk_only` / `doc_only` and (for community search) `community_level` / `with_chunk`.
+
+| Question style | Recommended start | Reasoning |
+| --- | --- | --- |
+| *"What is X?"* (specific lookup) | `top_k=3`, `num_hops=1`, `num_seen_min=1` | Tight neighborhood, few seeds. |
+| *"How are X and Y related?"* (relational) | `top_k=5`, `num_hops=2`, `num_seen_min=1` | Need to traverse between concepts. |
+| *"Summarize the report"* (broad) | `top_k=8`, `num_hops=2`, `num_seen_min=2` | More seeds, filter loose connections. |
+| *"Compare A across multiple sections"* (multi-hop reasoning) | `top_k=8`, `num_hops=3`, `num_seen_min=2` | Wide traversal, but tighten the filter. |
+| *"List all X"* (aggregation) | use *Community Search* with `community_level: 1–2` | Broader summaries, not chunk-level retrieval. |
+
+Heuristics:
+
+- If the answer is **vague or hallucinated**, you don't have enough context: raise `top_k` first, then `num_hops`.
+- If the answer is **drowning in irrelevant detail**, you have too much: drop `top_k`, raise `num_seen_min`, or set `chunk_only: true`.
+- If the answer **misses things across sections**, raise `num_hops` (1 → 2 → 3). Each extra hop multiplies result size, so don't go past 3 without strong evidence.
+- If the answer **cites whole documents but loses chunk-level detail**, set `doc_only: false` and `chunk_only: true`.
+- For broad-survey questions, prefer `community_search` over hybrid; tune `community_level` (lower = more granular communities, higher = broader summaries).
+
+Each tweak should be made **alone** — moving `top_k` and `num_hops` together makes it impossible to tell which one helped.
+
+### 5. Prompts — last resort, biggest leverage when the rest is right
+
+Customize prompts via the UI: *Settings → Customize Prompts*. The four customizable prompt groups (UI labels and underlying ids):
+
+- **Entity Relationships** (`entity_relationship`) — combined entity- and relationship-extraction prompt; controls what becomes a vertex / edge. Tune for noise suppression, domain specificity, and verb-form edge names (e.g. `PUBLISHES`, `OWNS`, `MANAGES` instead of nominal phrases). See §3.
+- **Schema Instructions** (`query_generation`) — instructions used when generating GSQL / Cypher and when filtering the schema for a structured query. Tune if your domain has unusual type names that aren't matching user phrasing, or if generated queries miss obvious joins.
+- **Community Summarization** (`community_summarization`) — how community summaries are produced during knowledge-graph build. Tune for length / tone and to bias summaries toward domain-specific framing.
+- **Chatbot Responses** (`chatbot_response`) — the final answer template. Keep it short; the LLM responds best to clear constraints (*"answer in ≤3 sentences, cite the doc id"*).
+
+When customizing:
+
+- **Always start from the system default** (don't write from scratch).
+- **Keep examples short and domain-relevant.**
+- **Test with the same evaluation set** before and after — a prompt change that fixes one question often regresses another.
+- **Know where overrides live.** The runtime resolves prompt files in this order:
+  1. Graph-scoped: `configs/graph_configs/<graphname>/prompts/<filename>.txt` — created when you edit prompts with a specific graph selected. Highest priority.
+  2. Global override: `configs/prompts/<filename>.txt` — created when you edit prompts globally and the bundled provider default path is read-only.
+  3. Provider default (bundled): `./common/prompts/<provider>/<filename>.txt` — selected by the `prompt_path` field in the LLM config. Shipped with the deployment.
+- **Version-control the override directories** so they survive container rebuilds and travel with the deployment.
+- **Delete custom prompt overrides** if you suspect they're stale; the system falls back to the next layer cleanly.
+
+### 6. Performance / cost knobs
+
+- **`default_concurrency`** drives all internal semaphores. ECC uses 2× this value for ingest workers; the chatbot uses 1×. Raise it to speed up ingestion of large corpora; lower it if you're hitting LLM rate limits or seeing socket exhaustion.
+- **`reuse_embedding: true`** skips re-embedding identical text — major saving on re-ingest of unchanged documents.
+- **Choose `llm_model` thoughtfully** — entity / relationship extraction tolerates cheaper / faster models (Haiku, Nova-lite, Flash); response synthesis benefits from stronger ones (Sonnet, GPT-4-class). The `multimodal_service` is independent — set it to a vision-capable model only when you actually ingest images.
+- **`load_batch_size`** and **`upsert_delay`** control ingestion pressure on TigerGraph. Defaults are fine for most loads; lower the batch size if you see write timeouts.
+
+### 7. A working tuning loop
+
+1. Define **5–10 representative evaluation questions** with expected answers (or at least the docs that should ground them).
+2. Establish a **baseline** — run all questions, save answers + retrieved chunks.
+3. **Change one parameter** (or one prompt). Re-run.
+4. Diff the answers. Keep the change only if it improves more questions than it regresses.
+5. **Iterate in order** — chunking → extraction → retrieval → prompts. Don't skip ahead.
+6. **Save the winning config** to `configs/server_config.json` and document the rationale in your team's runbook.
+
+The chatbot UI's *Explain* panel (which lists the chunks fed into the answer) is the fastest debugging tool — most quality issues become obvious by reading the chunks the system actually retrieved.
 
 [Go back to top](#top)
 
