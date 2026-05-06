@@ -23,6 +23,32 @@ from langchain_community.callbacks.manager import get_openai_callback
 logger = logging.getLogger(__name__)
 
 
+# Per-request collector for LLM usage so callers (e.g. agent trace logs) can
+# aggregate token usage without breaking the existing return signatures.
+# It's a context-local list the agent resets before each node executes.
+import contextvars as _contextvars
+
+_usage_collector: _contextvars.ContextVar = _contextvars.ContextVar(
+    "llm_usage_collector", default=None
+)
+
+
+def start_usage_collection():
+    """Begin collecting LLM usage for the current context (per node)."""
+    _usage_collector.set([])
+
+
+def get_collected_usage():
+    """Return the usage entries collected since the last start (or None)."""
+    return _usage_collector.get()
+
+
+def _record_usage(caller_name: str, usage_data: dict):
+    bucket = _usage_collector.get()
+    if bucket is not None:
+        bucket.append({"caller_name": caller_name, **usage_data})
+
+
 class LLM_Model:
     """Base LLM_Model Class
 
@@ -95,6 +121,7 @@ class LLM_Model:
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
             logger.info(f"{caller_name} usage: {usage_data}")
+            _record_usage(caller_name, usage_data)
 
         raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
 
@@ -131,6 +158,7 @@ class LLM_Model:
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
             logger.info(f"{caller_name} usage: {usage_data}")
+            _record_usage(caller_name, usage_data)
 
         raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
 

@@ -190,6 +190,13 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
               showExplain={handleShowExplain}
               showTable={handleShowTable}
               showGraph={handleShowGraph}
+              onViewTrace={() => {
+                const messageId = message.messageId || message.message_id || "";
+                // Store message in sessionStorage so the new tab reads it directly
+                // without needing an authenticated API fetch (which triggers browser auth dialog).
+                sessionStorage.setItem(`trace_msg_${messageId}`, JSON.stringify(message));
+                window.open(`/trace/${messageId}`, "_blank");
+              }}
             />
           </div>
 
