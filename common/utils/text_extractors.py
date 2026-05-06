@@ -290,7 +290,7 @@ class TextExtractor:
                     'error': result.get('error', 'Unknown error')
                 })
 
-        logger.info(f"Prepared {len(processed_files_info)} files ({len(jsonl_files_copied)} JSONL copied, {len(files_to_process)} converted), {total_docs} total documents")
+        logger.info(f"Processed {len(processed_files_info)} files, extracted {total_docs} total documents")
         logger.info(f"Created {len([f for f in processed_files_info if f.get('status') == 'success'])} JSONL files in {temp_folder}")
 
         return {
@@ -613,9 +613,22 @@ def extract_text_from_file(file_path, graphname=None):
         if extension in ['.txt', '.md']:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read().strip()
-        elif extension in ['.html', '.htm', '.csv']:
+        elif extension in ['.html', '.htm']:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read().strip()
+        elif extension == '.csv':
+            raw = file_path.read_bytes()
+            # utf-8-sig handles UTF-8 with BOM (common Excel CSV export)
+            try:
+                return raw.decode('utf-8-sig').strip()
+            except UnicodeDecodeError:
+                pass
+            # Fall back to chardet detection
+            import chardet
+            detected = chardet.detect(raw)
+            encoding = detected.get('encoding') if detected.get('confidence', 0) >= 0.5 else None
+            # latin-1 as final fallback — never raises DecodeError
+            return raw.decode(encoding or 'latin-1').strip()
         elif extension == '.json':
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -624,6 +637,32 @@ def extract_text_from_file(file_path, graphname=None):
             import docx
             doc = docx.Document(file_path)
             return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        elif extension in ['.xlsx', '.xls']:
+            import pandas as pd
+            engine = 'openpyxl' if extension == '.xlsx' else 'xlrd'
+            try:
+                xl = pd.ExcelFile(file_path, engine=engine)
+            except Exception:
+                xl = pd.ExcelFile(file_path)
+            sheet_texts = []
+            for sheet_name in xl.sheet_names:
+                # Always read with header=None so no data row is silently
+                # consumed as column names for headerless spreadsheets.
+                df = xl.parse(sheet_name, header=None)
+                if df.empty:
+                    continue
+                df = df.fillna('')
+                # Detect header row: first row is all non-empty strings with
+                # no purely numeric values → treat as column names.
+                first_row = df.iloc[0]
+                if all(isinstance(v, str) and v.strip() for v in first_row):
+                    df.columns = first_row.tolist()
+                    df = df.iloc[1:].reset_index(drop=True)
+                else:
+                    df.columns = [f"Column {i + 1}" for i in range(len(df.columns))]
+                sheet_md = df.to_markdown(index=False)
+                sheet_texts.append(f"## Sheet: {sheet_name}\n\n{sheet_md}")
+            return "\n\n".join(sheet_texts) if sheet_texts else "[Excel file is empty or contains no data]"
         elif extension == '.xml':
             import xml.etree.ElementTree as ET
             tree = ET.parse(file_path)
@@ -663,7 +702,7 @@ def get_doc_type_from_extension(extension):
 
 def get_supported_extensions():
     """Get list of supported file extensions."""
-    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.xml', '.jpeg', '.jpg', '.png', '.gif'}
+    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.doc', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls', '.jsonl'}
 
 def is_supported_file(file_path):
     """Check if a file is supported for text extraction."""
