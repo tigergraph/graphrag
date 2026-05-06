@@ -72,9 +72,24 @@ logger = logging.getLogger(__name__)
 
 TRACE_LOGS_DIR = os.environ.get("TRACE_LOGS_DIR", "/code/trace_logs")
 
+def _cleanup_old_traces(max_age_days: int = 30):
+    """Delete trace log files older than max_age_days."""
+    try:
+        cutoff = time.time() - (max_age_days * 86400)
+        for filename in os.listdir(TRACE_LOGS_DIR):
+            if not filename.endswith(".json"):
+                continue
+            filepath = os.path.join(TRACE_LOGS_DIR, filename)
+            if os.path.getmtime(filepath) < cutoff:
+                os.remove(filepath)
+    except Exception:
+        logger.warning("Failed to clean up old trace logs", exc_info=True)
+
+
 def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float):
     try:
         os.makedirs(TRACE_LOGS_DIR, exist_ok=True)
+        _cleanup_old_traces()
 
         # Strip chunk text from query_sources to keep trace files small.
         # final_retrieval contains the full text of every retrieved chunk.
