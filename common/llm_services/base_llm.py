@@ -287,6 +287,39 @@ Format: {format_instructions}\
 """
 
     @property
+    def select_retriever_prompt(self):
+        """Property to get the prompt for the auto-select retriever (RetrieverSelector Stage B).
+
+        Returns the user-facing prompt template; the parser injects format_instructions.
+        """
+        result = self._read_prompt_file(self.prompt_path + "select_retriever.txt")
+        if result is not None:
+            return result
+        return """\
+You are choosing the best retrieval strategy for a knowledge-graph question.
+Pick exactly one of: similarity, contextual, hybrid, community.
+
+Methods:
+- similarity: a single fact / definition / quote; the answer lives in one passage. Cheapest. Pick this for short factoid questions about a single entity.
+- contextual: needs surrounding narrative (a process, a sequence, cause-and-effect). Returns matching chunks plus their lookback/lookahead siblings.
+- hybrid: needs relationships between named entities or multi-hop reasoning. Returns matching chunks plus graph-expansion to nearby entities.
+- community: global, thematic, or aggregate questions over the whole corpus ("main themes", "what topics are covered", "summarize the documents"). Returns community summaries instead of chunks.
+
+Important constraints:
+- similarity returns a strict subset of contextual and hybrid (same vector hits, no expansion). Do NOT pick similarity if the question needs context or relationships — pick contextual or hybrid instead.
+- community is the only method that operates on community summaries. Pick it ONLY for global/thematic questions; do not pick it for questions about specific named entities.
+
+Schema context — the knowledge graph contains these entity types: {v_types}
+And these relationship types: {e_types}
+
+Question: {question}
+Conversation history (last 2 turns, may be empty): {conversation}
+
+Return JSON: {{"method": "<one of: similarity, contextual, hybrid, community>", "reason": "<≤20 words explaining the pick>"}}
+
+Format: {format_instructions}"""
+
+    @property
     def hyde_prompt(self):
         """Property to get the prompt for the HyDE tool."""
         result = self._read_prompt_file(self.prompt_path + "hyde.txt")

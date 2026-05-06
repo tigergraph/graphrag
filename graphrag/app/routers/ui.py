@@ -1092,8 +1092,8 @@ async def graph_query(
             LogWriter.info(f"Continuing conversation with ID: {convo_id}")
 
         # create agent
-        # get retrieval pattern to use
-        rag_pattern = rag_pattern or "hybridsearch"
+        # get retrieval pattern to use; default "auto" lets RetrieverSelector pick.
+        rag_pattern = rag_pattern or "auto"
         agent = make_agent(graphname, conn, use_cypher, supportai_retriever=rag_pattern)
 
         prev_id = None
@@ -1190,8 +1190,8 @@ async def chat(
             pass
         return
 
-    # Get RAG pattern
-    rag_pattern = rag_pattern or "hybridsearch"
+    # Get RAG pattern; default "auto" lets RetrieverSelector pick.
+    rag_pattern = rag_pattern or "auto"
 
     # Get conversation ID
     try:

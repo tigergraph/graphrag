@@ -24,6 +24,7 @@ from agent.agent_hallucination_check import TigerGraphAgentHallucinationCheck
 from agent.agent_rewrite import TigerGraphAgentRewriter
 from agent.agent_router import TigerGraphAgentRouter
 from agent.agent_usefulness_check import TigerGraphAgentUsefulnessCheck
+from agent.method_selector import RetrieverSelector
 from agent.Q import DONE, Q
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -57,6 +58,12 @@ class GraphState(TypedDict):
     schema_mapping: Optional[MapQuestionToSchemaResponse]
     error_history: list[dict] = []
     question_retry_count: int = 0
+    # Auto-selection (populated when supportai_retriever == "auto"; also written
+    # for manual mode so the UI can render which retriever ran). The "source"
+    # field distinguishes "rules"/"llm"/"fallback" (auto) from "manual".
+    chosen_retriever: Optional[str]
+    chosen_retriever_reason: Optional[str]
+    chosen_retriever_source: Optional[str]
 
 
 class TigerGraphAgentGraph:
@@ -71,7 +78,7 @@ class TigerGraphAgentGraph:
         cypher_gen_tool=None,
         enable_human_in_loop=False,
         q: Q = None,
-        supportai_retriever="hybridsearch",
+        supportai_retriever="auto",
     ):
         self.workflow = StateGraph(GraphState)
         self.llm_provider = llm_provider
@@ -455,20 +462,63 @@ class TigerGraphAgentGraph:
         state["lookup_source"] = "supportai"
         return state
     
+    # User-friendly labels for the four retrieval methods. Used in progress
+    # events and UI badges; keep in sync with method_selector.METHOD_* constants.
+    _METHOD_DISPLAY_NAMES = {
+        "similaritysearch": "Similarity",
+        "contextualsearch": "Contextual",
+        "hybridsearch": "Hybrid",
+        "communitysearch": "Community",
+    }
+
     def supportai_search(self, state):
         """
         Run the agent supportai search.
+
+        When `self.supportai_retriever == "auto"`, picks a method via
+        `RetrieverSelector` (rules first, LLM fallback). Otherwise dispatches
+        directly to the configured retriever. Either way, populates
+        `state["chosen_retriever*"]` and surfaces the choice on the context
+        dict so it flows through `generate_answer` into `query_sources`.
         """
-        if self.supportai_retriever == "hybridsearch":
-            return self.hybrid_search(state)
-        elif self.supportai_retriever == "similaritysearch":
-            return self.similarity_search(state)
-        elif self.supportai_retriever == "contextualsearch":
-            return self.sibling_search(state)
-        elif self.supportai_retriever == "communitysearch":
-            return self.community_search(state)
+        method = self.supportai_retriever
+        chosen_reason = "user-selected"
+        chosen_source = "manual"
+
+        if method == "auto":
+            selector = RetrieverSelector(self.llm_provider, self.db_connection)
+            choice = selector.choose(state["question"], state.get("conversation"))
+            method = choice.method
+            chosen_reason = choice.reason
+            chosen_source = choice.source
+            label = self._METHOD_DISPLAY_NAMES.get(method, method)
+            self.emit_progress(f"Auto-selected {label} search")
+
+        state["chosen_retriever"] = method
+        state["chosen_retriever_reason"] = chosen_reason
+        state["chosen_retriever_source"] = chosen_source
+
+        if method == "hybridsearch":
+            result_state = self.hybrid_search(state)
+        elif method == "similaritysearch":
+            result_state = self.similarity_search(state)
+        elif method == "contextualsearch":
+            result_state = self.sibling_search(state)
+        elif method == "communitysearch":
+            result_state = self.community_search(state)
         else:
-            raise ValueError(f"Invalid supportai retriever: {self.supportai_retriever}")
+            raise ValueError(f"Invalid supportai retriever: {method}")
+
+        # Mirror the choice onto the context dict so it lands on
+        # GraphRAGResponse.query_sources without further plumbing.
+        ctx = result_state.get("context") or {}
+        if isinstance(ctx, dict):
+            ctx["chosen_retriever"] = method
+            ctx["chosen_retriever_reason"] = chosen_reason
+            ctx["chosen_retriever_source"] = chosen_source
+            result_state["context"] = ctx
+
+        return result_state
     
     def generate_answer(self, state):
         """
