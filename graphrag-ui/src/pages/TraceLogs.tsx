@@ -864,8 +864,17 @@ const TraceLogs: FC = () => {
         </div>
 
         {/* Tabs */}
-        <Tabs defaultValue="logs" className="w-full">
+        <Tabs defaultValue="citations" className="w-full">
           <TabsList className="w-full justify-start bg-transparent border-b border-border rounded-none h-auto p-0 gap-0">
+            <TabsTrigger
+              value="citations"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5"
+            >
+              Citations
+              <span className="ml-1.5 bg-muted text-muted-foreground text-xs px-1.5 py-0.5 rounded-full">
+                {trace.citations.length}
+              </span>
+            </TabsTrigger>
             <TabsTrigger
               value="logs"
               className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5"
@@ -880,15 +889,6 @@ const TraceLogs: FC = () => {
               Tool Calls
               <span className="ml-1.5 bg-muted text-muted-foreground text-xs px-1.5 py-0.5 rounded-full">
                 {trace.toolCalls.length}
-              </span>
-            </TabsTrigger>
-            <TabsTrigger
-              value="citations"
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5"
-            >
-              Citations
-              <span className="ml-1.5 bg-muted text-muted-foreground text-xs px-1.5 py-0.5 rounded-full">
-                {trace.citations.length}
               </span>
             </TabsTrigger>
             <TabsTrigger
@@ -911,14 +911,14 @@ const TraceLogs: FC = () => {
             </TabsTrigger>
           </TabsList>
 
+          <TabsContent value="citations" className="pt-4">
+            <CitationsPanel trace={trace} />
+          </TabsContent>
           <TabsContent value="logs" className="pt-4">
             <LogsPanel trace={trace} />
           </TabsContent>
           <TabsContent value="toolcalls" className="pt-4">
             <ToolCallsPanel trace={trace} />
-          </TabsContent>
-          <TabsContent value="citations" className="pt-4">
-            <CitationsPanel trace={trace} />
           </TabsContent>
           <TabsContent value="timeline" className="pt-4">
             <TimelinePanel trace={trace} />
