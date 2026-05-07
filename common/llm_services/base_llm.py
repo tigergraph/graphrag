@@ -43,6 +43,16 @@ def get_collected_usage():
     return _usage_collector.get()
 
 
+def reset_usage_collection():
+    """Drop any accumulated usage and disable collection for this context.
+
+    Must be called at the end of a request (success or failure) so stale
+    usage data doesn't bleed into the next request that runs on the same
+    thread (sync FastAPI handlers re-use worker threads from a pool).
+    """
+    _usage_collector.set(None)
+
+
 def _record_usage(caller_name: str, usage_data: dict):
     bucket = _usage_collector.get()
     if bucket is not None:

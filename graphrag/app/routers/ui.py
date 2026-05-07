@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 TRACE_LOGS_DIR = os.environ.get("TRACE_LOGS_DIR", "/code/trace_logs")
 
+
 def _cleanup_old_traces(max_age_days: int = 30):
     """Delete trace log files older than max_age_days."""
     try:
@@ -88,7 +89,17 @@ def _cleanup_old_traces(max_age_days: int = 30):
 
 def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float):
     try:
+        if not isinstance(message_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", message_id):
+            logger.warning("Refusing to save trace log: invalid message_id %r", message_id)
+            return
+
         os.makedirs(TRACE_LOGS_DIR, exist_ok=True)
+        base_dir = os.path.abspath(TRACE_LOGS_DIR)
+        filepath = os.path.abspath(os.path.join(base_dir, f"{message_id}.json"))
+        if os.path.commonpath([base_dir, filepath]) != base_dir:
+            logger.warning("Refusing to save trace log: path escapes TRACE_LOGS_DIR for %r", message_id)
+            return
+
         _cleanup_old_traces()
 
         # Strip chunk text from query_sources to keep trace files small.
@@ -110,7 +121,6 @@ def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp
             "natural_language_response": resp.natural_language_response,
             "timestamp": time.time(),
         }
-        filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
         with open(filepath, "w") as f:
             json.dump(trace_data, f, default=str)
     except Exception:
@@ -389,7 +399,18 @@ def get_trace_log(
     message_id: str,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
-    filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
+    # Trace logs contain user queries (potentially PII), full LLM responses,
+    # internal cypher, schema mappings, and per-call cost. Any authenticated
+    # user could otherwise read another user's trace by guessing or learning
+    # the message_id. Restrict to superusers to prevent cross-user disclosure.
+    _require_roles(creds[1], {"superuser"})
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", message_id):
+        raise HTTPException(status_code=400, detail="Invalid message_id")
+    base_dir = os.path.abspath(TRACE_LOGS_DIR)
+    filepath = os.path.abspath(os.path.join(base_dir, f"{message_id}.json"))
+    if os.path.commonpath([base_dir, filepath]) != base_dir:
+        raise HTTPException(status_code=400, detail="Invalid message_id")
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Trace log not found")
     with open(filepath, "r") as f:
