@@ -24,7 +24,12 @@ from agent.agent_hallucination_check import TigerGraphAgentHallucinationCheck
 from agent.agent_rewrite import TigerGraphAgentRewriter
 from agent.agent_router import TigerGraphAgentRouter
 from agent.agent_usefulness_check import TigerGraphAgentUsefulnessCheck
-from agent.method_selector import RetrieverSelector
+from agent.method_selector import (
+    CHUNK_BASED_METHODS,
+    INLANE_FALLBACK_TABLE,
+    RetrieverSelector,
+    has_insufficient_context,
+)
 from agent.Q import DONE, Q
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -65,6 +70,15 @@ class GraphState(TypedDict):
     chosen_retriever: Optional[str]
     chosen_retriever_reason: Optional[str]
     chosen_retriever_source: Optional[str]
+    # Cross-lane fallback: set by route_question after generate_function/cypher
+    # retries are exhausted, so supportai_search knows to flip the source label
+    # to "router_fallback" and force auto-selection.
+    router_fallback_attempted: Optional[bool]
+    # In-lane fallback: set by supportai_search when the first chunk-based method
+    # returned fewer than top_k chunks and we ran a second method via
+    # INLANE_FALLBACK_TABLE. The "_from" field records the original method.
+    inlane_fallback_attempted: Optional[bool]
+    inlane_fallback_from: Optional[str]
 
 
 class TigerGraphAgentGraph:
@@ -145,8 +159,18 @@ class TigerGraphAgentGraph:
     def route_question(self, state):
         """
         Run the agent router.
+
+        When generate_function / generate_cypher have failed to produce a usable
+        answer through 3 rewrite cycles (`question_retry_count > 2`), instead of
+        going straight to `apologize`, fall back to vector search if available.
+        `supportai_search` reads `state["router_fallback_attempted"]` to flip its
+        source label and re-run auto-selection regardless of configured method.
         """
         if state["question_retry_count"] > 2:
+            if self.supportai_enabled and not state.get("router_fallback_attempted"):
+                state["router_fallback_attempted"] = True
+                self.emit_progress("Trying a different approach…")
+                return "supportai_lookup"
             return "apologize"
         if self._is_greeting(state["question"]):
             return "greeting"
@@ -472,66 +496,135 @@ class TigerGraphAgentGraph:
         "communitysearch": "Community",
     }
 
+    def _dispatch_retriever(self, method, state):
+        """Run the retriever named by `method` and return the updated state.
+
+        Centralises the if/elif chain so it can be called twice (for in-lane
+        fallback) without duplication.
+        """
+        if method == "hybridsearch":
+            return self.hybrid_search(state)
+        elif method == "similaritysearch":
+            return self.similarity_search(state)
+        elif method == "contextualsearch":
+            return self.sibling_search(state)
+        elif method == "communitysearch":
+            return self.community_search(state)
+        raise ValueError(f"Invalid supportai retriever: {method}")
+
+    def _record_selection_metric(self, method, source):
+        """Increment the selection counter; never lets a metric error break the request."""
+        try:
+            pmetrics.llm_method_selection_total.labels(
+                selected_method=method, selection_source=source
+            ).inc()
+        except Exception:  # noqa: BLE001
+            pass
+
     def supportai_search(self, state):
         """
         Run the agent supportai search.
 
-        When `self.supportai_retriever == "auto"`, picks a method via
-        `RetrieverSelector` (rules first, LLM fallback). Otherwise dispatches
-        directly to the configured retriever. Either way, populates
-        `state["chosen_retriever*"]` and surfaces the choice on the context
-        dict so it flows through `generate_answer` into `query_sources`.
+        Three layers of behavior:
+
+        1. **Method selection.** When `self.supportai_retriever == "auto"` (the
+           default), picks a method via `RetrieverSelector`. When configured to
+           a specific method, uses that. **Exception:** when reached via
+           cross-lane fallback (`state["router_fallback_attempted"]`), forces
+           auto-selection regardless of configuration — manual users still get
+           the best vector method when the structured-data path has exhausted
+           its retries.
+        2. **In-lane fallback.** After the first chunk-based retriever runs, if
+           it returned fewer than `top_k` chunks (signal: insufficient context),
+           runs a second method per `INLANE_FALLBACK_TABLE` and uses its context
+           for downstream generation. Single retry only; skipped for manual
+           mode and community search.
+        3. **Out-of-corpus short-circuit.** If after all retrieval attempts the
+           result is still empty, marks the context so `generate_answer`
+           returns an honest "couldn't find" message instead of letting the
+           LLM hallucinate from empty context.
+
+        State written: `chosen_retriever{,_reason,_source}` populated for the
+        UI/telemetry; mirrored into `state["context"]` so it lands on
+        `GraphRAGResponse.query_sources` without further plumbing.
         """
+        is_router_fallback = bool(state.get("router_fallback_attempted"))
+
         method = self.supportai_retriever
         chosen_reason = "user-selected"
         chosen_source = "manual"
 
-        if method == "auto":
+        # In router_fallback mode we always auto-select, even for manual users —
+        # they need the best vector method now that structured-data is dead.
+        if is_router_fallback or method == "auto":
             selector = RetrieverSelector(self.llm_provider, self.db_connection)
             choice = selector.choose(state["question"], state.get("conversation"))
             method = choice.method
             chosen_reason = choice.reason
             chosen_source = choice.source
+
+        if is_router_fallback:
+            chosen_source = "router_fallback"
+            chosen_reason = f"{chosen_reason} (after structured-data retries exhausted)"
+            label = self._METHOD_DISPLAY_NAMES.get(method, method)
+            self.emit_progress(f"Trying a different approach: {label} search")
+        elif chosen_source != "manual":
             label = self._METHOD_DISPLAY_NAMES.get(method, method)
             self.emit_progress(f"Auto-selected {label} search")
 
         state["chosen_retriever"] = method
         state["chosen_retriever_reason"] = chosen_reason
         state["chosen_retriever_source"] = chosen_source
+        self._record_selection_metric(method, chosen_source)
 
-        # Phase 1.5 — telemetry: count selection by method + source so operators
-        # can see the auto-vs-manual distribution and rules-vs-llm hit rate.
-        try:
-            pmetrics.llm_method_selection_total.labels(
-                selected_method=method, selection_source=chosen_source
-            ).inc()
-        except Exception:  # noqa: BLE001 - metrics must never break the request path
-            pass
+        # First retrieval attempt
+        result_state = self._dispatch_retriever(method, state)
 
-        if method == "hybridsearch":
-            result_state = self.hybrid_search(state)
-        elif method == "similaritysearch":
-            result_state = self.similarity_search(state)
-        elif method == "contextualsearch":
-            result_state = self.sibling_search(state)
-        elif method == "communitysearch":
-            result_state = self.community_search(state)
-        else:
-            raise ValueError(f"Invalid supportai retriever: {method}")
+        # In-lane fallback (Feature 2) — chunk-based methods only, single retry,
+        # skipped for manual users so we don't second-guess their pick.
+        ctx = result_state.get("context") if isinstance(result_state.get("context"), dict) else {}
+        result = ctx.get("result") if isinstance(ctx.get("result"), dict) else {}
+        final_retrieval = result.get("final_retrieval") if isinstance(result, dict) else None
+        top_k = self._graphrag_cfg.get("top_k", 5)
+        can_inlane_fallback = (
+            chosen_source != "manual"
+            and method in CHUNK_BASED_METHODS
+            and not result_state.get("inlane_fallback_attempted")
+            and has_insufficient_context(final_retrieval, method, top_k)
+        )
+        if can_inlane_fallback:
+            fallback_method = INLANE_FALLBACK_TABLE.get(method)
+            if fallback_method:
+                label_old = self._METHOD_DISPLAY_NAMES.get(method, method)
+                label_new = self._METHOD_DISPLAY_NAMES.get(fallback_method, fallback_method)
+                self.emit_progress(
+                    f"Insufficient context from {label_old} search, trying {label_new} search"
+                )
+                result_state["inlane_fallback_attempted"] = True
+                result_state["inlane_fallback_from"] = method
+                # Update the active method/source for the second pass.
+                method = fallback_method
+                chosen_source = "inlane_fallback"
+                chosen_reason = f"fallback from {label_old} (returned fewer than top_k chunks)"
+                self._record_selection_metric(method, chosen_source)
+                result_state = self._dispatch_retriever(method, result_state)
 
-        # Mirror the choice onto the context dict so it lands on
+        # Mirror the (final) choice onto the context dict so it lands on
         # GraphRAGResponse.query_sources without further plumbing.
         ctx = result_state.get("context") or {}
         if isinstance(ctx, dict):
             ctx["chosen_retriever"] = method
             ctx["chosen_retriever_reason"] = chosen_reason
             ctx["chosen_retriever_source"] = chosen_source
+            if result_state.get("inlane_fallback_attempted"):
+                ctx["inlane_fallback_from"] = result_state.get("inlane_fallback_from")
+            if is_router_fallback:
+                ctx["router_fallback"] = True
 
-            # Phase 1.5 — out-of-corpus short-circuit (single-method partial).
-            # If the chosen retriever returned no usable results, mark the
-            # context so generate_answer skips the LLM call and returns an
-            # honest "couldn't find relevant info" message instead of letting
-            # the model hallucinate from empty/off-topic context.
+            # Out-of-corpus short-circuit — applies after all retrieval attempts.
+            # If the chosen retriever (or its fallback) returned nothing, mark
+            # the context so generate_answer returns an honest "couldn't find"
+            # message instead of hallucinating from empty context.
             result = ctx.get("result") if isinstance(ctx.get("result"), dict) else {}
             final_retrieval = result.get("final_retrieval") if isinstance(result, dict) else None
             if not final_retrieval:

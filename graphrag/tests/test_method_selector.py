@@ -37,10 +37,13 @@ METHOD_CONTEXTUAL = method_selector.METHOD_CONTEXTUAL
 METHOD_HYBRID = method_selector.METHOD_HYBRID
 METHOD_SIMILARITY = method_selector.METHOD_SIMILARITY
 FALLBACK_METHOD = method_selector.FALLBACK_METHOD
+CHUNK_BASED_METHODS = method_selector.CHUNK_BASED_METHODS
+INLANE_FALLBACK_TABLE = method_selector.INLANE_FALLBACK_TABLE
 RetrieverChoice = method_selector.RetrieverChoice
 RetrieverSelector = method_selector.RetrieverSelector
 _LLMRetrieverChoice = method_selector._LLMRetrieverChoice
 rules_choose = method_selector.rules_choose
+has_insufficient_context = method_selector.has_insufficient_context
 
 
 # ---------- Stage A: rules_choose ----------
@@ -286,6 +289,98 @@ class TestRetrieverChoice(unittest.TestCase):
         self.assertEqual(c.method, "hybridsearch")
         self.assertEqual(c.reason, "r")
         self.assertEqual(c.source, "rules")
+
+
+# ---------- In-lane fallback table + has_insufficient_context ----------
+
+
+class TestChunkBasedMethods(unittest.TestCase):
+    """The CHUNK_BASED_METHODS set governs both the insufficient-context check
+    and the in-lane fallback trigger; community must be excluded."""
+
+    def test_chunk_methods_membership(self):
+        self.assertIn(METHOD_SIMILARITY, CHUNK_BASED_METHODS)
+        self.assertIn(METHOD_CONTEXTUAL, CHUNK_BASED_METHODS)
+        self.assertIn(METHOD_HYBRID, CHUNK_BASED_METHODS)
+
+    def test_community_excluded(self):
+        self.assertNotIn(METHOD_COMMUNITY, CHUNK_BASED_METHODS)
+
+
+class TestInlaneFallbackTable(unittest.TestCase):
+    """Subset-aware: a fallback method must NOT be a strict subset of the
+    method it's falling back from. Specifically, similarity is a subset of
+    contextual and hybrid, so neither can fall back to similarity."""
+
+    def test_similarity_falls_back_to_hybrid(self):
+        self.assertEqual(INLANE_FALLBACK_TABLE[METHOD_SIMILARITY], METHOD_HYBRID)
+
+    def test_contextual_does_not_fall_back_to_similarity(self):
+        self.assertNotEqual(INLANE_FALLBACK_TABLE[METHOD_CONTEXTUAL], METHOD_SIMILARITY)
+
+    def test_hybrid_does_not_fall_back_to_similarity(self):
+        self.assertNotEqual(INLANE_FALLBACK_TABLE[METHOD_HYBRID], METHOD_SIMILARITY)
+
+    def test_contextual_falls_back_to_hybrid(self):
+        # Different expansion shape (graph hops vs siblings); not a subset.
+        self.assertEqual(INLANE_FALLBACK_TABLE[METHOD_CONTEXTUAL], METHOD_HYBRID)
+
+    def test_hybrid_falls_back_to_community(self):
+        # Different retrieval surface (community summaries vs chunks).
+        self.assertEqual(INLANE_FALLBACK_TABLE[METHOD_HYBRID], METHOD_COMMUNITY)
+
+    def test_community_has_no_fallback(self):
+        # Community's top-k semantics differ; the in-lane trigger doesn't fire
+        # for it, so a fallback entry would be unused.
+        self.assertNotIn(METHOD_COMMUNITY, INLANE_FALLBACK_TABLE)
+
+    def test_no_self_fallback(self):
+        # A method should never fall back to itself.
+        for method, fallback in INLANE_FALLBACK_TABLE.items():
+            self.assertNotEqual(method, fallback, f"{method} falls back to itself")
+
+
+class TestHasInsufficientContext(unittest.TestCase):
+    """`has_insufficient_context` decides whether to trigger in-lane fallback.
+    Only chunk-based methods qualify; community is excluded."""
+
+    def test_empty_chunk_method_is_insufficient(self):
+        self.assertTrue(has_insufficient_context({}, METHOD_HYBRID, top_k=5))
+        self.assertTrue(has_insufficient_context({}, METHOD_SIMILARITY, top_k=5))
+        self.assertTrue(has_insufficient_context({}, METHOD_CONTEXTUAL, top_k=5))
+
+    def test_none_chunk_method_is_insufficient(self):
+        # Treats malformed/missing input as insufficient.
+        self.assertTrue(has_insufficient_context(None, METHOD_HYBRID, top_k=5))
+
+    def test_partial_below_top_k_is_insufficient(self):
+        partial = {f"chunk{i}": "text" for i in range(3)}
+        self.assertTrue(has_insufficient_context(partial, METHOD_HYBRID, top_k=5))
+
+    def test_full_top_k_is_sufficient(self):
+        full = {f"chunk{i}": "text" for i in range(5)}
+        self.assertFalse(has_insufficient_context(full, METHOD_HYBRID, top_k=5))
+
+    def test_above_top_k_is_sufficient(self):
+        above = {f"chunk{i}": "text" for i in range(7)}
+        self.assertFalse(has_insufficient_context(above, METHOD_HYBRID, top_k=5))
+
+    def test_community_always_returns_false(self):
+        """Community has different top_k semantics (community summaries, not
+        chunks). It should never trigger the insufficient-context path."""
+        self.assertFalse(has_insufficient_context({}, METHOD_COMMUNITY, top_k=5))
+        self.assertFalse(has_insufficient_context(None, METHOD_COMMUNITY, top_k=5))
+        partial = {f"comm{i}": "summary" for i in range(2)}
+        self.assertFalse(has_insufficient_context(partial, METHOD_COMMUNITY, top_k=5))
+
+    def test_unknown_method_returns_false(self):
+        # An unknown method is not chunk-based; conservative: don't trigger.
+        self.assertFalse(has_insufficient_context({}, "somethingelse", top_k=5))
+
+    def test_top_k_one_edge_case(self):
+        # With top_k=1, a single chunk is sufficient.
+        self.assertFalse(has_insufficient_context({"a": "x"}, METHOD_HYBRID, top_k=1))
+        self.assertTrue(has_insufficient_context({}, METHOD_HYBRID, top_k=1))
 
 
 if __name__ == "__main__":
