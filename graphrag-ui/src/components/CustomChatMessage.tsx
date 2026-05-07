@@ -55,19 +55,17 @@ const RetrieverBadge: FC<{ message: any }> = ({ message }) => {
   const label = METHOD_LABELS[method] || method;
   const reason = (qs.chosen_retriever_reason as string | undefined) || "";
   const source = (qs.chosen_retriever_source as string | undefined) || "";
-  // For source, show "auto" for any of rules/llm/fallback; "manual" stays as-is.
   const sourceLabel = source === "manual" ? "manual" : "auto";
+  // Reason + source live in the hover tooltip so the inline chip stays
+  // glanceable; users who want the detail can hover.
+  const tooltip = reason ? `${sourceLabel}: ${reason}` : sourceLabel;
   return (
     <div
-      className="inline-flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-shadeA rounded-full px-2 py-0.5 mt-1 max-w-full"
-      title={reason ? `${reason} (${sourceLabel})` : sourceLabel}
+      className="inline-flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-shadeA rounded-full px-2 py-0.5 mt-1"
+      title={tooltip}
     >
       <span>🔎</span>
       <span className="font-medium">{label}</span>
-      {reason ? (
-        <span className="truncate italic">· {reason}</span>
-      ) : null}
-      <span className="opacity-60">· {sourceLabel}</span>
     </div>
   );
 };
