@@ -310,6 +310,13 @@ class TigerGraphAgentGraph:
     def generate_function(self, state):
         """
         Run the agent function generator.
+
+        Empty results are treated as a generation failure (symmetric with
+        `generate_cypher`) so the rewrite-and-retry loop can re-attempt with a
+        reformulated question. After 3 retries, `route_question` falls through
+        to the cross-lane vector-search fallback. Without this symmetry, an
+        empty function result would pass straight to `generate_answer` and
+        risk a hallucinated answer from empty context.
         """
         self.emit_progress("Generating the code to answer your question")
         try:
@@ -322,7 +329,21 @@ class TigerGraphAgentGraph:
                 state["schema_mapping"].target_edge_attributes,
             )
             logger.info(f"generate_function: {step}")
-            state["context"] = step
+            result = step.get("result") if isinstance(step, dict) else None
+            if result is None or self.is_query_result_empty(result):
+                state["context"] = (
+                    {**step, "error": True} if isinstance(step, dict) else {"error": True}
+                )
+                if "error_history" not in state or state["error_history"] is None:
+                    state["error_history"] = []
+                state["error_history"].append(
+                    {
+                        "error_message": "Function returned empty result",
+                        "error_step": "generate_function",
+                    }
+                )
+            else:
+                state["context"] = step
         except Exception as e:
             state["context"] = {"error": True}
             if "error_history" not in state or state["error_history"] is None:
