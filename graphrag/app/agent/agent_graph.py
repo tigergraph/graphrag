@@ -167,7 +167,13 @@ class TigerGraphAgentGraph:
         source label and re-run auto-selection regardless of configured method.
         """
         if state["question_retry_count"] > 2:
-            if self.supportai_enabled and not state.get("router_fallback_attempted"):
+            # Cross-lane fallback can be disabled per-graph via the
+            # `enable_router_fallback` graphrag_config key (default True).
+            if (
+                self.supportai_enabled
+                and self._graphrag_cfg.get("enable_router_fallback", True)
+                and not state.get("router_fallback_attempted")
+            ):
                 state["router_fallback_attempted"] = True
                 self.emit_progress("Trying a different approach…")
                 return "supportai_lookup"
