@@ -703,13 +703,15 @@ def parse_gsql_schema(text: str) -> SchemaProposal:
 class ExistingSchema:
     """Snapshot of what's already on the graph, used by the diff emitter.
 
-    ``vertex_types`` is the set of vertex-type names currently on the
-    graph (case-sensitive). ``edge_pairs`` maps an edge type name to the
-    set of ``(FROM, TO)`` pairs already declared for that edge.
+    ``vertex_types`` — vertex-type names currently on the graph.
+    ``edge_pairs`` — edge-type name → set of ``(FROM, TO)`` pairs.
+    ``directed_edges`` — subset of edge-type names with
+    ``IsDirected=True`` (consumed by the retriever renderer).
     """
 
     vertex_types: Set[str] = field(default_factory=set)
     edge_pairs: dict = field(default_factory=dict)
+    directed_edges: Set[str] = field(default_factory=set)
 
     def has_vertex(self, name: str) -> bool:
         folded = name.casefold()
@@ -819,6 +821,10 @@ def emit_structural_link_alters(
     structural edges:
 
     * ``CONTAINS_ENTITY`` — ``Document`` / ``DocumentChunk`` → domain vertex
+    * ``IN_COMMUNITY`` — domain vertex → ``Community`` (so the
+      post-Louvain mirror step can attach domain-VT instances to the
+      community their twin Entity belongs to, and retrievers walking
+      domain VTs can reach community memberships directly)
 
     The typed-relationship pattern (``IS_HEAD_OF`` / ``HAS_TAIL``) lives
     at the meta-schema layer (``EntityType`` ↔ ``RelationshipType``) and
@@ -840,6 +846,7 @@ def emit_structural_link_alters(
     # bare-graph fixtures may not have them.
     has_doc = existing.has_vertex("Document")
     has_chunk = existing.has_vertex("DocumentChunk")
+    has_community = existing.has_vertex("Community")
 
     stmts: List[str] = []
     for v in proposal.vertices:
@@ -851,6 +858,11 @@ def emit_structural_link_alters(
         if has_chunk and not existing.has_edge_pair("CONTAINS_ENTITY", "DocumentChunk", v.name):
             stmts.append(
                 f"ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO {v.name})"
+            )
+        # IN_COMMUNITY: <vt> → Community
+        if has_community and not existing.has_edge_pair("IN_COMMUNITY", v.name, "Community"):
+            stmts.append(
+                f"ALTER EDGE IN_COMMUNITY ADD PAIR (FROM {v.name}, TO Community)"
             )
     return stmts
 
@@ -955,6 +967,8 @@ def read_existing_schema(conn) -> ExistingSchema:
 
         if pairs:
             snapshot.edge_pairs[et_name] = pairs
+        if meta.get("IsDirected"):
+            snapshot.directed_edges.add(et_name)
 
     return snapshot
 
@@ -1067,6 +1081,8 @@ async def read_existing_schema_async(conn) -> "ExistingSchema":
                 pairs.add((f, t))
         if pairs:
             snapshot.edge_pairs[et_name] = pairs
+        if meta.get("IsDirected"):
+            snapshot.directed_edges.add(et_name)
     return snapshot
 
 
@@ -1202,6 +1218,9 @@ def apply_proposal(
         # Even on no-op, refresh metadata so descriptions edited in the
         # review panel land on EntityType / RelationshipType vertices.
         metadata = upsert_type_metadata(conn, proposal)
+        retrievers = _install_retrievers_after_apply(
+            conn, graphname, proposal=proposal, pre_apply_existing=existing
+        )
         return {
             "status": "no-op",
             "statements": [],
@@ -1209,6 +1228,7 @@ def apply_proposal(
             "gsql_output": "",
             "summary": summary,
             "metadata": metadata,
+            "retrievers": retrievers,
         }
 
     block, job_name = build_schema_change_job(graphname, statements, job_name)
@@ -1230,6 +1250,9 @@ def apply_proposal(
             "metadata": {"entity_types": [], "relationship_types": []},
         }
     metadata = upsert_type_metadata(conn, proposal)
+    retrievers = _install_retrievers_after_apply(
+        conn, graphname, proposal=proposal, pre_apply_existing=existing
+    )
     return {
         "status": "applied",
         "statements": statements,
@@ -1237,7 +1260,127 @@ def apply_proposal(
         "gsql_output": output,
         "summary": summary,
         "metadata": metadata,
+        "retrievers": retrievers,
     }
+
+
+def _detect_transitional_state(
+    conn,
+    proposal: SchemaProposal,
+    pre_apply_existing: ExistingSchema,
+) -> Optional[dict]:
+    """Return a payload when a domain schema is being added to a graph
+    that already has Entity-layer data; ``None`` otherwise.
+    """
+    new_vts = [
+        v.name for v in proposal.vertices if not pre_apply_existing.has_vertex(v.name)
+    ]
+    if not new_vts:
+        return None
+    try:
+        entity_count = conn.getVertexCount("Entity") or 0
+    except Exception:
+        entity_count = 0
+    if entity_count <= 0:
+        return None
+    return {
+        "entity_count": int(entity_count),
+        "new_domain_vts": sorted(new_vts),
+        "recommendation": (
+            "Existing Entity-layer data won't be auto-promoted to the "
+            "newly declared domain types. Retrievers will keep walking "
+            "the Entity layer (retrieval_include_entity forced to "
+            "True) so chat answers stay grounded. For full typed "
+            "retrieval, clear derived data (Entity / RELATIONSHIP / "
+            "Community) and re-run ECC against the existing chunks."
+        ),
+    }
+
+
+def _install_retrievers_after_apply(
+    conn,
+    graphname: str,
+    proposal: Optional[SchemaProposal] = None,
+    pre_apply_existing: Optional[ExistingSchema] = None,
+) -> dict:
+    """Re-render and install the templated retrievers against the live
+    domain schema. No-op when no domain types are on the graph.
+    """
+    try:
+        snapshot = read_existing_schema(conn)
+    except Exception as exc:
+        return {"status": "error", "error": f"read live schema: {exc}"}
+
+    # Union the live-schema view with the proposal so a stale cache
+    # right after SCHEMA_CHANGE JOB doesn't miss new types.
+    domain_vt_set: Set[str] = {
+        v for v in snapshot.vertex_types if not is_structural_type(v)
+    }
+    domain_edge_set: Set[str] = {
+        e for e in snapshot.edge_pairs
+        if not is_structural_type(e) and e in snapshot.directed_edges
+    }
+    if proposal is not None:
+        for v in proposal.vertices:
+            if not is_structural_type(v.name):
+                domain_vt_set.add(v.name)
+        for e in proposal.edges:
+            if not is_structural_type(e.name) and e.directed:
+                domain_edge_set.add(e.name)
+    domain_vts = sorted(domain_vt_set)
+    domain_edges = sorted(domain_edge_set)
+
+    import logging as _logging
+    _logger = _logging.getLogger(__name__)
+    _logger.info(
+        f"_install_retrievers_after_apply: graph={graphname} "
+        f"domain_vts={len(domain_vts)} directed_domain_edges={len(domain_edges)} "
+        f"snapshot_edge_pairs={len(snapshot.edge_pairs)}"
+    )
+
+    if not domain_vts and not domain_edges:
+        return {"status": "skipped", "reason": "no domain types on graph"}
+
+    transitional: Optional[dict] = None
+    if proposal is not None and pre_apply_existing is not None:
+        transitional = _detect_transitional_state(
+            conn, proposal, pre_apply_existing
+        )
+
+    try:
+        from common.db.retriever_render import (
+            install_retrievers,
+            resolve_include_entity,
+        )
+    except Exception as exc:
+        return {"status": "error", "error": f"import renderer: {exc}"}
+
+    try:
+        from common.config import graphrag_config
+        include_entity = resolve_include_entity(
+            graphrag_config.get,
+            has_domain_schema=bool(domain_vts),
+        )
+    except Exception:
+        include_entity = False if domain_vts else True
+
+    if transitional:
+        include_entity = True
+
+    result: dict = {
+        "status": "installed",
+        "include_entity": include_entity,
+        "results": install_retrievers(
+            conn,
+            graphname,
+            domain_vts=domain_vts,
+            domain_edges=domain_edges,
+            include_entity=include_entity,
+        ),
+    }
+    if transitional:
+        result["transitional"] = transitional
+    return result
 
 
 # -----------------------------------------------------------------------------

@@ -37,10 +37,17 @@ from common.db.schema_utils import (
 class _FakeConn:
     """Minimal pyTigerGraph-shaped connection for read_existing_schema tests."""
 
-    def __init__(self, vertex_types, edge_metadata, gsql_response="OK"):
+    def __init__(
+        self,
+        vertex_types,
+        edge_metadata,
+        gsql_response="OK",
+        vertex_counts=None,
+    ):
         self._vertex_types = list(vertex_types)
         self._edge_metadata = dict(edge_metadata)
         self._gsql_response = gsql_response
+        self._vertex_counts = dict(vertex_counts or {})
         self.gsql_calls = []
         self.upsert_calls = []
 
@@ -55,10 +62,27 @@ class _FakeConn:
 
     def gsql(self, command):
         self.gsql_calls.append(command)
+        # Minimal schema-change simulation so post-apply reads see the
+        # newly-added vertex / edge types. Just enough for tests that
+        # exercise the retriever-install hook downstream of
+        # apply_proposal.
+        import re
+        for m in re.finditer(r"\bADD VERTEX (\w+)", command):
+            vt = m.group(1)
+            if vt not in self._vertex_types:
+                self._vertex_types.append(vt)
+        for m in re.finditer(
+            r"\bADD (?:DIRECTED|UNDIRECTED) EDGE (\w+)", command
+        ):
+            et = m.group(1)
+            self._edge_metadata.setdefault(et, {"EdgePairs": []})
         return self._gsql_response
 
     def upsertVertex(self, vertex_type, vertex_id, attributes=None):
         self.upsert_calls.append((vertex_type, vertex_id, dict(attributes or {})))
+
+    def getVertexCount(self, vertex_type):
+        return int(self._vertex_counts.get(vertex_type, 0))
 
 
 class _FakeConnWithVertices(_FakeConn):
@@ -612,7 +636,9 @@ def test_build_schema_change_job_empty_statements_raises():
 
 def test_apply_proposal_no_op_when_diff_is_empty():
     """If the existing graph already has every type in the proposal, the
-    helper must not call gsql at all and must report status='no-op'.
+    helper must not run a SCHEMA_CHANGE JOB and must report
+    status='no-op'. Retriever re-installs are still expected because
+    they're keyed off the live schema, not the proposal diff.
     """
     conn = _FakeConn(
         vertex_types=["Company", "Report"],
@@ -634,7 +660,8 @@ def test_apply_proposal_no_op_when_diff_is_empty():
     assert result["statements"] == []
     assert result["job_name"] is None
     assert result["gsql_output"] == ""
-    assert conn.gsql_calls == []
+    # No SCHEMA_CHANGE JOB block — but retriever installs may run.
+    assert not any("SCHEMA_CHANGE JOB" in c for c in conn.gsql_calls)
     assert result["summary"]["vertex_count"] == 2
 
 
@@ -656,8 +683,9 @@ def test_apply_proposal_runs_single_gsql_call_with_diff():
     result = apply_proposal(conn, "MyGraph", proposal)
 
     assert result["status"] == "applied"
-    assert len(conn.gsql_calls) == 1
-    cmd = conn.gsql_calls[0]
+    schema_calls = [c for c in conn.gsql_calls if "SCHEMA_CHANGE JOB" in c]
+    assert len(schema_calls) == 1
+    cmd = schema_calls[0]
     assert "USE GRAPH MyGraph" in cmd
     assert "ADD VERTEX Filing" in cmd
     assert "ADD DIRECTED EDGE OWNS" in cmd
@@ -709,8 +737,9 @@ def test_apply_proposal_end_to_end_from_pasted_gsql():
     result = apply_proposal(conn, "FreshGraph", proposal)
 
     assert result["status"] == "applied"
-    assert len(conn.gsql_calls) == 1
-    cmd = conn.gsql_calls[0]
+    schema_calls = [c for c in conn.gsql_calls if "SCHEMA_CHANGE JOB" in c]
+    assert len(schema_calls) == 1
+    cmd = schema_calls[0]
     assert "USE GRAPH FreshGraph" in cmd
     assert "ADD VERTEX Company" in cmd
     assert "ADD VERTEX Filing" in cmd
@@ -718,6 +747,102 @@ def test_apply_proposal_end_to_end_from_pasted_gsql():
     assert "FROM Company, TO Filing" in cmd
     assert result["summary"]["vertex_count"] == 2
     assert result["summary"]["edge_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Transitional graph (pre-existing Entity data + new domain schema)
+# ---------------------------------------------------------------------------
+
+
+def test_apply_proposal_transitional_forces_include_entity():
+    """Upgrade case: existing graph has Entity-layer data, user declares
+    a domain schema for the first time. The retriever installer must
+    flip ``include_entity`` to True regardless of config so existing
+    Entity rows stay reachable until re-ingest. The result surfaces a
+    transitional payload the dialog can render.
+    """
+    conn = _FakeConn(
+        vertex_types=[
+            "Document", "DocumentChunk", "Entity",
+            "EntityType", "RelationshipType", "Community",
+        ],
+        edge_metadata={},
+        # Existing Entity-layer data — 1742 entities, no domain VTs yet.
+        vertex_counts={"Entity": 1742},
+    )
+    proposal = SchemaProposal()
+    proposal.add_vertex("Company")
+    proposal.add_vertex("Report")
+
+    result = apply_proposal(conn, "g", proposal)
+
+    assert result["status"] == "applied"
+    retrievers = result["retrievers"]
+    # Forced True regardless of config default.
+    assert retrievers["include_entity"] is True
+    # Transitional payload surfaced for the caller / UI.
+    transitional = retrievers.get("transitional")
+    assert transitional is not None
+    assert transitional["entity_count"] == 1742
+    assert transitional["new_domain_vts"] == ["Company", "Report"]
+    assert "re-ingest" in transitional["recommendation"].lower() or \
+        "re-run" in transitional["recommendation"].lower()
+
+
+def test_apply_proposal_no_entity_data_keeps_typed_purist_default():
+    """Fresh graph (no Entity rows yet) gets the normal auto-default —
+    typed-purist when domain schema exists.
+    """
+    conn = _FakeConn(
+        vertex_types=[
+            "Document", "DocumentChunk", "Entity",
+            "EntityType", "RelationshipType", "Community",
+        ],
+        edge_metadata={},
+        vertex_counts={"Entity": 0},
+    )
+    proposal = SchemaProposal()
+    proposal.add_vertex("Company")
+
+    result = apply_proposal(conn, "g", proposal)
+
+    retrievers = result["retrievers"]
+    # No Entity data → auto-default fires, typed-purist.
+    assert retrievers["include_entity"] is False
+    assert "transitional" not in retrievers
+
+
+def test_apply_proposal_no_new_domain_vts_skips_transitional_check():
+    """Re-applying an unchanged proposal against a graph that already
+    has the domain VTs is not transitional — no new VTs introduced. The
+    Entity count is irrelevant; auto-default behaviour applies.
+    """
+    conn = _FakeConn(
+        vertex_types=[
+            "Document", "DocumentChunk", "Entity",
+            "EntityType", "RelationshipType", "Community",
+            "Company",  # already on the graph
+        ],
+        edge_metadata={
+            "CONTAINS_ENTITY": {
+                "FromVertexTypeName": "Document",
+                "ToVertexTypeName": "Company",
+            },
+            "IN_COMMUNITY": {
+                "FromVertexTypeName": "Company",
+                "ToVertexTypeName": "Community",
+            },
+        },
+        vertex_counts={"Entity": 9000, "Company": 100},
+    )
+    proposal = SchemaProposal()
+    proposal.add_vertex("Company")  # already on graph — no new VT
+
+    result = apply_proposal(conn, "g", proposal)
+
+    retrievers = result["retrievers"]
+    # No new VTs in proposal → not a transitional apply, normal default.
+    assert "transitional" not in retrievers
 
 
 # ---------------------------------------------------------------------------
@@ -866,10 +991,10 @@ def test_read_type_metadata_returns_empty_on_missing_method():
 
 def test_emit_structural_links_for_new_domain_vertices():
     """Each new domain vertex must get CONTAINS_ENTITY pairs from
-    Document and DocumentChunk. IS_HEAD_OF / HAS_TAIL are NOT added
-    per-domain-vertex — they live at the EntityType ↔ RelationshipType
-    meta-schema layer and the original schema declaration covers the
-    only pair we ever traverse.
+    Document and DocumentChunk, plus an IN_COMMUNITY pair to Community.
+    IS_HEAD_OF / HAS_TAIL are NOT added per-domain-vertex — they live
+    at the EntityType ↔ RelationshipType meta-schema layer and the
+    original schema declaration covers the only pair we ever traverse.
     """
     proposal = SchemaProposal()
     proposal.add_vertex("Company")
@@ -878,11 +1003,12 @@ def test_emit_structural_links_for_new_domain_vertices():
     existing = ExistingSchema(
         vertex_types={
             "Document", "DocumentChunk", "Entity",
-            "EntityType", "RelationshipType",
+            "EntityType", "RelationshipType", "Community",
             "Company", "Report",
         },
         edge_pairs={
             "CONTAINS_ENTITY": {("Document", "Entity"), ("DocumentChunk", "Entity")},
+            "IN_COMMUNITY": {("Entity", "Community")},
             "IS_HEAD_OF": {("EntityType", "RelationshipType")},
             "HAS_TAIL": {("RelationshipType", "EntityType")},
         },
@@ -890,15 +1016,73 @@ def test_emit_structural_links_for_new_domain_vertices():
 
     stmts = emit_structural_link_alters(proposal, existing)
 
-    # Each vertex gets two CONTAINS_ENTITY pair-additions: 2*2 = 4.
+    # Each vertex gets two CONTAINS_ENTITY pair-additions plus one
+    # IN_COMMUNITY pair-addition: 2*(2+1) = 6.
     assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO Company)" in stmts
     assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO Company)" in stmts
     assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO Report)" in stmts
     assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO Report)" in stmts
+    assert "ALTER EDGE IN_COMMUNITY ADD PAIR (FROM Company, TO Community)" in stmts
+    assert "ALTER EDGE IN_COMMUNITY ADD PAIR (FROM Report, TO Community)" in stmts
     # No per-domain-vertex IS_HEAD_OF / HAS_TAIL emitted.
     assert not any("IS_HEAD_OF" in s for s in stmts)
     assert not any("HAS_TAIL" in s for s in stmts)
-    assert len(stmts) == 4
+    assert len(stmts) == 6
+
+
+def test_emit_structural_links_skips_in_community_when_already_present():
+    proposal = SchemaProposal()
+    proposal.add_vertex("Company")
+
+    existing = ExistingSchema(
+        vertex_types={
+            "Document", "DocumentChunk", "Entity",
+            "EntityType", "RelationshipType", "Community",
+            "Company",
+        },
+        edge_pairs={
+            "CONTAINS_ENTITY": {
+                ("Document", "Entity"), ("DocumentChunk", "Entity"),
+                ("Document", "Company"), ("DocumentChunk", "Company"),
+            },
+            "IN_COMMUNITY": {
+                ("Entity", "Community"),
+                ("Company", "Community"),  # already there
+            },
+        },
+    )
+
+    stmts = emit_structural_link_alters(proposal, existing)
+    # CONTAINS_ENTITY pairs already present, IN_COMMUNITY pair already
+    # present — nothing left to emit.
+    assert stmts == []
+
+
+def test_emit_structural_links_skips_in_community_when_community_missing():
+    """Bare-graph defensive case: if Community isn't on the graph yet,
+    don't emit IN_COMMUNITY pairs that would reference an undeclared
+    endpoint and fail at schema-change time.
+    """
+    proposal = SchemaProposal()
+    proposal.add_vertex("Company")
+
+    existing = ExistingSchema(
+        vertex_types={
+            "Document", "DocumentChunk", "Entity",
+            "EntityType", "RelationshipType",
+            # Community deliberately omitted.
+            "Company",
+        },
+        edge_pairs={
+            "CONTAINS_ENTITY": {("Document", "Entity"), ("DocumentChunk", "Entity")},
+        },
+    )
+
+    stmts = emit_structural_link_alters(proposal, existing)
+    assert not any("IN_COMMUNITY" in s for s in stmts)
+    # CONTAINS_ENTITY pairs still emitted.
+    assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO Company)" in stmts
+    assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO Company)" in stmts
 
 
 def test_emit_structural_links_skips_already_present_pairs():
@@ -908,7 +1092,7 @@ def test_emit_structural_links_skips_already_present_pairs():
     existing = ExistingSchema(
         vertex_types={
             "Document", "DocumentChunk", "Entity",
-            "EntityType", "RelationshipType",
+            "EntityType", "RelationshipType", "Community",
             "Company",
         },
         edge_pairs={
@@ -917,15 +1101,18 @@ def test_emit_structural_links_skips_already_present_pairs():
                 ("DocumentChunk", "Entity"),
                 ("Document", "Company"),  # already there
             },
+            "IN_COMMUNITY": {("Entity", "Community")},
             "IS_HEAD_OF": {("EntityType", "RelationshipType")},
             "HAS_TAIL": {("RelationshipType", "EntityType")},
         },
     )
 
     stmts = emit_structural_link_alters(proposal, existing)
-    # Only the missing CONTAINS_ENTITY pair (DocumentChunk → Company).
+    # Missing CONTAINS_ENTITY pair (DocumentChunk → Company) and the
+    # missing IN_COMMUNITY pair (Company → Community).
     assert stmts == [
         "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO Company)",
+        "ALTER EDGE IN_COMMUNITY ADD PAIR (FROM Company, TO Community)",
     ]
 
 
@@ -938,7 +1125,7 @@ def test_apply_proposal_emits_structural_links_alongside_domain_adds():
     conn = _FakeConn(
         vertex_types=[
             "Document", "DocumentChunk", "Entity",
-            "EntityType", "RelationshipType",
+            "EntityType", "RelationshipType", "Community",
         ],
         edge_metadata={},
     )
@@ -947,13 +1134,17 @@ def test_apply_proposal_emits_structural_links_alongside_domain_adds():
 
     result = apply_proposal(conn, "g", proposal)
     assert result["status"] == "applied"
-    assert len(conn.gsql_calls) == 1
-    cmd = conn.gsql_calls[0]
+    schema_calls = [c for c in conn.gsql_calls if "SCHEMA_CHANGE JOB" in c]
+    assert len(schema_calls) == 1
+    cmd = schema_calls[0]
     # Domain ADD VERTEX is in there.
     assert "ADD VERTEX Company" in cmd
     # CONTAINS_ENTITY pair-additions for Company are in the same job.
     assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO Company)" in cmd
     assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO Company)" in cmd
+    # IN_COMMUNITY pair-addition for Company is in the same job —
+    # community retrievers walking domain VTs need this edge present.
+    assert "ALTER EDGE IN_COMMUNITY ADD PAIR (FROM Company, TO Community)" in cmd
     # No per-domain-vertex IS_HEAD_OF / HAS_TAIL — those live at
     # EntityType ↔ RelationshipType in the structural schema.
     assert "IS_HEAD_OF ADD PAIR" not in cmd
@@ -972,6 +1163,7 @@ def test_apply_proposal_skips_structural_links_when_core_types_missing():
     result = apply_proposal(conn, "g", proposal)
     cmd = conn.gsql_calls[0] if conn.gsql_calls else ""
     assert "ALTER EDGE CONTAINS_ENTITY" not in cmd
+    assert "ALTER EDGE IN_COMMUNITY" not in cmd
     assert "ALTER EDGE IS_HEAD_OF" not in cmd
     assert "ALTER EDGE HAS_TAIL" not in cmd
 

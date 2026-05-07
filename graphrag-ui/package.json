@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.5",
   "type": "module",
+  "packageManager": "pnpm@9.15.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
@@ -57,5 +58,11 @@
     "tailwindcss": "^3.4.18",
     "typescript": "^5.2.2",
     "vite": "^5.2.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@swc/core",
+      "esbuild"
+    ]
   }
 }

@@ -58,6 +58,9 @@ COMMUNITY_QUERIES = [
     "common/gsql/graphrag/louvain/stream_community",
     "common/gsql/graphrag/get_community_children",
     "common/gsql/graphrag/communities_have_desc",
+    "common/gsql/graphrag/graphrag_delete_all_communities",
+    "common/gsql/graphrag/graphrag_stream_entity_community_pairs",
+    "common/gsql/graphrag/graphrag_stream_all_ids",
 ]
 
 REQUIRED_QUERIES = [
@@ -464,3 +467,82 @@ async def check_embedding_rebuilt(conn, v_type: str):
     logger.info(resp)
 
     return res
+
+
+async def graphrag_mirror_communities(
+    conn: AsyncTigerGraphConnection,
+    domain_vts: list[str],
+) -> int:
+    """Mirror Entity → Community memberships onto domain-VT instances
+    that share the same id. Returns the number of mirror edges written.
+    """
+    if not domain_vts:
+        return 0
+
+    async with tg_sem:
+        try:
+            res = await conn.runInstalledQuery(
+                "graphrag_stream_entity_community_pairs",
+                params={},
+                sizeLimit=1000000000,
+            )
+        except Exception as e:
+            logger.error(f"stream entity-community pairs failed: {e}")
+            return 0
+
+    pairs = (res[0] if res else {}).get("pairs", []) or []
+    if not pairs:
+        return 0
+
+    valid_ids_by_vt: dict[str, set[str]] = {}
+    for vt in domain_vts:
+        try:
+            async with tg_sem:
+                r = await conn.runInstalledQuery(
+                    "graphrag_stream_all_ids",
+                    params={"v_type": vt},
+                    sizeLimit=1000000000,
+                )
+        except Exception as e:
+            logger.warning(f"stream_all_ids({vt}) failed: {e}")
+            valid_ids_by_vt[vt] = set()
+            continue
+        ids = set((r[0] if r else {}).get("@@ids", []) or [])
+        valid_ids_by_vt[vt] = ids
+
+    written = 0
+    chunk_size = 5000
+    for vt, valid_ids in valid_ids_by_vt.items():
+        if not valid_ids:
+            continue
+        edges = [
+            (p["entity_id"], p["community_id"])
+            for p in pairs
+            if isinstance(p, dict)
+            and p.get("entity_id") in valid_ids
+            and p.get("community_id")
+        ]
+        if not edges:
+            continue
+        for i in range(0, len(edges), chunk_size):
+            chunk = edges[i:i + chunk_size]
+            async with tg_sem:
+                try:
+                    await conn.upsertEdges(
+                        sourceVertexType=vt,
+                        edgeType="IN_COMMUNITY",
+                        targetVertexType="Community",
+                        edges=chunk,
+                    )
+                    written += len(chunk)
+                except Exception as e:
+                    logger.error(
+                        f"upsertEdges IN_COMMUNITY for {vt} (chunk size "
+                        f"{len(chunk)}) failed: {e}"
+                    )
+
+    logger.info(
+        f"graphrag_mirror_communities: wrote {written} mirror "
+        f"IN_COMMUNITY edges across {len(domain_vts)} domain VT(s)"
+    )
+    return written

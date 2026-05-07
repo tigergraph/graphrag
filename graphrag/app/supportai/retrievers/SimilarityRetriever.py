@@ -25,8 +25,8 @@ class SimilarityRetriever(BaseRetriever):
             res = self.conn.runInstalledQuery(
                 "Content_Similarity_Search",
                 params = {
-                    "json_list_vts": str(start_set),
                     "v_type": index,
+                    "json_list_vts": str(start_set),
                     "verbose": verbose,
                 },
                 usePost=True
@@ -41,8 +41,8 @@ class SimilarityRetriever(BaseRetriever):
             res = self.conn.runInstalledQuery(
                 "Content_Similarity_Vector_Search",
                 params = {
-                    "v_type": index,
                     "query_vector": query_vector,
+                    "v_type": index,
                     "top_k": top_k,
                     "verbose": verbose,
                 },

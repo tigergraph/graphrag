@@ -49,8 +49,8 @@ class CommunityRetriever(BaseRetriever):
                 resp = self.conn.runInstalledQuery(
                     "Content_Similarity_Search",
                     params = {
-                        "json_list_vts": str(start_set),
                         "v_type": "DocumentChunk",
+                        "json_list_vts": str(start_set),
                         "verbose": verbose,
                     },
                     usePost=True

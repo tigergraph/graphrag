@@ -23,12 +23,23 @@
 - **`check_embedding_store_status()`** in the inquiryai / supportai routers raises HTTP 503 instead of swallowing the exception.
 - **Bedrock `max_tokens` is auto-defaulted** per model family (Claude 3.x = 4096, Sonnet 3.5+ / 4.x = 8192, Titan / Cohere / Llama at their published caps), so schema extraction and other large-output prompts no longer truncate at the langchain-aws built-in 1024 default. Explicit `model_kwargs.max_tokens` and the existing `token_limit` config field both override the auto-default.
 - **Hybrid / similarity retrievers surface domain vertex types** in the LLM context with a `<TypeName>: <id>` label, so type-aware questions (e.g. "which companies …") receive properly grounded answers.
+- **Community / hybrid retrievers walk domain edges and domain VTs directly** when a schema exists. The `Entity` layer becomes scaffolding for Louvain; community memberships are mirrored from `Entity` onto matching domain-VT instances after community detection so retrievers reach community context without traversing the legacy layer. New `graphrag_config.retrieval_include_entity` flag controls whether `Entity` stays visible to the chat agent — when unset, defaults to `false` for graphs with a domain schema (typed-purist) and `true` otherwise (no-op fallback).
+- **`apply_proposal` re-installs retriever queries** against the live domain schema, idempotently. Identical bodies are TG no-ops; new domain types or a changed `retrieval_include_entity` value re-render the affected queries on the next apply call.
+- **Transitional-graph detection at schema apply**: when a domain schema is added to a graph that already has Entity-layer data (typical v1.3.x → v1.4.0 upgrade applying a schema for the first time), `apply_proposal` forces `retrieval_include_entity=True` for the rendered queries so existing Entity rows stay reachable. The result payload carries a `transitional` block (`entity_count`, `new_domain_vts`, `recommendation`) for the init-graph dialog to surface a "your existing entities won't be auto-typed — re-ingest for full schema awareness" prompt. Once the user clears derived data and re-ingests (planned v1.5 admin endpoint), the auto-default flips back to typed-purist on the next apply call.
+
+> **Upgrading from a pre-release v1.4.0 build**: graphs that already
+> have domain vertex types but were created before the multi-pair
+> `IN_COMMUNITY` schema landed will see a "skipping community mirror
+> for [...]: IN_COMMUNITY pair not on schema" warning during
+> community detection. Re-run `/apply_proposal` with the existing
+> schema once to backfill the missing pairs. v1.3.x graphs (no domain
+> types) are unaffected — the mirror block is skipped entirely.
 
 ### Removed
 - **`RELATIONSHIP_TYPE` edge** between `EntityType` vertices — superseded by `IS_HEAD_OF` + `HAS_TAIL` through `RelationshipType`.
 
 ### Configuration
-- New `graphrag_config` keys: `schema_max_sample_files` (default 5), `schema_max_total_mb` (default 50), `strict_mode` (default false).
+- New `graphrag_config` keys: `schema_max_sample_files` (default 5), `schema_max_total_mb` (default 50), `strict_mode` (default false), `retrieval_include_entity` (auto: false when domain schema present, true otherwise).
 - New env var: `PDF_IMAGE_CONCURRENCY` (default 8).
 
 > Implementation-level details for v1.4.0 (parser internals, endpoint contracts, dialog state machine, prompt-resolution chain, schema-aware ECC worker logic, etc.) live in `dev/plans/graphrag/v1.4.0_implementation_notes.md`.

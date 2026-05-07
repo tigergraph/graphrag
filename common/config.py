@@ -434,6 +434,8 @@ if "chunker" not in graphrag_config:
     graphrag_config["chunker"] = "semantic"
 if "extractor" not in graphrag_config:
     graphrag_config["extractor"] = "llm"
+# ``retrieval_include_entity`` is resolved at install time
+# (see ``common.db.retriever_render.resolve_include_entity``).
 
 reuse_embedding = graphrag_config.get("reuse_embedding", True)
 doc_process_switch = graphrag_config.get("doc_process_switch", True)

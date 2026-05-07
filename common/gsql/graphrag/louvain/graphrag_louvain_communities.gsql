@@ -1,4 +1,5 @@
-CREATE OR REPLACE DISTRIBUTED QUERY graphrag_louvain_communities(UINT iteration=1, UINT max_hop = 10, UINT n_batches = 1) SYNTAX V2{
+// Non-distributed form intentional; see v1.5 plan to revisit.
+CREATE OR REPLACE QUERY graphrag_louvain_communities(UINT iteration=1, UINT max_hop = 10, UINT n_batches = 1) SYNTAX V2{
     /*
      * This is the same query as tg_louvain, just that Paper-related schema
      * are changed to Community-related schema
