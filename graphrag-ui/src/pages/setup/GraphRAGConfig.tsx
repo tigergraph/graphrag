@@ -27,6 +27,7 @@ const GraphRAGConfig = () => {
   const [numSeenMin, setNumSeenMin] = useState("2");
   const [communityLevel, setCommunityLevel] = useState("2");
   const [docOnly, setDocOnly] = useState(false);
+  const [enableRouterFallback, setEnableRouterFallback] = useState(true);
 
   // Advanced ingestion settings
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -76,6 +77,7 @@ const GraphRAGConfig = () => {
     setNumSeenMin(String(graphragConfig.num_seen_min ?? 2));
     setCommunityLevel(String(graphragConfig.community_level ?? 2));
     setDocOnly(graphragConfig.doc_only ?? false);
+    setEnableRouterFallback(graphragConfig.enable_router_fallback ?? true);
     setLoadBatchSize(String(graphragConfig.load_batch_size ?? 500));
     setUpsertDelay(String(graphragConfig.upsert_delay ?? 0));
     setMaxConcurrency(String(graphragConfig.default_concurrency ?? 10));
@@ -160,6 +162,7 @@ const GraphRAGConfig = () => {
         num_seen_min: parseInt(numSeenMin),
         community_level: parseInt(communityLevel),
         doc_only: docOnly,
+        enable_router_fallback: enableRouterFallback,
         load_batch_size: parseInt(loadBatchSize),
         upsert_delay: parseInt(upsertDelay),
         default_concurrency: parseInt(maxConcurrency),
@@ -178,6 +181,7 @@ const GraphRAGConfig = () => {
         num_seen_min: 2,
         community_level: 2,
         doc_only: false,
+        enable_router_fallback: true,
         load_batch_size: 500,
         upsert_delay: 0,
         default_concurrency: 10,
@@ -463,6 +467,24 @@ const GraphRAGConfig = () => {
                 </div>
                 <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 ml-6">
                   Retrieve original documents instead of document chunks in results
+                </p>
+              </div>
+
+              <div>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="enableRouterFallback"
+                    className="rounded border-gray-300 dark:border-[#3D3D3D]"
+                    checked={enableRouterFallback}
+                    onChange={(e) => setEnableRouterFallback(e.target.checked)}
+                  />
+                  <label htmlFor="enableRouterFallback" className="text-sm font-medium text-black dark:text-white">
+                    Fallback to Vector Search on Structured-Data Failure
+                  </label>
+                </div>
+                <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 ml-6">
+                  When function or cypher generation fails after 3 retries, automatically try vector search instead of giving up.
                 </p>
               </div>
             </div>

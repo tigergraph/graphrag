@@ -1,4 +1,4 @@
-import React, {useState, useCallback, useEffect, useContext} from 'react';
+import React, {useState, useRef, useCallback, useEffect, useContext} from 'react';
 import {createClientMessage} from 'react-chatbot-kit';
 import useWebSocket, {ReadyState} from 'react-use-websocket';
 import Loader from '../components/Loader';
@@ -81,6 +81,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
 }) => {
   const selectedGraph = useContext(SelectedGraphContext);
   const selectedRagPattern = useContext(RagPatternContext);
+  const lastUserQueryRef = useRef<string>("");
   const WS_URL = "/ui/" + selectedGraph + "/chat" + "?rag_pattern=" + selectedRagPattern;
   const [messageHistory, setMessageHistory] = useState<MessageEvent<Message>[]>(
     [],
@@ -205,6 +206,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
   };
 
   const defaultQuestions = (msg: string) => {
+    lastUserQueryRef.current = msg;
     const clientMessage = createClientMessage(msg, {
       delay: 300,
     });
@@ -213,6 +215,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
   };
 
   const queryGraphragWs = (msg) => {
+    lastUserQueryRef.current = msg;
     const queryGraphragWsTest = (msg: string) => {
       sendMessage(msg);
     };
@@ -268,6 +271,9 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
           // Don't dispatch refresh event here - refresh happens when user sends the question
           return; // Don't create a bot message for conversation ID
         }
+
+        // Attach the user query so the trace page can display it
+        messageData.userQuery = lastUserQueryRef.current;
 
         // Handle regular bot messages
         const botMessage = createChatBotMessage(messageData);

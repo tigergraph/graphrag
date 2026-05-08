@@ -28,6 +28,48 @@ interface IChatbotMessageProps {
 }
 
 const urlRegex = /https?:\/\//
+
+// Phase 1.5 — render a subtle chip showing which retrieval method ran.
+// Reads the auto-selection metadata that supportai_search mirrors into
+// query_sources (chosen_retriever / chosen_retriever_reason / chosen_retriever_source).
+const METHOD_LABELS: Record<string, string> = {
+  similaritysearch: "Similarity",
+  contextualsearch: "Contextual",
+  hybridsearch: "Hybrid",
+  communitysearch: "Community",
+};
+
+const RetrieverBadge: FC<{ message: any }> = ({ message }) => {
+  const qs = message?.query_sources;
+  if (!qs || typeof qs !== "object") return null;
+  const method = qs.chosen_retriever as string | undefined;
+  if (!method) return null;
+  // Suppress for greetings / errors / progress events — those don't run a retriever.
+  if (
+    message.response_type === "progress" ||
+    message.response_type === "greeting" ||
+    message.response_type === "error"
+  ) {
+    return null;
+  }
+  const label = METHOD_LABELS[method] || method;
+  const reason = (qs.chosen_retriever_reason as string | undefined) || "";
+  const source = (qs.chosen_retriever_source as string | undefined) || "";
+  const sourceLabel = source === "manual" ? "manual" : "auto";
+  // Reason + source live in the hover tooltip so the inline chip stays
+  // glanceable; users who want the detail can hover.
+  const tooltip = reason ? `${sourceLabel}: ${reason}` : sourceLabel;
+  return (
+    <div
+      className="inline-flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-shadeA rounded-full px-2 py-0.5 mt-1"
+      title={tooltip}
+    >
+      <span>🔎</span>
+      <span className="font-medium">{label}</span>
+    </div>
+  );
+};
+
 const getReasoning = (msg) => {
   
   if(msg.query_sources.reasoning instanceof Array) {
@@ -185,11 +227,19 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
             ) : (
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} className={message.response_type === "history" ? undefined : "typewriter"}>{message.content}</ReactMarkdown>
             )}
+            <RetrieverBadge message={message} />
             <Interactions
               message={message} 
               showExplain={handleShowExplain}
               showTable={handleShowTable}
               showGraph={handleShowGraph}
+              onViewTrace={() => {
+                const messageId = message.messageId || message.message_id || "";
+                // Store message in sessionStorage so the new tab reads it directly
+                // without needing an authenticated API fetch (which triggers browser auth dialog).
+                sessionStorage.setItem(`trace_msg_${messageId}`, JSON.stringify(message));
+                window.open(`/trace/${messageId}`, "_blank");
+              }}
             />
           </div>
 

@@ -52,10 +52,11 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
       }
     }
 
-    // Set default ragPattern if no value in sessionStorage
+    // Set default ragPattern if no value in sessionStorage. "Auto" lets the
+    // backend RetrieverSelector pick a method per question.
     if (!sessionStorage.getItem("ragPattern")) {
-      setRagPattern("Hybrid Search");
-      sessionStorage.setItem("ragPattern", "Hybrid Search");
+      setRagPattern("Auto");
+      sessionStorage.setItem("ragPattern", "Auto");
     }
 
     const date = new Date();
@@ -119,7 +120,7 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
                 <DropdownMenuLabel>Select a GraphRAG Pattern</DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  {["Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
+                  {["Auto", "Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
                     <DropdownMenuItem key={i} onSelect={() => handleSelectRag(f)}>
                       {/* <User className="mr-2 h-4 w-4" /> */}
                       <span>{f}</span>

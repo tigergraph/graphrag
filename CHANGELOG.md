@@ -11,6 +11,14 @@
 - **JSONL caching shared between schema extraction and ingest** — files uploaded for schema extraction are reused by the ingest flow without re-conversion.
 - **Parallel image description** during PDF processing (default 8 workers, env-overridable).
 - **Async embedding-store initialization** — service startup no longer blocks on the TigerGraph connection; status surfaces as `initializing` / `ok` / `error`.
+- **Auto retrieval method selection** — new "Auto" option in the chat dropdown picks among Similarity / Contextual / Hybrid / Community per question
+  - Two-stage selector: deterministic regex rules cover common cases; LLM fallback handles the rest with a subset-aware prompt
+  - Selection visible via a chip below each bot reply (method icon + label; reason and source in hover tooltip)
+  - Manual method selection still works as override during the transition
+- **Method selection telemetry** — Prometheus counter `llm_method_selection_total` with `selected_method` and `selection_source` labels
+- **Out-of-corpus short-circuit** — when the chosen retriever returns no results, the system returns an honest "couldn't find relevant info" message instead of letting the LLM hallucinate from empty context
+- **In-lane retrieval fallback** — when a chunk-based search method (similarity / contextual / hybrid) returns fewer than `top_k` chunks, the system tries a second method via a subset-aware fallback table (similarity → hybrid, contextual → hybrid, hybrid → community). Single retry, skipped for manual mode and community search.
+- **Cross-lane fallback to vector search** — when `generate_function` or `generate_cypher` retries are exhausted (3 rewrite cycles), the system falls back to auto-selected vector search instead of going straight to the apology message. Forces auto-selection regardless of configured method, so even manual users get the best vector option in this recovery path. Toggleable per-graph via `graphrag_config.enable_router_fallback` (default `true`); also editable from the GraphRAG config page in the admin UI.
 
 ### Changed
 - **All customizable prompts now ship as in-code defaults**, packaged inside the LLM service. Provider prompt directories are kept (empty) for backward compatibility; per-graph and global overrides still win when present.
@@ -26,6 +34,7 @@
 - **Community / hybrid retrievers walk domain edges and domain VTs directly** when a schema exists. The `Entity` layer becomes scaffolding for Louvain; community memberships are mirrored from `Entity` onto matching domain-VT instances after community detection so retrievers reach community context without traversing the legacy layer. New `graphrag_config.retrieval_include_entity` flag controls whether `Entity` stays visible to the chat agent — when unset, defaults to `false` for graphs with a domain schema (typed-purist) and `true` otherwise (no-op fallback).
 - **`apply_proposal` re-installs retriever queries** against the live domain schema, idempotently. Identical bodies are TG no-ops; new domain types or a changed `retrieval_include_entity` value re-render the affected queries on the next apply call.
 - **Transitional-graph detection at schema apply**: when a domain schema is added to a graph that already has Entity-layer data (typical v1.3.x → v1.4.0 upgrade applying a schema for the first time), `apply_proposal` forces `retrieval_include_entity=True` for the rendered queries so existing Entity rows stay reachable. The result payload carries a `transitional` block (`entity_count`, `new_domain_vts`, `recommendation`) for the init-graph dialog to surface a "your existing entities won't be auto-typed — re-ingest for full schema awareness" prompt. Once the user clears derived data and re-ingests (planned v1.5 admin endpoint), the auto-default flips back to typed-purist on the next apply call.
+- **Empty function-call results now trigger retry** — `generate_function` now treats an empty result as a generation failure (symmetric with `generate_cypher`). Rewrite-and-retry kicks in, and after 3 cycles the cross-lane vector fallback runs. Previously, empty function results passed through to answer generation and risked hallucinated narratives around the emptiness.
 
 > **Upgrading from a pre-release v1.4.0 build**: graphs that already
 > have domain vertex types but were created before the multi-pair
@@ -39,7 +48,7 @@
 - **`RELATIONSHIP_TYPE` edge** between `EntityType` vertices — superseded by `IS_HEAD_OF` + `HAS_TAIL` through `RelationshipType`.
 
 ### Configuration
-- New `graphrag_config` keys: `schema_max_sample_files` (default 5), `schema_max_total_mb` (default 50), `strict_mode` (default false), `retrieval_include_entity` (auto: false when domain schema present, true otherwise).
+- New `graphrag_config` keys: `schema_max_sample_files` (default 5), `schema_max_total_mb` (default 50), `strict_mode` (default false), `retrieval_include_entity` (auto: false when domain schema present, true otherwise), `enable_router_fallback` (default true).
 - New env var: `PDF_IMAGE_CONCURRENCY` (default 8).
 
 > Implementation-level details for v1.4.0 (parser internals, endpoint contracts, dialog state machine, prompt-resolution chain, schema-aware ECC worker logic, etc.) live in `dev/plans/graphrag/v1.4.0_implementation_notes.md`.

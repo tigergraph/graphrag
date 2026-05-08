@@ -72,6 +72,11 @@ class PrometheusMetrics(metaclass=SingletonMeta):
                 "Number of LLM responses that yielded an error result",
                 ["llm_model"],
             )
+            self.llm_method_selection_total = Counter(
+                "llm_method_selection_total",
+                "Number of times each retrieval method was selected (auto + manual)",
+                ["selected_method", "selection_source"],
+            )
 
             # collect metrics for TigerGraph
             self.tigergraph_active_connections = Gauge(

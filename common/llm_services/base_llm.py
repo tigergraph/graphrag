@@ -23,6 +23,42 @@ from langchain_community.callbacks.manager import get_openai_callback
 logger = logging.getLogger(__name__)
 
 
+# Per-request collector for LLM usage so callers (e.g. agent trace logs) can
+# aggregate token usage without breaking the existing return signatures.
+# It's a context-local list the agent resets before each node executes.
+import contextvars as _contextvars
+
+_usage_collector: _contextvars.ContextVar = _contextvars.ContextVar(
+    "llm_usage_collector", default=None
+)
+
+
+def start_usage_collection():
+    """Begin collecting LLM usage for the current context (per node)."""
+    _usage_collector.set([])
+
+
+def get_collected_usage():
+    """Return the usage entries collected since the last start (or None)."""
+    return _usage_collector.get()
+
+
+def reset_usage_collection():
+    """Drop any accumulated usage and disable collection for this context.
+
+    Must be called at the end of a request (success or failure) so stale
+    usage data doesn't bleed into the next request that runs on the same
+    thread (sync FastAPI handlers re-use worker threads from a pool).
+    """
+    _usage_collector.set(None)
+
+
+def _record_usage(caller_name: str, usage_data: dict):
+    bucket = _usage_collector.get()
+    if bucket is not None:
+        bucket.append({"caller_name": caller_name, **usage_data})
+
+
 class LLM_Model:
     """Base LLM_Model Class
 
@@ -95,6 +131,7 @@ class LLM_Model:
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
             logger.info(f"{caller_name} usage: {usage_data}")
+            _record_usage(caller_name, usage_data)
 
         raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
 
@@ -131,6 +168,7 @@ class LLM_Model:
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
             logger.info(f"{caller_name} usage: {usage_data}")
+            _record_usage(caller_name, usage_data)
 
         raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
 
@@ -378,6 +416,39 @@ Return JSON with a single key `datasource` (value: `functions`, `vectorstore`, o
 - **Conversation history**: {conversation}
 
 {format_instructions}"""
+
+    @property
+    def select_retriever_prompt(self):
+        """Property to get the prompt for the auto-select retriever (RetrieverSelector Stage B).
+
+        Returns the user-facing prompt template; the parser injects format_instructions.
+        """
+        result = self._read_prompt_file(self.prompt_path + "select_retriever.txt")
+        if result is not None:
+            return result
+        return """\
+You are choosing the best retrieval strategy for a knowledge-graph question.
+Pick exactly one of: similarity, contextual, hybrid, community.
+
+Methods:
+- similarity: a single fact / definition / quote; the answer lives in one passage. Cheapest. Pick this for short factoid questions about a single entity.
+- contextual: needs surrounding narrative (a process, a sequence, cause-and-effect). Returns matching chunks plus their lookback/lookahead siblings.
+- hybrid: needs relationships between named entities or multi-hop reasoning. Returns matching chunks plus graph-expansion to nearby entities.
+- community: global, thematic, or aggregate questions over the whole corpus ("main themes", "what topics are covered", "summarize the documents"). Returns community summaries instead of chunks.
+
+Important constraints:
+- similarity returns a strict subset of contextual and hybrid (same vector hits, no expansion). Do NOT pick similarity if the question needs context or relationships — pick contextual or hybrid instead.
+- community is the only method that operates on community summaries. Pick it ONLY for global/thematic questions; do not pick it for questions about specific named entities.
+
+Schema context — the knowledge graph contains these entity types: {v_types}
+And these relationship types: {e_types}
+
+Question: {question}
+Conversation history (last 2 turns, may be empty): {conversation}
+
+Return JSON: {{"method": "<one of: similarity, contextual, hybrid, community>", "reason": "<≤20 words explaining the pick>"}}
+
+Format: {format_instructions}"""
 
     @property
     def hyde_prompt(self):
