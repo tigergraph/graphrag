@@ -745,7 +745,7 @@ const TraceLogs: FC = () => {
   const userQuery = stateUserQuery || sessionMessage?.userQuery || apiData?.user_query;
 
   const trace = useMemo(
-    () => buildTraceFromMessage(message, userQuery),
+    () => (message ? buildTraceFromMessage(message, userQuery) : null),
     [message, userQuery]
   );
 
@@ -760,6 +760,7 @@ const TraceLogs: FC = () => {
   };
 
   const handleDownload = () => {
+    if (!trace) return;
     const blob = new Blob([JSON.stringify(trace, null, 2)], {
       type: "application/json",
     });
@@ -775,6 +776,14 @@ const TraceLogs: FC = () => {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <p className="text-muted-foreground">Loading trace data...</p>
+      </div>
+    );
+  }
+
+  if (!trace) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <p className="text-muted-foreground">Trace data not found.</p>
       </div>
     );
   }
