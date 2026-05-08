@@ -11,7 +11,7 @@ from tools import GenerateCypher, GenerateFunction, MapQuestionToSchema
 from common.config import embedding_service, embedding_store, llm_config, get_completion_config, get_chat_config, get_llm_service
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.embedding_services import EmbeddingModel
-from common.llm_services.base_llm import LLM_Model, start_usage_collection, get_collected_usage
+from common.llm_services.base_llm import LLM_Model, start_usage_collection, get_collected_usage, reset_usage_collection
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics
@@ -44,7 +44,7 @@ class TigerGraphAgent:
         embedding_store: EmbeddingStore,
         use_cypher: bool = False,
         ws=None,
-        supportai_retriever="hybridsearch"
+        supportai_retriever="auto"
     ):
         self.conn = db_connection
 
@@ -257,6 +257,10 @@ class TigerGraphAgent:
             traceback.print_exc()
             raise e
         finally:
+            # Clear the per-request LLM usage bucket so it can't leak into the
+            # next request that runs on the same worker thread (sync FastAPI
+            # handlers re-use threads from a pool, where ContextVars persist).
+            reset_usage_collection()
             metrics.llm_request_total.labels(self.model_name).inc()
             metrics.llm_inprogress_requests.labels(self.model_name).dec()
             duration = time.time() - start_time
@@ -265,7 +269,7 @@ class TigerGraphAgent:
             )
 
 
-def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="hybridsearch") -> TigerGraphAgent:
+def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto") -> TigerGraphAgent:
     llm_provider = get_llm_service(get_chat_config(graphname))
     chat_config = llm_provider.config
 

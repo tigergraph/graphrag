@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.4.0]
+
+### Added
+- **Auto retrieval method selection** — new "Auto" option in the chat dropdown picks among Similarity / Contextual / Hybrid / Community per question
+  - Two-stage selector: deterministic regex rules cover common cases; LLM fallback handles the rest with a subset-aware prompt
+  - Selection visible via a chip below each bot reply (method icon + label; reason and source in hover tooltip)
+  - Manual method selection still works as override during the transition
+- **Method selection telemetry** — Prometheus counter `llm_method_selection_total` with `selected_method` and `selection_source` labels
+- **Out-of-corpus short-circuit** — when the chosen retriever returns no results, the system returns an honest "couldn't find relevant info" message instead of letting the LLM hallucinate from empty context
+- **In-lane retrieval fallback** — when a chunk-based search method (similarity / contextual / hybrid) returns fewer than `top_k` chunks, the system tries a second method via a subset-aware fallback table (similarity → hybrid, contextual → hybrid, hybrid → community). Single retry, skipped for manual mode and community search.
+- **Cross-lane fallback to vector search** — when `generate_function` or `generate_cypher` retries are exhausted (3 rewrite cycles), the system falls back to auto-selected vector search instead of going straight to the apology message. Forces auto-selection regardless of configured method, so even manual users get the best vector option in this recovery path. Toggleable per-graph via `graphrag_config.enable_router_fallback` (default `true`); also editable from the GraphRAG config page in the admin UI.
+
+### Changed
+- **Empty function-call results now trigger retry** — `generate_function` now treats an empty result as a generation failure (symmetric with `generate_cypher`). Rewrite-and-retry kicks in, and after 3 cycles the cross-lane vector fallback runs. Previously, empty function results passed through to answer generation and risked hallucinated narratives around the emptiness.
+
 ## [1.3.1]
 
 ### Changed

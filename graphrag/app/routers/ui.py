@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 TRACE_LOGS_DIR = os.environ.get("TRACE_LOGS_DIR", "/code/trace_logs")
 
+
 def _cleanup_old_traces(max_age_days: int = 30):
     """Delete trace log files older than max_age_days."""
     try:
@@ -86,9 +87,23 @@ def _cleanup_old_traces(max_age_days: int = 30):
         logger.warning("Failed to clean up old trace logs", exc_info=True)
 
 
-def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float):
+def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float, username: str):
     try:
+        if not isinstance(message_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", message_id):
+            logger.warning("Refusing to save trace log: invalid message_id %r", message_id)
+            return
+        if not isinstance(username, str) or not username:
+            # Without an owner we cannot enforce per-user access on read, so refuse to save.
+            logger.warning("Refusing to save trace log for %r: missing username", message_id)
+            return
+
         os.makedirs(TRACE_LOGS_DIR, exist_ok=True)
+        base_dir = os.path.abspath(TRACE_LOGS_DIR)
+        filepath = os.path.abspath(os.path.join(base_dir, f"{message_id}.json"))
+        if os.path.commonpath([base_dir, filepath]) != base_dir:
+            logger.warning("Refusing to save trace log: path escapes TRACE_LOGS_DIR for %r", message_id)
+            return
+
         _cleanup_old_traces()
 
         # Strip chunk text from query_sources to keep trace files small.
@@ -102,6 +117,7 @@ def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp
         trace_data = {
             "message_id": message_id,
             "conversation_id": conversation_id,
+            "username": username,
             "user_query": user_query,
             "response_time": elapsed,
             "response_type": resp.response_type,
@@ -110,7 +126,6 @@ def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp
             "natural_language_response": resp.natural_language_response,
             "timestamp": time.time(),
         }
-        filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
         with open(filepath, "w") as f:
             json.dump(trace_data, f, default=str)
     except Exception:
@@ -389,11 +404,42 @@ def get_trace_log(
     message_id: str,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
-    filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
+    # Trace logs contain user queries (potentially PII), full LLM responses,
+    # internal cypher, schema mappings, and per-call cost.
+    # Two layers of access control:
+    #   1. Role: must be a superuser.
+    #   2. Ownership: must be the user who originated the trace.
+    # This prevents cross-user disclosure even between superusers.
+    _require_roles(creds[1], {"superuser"})
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", message_id):
+        raise HTTPException(status_code=400, detail="Invalid message_id")
+    base_dir = os.path.abspath(TRACE_LOGS_DIR)
+    filepath = os.path.abspath(os.path.join(base_dir, f"{message_id}.json"))
+    if os.path.commonpath([base_dir, filepath]) != base_dir:
+        raise HTTPException(status_code=400, detail="Invalid message_id")
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail="Trace log not found")
-    with open(filepath, "r") as f:
-        return json.load(f)
+
+    try:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Failed to read trace log %r", message_id, exc_info=True)
+        raise HTTPException(status_code=404, detail="Trace log not found")
+
+    # Per-user segregation. Legacy files (saved before this fix) have no
+    # "username" field and therefore can't pass this check — they will 404
+    # for everyone and age out via the existing 30-day cleanup.
+    owner = data.get("username")
+    if owner != creds[1].username:
+        logger.warning(
+            "User %r attempted to read trace owned by %r (message_id=%s)",
+            creds[1].username, owner, message_id,
+        )
+        raise HTTPException(status_code=404, detail="Trace log not found")
+
+    return data
 
 
 
@@ -1092,8 +1138,8 @@ async def graph_query(
             LogWriter.info(f"Continuing conversation with ID: {convo_id}")
 
         # create agent
-        # get retrieval pattern to use
-        rag_pattern = rag_pattern or "hybridsearch"
+        # get retrieval pattern to use; default "auto" lets RetrieverSelector pick.
+        rag_pattern = rag_pattern or "auto"
         agent = make_agent(graphname, conn, use_cypher, supportai_retriever=rag_pattern)
 
         prev_id = None
@@ -1133,7 +1179,7 @@ async def graph_query(
             query_sources=resp.query_sources,
         )
         await write_message_to_history(message, auth)
-        await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed)
+        await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, creds.username)
         prev_id = message.message_id
 
         # reply
@@ -1174,6 +1220,8 @@ async def chat(
         usr_auth = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         logger.info(f"Received authentication data, length: {len(usr_auth)}")
         _, conn = ws_basic_auth(usr_auth, graphname)
+        # Extract the authenticated username for trace-log ownership tracking.
+        ws_username = base64.b64decode(usr_auth.encode()).decode().split(":", 1)[0]
         logger.info("Authentication successful")
     except asyncio.TimeoutError:
         logger.error("WebSocket authentication timeout - no credentials received")
@@ -1190,8 +1238,8 @@ async def chat(
             pass
         return
 
-    # Get RAG pattern
-    rag_pattern = rag_pattern or "hybridsearch"
+    # Get RAG pattern; default "auto" lets RetrieverSelector pick.
+    rag_pattern = rag_pattern or "auto"
 
     # Get conversation ID
     try:
@@ -1260,7 +1308,7 @@ async def chat(
                 query_sources=resp.query_sources,
             )
             await write_message_to_history(message, usr_auth)
-            await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed)
+            await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, ws_username)
             prev_id = message.message_id
 
             # reply

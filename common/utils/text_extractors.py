@@ -652,11 +652,16 @@ def extract_text_from_file(file_path, graphname=None):
                 if df.empty:
                     continue
                 df = df.fillna('')
-                # Detect header row: first row is all non-empty strings with
-                # no purely numeric values → treat as column names.
                 first_row = df.iloc[0]
-                if all(isinstance(v, str) and v.strip() for v in first_row):
-                    df.columns = first_row.tolist()
+                first_row_values = [str(v).strip() for v in first_row]
+                looks_like_header = (
+                    len(df) > 1
+                    and all(first_row_values)
+                    and len(set(first_row_values)) == len(first_row_values)
+                    and not any(v.isdigit() for v in first_row_values)
+                )
+                if looks_like_header:
+                    df.columns = first_row_values
                     df = df.iloc[1:].reset_index(drop=True)
                 else:
                     df.columns = [f"Column {i + 1}" for i in range(len(df.columns))]
