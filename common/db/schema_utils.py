@@ -566,6 +566,12 @@ def _extract_attributes(body: str, *, is_edge_body: bool) -> List[Tuple[str, str
         # stripped, but be defensive against other reserved tokens).
         if folded in {"from", "to", "primary_id"}:
             continue
+        # Drop attribute names that collide with GSQL reserved words
+        # (e.g. ``count``, ``min``, ``max``). The schema-change job
+        # would otherwise fail with "Encountered ',' ..." when TG's
+        # parser reads the keyword in attribute position.
+        if is_reserved_word(name):
+            continue
         seen.add(folded)
         out.append((name, type_str))
     return out
@@ -1239,48 +1245,65 @@ def apply_proposal(
             "status": "no-op",
             "statements": [],
             "job_name": None,
+            "job_names": [],
             "gsql_output": "",
             "summary": summary,
             "metadata": metadata,
             "retrievers": retrievers,
         }
 
-    block, job_name = build_schema_change_job(graphname, statements, job_name)
-    try:
-        output = conn.gsql(block)
-    except Exception:
-        # If gsql() raised mid-block, the trailing DROP JOB may not have
-        # executed. Best-effort cleanup so leaked jobs don't accumulate.
+    # Split into two phases so TG's job-validator never sees an ALTER
+    # statement that references a vertex/edge type created elsewhere in
+    # the same job. Phase 1 ADDs new types; phase 2 ALTERs (e.g. ADD
+    # PAIR on existing edges) runs only after phase 1 commits.
+    add_stmts = [s for s in statements if s.lstrip().upper().startswith("ADD ")]
+    alter_stmts = [s for s in statements if s.lstrip().upper().startswith("ALTER ")]
+
+    def _run_phase(phase_stmts: List[str], phase_job: Optional[str]) -> Tuple[str, str]:
+        block, name = build_schema_change_job(graphname, phase_stmts, phase_job)
         try:
-            conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {job_name}")
+            out = conn.gsql(block)
         except Exception:
-            pass
-        raise
-    err = gsql_output_error(output)
-    if err:
-        # Server-reported failure (no exception). RUN may have aborted
-        # before DROP — try to clean up; ignore the "not found" path.
-        try:
-            conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {job_name}")
-        except Exception:
-            pass
-        # pyTigerGraph's gsql() returned a failure response without
-        # raising — surface it explicitly so the caller doesn't
-        # falsely report "applied". Skip metadata upsert (the schema
-        # change didn't land, so writing EntityType vertices for
-        # types that don't exist would also fail). Include a
-        # ``retrievers`` placeholder so the result shape is uniform
-        # with the no-op / applied paths.
-        return {
-            "status": "error",
-            "statements": statements,
-            "job_name": job_name,
-            "gsql_output": output,
-            "error": err,
-            "summary": summary,
-            "metadata": {"entity_types": [], "relationship_types": []},
-            "retrievers": {"status": "skipped", "reason": "schema apply failed"},
-        }
+            try:
+                conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {name}")
+            except Exception:
+                pass
+            raise
+        return out, name
+
+    phase_outputs: List[str] = []
+    phase_jobs: List[str] = []
+    first_job_name: Optional[str] = None
+    for phase_stmts in (add_stmts, alter_stmts):
+        if not phase_stmts:
+            continue
+        # Only honor the caller-supplied job_name on the first phase that
+        # actually runs; subsequent phases get auto-generated names so
+        # they don't collide.
+        phase_job = job_name if first_job_name is None else None
+        output, ran_name = _run_phase(phase_stmts, phase_job)
+        phase_outputs.append(output)
+        phase_jobs.append(ran_name)
+        if first_job_name is None:
+            first_job_name = ran_name
+        err = gsql_output_error(output)
+        if err:
+            try:
+                conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {ran_name}")
+            except Exception:
+                pass
+            return {
+                "status": "error",
+                "statements": statements,
+                "job_name": first_job_name,
+                "job_names": phase_jobs,
+                "gsql_output": "\n".join(phase_outputs),
+                "error": err,
+                "summary": summary,
+                "metadata": {"entity_types": [], "relationship_types": []},
+                "retrievers": {"status": "skipped", "reason": "schema apply failed"},
+            }
+
     metadata = upsert_type_metadata(conn, proposal)
     retrievers = _install_retrievers_after_apply(
         conn, graphname, proposal=proposal, pre_apply_existing=existing
@@ -1288,8 +1311,9 @@ def apply_proposal(
     return {
         "status": "applied",
         "statements": statements,
-        "job_name": job_name,
-        "gsql_output": output,
+        "job_name": first_job_name,
+        "job_names": phase_jobs,
+        "gsql_output": "\n".join(phase_outputs),
         "summary": summary,
         "metadata": metadata,
         "retrievers": retrievers,

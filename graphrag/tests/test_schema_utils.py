@@ -901,7 +901,7 @@ def test_apply_proposal_error_path_returns_uniform_shape():
     assert result["status"] == "error"
     # Full uniform shape — same key set as success / no-op.
     assert set(result.keys()) == {
-        "status", "statements", "job_name", "gsql_output",
+        "status", "statements", "job_name", "job_names", "gsql_output",
         "error", "summary", "metadata", "retrievers",
     }
     assert result["retrievers"] == {
@@ -1182,10 +1182,12 @@ def test_emit_structural_links_skips_already_present_pairs():
 
 
 def test_apply_proposal_emits_structural_links_alongside_domain_adds():
-    """End-to-end: apply_proposal runs both emit_add_statements and
-    emit_structural_link_alters in a single schema-change job. The
-    fake graph has the GraphRAG structural types in place (production
-    invariant — init_supportai runs before apply_proposal).
+    """End-to-end: apply_proposal runs emit_add_statements (phase 1)
+    and emit_structural_link_alters (phase 2) as two separate
+    schema-change jobs so TG's job validator never sees an ALTER that
+    references a vertex type created in the same job. The fake graph
+    has the GraphRAG structural types in place (production invariant —
+    init_supportai runs before apply_proposal).
     """
     conn = _FakeConn(
         vertex_types=[
@@ -1200,20 +1202,27 @@ def test_apply_proposal_emits_structural_links_alongside_domain_adds():
     result = apply_proposal(conn, "g", proposal)
     assert result["status"] == "applied"
     schema_calls = [c for c in conn.gsql_calls if "SCHEMA_CHANGE JOB" in c]
-    assert len(schema_calls) == 1
-    cmd = schema_calls[0]
-    # Domain ADD VERTEX is in there.
-    assert "ADD VERTEX Company" in cmd
-    # CONTAINS_ENTITY pair-additions for Company are in the same job.
-    assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO Company)" in cmd
-    assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO Company)" in cmd
-    # IN_COMMUNITY pair-addition for Company is in the same job —
+    # Two phases: phase 1 = ADD VERTEX, phase 2 = ALTER EDGE ADD PAIR.
+    assert len(schema_calls) == 2
+    add_cmd, alter_cmd = schema_calls
+    # Phase 1 carries the domain ADD VERTEX.
+    assert "ADD VERTEX Company" in add_cmd
+    assert "ALTER EDGE" not in add_cmd
+    # Phase 2 carries every structural-link ALTER, no ADD VERTEX.
+    assert "ADD VERTEX" not in alter_cmd
+    assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO Company)" in alter_cmd
+    assert "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO Company)" in alter_cmd
+    # IN_COMMUNITY pair-addition for Company —
     # community retrievers walking domain VTs need this edge present.
-    assert "ALTER EDGE IN_COMMUNITY ADD PAIR (FROM Company, TO Community)" in cmd
+    assert "ALTER EDGE IN_COMMUNITY ADD PAIR (FROM Company, TO Community)" in alter_cmd
     # No per-domain-vertex IS_HEAD_OF / HAS_TAIL — those live at
     # EntityType ↔ RelationshipType in the structural schema.
-    assert "IS_HEAD_OF ADD PAIR" not in cmd
-    assert "HAS_TAIL ADD PAIR" not in cmd
+    assert "IS_HEAD_OF ADD PAIR" not in alter_cmd
+    assert "HAS_TAIL ADD PAIR" not in alter_cmd
+    # Result surfaces both phase job names; the legacy ``job_name`` key
+    # remains the first phase for callers that haven't migrated.
+    assert len(result["job_names"]) == 2
+    assert result["job_name"] == result["job_names"][0]
 
 
 def test_apply_proposal_skips_structural_links_when_core_types_missing():
