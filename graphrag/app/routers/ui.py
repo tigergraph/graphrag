@@ -640,6 +640,14 @@ async def convert_sample_files(
                 ),
             )
         safe_name = os.path.basename(f.filename or "sample")
+        if safe_name in saved_basenames:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Duplicate filename '{safe_name}' in upload set. "
+                    "Rename one of the files and try again."
+                ),
+            )
         target = os.path.join(upload_dir, safe_name)
         with open(target, "wb") as out:
             out.write(data)
@@ -704,11 +712,23 @@ def extract_schema_from_jsonl(
 
     if requested:
         jsonl_paths = []
+        missing_jsonls = []
         for name in requested:
             stem = os.path.splitext(os.path.basename(name))[0]
             p = os.path.join(temp_folder, f"{stem}.jsonl")
             if os.path.exists(p):
                 jsonl_paths.append(p)
+            else:
+                missing_jsonls.append(name)
+        if missing_jsonls:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Converted JSONL not found for: "
+                    + ", ".join(missing_jsonls)
+                    + ". Run convert_sample_files first for those files."
+                ),
+            )
     else:
         jsonl_paths = [
             os.path.join(temp_folder, fn)

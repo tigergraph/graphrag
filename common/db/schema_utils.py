@@ -94,6 +94,12 @@ GRAPHRAG_STRUCTURAL_EDGE_TYPES: frozenset = frozenset({
 })
 
 
+# TigerGraph identifier pattern (graphs, jobs, vertex/edge types). Must
+# match the route-level ``ValidGraphName`` regex so direct callers of
+# the helpers below get the same protection the API layer enforces.
+_GSQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 _GSQL_RESERVED_CACHE: Optional[frozenset] = None
 
 
@@ -675,9 +681,13 @@ def parse_gsql_schema(text: str) -> SchemaProposal:
         for pm in _EDGE_PAIR_RE.finditer(body):
             from_vt = pm.group("from")
             to_vt = pm.group("to")
-            if is_structural_type(from_vt) and is_structural_type(to_vt):
-                # Both endpoints are structural — definitely not a domain
-                # edge pair the user is trying to add. Drop it.
+            if is_structural_type(from_vt) or is_structural_type(to_vt):
+                # Either endpoint is a structural type, a reverse_*
+                # auto-generated companion, or a GSQL reserved word —
+                # the pair would be invalid as a user-declared domain
+                # edge. ``drop_dangling_pairs`` would catch it later
+                # anyway; rejecting here keeps the proposal free of
+                # transient invalid state.
                 continue
             proposal.add_edge_pair(
                 name=name,
@@ -996,8 +1006,12 @@ def build_schema_change_job(
     """
     if not statements:
         raise ValueError("build_schema_change_job: statements is empty")
+    if not _GSQL_IDENT_RE.fullmatch(graphname):
+        raise ValueError(f"Invalid graph name: {graphname!r}")
     if job_name is None:
         job_name = f"add_domain_schema_{uuid.uuid4().hex[:8]}"
+    elif not _GSQL_IDENT_RE.fullmatch(job_name):
+        raise ValueError(f"Invalid job name: {job_name!r}")
 
     body = ";\n  ".join(s.rstrip(";") for s in statements) + ";"
     block = (
@@ -1232,14 +1246,31 @@ def apply_proposal(
         }
 
     block, job_name = build_schema_change_job(graphname, statements, job_name)
-    output = conn.gsql(block)
+    try:
+        output = conn.gsql(block)
+    except Exception:
+        # If gsql() raised mid-block, the trailing DROP JOB may not have
+        # executed. Best-effort cleanup so leaked jobs don't accumulate.
+        try:
+            conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {job_name}")
+        except Exception:
+            pass
+        raise
     err = gsql_output_error(output)
     if err:
+        # Server-reported failure (no exception). RUN may have aborted
+        # before DROP — try to clean up; ignore the "not found" path.
+        try:
+            conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {job_name}")
+        except Exception:
+            pass
         # pyTigerGraph's gsql() returned a failure response without
         # raising — surface it explicitly so the caller doesn't
         # falsely report "applied". Skip metadata upsert (the schema
         # change didn't land, so writing EntityType vertices for
-        # types that don't exist would also fail).
+        # types that don't exist would also fail). Include a
+        # ``retrievers`` placeholder so the result shape is uniform
+        # with the no-op / applied paths.
         return {
             "status": "error",
             "statements": statements,
@@ -1248,6 +1279,7 @@ def apply_proposal(
             "error": err,
             "summary": summary,
             "metadata": {"entity_types": [], "relationship_types": []},
+            "retrievers": {"status": "skipped", "reason": "schema apply failed"},
         }
     metadata = upsert_type_metadata(conn, proposal)
     retrievers = _install_retrievers_after_apply(

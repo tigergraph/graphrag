@@ -570,6 +570,24 @@ def get_embedding_store(timeout: float = 0):
     return embedding_store
 
 
+def reset_embedding_store() -> None:
+    """Drop the in-memory store and re-run ``_init_embedding_store`` so
+    a config reload picks up the new ``embedding_service`` and
+    ``db_config``. Callers should swap the inputs before calling.
+    No-op when ``INIT_EMBED_STORE`` is disabled (e.g. ECC).
+    """
+    global embedding_store
+    if os.getenv("INIT_EMBED_STORE", "true") != "true":
+        return
+    embedding_store = None
+    _embedding_store_ready.clear()
+    service_status["embedding_store"] = {
+        "status": "initializing",
+        "error": "Embedding store is still initializing",
+    }
+    threading.Thread(target=_init_embedding_store, daemon=True).start()
+
+
 if os.getenv("INIT_EMBED_STORE", "true") == "true":
     threading.Thread(target=_init_embedding_store, daemon=True).start()
 
@@ -682,6 +700,9 @@ def reload_llm_config(new_llm_config: dict = None):
         else:
             raise Exception("Embedding service not implemented")
 
+        # Re-init so the store binds to the freshly-built embedding_service.
+        reset_embedding_store()
+
         return {
             "status": "success",
             "message": "LLM configuration reloaded successfully"
@@ -731,6 +752,9 @@ def reload_db_config(new_db_config: dict = None):
         for k in old_db_keys - set(new_db_config.keys()):
             del db_config[k]
         db_config.update(new_db_config)
+
+        # Re-init so the store binds to the freshly-updated db_config.
+        reset_embedding_store()
 
         return {
             "status": "success",

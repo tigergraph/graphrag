@@ -38,8 +38,12 @@ $HOME/Downloads/BarclaysDocs/QuarterlyInvestmentReport_uss.pdf \\
 
 Environment variables:
     GRAPHRAG_URL            Base URL of running GraphRAG service (required to run)
-    DB_CONFIG               Path to db_config.json (default: ./configs/db_config.json)
-    TG_USERNAME / TG_PASSWORD  Fallbacks if DB_CONFIG is missing
+    TG_HOST                 TigerGraph host URL (e.g. http://host:14240). Required
+                            unless ``db_config.hostname`` is set in SERVER_CONFIG.
+    SERVER_CONFIG           Path to server_config.json (default:
+                            ./configs/server_config.json). Read for the
+                            ``db_config`` block (hostname / username / password).
+    TG_USERNAME / TG_PASSWORD  Fallbacks if SERVER_CONFIG is missing or partial.
     TEST_GRAPH              Graph name (default: SchemaAwareE2E_<timestamp>)
     TEST_FILES              Comma-separated file paths (default: BarclaysDocs PDFs)
     REBUILD_TIMEOUT         Max seconds to wait for rebuild (default: 7200)
@@ -64,15 +68,27 @@ import requests
 
 GRAPHRAG_URL = os.getenv("GRAPHRAG_URL", "http://localhost:80")
 
-_db_config_path = os.getenv("DB_CONFIG", "./configs/db_config.json")
+_server_config_path = os.getenv("SERVER_CONFIG", "./configs/server_config.json")
+_db: dict = {}
 try:
-    with open(_db_config_path) as _f:
-        _db = json.load(_f)
-    USERNAME = _db.get("username", "tigergraph")
-    PASSWORD = _db.get("password", "tigergraph")
+    with open(_server_config_path) as _f:
+        _db = (json.load(_f) or {}).get("db_config") or {}
 except Exception:
-    USERNAME = os.getenv("TG_USERNAME", "tigergraph")
-    PASSWORD = os.getenv("TG_PASSWORD", "tigergraph")
+    _db = {}
+
+USERNAME = _db.get("username") or os.getenv("TG_USERNAME", "tigergraph")
+PASSWORD = _db.get("password") or os.getenv("TG_PASSWORD", "tigergraph")
+# Resolution order: TG_HOST env override → ``db_config.hostname`` in
+# server_config.json → fail fast. No baked-in default — local
+# environments differ, and a wrong fallback can silently point the
+# test at the wrong cluster.
+TG_HOST = os.getenv("TG_HOST") or _db.get("hostname")
+if not TG_HOST:
+    raise RuntimeError(
+        "TG_HOST is not set. Export it in the shell or set "
+        f"'db_config.hostname' in {_server_config_path} before running "
+        "the e2e test."
+    )
 
 REBUILD_TIMEOUT = int(os.getenv("REBUILD_TIMEOUT", "7200"))
 SCHEMA_EXTRACT_TIMEOUT = int(os.getenv("SCHEMA_EXTRACT_TIMEOUT", "300"))
@@ -265,9 +281,8 @@ def test_05_validate_live_schema():
 
     from pyTigerGraph import TigerGraphConnection
 
-    tg_host = os.getenv("TG_HOST", "http://192.168.11.11")
     conn = TigerGraphConnection(
-        host=tg_host,
+        host=TG_HOST,
         graphname=GRAPH_NAME,
         username=USERNAME,
         password=PASSWORD,
@@ -433,9 +448,8 @@ def test_09_validate_final_graph():
 
     from pyTigerGraph import TigerGraphConnection
 
-    tg_host = os.getenv("TG_HOST", "http://192.168.11.11")
     conn = TigerGraphConnection(
-        host=tg_host,
+        host=TG_HOST,
         graphname=GRAPH_NAME,
         username=USERNAME,
         password=PASSWORD,

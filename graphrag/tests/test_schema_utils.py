@@ -629,6 +629,40 @@ def test_build_schema_change_job_empty_statements_raises():
         build_schema_change_job("g", [])
 
 
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "g raph",          # whitespace
+        'g"x',             # quote — closes a STRING literal
+        "g; DROP GRAPH x", # statement separator + injection attempt
+        "g\n",             # newline
+        "1graph",          # leading digit
+        "",                # empty
+    ],
+)
+def test_build_schema_change_job_rejects_invalid_graphname(bad_name):
+    with pytest.raises(ValueError, match="Invalid graph name"):
+        build_schema_change_job(bad_name, ["ADD VERTEX X(PRIMARY_ID id STRING)"])
+
+
+@pytest.mark.parametrize(
+    "bad_job",
+    [
+        "job name",
+        'job"x',
+        "job; DROP JOB other",
+        "1job",
+    ],
+)
+def test_build_schema_change_job_rejects_invalid_job_name(bad_job):
+    with pytest.raises(ValueError, match="Invalid job name"):
+        build_schema_change_job(
+            "g",
+            ["ADD VERTEX X(PRIMARY_ID id STRING)"],
+            job_name=bad_job,
+        )
+
+
 # ---------------------------------------------------------------------------
 # apply_proposal
 # ---------------------------------------------------------------------------
@@ -843,6 +877,37 @@ def test_apply_proposal_no_new_domain_vts_skips_transitional_check():
     retrievers = result["retrievers"]
     # No new VTs in proposal → not a transitional apply, normal default.
     assert "transitional" not in retrievers
+
+
+def test_apply_proposal_error_path_returns_uniform_shape():
+    """When ``conn.gsql`` reports a server-side failure, the result
+    payload must carry the same keys as the success / no-op paths so
+    callers can read ``status / statements / retrievers / metadata``
+    uniformly without a per-status branch.
+    """
+    conn = _FakeConn(
+        vertex_types=[
+            "Document", "DocumentChunk", "Entity",
+            "EntityType", "RelationshipType", "Community",
+        ],
+        edge_metadata={},
+        gsql_response="SEMANTIC ERROR: simulated failure",
+    )
+    proposal = SchemaProposal()
+    proposal.add_vertex("Company")
+
+    result = apply_proposal(conn, "g", proposal)
+
+    assert result["status"] == "error"
+    # Full uniform shape — same key set as success / no-op.
+    assert set(result.keys()) == {
+        "status", "statements", "job_name", "gsql_output",
+        "error", "summary", "metadata", "retrievers",
+    }
+    assert result["retrievers"] == {
+        "status": "skipped",
+        "reason": "schema apply failed",
+    }
 
 
 # ---------------------------------------------------------------------------

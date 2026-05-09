@@ -482,10 +482,15 @@ async def extract(
 
                 rel_type_lower = (edge.type or "").casefold()
                 canonical_rel = domain_edge_canonical.get(rel_type_lower)
+                # Use the canonical-resolved name as the key for the
+                # endpoint-pair lookup so the check stays correct even
+                # if ``domain_edge_canonical`` later admits alias →
+                # canonical mappings.
+                canonical_rel_key = canonical_rel.casefold() if canonical_rel else ""
                 valid_pair = (
                     canonical_rel is not None
                     and (src_type.casefold(), tgt_type.casefold())
-                    in edge_endpoint_pairs.get(rel_type_lower, set())
+                    in edge_endpoint_pairs.get(canonical_rel_key, set())
                 )
 
                 # Strict mode: only write the typed pattern. Legacy
