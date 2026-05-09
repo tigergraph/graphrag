@@ -505,43 +505,64 @@ def get_llm_service(service_config: dict) -> LLM_Model:
         raise Exception(f"LLM service '{service_name}' not supported")
 
 
-# Module-level ``embedding_store`` is kept for back-compat with direct
-# importers (`from common.config import embedding_store`); it's
-# populated by the background-init thread below. New callers should
-# prefer the ``get_embedding_store(timeout)`` getter so they fail
-# fast (or wait briefly) instead of seeing a ``None`` mid-startup.
+# Module-level ``embedding_store`` is the back-compat default for
+# direct importers (``from common.config import embedding_store``).
+# It's populated by the background init thread below.
+#
+# ``_embedding_stores`` is the per-graph cache used by chatbot
+# retrievers via ``get_embedding_store(graphname=...)``. Each entry
+# has its own ``TigerGraphConnection`` bound to that graphname for
+# its lifetime — no in-place ``set_graphname`` mutation — so
+# concurrent chat across different graphs can't race over a shared
+# connection.
 embedding_store = None
 _embedding_store_ready = threading.Event()
+_embedding_stores: dict = {}
+_embedding_stores_lock = threading.Lock()
 service_status["embedding_store"] = {
     "status": "initializing",
     "error": "Embedding store is still initializing",
 }
 
 
+def _build_embedding_store(graphname: str = "") -> TigerGraphEmbeddingStore:
+    """Construct a fresh ``TigerGraphEmbeddingStore`` bound to *graphname*.
+
+    Uses the live globals (``db_config`` for the connection and
+    ``embedding_service`` for the model) so the result reflects the
+    current config.
+    """
+    conn = TigerGraphConnection(
+        host=db_config.get("hostname", "http://tigergraph"),
+        username=db_config.get("username", "tigergraph"),
+        password=db_config.get("password", "tigergraph"),
+        gsPort=db_config.get("gsPort", "14240"),
+        restppPort=db_config.get("restppPort", "9000"),
+        graphname=graphname or db_config.get("graphname", ""),
+        apiToken=db_config.get("apiToken", ""),
+    )
+    if not db_config.get("apiToken") and db_config.get("getToken"):
+        conn.getToken()
+
+    store = TigerGraphEmbeddingStore(
+        conn,
+        embedding_service,
+        support_ai_instance=True,
+    )
+    if graphname:
+        # Runs the GDS check and per-graph vector-query install.
+        store.set_graphname(graphname)
+    return store
+
+
 def _init_embedding_store():
-    """Background thread target. Builds the embedding store without
-    blocking module import — TigerGraph may be slow on first connect,
-    and we don't want app startup to wait on it.
+    """Background thread target. Builds the default embedding store
+    without blocking module import — TigerGraph may be slow on first
+    connect, and we don't want app startup to wait on it.
     """
     global embedding_store
     try:
-        conn = TigerGraphConnection(
-            host=db_config.get("hostname", "http://tigergraph"),
-            username=db_config.get("username", "tigergraph"),
-            password=db_config.get("password", "tigergraph"),
-            gsPort=db_config.get("gsPort", "14240"),
-            restppPort=db_config.get("restppPort", "9000"),
-            graphname=db_config.get("graphname", ""),
-            apiToken=db_config.get("apiToken", ""),
-        )
-        if not db_config.get("apiToken") and db_config.get("getToken"):
-            conn.getToken()
-
-        embedding_store = TigerGraphEmbeddingStore(
-            conn,
-            embedding_service,
-            support_ai_instance=True,
-        )
+        embedding_store = _build_embedding_store()
         service_status["embedding_store"] = {"status": "ok", "error": None}
     except Exception as e:
         service_status["embedding_store"] = {"status": "error", "error": str(e)}
@@ -550,16 +571,35 @@ def _init_embedding_store():
         _embedding_store_ready.set()
 
 
-def get_embedding_store(timeout: float = 0):
-    """Return the embedding store if ready.
+def get_embedding_store(graphname: str | None = None, timeout: float = 0):
+    """Return an embedding store.
 
     Args:
-        timeout: Seconds to wait for initialization. Default 0
-            (non-blocking — raises immediately if still initializing).
+        graphname: When supplied, returns a per-graph instance built
+            and cached on first request (each cache entry has its own
+            connection bound to *graphname* for its lifetime).
+        timeout: Seconds to wait for the default-store init when
+            *graphname* is not supplied. Default 0 (non-blocking —
+            raises immediately if still initializing).
 
     Raises:
         RuntimeError: if not yet ready, timed out, or initialization failed.
     """
+    if graphname:
+        with _embedding_stores_lock:
+            cached = _embedding_stores.get(graphname)
+            if cached is not None:
+                return cached
+        # Build outside the lock so first-time setup for one graph
+        # doesn't serialize first-time setup for another.
+        store = _build_embedding_store(graphname)
+        with _embedding_stores_lock:
+            existing = _embedding_stores.get(graphname)
+            if existing is not None:
+                return existing  # racing thread won
+            _embedding_stores[graphname] = store
+            return store
+
     if not _embedding_store_ready.wait(timeout=timeout):
         raise RuntimeError(
             "Embedding store is still initializing. Please try again shortly."
@@ -571,14 +611,17 @@ def get_embedding_store(timeout: float = 0):
 
 
 def reset_embedding_store() -> None:
-    """Drop the in-memory store and re-run ``_init_embedding_store`` so
-    a config reload picks up the new ``embedding_service`` and
-    ``db_config``. Callers should swap the inputs before calling.
-    No-op when ``INIT_EMBED_STORE`` is disabled (e.g. ECC).
+    """Drop the per-graph cache and the default store, then re-run the
+    background init so a config reload picks up the new
+    ``embedding_service`` and ``db_config``. Callers should swap the
+    inputs before calling. No-op when ``INIT_EMBED_STORE`` is disabled
+    (e.g. ECC).
     """
     global embedding_store
     if os.getenv("INIT_EMBED_STORE", "true") != "true":
         return
+    with _embedding_stores_lock:
+        _embedding_stores.clear()
     embedding_store = None
     _embedding_store_ready.clear()
     service_status["embedding_store"] = {
@@ -700,7 +743,8 @@ def reload_llm_config(new_llm_config: dict = None):
         else:
             raise Exception("Embedding service not implemented")
 
-        # Re-init so the store binds to the freshly-built embedding_service.
+        # Clear per-graph cache + rebuild the default so callers don't
+        # keep references to the old embedding service.
         reset_embedding_store()
 
         return {
@@ -753,7 +797,8 @@ def reload_db_config(new_db_config: dict = None):
             del db_config[k]
         db_config.update(new_db_config)
 
-        # Re-init so the store binds to the freshly-updated db_config.
+        # Clear per-graph cache + rebuild the default so callers don't
+        # keep connections bound to the old credentials.
         reset_embedding_store()
 
         return {

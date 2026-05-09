@@ -19,6 +19,13 @@
 - **Out-of-corpus short-circuit** — when the chosen retriever returns no results, the system returns an honest "couldn't find relevant info" message instead of letting the LLM hallucinate from empty context
 - **In-lane retrieval fallback** — when a chunk-based search method (similarity / contextual / hybrid) returns fewer than `top_k` chunks, the system tries a second method via a subset-aware fallback table (similarity → hybrid, contextual → hybrid, hybrid → community). Single retry, skipped for manual mode and community search.
 - **Cross-lane fallback to vector search** — when `generate_function` or `generate_cypher` retries are exhausted (3 rewrite cycles), the system falls back to auto-selected vector search instead of going straight to the apology message. Forces auto-selection regardless of configured method, so even manual users get the best vector option in this recovery path. Toggleable per-graph via `graphrag_config.enable_router_fallback` (default `true`); also editable from the GraphRAG config page in the admin UI.
+- **Trace Logs UI** — new admin page that captures and displays the full agent execution trace for each chat turn (per-node inputs/outputs, durations in seconds, citations, token usage by node)
+  - Citations tab (now shown first), Token Overview tab, and a per-node detail view
+  - Role-gated "View Trace" entry from the chat reply; superuser-only access on the trace endpoint
+  - Per-user ownership check on `/ui/trace/{message_id}` and 30-day automatic cleanup of stored traces
+  - Routed through nginx at `/trace`
+- **Excel and CSV ingestion** — `.xlsx` / `.xls` / `.csv` accepted in document ingestion; the upload UI shows a clear warning when an unsupported file type is selected
+  - Headerless Excel sheets preserve all rows; CSV extraction handles non-UTF-8 encodings without dropping content
 
 ### Changed
 - **All customizable prompts now ship as in-code defaults**, packaged inside the LLM service. Provider prompt directories are kept (empty) for backward compatibility; per-graph and global overrides still win when present.
@@ -35,6 +42,7 @@
 - **`apply_proposal` re-installs retriever queries** against the live domain schema, idempotently. Identical bodies are TG no-ops; new domain types or a changed `retrieval_include_entity` value re-render the affected queries on the next apply call.
 - **Transitional-graph detection at schema apply**: when a domain schema is added to a graph that already has Entity-layer data (typical v1.3.x → v1.4.0 upgrade applying a schema for the first time), `apply_proposal` forces `retrieval_include_entity=True` for the rendered queries so existing Entity rows stay reachable. The result payload carries a `transitional` block (`entity_count`, `new_domain_vts`, `recommendation`) for the init-graph dialog to surface a "your existing entities won't be auto-typed — re-ingest for full schema awareness" prompt. Once the user clears derived data and re-ingests (planned v1.5 admin endpoint), the auto-default flips back to typed-purist on the next apply call.
 - **Empty function-call results now trigger retry** — `generate_function` now treats an empty result as a generation failure (symmetric with `generate_cypher`). Rewrite-and-retry kicks in, and after 3 cycles the cross-lane vector fallback runs. Previously, empty function results passed through to answer generation and risked hallucinated narratives around the emptiness.
+- **Default chat retrieval method is now `auto`** instead of `hybridsearch`. Existing graphs that did not configure a method explicitly will route through the new selector after upgrade. Manual mode (and any explicitly-selected method in the chat dropdown) overrides the default unchanged.
 
 > **Upgrading from a pre-release v1.4.0 build**: graphs that already
 > have domain vertex types but were created before the multi-pair
@@ -50,6 +58,7 @@
 ### Configuration
 - New `graphrag_config` keys: `schema_max_sample_files` (default 5), `schema_max_total_mb` (default 50), `strict_mode` (default false), `retrieval_include_entity` (auto: false when domain schema present, true otherwise), `enable_router_fallback` (default true).
 - New env var: `PDF_IMAGE_CONCURRENCY` (default 8).
+- `graphrag-ui` build now pins pnpm via `packageManager: "pnpm@9.15.0"` and ships an `.npmrc` allow-list for `@swc/core` / `esbuild` so the Docker image build does not trip pnpm 10's strict `[ERR_PNPM_IGNORED_BUILDS]` policy.
 
 > Implementation-level details for v1.4.0 (parser internals, endpoint contracts, dialog state machine, prompt-resolution chain, schema-aware ECC worker logic, etc.) live in `dev/plans/graphrag/v1.4.0_implementation_notes.md`.
 
