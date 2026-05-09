@@ -47,26 +47,134 @@ def test_concatenate_samples_joins_doc_id_headers():
         {"doc_id": "report1", "content": "Hello world."},
         {"doc_id": "report2", "content": "Second body."},
     ]
-    blob = schema_extraction.concatenate_samples(samples, max_chars=10_000)
+    blob = schema_extraction.concatenate_samples(samples, max_tokens=2_500)
     assert "# report1" in blob
     assert "# report2" in blob
     assert "Hello world." in blob
     assert "Second body." in blob
 
 
-def test_concatenate_samples_truncates_at_max_chars():
+def test_concatenate_samples_truncates_at_max_budget():
     samples = [
         {"doc_id": "a", "content": "x" * 1_000},
         {"doc_id": "b", "content": "y" * 1_000},
     ]
-    blob = schema_extraction.concatenate_samples(samples, max_chars=300)
+    # 75 tokens × 4 chars/token = 300 char cap.
+    blob = schema_extraction.concatenate_samples(samples, max_tokens=75)
     assert len(blob) <= 300
 
 
 def test_concatenate_samples_handles_empty_content():
     samples = [{"doc_id": "empty", "content": ""}]
-    blob = schema_extraction.concatenate_samples(samples, max_chars=1_000)
+    blob = schema_extraction.concatenate_samples(samples, max_tokens=250)
     assert "# empty" in blob
+
+
+def test_concatenate_samples_distributes_budget_across_files():
+    """Every uploaded file must contribute to the LLM blob even when
+    the first file is large — proportional/equal-share split prevents
+    later files from being silently dropped.
+    """
+    samples = [
+        {"doc_id": f"f{i}", "content": "x" * 5_000} for i in range(4)
+    ]
+    # 100 tokens × 4 = 400 char cap; ~100 chars per file.
+    blob = schema_extraction.concatenate_samples(samples, max_tokens=100)
+    # All four headers must appear; greedy first-fit would only emit f0 / f1.
+    for i in range(4):
+        assert f"# f{i}" in blob
+    assert len(blob) <= 400
+
+
+def test_concatenate_samples_rolls_unused_budget_forward():
+    """A small first file leaves room for later files. The leftover
+    budget must flow forward, not be discarded.
+    """
+    samples = [
+        {"doc_id": "small", "content": "tiny"},
+        {"doc_id": "big", "content": "y" * 10_000},
+    ]
+    # 250 tokens × 4 = 1_000 char cap.
+    blob = schema_extraction.concatenate_samples(samples, max_tokens=250)
+    # Big file should consume most of the leftover from small.
+    assert blob.count("y") > 700  # ≥ 700 chars of big-file body
+    assert "tiny" in blob
+
+
+def test_resolve_sample_token_budget_uses_token_limit_when_configured():
+    """When llm_service.config.token_limit is set, it drives the
+    sample budget — model name is irrelevant.
+    """
+
+    class _LLM:
+        config = {"token_limit": 50_000, "llm_model": "anything"}
+
+    tokens = schema_extraction._resolve_sample_token_budget(_LLM())
+    # 50_000 - 4_000 reserved = 46_000 sample tokens.
+    assert tokens == 46_000
+
+
+def test_resolve_sample_token_budget_uses_known_model_default():
+    """Falls back to the per-model default context window when
+    token_limit is not configured. Known build → no warning.
+    """
+
+    class _LLM:
+        config = {"llm_model": "claude-3-5-sonnet-20241022"}
+
+    tokens = schema_extraction._resolve_sample_token_budget(_LLM())
+    # claude-3-5-sonnet → 200_000 tokens default - 4_000 reserved.
+    assert tokens == 200_000 - 4_000
+
+
+def test_resolve_sample_token_budget_warns_for_unknown_family_member(caplog):
+    """An unrecognized but family-matchable model picks the family's
+    default and emits a warning so the operator can update the table.
+    """
+    import logging
+
+    class _LLM:
+        config = {"llm_model": "claude-7-future-2030"}
+
+    caplog.set_level(logging.WARNING, logger=schema_extraction.logger.name)
+    tokens = schema_extraction._resolve_sample_token_budget(_LLM())
+    # Family fallback for "claude" → 200_000 tokens.
+    assert tokens == 200_000 - 4_000
+    assert any(
+        "claude-7-future-2030" in rec.message and "claude-family default" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_resolve_sample_token_budget_warns_for_completely_unknown_model(caplog):
+    """A model that doesn't match any family substring still gets a
+    sane budget, but the warning is louder so the operator notices.
+    """
+    import logging
+
+    class _LLM:
+        config = {"llm_model": "homegrown-frobnicator-v3"}
+
+    caplog.set_level(logging.WARNING, logger=schema_extraction.logger.name)
+    tokens = schema_extraction._resolve_sample_token_budget(_LLM())
+    assert tokens == 128_000 - 4_000
+    assert any(
+        "unknown" in rec.message and "homegrown-frobnicator" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_resolve_sample_token_budget_handles_missing_config():
+    """LLM service without a ``config`` attribute (e.g., test stubs)
+    still produces a usable budget via the fallback path.
+    """
+
+    class _LLM:
+        pass
+
+    tokens = schema_extraction._resolve_sample_token_budget(_LLM())
+    # No config → no token_limit, no model_name → fallback 128_000.
+    assert tokens == 128_000 - 4_000
 
 
 def test_extract_schema_gsql_passes_structural_and_keyword_lists_to_llm():
