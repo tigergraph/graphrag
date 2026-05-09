@@ -1,16 +1,8 @@
-import pytest
-
-def pytest_collection_modifyitems(config, items):
-    """
-    Hook to modify collected test items.
-    """
-    deselected_modules = set()
-    for item in items:
-        try:
-            # Attempt to collect the test
-            config.hook.pytest_runtest_protocol(item=item, nextitem=None)
-        except Exception as e:
-            # Check if the error message contains the specified substring
-            error_message = str(e)
-    # Remove the deselected modules from the test items list
-    items[:] = [item for item in items if item.module.__name__ not in deselected_modules]
+# Intentionally empty.
+#
+# A previous version of this file defined ``pytest_collection_modifyitems``
+# that called ``config.hook.pytest_runtest_protocol`` for each item — that
+# actually executed every test once during the collection phase and again
+# during the normal runtest phase, so every test ran twice. The
+# ``deselected_modules`` set it built was also never populated, so the
+# hook had no useful effect besides the double-run.

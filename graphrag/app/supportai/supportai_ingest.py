@@ -166,32 +166,12 @@ class BaseIngestion:
                         for x in chunk.relationships
                     ],
                 )
-                self.conn.upsertEdges(
-                    "Entity",
-                    "IS_HEAD_OF",
-                    "RelationshipType",
-                    [
-                        (
-                            x["source"],
-                            x["source"] + ":" + x["type"] + ":" + x["target"],
-                            {},
-                        )
-                        for x in chunk.relationships
-                    ],
-                )
-                self.conn.upsertEdges(
-                    "RelationshipType",
-                    "HAS_TAIL",
-                    "Entity",
-                    [
-                        (
-                            x["source"] + ":" + x["type"] + ":" + x["target"],
-                            x["target"],
-                            {},
-                        )
-                        for x in chunk.relationships
-                    ],
-                )
+                # IS_HEAD_OF / HAS_TAIL live at the meta-schema layer
+                # (EntityType ↔ RelationshipType) — they are NOT written
+                # per-relationship-instance here. The schema-aware ECC
+                # path writes them when it knows the EntityType for the
+                # source / target. Legacy supportai chunks without
+                # entity_type info skip the meta-layer edges.
                 self.conn.upsertEdges(
                     "DocumentChunk",
                     "MENTIONS_RELATIONSHIP",
@@ -269,32 +249,11 @@ class BaseIngestion:
                         for x in document.relationships
                     ],
                 )
-                self.conn.upsertEdges(
-                    "Entity",
-                    "IS_HEAD_OF",
-                    "RelationshipType",
-                    [
-                        (
-                            x["source"],
-                            x["source"] + ":" + x["type"] + ":" + x["target"],
-                            {},
-                        )
-                        for x in document.relationships
-                    ],
-                )
-                self.conn.upsertEdges(
-                    "RelationshipType",
-                    "HAS_TAIL",
-                    "Entity",
-                    [
-                        (
-                            x["source"] + ":" + x["type"] + ":" + x["target"],
-                            x["target"],
-                            {},
-                        )
-                        for x in document.relationships
-                    ],
-                )
+                # IS_HEAD_OF / HAS_TAIL are meta-schema edges between
+                # EntityType and RelationshipType — see chunk path
+                # comment above. Legacy document-level supportai ingest
+                # writes only MENTIONS_RELATIONSHIP from Document to
+                # RelationshipType.
                 self.conn.upsertEdges(
                     "Document",
                     "MENTIONS_RELATIONSHIP",

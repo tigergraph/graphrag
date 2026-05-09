@@ -1,5 +1,5 @@
 from common.chunkers import character_chunker, regex_chunker, semantic_chunker, markdown_chunker, recursive_chunker, html_chunker, single_chunker
-from common.config import get_graphrag_config, embedding_service
+from common.config import get_graphrag_config, get_embedding_service
 
 def get_chunker(chunker_type: str = "", graphname: str = None):
     cfg = get_graphrag_config(graphname)
@@ -8,7 +8,7 @@ def get_chunker(chunker_type: str = "", graphname: str = None):
     chunker_config = cfg.get("chunker_config", {})
     if chunker_type == "semantic":
         chunker = semantic_chunker.SemanticChunker(
-            embedding_service,
+            get_embedding_service(),
             chunker_config.get("method", "percentile"),
             chunker_config.get("threshold", 0.95),
         )

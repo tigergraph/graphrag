@@ -21,7 +21,7 @@ import httpx
 from aiochannel import Channel
 from pyTigerGraph import TigerGraphConnection
 
-from common.config import embedding_service, entity_extraction_switch, doc_process_switch
+from common.config import get_embedding_service, entity_extraction_switch, doc_process_switch
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.extractors.BaseExtractor import BaseExtractor
 from supportai import workers
@@ -140,7 +140,7 @@ async def embed(
             logger.info(f"Embed to {graphname}_{index_name}: {v_id}")
             sp.create_task(
                 workers.embed(
-                    embedding_service,
+                    get_embedding_service(),
                     embedding_store,
                     v_id,
                     content,

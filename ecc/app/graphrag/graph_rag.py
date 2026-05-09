@@ -31,11 +31,12 @@ from graphrag.util import (
     load_q,
     loading_event,
     make_headers,
+    graphrag_mirror_communities,
     stream_ids,
     tg_sem,
     upsert_batch,
-    add_rels_between_types
 )
+from common.db.schema_utils import is_structural_type, read_existing_schema_async
 from pyTigerGraph import AsyncTigerGraphConnection
 
 from common.config import embedding_service, entity_extraction_switch, community_detection_switch, doc_process_switch, get_graphrag_config
@@ -506,16 +507,10 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
     init_end = time.perf_counter()
     logger.info("Doc Processing End")
 
-    # Type Resolution
+    # Type Resolution — IS_HEAD_OF / HAS_TAIL writes happen inline in
+    # the per-relationship extract step (workers.py); no post-processing
+    # query needed.
     type_start = time.perf_counter()
-    if entity_extraction_switch:
-        logger.info("Type Processing Start")
-        res = await add_rels_between_types(conn)
-        if res.get("error", False):
-            logger.error(f"Error adding relationships between types: {res}")
-        else:
-            logger.info(f"Added relationships between types: {res}")
-    logger.info("Type Processing End")
     type_end = time.perf_counter()
 
     # Community Detection
@@ -526,6 +521,19 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
     if community_detection_switch:
         await install_queries(COMMUNITY_QUERIES, conn)
         logger.info("Community Processing Start")
+
+        # Clear pre-existing communities so re-detection is idempotent.
+        try:
+            async with tg_sem:
+                res = await conn.runInstalledQuery(
+                    "graphrag_delete_all_communities"
+                )
+            deleted = (res[0] if res else {}).get("deleted", 0)
+            if deleted:
+                logger.info(f"Cleared {deleted} pre-existing Community vertex(es)")
+        except Exception as e:
+            logger.warning(f"graphrag_delete_all_communities failed: {e}")
+
         comm_process_chan = Channel()
         upsert_chan = Channel()
         embed_chan = Channel()
@@ -547,6 +555,30 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
         await embed_chan.join()
         logger.info("Join upsert_chan")
         await upsert_chan.join()
+
+        # Mirror Entity → Community memberships onto domain-VT instances
+        # that share the same id.
+        try:
+            existing_schema = await read_existing_schema_async(conn)
+            domain_vts = sorted(
+                v for v in existing_schema.vertex_types if not is_structural_type(v)
+            )
+        except Exception as e:
+            logger.warning(f"read live schema for community mirror failed: {e}")
+            domain_vts = []
+        if domain_vts:
+            mirrorable = [
+                vt for vt in domain_vts
+                if existing_schema.has_edge_pair("IN_COMMUNITY", vt, "Community")
+            ]
+            skipped = sorted(set(domain_vts) - set(mirrorable))
+            if skipped:
+                logger.warning(
+                    f"skipping community mirror for {skipped}: "
+                    f"IN_COMMUNITY pair missing on schema"
+                )
+            if mirrorable:
+                await graphrag_mirror_communities(conn, mirrorable)
     community_end = time.perf_counter()
     logger.info("Community Processing End")
 

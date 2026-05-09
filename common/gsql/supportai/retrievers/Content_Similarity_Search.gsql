@@ -40,15 +40,15 @@ CREATE OR REPLACE DISTRIBUTED QUERY Content_Similarity_Search(STRING json_list_v
             @@final_retrieval += (s.id -> tgt.text)
           END
         POST-ACCUM
-          IF s.type == "RelationshipType" OR s.type == "Entity" THEN
+          IF s.type == "Relationship" OR s.type == "Entity" OR s.type == "Concept" THEN
             @@final_retrieval += (s.id -> s.definition)
           ELSE IF s.type == "Community" THEN
             @@final_retrieval += (s.id -> s.description)
           END;
-    
+
   @@verbose_info += ("start_set" -> @@start_set_type);
 
-  PRINT @@final_retrieval as final_retrieval;    
+  PRINT @@final_retrieval as final_retrieval;
 
   IF verbose THEN
       PRINT @@verbose_info as verbose;

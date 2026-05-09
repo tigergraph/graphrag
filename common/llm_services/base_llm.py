@@ -184,19 +184,113 @@ class LLM_Model:
     @property
     def map_question_schema_prompt(self):
         """Property to get the prompt for the MapQuestionToSchema tool."""
-        return self._read_prompt_file(self.prompt_path + "map_question_to_schema.txt")
+        result = self._read_prompt_file(self.prompt_path + "map_question_to_schema.txt")
+        if result is not None:
+            return result
+        return """# Map Question to Schema
+
+Replace entities and relationships in the question with their canonical schema names provided in the Inputs section below.
+
+## Rules
+- If an entity (e.g. "John Doe") is referred to by different names or pronouns ("Joe", "he"), use the most complete identifier ("John Doe") consistently.
+- Choose the better mapping between a vertex type and one of its attributes.
+- Ensure entities are either source or target vertices of the chosen relationships.
+- If an entity maps to a vertex attribute, consider generating a `WHERE` clause.
+- For synonyms, output the canonical form from the schema choices.
+- Generate the **complete** rewritten question. Keep the case of schema elements unchanged.
+- Do NOT generate `target_vertex_ids` unless the term `id` is explicitly mentioned in the question.
+
+## Inputs
+- **Vertices**: {vertices}
+- **Vertex attributes**: {verticesAttrs}
+- **Edges**: {edges}
+- **Edge source/target**: {edgesInfo}
+- **Question**: {question}
+- **Conversation**: {conversation}
+
+{format_instructions}
+"""
 
     @property
     def generate_function_prompt(self):
         """Property to get the prompt for the GenerateFunction tool."""
-        return self._read_prompt_file(self.prompt_path + "generate_function.txt")
+        result = self._read_prompt_file(self.prompt_path + "generate_function.txt")
+        if result is not None:
+            return result
+        return """# pyTigerGraph Function Selection
+
+Use the schema below to write the pyTigerGraph function call that answers the question via a `pyTigerGraph` connection.
+
+## Selection Rules
+- For "how many", counts, totals, or graph-DB statistics, always pick a function whose name contains `Count` (e.g. `getVertexCount`, `getEdgeCount`).
+- Never pick a function not described in the docstrings below.
+- If entities map to vertex attributes, consider a `WHERE` clause.
+- When constructing `WHERE`, quote string attribute values properly. Example: `('Person', where='name="William Torres"')` — applies to every string attribute (name, email, address, etc.).
+- Do NOT generate `target_vertex_ids` unless the term `id` is explicitly mentioned in the question.
+- Pick exactly **one** function to execute.
+
+## Schema
+- **Vertex Types**: {vertex_types}
+- **Vertex Attributes**: {vertex_attributes}
+- **Vertex IDs**: {vertex_ids}
+- **Edge Types**: {edge_types}
+- **Edge Attributes**: {edge_attributes}
+
+## Question
+{question}
+
+## Reference Docstrings
+1. {doc1}
+2. {doc2}
+3. {doc3}
+4. {doc4}
+5. {doc5}
+6. {doc6}
+7. {doc7}
+8. {doc8}
+
+## Output
+- If the function output answers the user's question, return that answer immediately.
+- Output **valid JSON only** — no extra text would render the response invalid.
+
+{format_instructions}
+"""
 
     @property
     def entity_relationship_extraction_prompt(self):
         """Property to get the prompt for the EntityRelationshipExtraction tool."""
-        return self._read_prompt_file(
+        result = self._read_prompt_file(
             self.prompt_path + "entity_relationship_extraction.txt"
         )
+        if result is not None:
+            return result
+        return """# Knowledge Graph Extraction
+
+You are a top-tier algorithm designed for extracting information in structured formats to build a knowledge graph.
+
+## Goals
+- **Nodes** represent entities, concepts, and properties of entities.
+- Aim for simplicity and clarity so the graph is accessible to a vast audience.
+
+## Node Labeling
+- **Consistency**: use basic or elementary types. Label a person as `person`, not `mathematician` / `scientist`.
+- **Node IDs**: never use integers. Use names or human-readable identifiers found in the text.
+
+## Numerical Data and Dates
+- Incorporate as **attributes / properties** of the respective nodes.
+- Do NOT create separate nodes for dates or numerical values.
+- Properties are key-value. Use properties only for dates and numbers; string properties become new nodes.
+- Never use escaped single or double quotes within property values.
+- Use `camelCase` for property keys (e.g. `birthDate`).
+
+## Coreference Resolution
+- Maintain entity consistency: if "John Doe" is referred to as "Joe" or "he", always use the most complete identifier (`John Doe`) throughout.
+
+## Strict Compliance
+- Follow these rules strictly. Non-compliance, including poor formatting, results in termination.
+
+## No-Relationship Nodes
+- Include nodes that have no relationships. Add the node and leave the relationships section empty."""
 
     @property
     def generate_cypher_prompt(self):
@@ -204,32 +298,58 @@ class LLM_Model:
         result = self._read_prompt_file(self.prompt_path + "generate_cypher.txt")
         if result is not None:
             return result
-        return """You're an expert in OpenCypher programming. Given the following schema and history, what is the OpenCypher query that retrieves the {question}
-                    Only include attributes that are found in the schema. Never include any attributes that are not found in the schema.
-                    Use attributes instead of primary id if attribute name is closer to the keyword type in the question.
-                    Use as less vertex type, edge type and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
-                    Do not return attributes that are not explicitly mentioned in the question. If a vertex type is mentioned in the question, only return the vertex.
-                    Never use directed edge pattern in the OpenCypher query. Always use and create query using undirected pattern.
-                    Always use double quotes for strings instead of single quotes.
+        return """# OpenCypher Query Generation
 
-                    Avoid generating invalid OpenCypher queries based on the errors from history below.
+You are an expert in OpenCypher. Generate the best query that retrieves the answer to: **{question}**.
 
-                    Schema: {schema}
-                    History: {history}
+## Schema and History
+- **Schema**: {schema}
+- **History**: {history}
 
-                    You cannot use the following clauses:
-                    OPTIONAL MATCH
-                    CREATE
-                    MERGE
-                    REMOVE
-                    UNION
-                    UNION ALL
-                    UNWIND
-                    SET
+## Construction Rules
+- Distinguish entity **value** from entity **type** carefully.
+- Remove duplicate words with the same meaning in the question.
+- Only use attributes that exist in the schema. Pick the closest matching attribute name when multiple candidates exist.
+- Prefer attributes over primary IDs when an attribute name is more similar to the keyword in the question.
+- Keep the query minimal — fewest vertex types, edge types, and attributes possible.
+- Do NOT return attributes that aren't explicitly mentioned in the question. If only a vertex is mentioned, return only the vertex.
+- Always include the entity from the `WHERE` clause in the final `RETURN`. Use vertex name over ID when available.
+- Always use **undirected** edge patterns. Ensure edges connect correct vertex types per schema.
+- Use **double quotes** for strings.
+- For string comparisons in `WHERE`, convert with `toLower()`.
+- Use multi-word, underscore-joined aliases for `ORDER BY`. Aliases / attributes used in `ORDER BY` must be in `RETURN`. Always specify `ASC` / `DESC` based on data type.
+- For "summarize" / "write a summary" questions, fetch all neighbour nodes and edges.
+- Avoid invalid queries based on errors in the history above.
 
-                    Make sure to have correct attribute names in the OpenCypher query and not to name result aliases that are vertex or edge types.
+## Supported
+- **Clauses**: `MATCH`, `OPTIONAL MATCH`, `MANDATORY MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `DELETE`, `DETACH DELETE`
+- **Operators**:
+  - Math: `+`, `-`, `*`, `/`, `%`, `^`
+  - Comparison: `=`, `<`, `<=`, `>`, `>=`, `<>`, `IS NULL`, `IS NOT NULL`
+  - Boolean: `AND`, `OR`, `NOT`, `XOR`
+  - String / list: `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `IN`, `DISTINCT`, `[ ]`, `.`
+- **Functions**:
+  - Aggregation: `count`, `sum`, `avg`, `min`, `max`, `stDev`, `stDevP`
+  - Math: `abs`, `sqrt`, `log`, `exp`, `sin`, `cos`, `tan`, `radians`, `degrees`
+  - String: `left`, `right`, `substring`, `replace`, `trim`, `toLower`, `toUpper`, `split`
+  - List: `head`, `last`, `size`, `range`, `coalesce`, `tail`
+  - Other: `id`, `elementId`, `labels`, `properties`, `timestamp`
+- **Expressions**: `CASE`
 
-                    ONLY write the OpenCypher query in the response. Do not include any other information in the response."""
+## Unsupported
+- **Clauses**: `CALL`, `CREATE`, `MERGE`, `REMOVE`, `SET`, `UNION`, `UNION ALL`, `UNWIND`
+- **Functions**: `collect`, `exists`, `keys`, `nodes`, `relationships`, `length`, `percentileCont`, `percentileDisc`, `startNode`, `endNode`, `reverse` (list form)
+- **Syntax limits**:
+  - `WITH` must group by exactly one vertex variable.
+  - Path variables (`p = (...)`) not supported.
+  - `MATCH` must reference variables from prior `WITH`.
+  - Disconnected `MATCH` fragments not supported.
+
+## Output
+- The query must return both the entity from the question AND the requested data.
+- Validate syntax before responding.
+- Aliases must NOT match vertex / edge types, operator / function names, or reserved keywords. Use multi-word underscore identifiers.
+- Output ONLY the OpenCypher query — no explanation."""
 
     @property
     def generate_gsql_prompt(self):
@@ -237,37 +357,30 @@ class LLM_Model:
         result = self._read_prompt_file(self.prompt_path + "generate_gsql.txt")
         if result is not None:
             return result
-        return """You're an expert in GSQL (Graph SQL) programming for TigerGraph. Given the following schema: {schema}, what is the GSQL query that retrieves the answer for question: {question}
-                    Only include attributes that are found in the schema. Never include any attributes that are not found in the schema.
-                    Use attributes instead of primary id if attribute name is more similar to the keyword type in the question.
-                    Use as few vertex types, edge types and attributes as possible. If an attribute is not found in the schema, please exclude it from the query.
-                    Do not return attributes that are not explicitly mentioned in the question. If a vertex type is mentioned in the question, only return the vertex.
-                    Always use double quotes for strings instead of single quotes.
-                    Use alias for ORDER BY if any, and make sure the alias or attributes used in ORDER BY is also in PRINT. Always add ASC or DESC for ORDER BY based on data type.
+        return """# GSQL Query Generation
 
-                    Avoid generating invalid GSQL queries based on the errors from history below.
+You are an expert in TigerGraph GSQL. Generate the GSQL query that retrieves the answer to: **{question}**.
 
-                    Schema: {schema}
-                    History: {history}
+## Schema and History
+- **Schema**: {schema}
+- **History**: {history}
 
-                    Additionally, you cannot use the following clauses:
-                    CREATE
-                    DELETE
-                    INSERT
-                    UPDATE
-                    UPSERT
+## Construction Rules
+- Only use attributes in the schema. Never invent attributes.
+- Prefer attributes over primary IDs when the attribute name is more similar to a keyword in the question.
+- Keep the query minimal — fewest vertex types, edge types, and attributes possible.
+- Do NOT return attributes the question doesn't mention. If only a vertex is mentioned, return only the vertex.
+- Always use **double quotes** for strings.
+- Use aliases for `ORDER BY`. Aliases / attributes used in `ORDER BY` must also be in `PRINT`. Always specify `ASC` / `DESC` based on data type.
+- Avoid invalid queries based on errors in the history above.
 
-                    Here's some commonly used abbreviations:
-                    dt -> date
-                    pct -> percentage
-                    qty -> quantity
-                    lng -> longitude
-                    cm -> Contract Manufacturer
+## Unsupported
+- **Clauses**: `CREATE`, `DELETE`, `INSERT`, `UPDATE`, `UPSERT`
 
-                    Always make the GSQL query returns the entity in the original question together with the data to be queried.
-                    Make sure to have correct attribute names in the GSQL query and not to name result aliases that are vertex or edge types, operator or function names, and other reserved keywords, always construct alias with multiple words connected with underscore.
-
-                    ONLY write the GSQL query in the response. Do not include any other information in the response."""
+## Output
+- The query must return both the entity from the question AND the requested data.
+- Aliases must NOT match vertex / edge types, operator / function names, or reserved keywords. Use multi-word underscore identifiers.
+- Output ONLY the GSQL query — no explanation."""
 
     @property
     def route_response_prompt(self):
@@ -275,26 +388,34 @@ class LLM_Model:
         result = self._read_prompt_file(self.prompt_path + "route_response.txt")
         if result is not None:
             return result
-        return """\
-You are an expert at routing a user question to a vectorstore, function calls, or conversation history.
-Use the conversation history for questions that are similar to previous ones or that reference earlier answers or responses.
-Use the vectorstore for questions that would be best suited by text documents.
-Use the function calls for questions that ask about structured data, or operations on structured data.
-Questions referring to same entities in a previous, earlier, or above answer or response should be routed to the conversation history.
-Keep in mind that some questions about documents such as "how many documents are there?" can be answered by function calls.
-The function calls can be used to answer questions about these entities: {v_types} and relationships: {e_types}.
-IMPORTANT: Questions about graph database statistics or metadata MUST be routed to function calls. This includes:
-- Counting vertices/nodes/edges (e.g. "how many vertices are there", "how many edges in the graph")
-- Listing or describing vertex/edge types, schema, or graph structure
-- Aggregations, totals, or summaries of data stored in the graph database
-- Any question mentioning "graph", "graph db", "graph database", "vertices", "nodes", or "edges" in the context of statistics or counts
-These are database queries, NOT document lookups — always route them to function calls.
-Otherwise, use vectorstore. Choose one of 'functions', 'vectorstore', or 'history' based on the question and conversation history.
-Return a JSON with a single key 'datasource' and no preamble or explanation.
-Question to route: {question}
-Conversation history: {conversation}
-Format: {format_instructions}\
-"""
+        return """# Route the Question
+
+Route the user question to one of: `functions`, `vectorstore`, or `history`.
+
+## Routing
+- **`history`**: questions similar to previous ones, or that reference earlier answers / responses, or that refer to the same entities mentioned in a previous answer.
+- **`vectorstore`**: questions best answered by text documents.
+- **`functions`**: questions about structured data or operations on structured data. Available entities: {v_types}; relationships: {e_types}. Some "how many documents are there?" style questions can be answered here.
+
+## Mandatory `functions` Routing
+Any question about graph database **statistics or metadata** MUST route to `functions`:
+- Counts of vertices / nodes / edges (e.g. "how many edges in the graph").
+- Listing or describing vertex / edge types, schema, or graph structure.
+- Aggregations, totals, or summaries of data in the graph database.
+- Any question mentioning "graph", "graph db", "graph database", "vertices", "nodes", or "edges" in the context of statistics / counts.
+
+These are **database queries, not document lookups** — always route them to `functions`.
+
+Otherwise, route to `vectorstore`.
+
+## Output
+Return JSON with a single key `datasource` (value: `functions`, `vectorstore`, or `history`). No preamble or explanation.
+
+## Inputs
+- **Question**: {question}
+- **Conversation history**: {conversation}
+
+{format_instructions}"""
 
     @property
     def select_retriever_prompt(self):
@@ -335,8 +456,13 @@ Format: {format_instructions}"""
         result = self._read_prompt_file(self.prompt_path + "hyde.txt")
         if result is not None:
             return result
-        return """You are a helpful agent that is writing an example of a document that might answer this question: {question}
-                  Answer:"""
+        return """# Hypothetical Document
+
+Write an example of a document that might answer this question.
+
+**Question**: {question}
+
+**Answer**:"""
 
     @property
     def chatbot_response_prompt(self):
@@ -344,13 +470,27 @@ Format: {format_instructions}"""
         result = self._read_prompt_file(self.prompt_path + "chatbot_response.txt")
         if result is not None:
             return result
-        return """Given the answer context in JSON format, rephrase it to answer the question. \n
-                   Use only the provided information in context without adding any reasoning or additional logic. \n
-                   Make sure all information in the answer are covered in the generated answer.\n
+        return """# AI-Powered Knowledge Graph Assistant
 
-                   Question: {question} \n
-                   Answer: {context} \n
-                   Format: {format_instructions}"""
+You are a highly efficient, empathetic, and professional AI assistant. Use the provided contexts to answer the user's question.
+
+## Rules
+- The contexts arrive as JSON key-context pairs. **Combine and rephrase** them to answer the question.
+- **Score** each context for relevance and use only the high-scoring ones — do not invent additional logic.
+- **Cover** the relevant information, especially image references that carry critical visual information.
+- **Preserve** image links exactly as `![description](url)` in the final answer when used. Do NOT modify or omit them.
+- **Format** the answer in Markdown — titles, paragraphs, bulleted / numbered lists, images, and tables. Place images and tables below the related text section.
+- **Tables**: every row, including the header, starts on a new line.
+- **Output as JSON** — escape characters as needed so the response is valid JSON. Include every field required by the format instructions; set unknown fields to empty.
+- Treat context keys as citations only when asked; otherwise do NOT include citations in the final answer.
+
+## Inputs
+- **Question**: {question}
+- **Contexts**: {context}
+- **Query**: {query}
+
+{format_instructions}
+"""
 
     @property
     def keyword_extraction_prompt(self):
@@ -358,7 +498,20 @@ Format: {format_instructions}"""
         result = self._read_prompt_file(self.prompt_path + "keyword_extraction.txt")
         if result is not None:
             return result
-        return """You are a helpful assistant responsible for extracting key terms (glossary) from all the questions below to represent their original meaning as much as possible. Each term should only contain a couple of words. Include a quality score for the each extracted glossary, based on how important and frequent it's in the given questions. The quality score should range from 0 (poor) to 100 (excellent), with higher scores indicating terms that are both significant and frequent in the context of the questions.\nThe output should only contain the extracted terms and their quality scores using the required format.\n\nQuestion: {question}\n\n{format_instructions}\n"""
+        return """# Keyword Extraction
+
+Extract key terms (glossary) from the question(s) below to represent their original meaning as faithfully as possible.
+
+## Rules
+- Each term should contain only a couple of words.
+- Score each extracted term **0 (poor)** to **100 (excellent)** based on how important and frequent it is in the question(s). Higher scores indicate terms that are both significant and frequent.
+- Output ONLY the extracted terms with their quality scores in the required format.
+
+## Question
+{question}
+
+{format_instructions}
+"""
 
     @property
     def question_expansion_prompt(self):
@@ -366,7 +519,18 @@ Format: {format_instructions}"""
         result = self._read_prompt_file(self.prompt_path + "question_expansion.txt")
         if result is not None:
             return result
-        return """You are a helpful assistant responsible for generating 10 new questions similar to the original question below to represent its meaning in a more clear way.\nInclude a quality score for the answer, based on how well it represents the meaning of the original question. The quality score should be between 0 (poor) and 100 (excellent).\n\nQuestion: {question}\n\n{format_instructions}\n"""
+        return """# Question Expansion
+
+Generate **10 new questions** similar to the original question below to express its meaning more clearly.
+
+## Scoring
+Include a quality score per generated question, **0 (poor)** to **100 (excellent)**, based on how well it represents the meaning of the original question.
+
+## Question
+{question}
+
+{format_instructions}
+"""
 
     @property
     def graphrag_scoring_prompt(self):
@@ -374,7 +538,19 @@ Format: {format_instructions}"""
         result = self._read_prompt_file(self.prompt_path + "graphrag_scoring.txt")
         if result is not None:
             return result
-        return """You are a helpful assistant responsible for generating an answer to the question below using the data provided.\nInclude a quality score for the answer, based on how well it answers the question. The quality score should be between 0 (poor) and 100 (excellent).\n\nQuestion: {question}\nContext: {context}\n\n{format_instructions}\n"""
+        return """# Quality-Scored Answer
+
+Generate an answer to the question below using the provided data, and include a quality score.
+
+## Scoring
+The quality score is between **0 (poor)** and **100 (excellent)**, based on how well the answer addresses the question.
+
+## Inputs
+- **Question**: {question}
+- **Context**: {context}
+
+{format_instructions}
+"""
 
     @property
     def community_summarize_prompt(self):
@@ -382,10 +558,61 @@ Format: {format_instructions}"""
         result = self._read_prompt_file(self.prompt_path + "community_summarization.txt")
         if result is not None:
             return result
-        raise FileNotFoundError(
-            f"Community summarization prompt file not found in {self.prompt_path}. "
-            "Please ensure community_summarization.txt exists in the configured prompt path."
-        )
+        return """# Community Summary
+
+Generate a comprehensive summary of the data below.
+
+## Rules
+- Concatenate the descriptions into a single, comprehensive summary that includes information from **all** descriptions.
+- Resolve contradictions; do NOT add information that is not in the descriptions.
+- Write in **third person** and include the entity name(s) for full context.
+
+## Data
+- **Community Title**: {entity_name}
+- **Description List**: {description_list}
+"""
+
+    @property
+    def schema_extraction_prompt(self):
+        """Property to get the prompt for sample-doc schema extraction."""
+        result = self._read_prompt_file(self.prompt_path + "schema_extraction.txt")
+        if result is not None:
+            return result
+        return """# Schema Extraction
+
+You are a knowledge-graph schema architect. From the sample documents provided in the Inputs section below, produce a domain schema as TigerGraph GSQL `VERTEX` / `DIRECTED EDGE` / `UNDIRECTED EDGE` declarations (no leading `ADD`). Return GSQL only — no fences, no commentary, no JSON.
+
+## Rules
+
+1. **Vertex inclusion**: a vertex type's instances must be individuated in the source (each instance has its own identity), appear **2+ times**, and have at least one natural attribute beyond `name`. Concrete or conceptual is fine. Skip categorical wrappers — names ending in `_record`, `_management`, `_context`, `_grouping`, or labels of classes-of-classes.
+2. **Skip layout**: do NOT produce types for axes, page numbers, captions, table cells, or other document-rendering artifacts.
+3. **Edge naming**: use a specific action verb. Include an edge type ONLY IF the source documents contain **2+ concrete instances** of that relationship between named entities — do NOT propose merely-plausible edges. Avoid generic edges (`RELATED_TO`, `CONNECTED_TO`, `ASSOCIATED_WITH`, `HAS`, `BELONGS_TO`). Use `DIRECTED EDGE` for asymmetric verbs and `UNDIRECTED EDGE` only for genuinely symmetric peer relationships.
+4. **Reserved names**: do NOT use a name (case-insensitive) matching any of the reserved structural types or GSQL keywords listed in the Inputs section. Pick a synonym or qualifier (e.g. `KeywordRecord`).
+5. **Attributes**: each `VERTEX` has **1–5** attributes; each `EDGE` has **0–3**. Primitive types only: `STRING`, `INT`, `UINT`, `DOUBLE`, `FLOAT`, `BOOL`, `DATETIME`. Do NOT include any id / primary-key field.
+6. **Comments**: every `VERTEX` and `EDGE` MUST be preceded by exactly one `// <one-sentence definition>` line.
+7. **Size**: produce **8–25** vertex types and **8–25** edge types.
+
+## Example Output (illustrative — pick names that fit YOUR documents)
+
+    // A natural person referenced in the documents.
+    VERTEX Person(name STRING, role STRING);
+
+    // An organization or institutional body.
+    VERTEX Organization(name STRING, founded_at DATETIME);
+
+    // A person works for an organization in a given role.
+    DIRECTED EDGE WORKS_FOR(FROM Person, TO Organization, role STRING);
+
+    // Two people are colleagues — symmetric peer relationship.
+    UNDIRECTED EDGE COLLEAGUE_OF(FROM Person, TO Person);
+
+## Inputs
+- **Reserved structural types** (case-insensitive): {structural_types}
+- **Reserved GSQL keywords** (case-insensitive): {tg_keywords}
+- **Sample documents**:
+
+{samples}
+"""
 
     @property
     def contextualize_question_prompt(self):
@@ -396,13 +623,18 @@ Format: {format_instructions}"""
         )
         if result is not None:
             return result
-        return (
-            "Given the following conversation history and a follow-up "
-            "question, rewrite the follow-up question into a standalone, "
-            "self-contained question suitable for searching a knowledge "
-            "graph.  Do NOT answer the question; only rewrite it.\n\n"
-            "Conversation history:\n{history}\n\n"
-            "Follow-up question: {question}\n\n"
-            "Standalone question:"
-        )
+        return """# Standalone Question Rewrite
+
+Given the conversation history and a follow-up question, rewrite the follow-up into a **standalone, self-contained** question suitable for searching a knowledge graph.
+
+Do **NOT** answer the question — only rewrite it.
+
+## Conversation History
+{history}
+
+## Follow-up Question
+{question}
+
+## Standalone Question
+"""
 

@@ -63,6 +63,7 @@
 ---
 
 ## Releases
+* **GraphRAG v1.4.0** (in progress): Schema-aware initialization. The *Initialize Knowledge Graph* dialog accepts an optional pasted GSQL schema; the backend parses, diffs, and applies domain types as a single atomic schema-change job. Type definitions captured at init time flow through to the entity-extraction prompt and the query-routing schema rep. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.0) when published.
 * **4/10/2026**: GraphRAG v1.3.0 released. Added an admin configuration UI with role-based access and per-graph chatbot LLM override, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.3.0) for details.
 * **2/28/2026**: GraphRAG v1.2.0 released. Added Admin UI for graph initialization, document ingestion, and knowledge graph rebuild, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.2.0) for details.
 * **9/22/2025**: GraphRAG is available now officially v1.1 (v1.1.0). AWS Bedrock support is completed with BDA integration for multimodal document ingestion. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.1.0) for details.

@@ -8,7 +8,7 @@ from agent.Q import Q
 from fastapi import WebSocket
 from tools import GenerateCypher, GenerateFunction, MapQuestionToSchema
 
-from common.config import embedding_service, embedding_store, llm_config, get_completion_config, get_chat_config, get_llm_service
+from common.config import get_embedding_service, get_embedding_store, llm_config, get_completion_config, get_chat_config, get_llm_service
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.embedding_services import EmbeddingModel
 from common.llm_services.base_llm import LLM_Model, start_usage_collection, get_collected_usage, reset_usage_collection
@@ -281,8 +281,8 @@ def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retr
     agent = TigerGraphAgent(
         llm_provider,
         conn,
-        embedding_service,
-        embedding_store,
+        get_embedding_service(),
+        get_embedding_store(),
         use_cypher=use_cypher,
         ws=ws,
         supportai_retriever=supportai_retriever

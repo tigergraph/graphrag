@@ -35,6 +35,10 @@ const GraphRAGConfig = () => {
   const [upsertDelay, setUpsertDelay] = useState("0");
   const [maxConcurrency, setMaxConcurrency] = useState("10");
 
+  // Schema-aware initialization (Phase 1 sample-doc path)
+  const [schemaMaxSampleFiles, setSchemaMaxSampleFiles] = useState("5");
+  const [schemaMaxTotalMb, setSchemaMaxTotalMb] = useState("50");
+
   // Chunker-specific settings
   const [chunkSize, setChunkSize] = useState("");
   const [overlapSize, setOverlapSize] = useState("");
@@ -77,6 +81,8 @@ const GraphRAGConfig = () => {
     setLoadBatchSize(String(graphragConfig.load_batch_size ?? 500));
     setUpsertDelay(String(graphragConfig.upsert_delay ?? 0));
     setMaxConcurrency(String(graphragConfig.default_concurrency ?? 10));
+    setSchemaMaxSampleFiles(String(graphragConfig.schema_max_sample_files ?? 5));
+    setSchemaMaxTotalMb(String(graphragConfig.schema_max_total_mb ?? 50));
 
     const chunkerConfig = graphragConfig.chunker_config || {};
     setChunkSize(String(chunkerConfig.chunk_size ?? ""));
@@ -160,6 +166,8 @@ const GraphRAGConfig = () => {
         load_batch_size: parseInt(loadBatchSize),
         upsert_delay: parseInt(upsertDelay),
         default_concurrency: parseInt(maxConcurrency),
+        schema_max_sample_files: parseInt(schemaMaxSampleFiles),
+        schema_max_total_mb: parseInt(schemaMaxTotalMb),
       };
 
       // Display defaults — used to avoid saving values the user never changed
@@ -177,6 +185,8 @@ const GraphRAGConfig = () => {
         load_batch_size: 500,
         upsert_delay: 0,
         default_concurrency: 10,
+        schema_max_sample_files: 5,
+        schema_max_total_mb: 50,
       };
 
       // Determine which config to diff against based on scope
@@ -711,6 +721,54 @@ const GraphRAGConfig = () => {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Schema-aware initialization (Phase 1) */}
+          <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+            <h2 className="text-lg font-semibold mb-4 text-black dark:text-white">
+              Schema Initialization
+            </h2>
+            <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-6">
+              Limits for the <em>Generate from sample documents</em> path on
+              the <em>Initialize Knowledge Graph</em> dialog.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                  Max Sample Files
+                </label>
+                <Input
+                  type="number"
+                  min="1"
+                  max="20"
+                  className="dark:border-[#3D3D3D] dark:bg-background"
+                  placeholder="5"
+                  value={schemaMaxSampleFiles}
+                  onChange={(e) => setSchemaMaxSampleFiles(e.target.value)}
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Maximum number of sample documents per schema-extraction run
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                  Max Total Size (MB)
+                </label>
+                <Input
+                  type="number"
+                  min="1"
+                  className="dark:border-[#3D3D3D] dark:bg-background"
+                  placeholder="50"
+                  value={schemaMaxTotalMb}
+                  onChange={(e) => setSchemaMaxTotalMb(e.target.value)}
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Combined upload cap across all sample files (per-file cap is fixed at 10 MB)
+                </p>
+              </div>
+            </div>
           </div>
 
           {/* Service Endpoints (global only) */}

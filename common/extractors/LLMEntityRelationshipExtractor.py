@@ -32,11 +32,112 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
         allowed_entity_types: List[str] = None,
         allowed_relationship_types: List[str] = None,
         strict_mode: bool = False,
+        entity_type_definitions: dict = None,
+        relationship_type_definitions: dict = None,
+        domain_edge_endpoints: dict = None,
     ):
         self.llm_service = llm_service
         self.allowed_vertex_types = allowed_entity_types
         self.allowed_edge_types = allowed_relationship_types
+        # When True the existing parser filter (drop nodes/rels whose
+        # type isn't in the allowed list) is enforced AND the prompt
+        # tells the LLM to stay within the schema. Read from
+        # graphrag_config.strict_mode by the ECC builder.
         self.strict_mode = strict_mode
+        self.entity_type_definitions = dict(entity_type_definitions or {})
+        self.relationship_type_definitions = dict(
+            relationship_type_definitions or {}
+        )
+        # Per-edge ``{name: [(from_vt, to_vt), ...]}`` derived from the
+        # live schema. Used by the prompt to tell the LLM the valid
+        # source/target pairs per relationship type, and by the ingest
+        # worker to validate that an extracted relationship's endpoints
+        # match a declared pair before writing IS_HEAD_OF / HAS_TAIL.
+        self.domain_edge_endpoints = {
+            k: list(v) for k, v in (domain_edge_endpoints or {}).items()
+        }
+
+    def _format_definitions(self, defs: dict) -> str:
+        """Render a ``{type_name: definition}`` dict as one
+        ``- <Name>: <definition>`` line per type, sorted by name. Used
+        when assembling the schema-aware extraction prompt.
+        """
+        if not defs:
+            return ""
+        return "\n".join(
+            f"- {name}: {definition}"
+            for name, definition in sorted(defs.items())
+            if definition
+        )
+
+    def _format_edge_endpoints(self) -> str:
+        """Render ``{edge_name: [(from, to), ...]}`` as
+        ``- <name>: <from> -> <to>[, <from2> -> <to2>]`` lines, sorted
+        by edge name. Empty when no endpoints are configured.
+        """
+        if not self.domain_edge_endpoints:
+            return ""
+        lines = []
+        for name, pairs in sorted(self.domain_edge_endpoints.items()):
+            pair_strs = ", ".join(f"{f} -> {t}" for f, t in pairs) or "<none>"
+            defn = self.relationship_type_definitions.get(name, "")
+            tail = f" — {defn}" if defn else ""
+            lines.append(f"- {name}: {pair_strs}{tail}")
+        return "\n".join(lines)
+
+    def _build_schema_prompt_messages(self) -> list:
+        """Return the human-message tuples that describe the domain
+        schema to the LLM. Used by both sync and async extraction paths.
+        Empty list when no schema is configured.
+        """
+        msgs = []
+        entity_def_block = self._format_definitions(self.entity_type_definitions)
+        rel_def_block = self._format_definitions(self.relationship_type_definitions)
+        endpoints_block = self._format_edge_endpoints()
+        if not (entity_def_block or rel_def_block or endpoints_block):
+            return msgs
+
+        if self.strict_mode:
+            msgs.append((
+                "human",
+                "STRICT SCHEMA MODE: only emit entities whose entity_type "
+                "matches one of the schema entity types listed below, and "
+                "only emit relationships whose relation_type matches a "
+                "schema relationship type AND whose source / target "
+                "entity types match a declared (FROM, TO) endpoint pair "
+                "for that relationship. Drop any entity or relationship "
+                "that doesn't fit. Do NOT invent new types.",
+            ))
+        else:
+            msgs.append((
+                "human",
+                "When deciding the entity_type / relationship_type for an "
+                "extraction, strongly prefer the schema types listed below "
+                "and use their definitions to disambiguate similar types. "
+                "Ignore page-structure / chart / layout artifacts (axes, "
+                "segments, percentages, page numbers, sections, navigation "
+                "menus, captions). Prefer concrete real-world entities over "
+                "abstract categorical groupings. Only invent a new type "
+                "when nothing in the schema fits.",
+            ))
+        if entity_def_block:
+            msgs.append((
+                "human",
+                f"Schema entity types with definitions:\n{entity_def_block}",
+            ))
+        if endpoints_block:
+            msgs.append((
+                "human",
+                "Schema relationship types — each line lists the valid "
+                "(source -> target) endpoint pairs for that relationship "
+                "and the relationship's definition:\n" + endpoints_block,
+            ))
+        elif rel_def_block:
+            msgs.append((
+                "human",
+                f"Schema relationship types with definitions:\n{rel_def_block}",
+            ))
+        return msgs
 
     def _parse_json_output(self, content: str) -> dict:
         """Parse JSON from LLM output with multiple fallback strategies.
@@ -298,6 +399,7 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
             prompt.append(("human", f"Allowed Node Types: {self.allowed_vertex_types}"))
         if self.allowed_edge_types:
             prompt.append(("human", f"Allowed Edge Types: {self.allowed_edge_types}"))
+        prompt.extend(self._build_schema_prompt_messages())
         prompt = ChatPromptTemplate.from_messages(prompt)
         chain = prompt | self.llm_service.llm  # | parser
         er = await self._aextract_kg_from_doc(document, chain, parser)
@@ -336,6 +438,7 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
             prompt.append(("human", f"Allowed Node Types: {self.allowed_vertex_types}"))
         if self.allowed_edge_types:
             prompt.append(("human", f"Allowed Edge Types: {self.allowed_edge_types}"))
+        prompt.extend(self._build_schema_prompt_messages())
         prompt = ChatPromptTemplate.from_messages(prompt)
         chain = prompt | self.llm_service.llm  # | parser
         er = self._extract_kg_from_doc(document, chain, parser)

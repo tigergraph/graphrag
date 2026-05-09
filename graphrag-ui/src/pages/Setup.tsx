@@ -20,6 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useConfirm } from "@/hooks/useConfirm";
+import { safeJson } from "@/utils/safeJson";
 
 const DEFAULT_MAX_UPLOAD_SIZE_MB = 100;
 const envUploadLimit = Number(import.meta.env.VITE_MAX_UPLOAD_SIZE_MB);
@@ -106,7 +107,7 @@ const [activeTab, setActiveTab] = useState("upload");
       const response = await fetch(`/ui/${ingestGraphName}/uploads/list`, {
         headers: { Authorization: `Basic ${creds}` },
       });
-      const data = await response.json();
+      const data = await safeJson(response);
       setUploadedFiles(data.files || []);
     } catch (error) {
       console.error("Error fetching files:", error);
@@ -162,11 +163,11 @@ const [activeTab, setActiveTab] = useState("upload");
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = await safeJson(response);
         throw new Error(errorData.detail || `Upload failed: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const data = await safeJson(response);
       if (data.status === "success") {
         const uploadedCount = selectedFiles?.length || 0;
         setUploadMessage("✅ Successfully uploaded the files. Processing...");
@@ -223,11 +224,11 @@ const [activeTab, setActiveTab] = useState("upload");
           });
 
           if (!response.ok) {
-            const errorData = await response.json();
+            const errorData = await safeJson(response);
             throw new Error(errorData.detail || `Upload failed with status ${response.status}`);
           }
 
-          const data = await response.json();
+          const data = await safeJson(response);
           if (data.status === "success") {
             uploadedCount++;
           } else {
