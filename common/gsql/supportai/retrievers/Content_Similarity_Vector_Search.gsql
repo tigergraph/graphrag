@@ -38,7 +38,7 @@ CREATE OR REPLACE DISTRIBUTED QUERY Content_Similarity_Vector_Search(STRING v_ty
             @@final_retrieval += (s.id -> tgt.text)
           END
         POST-ACCUM
-          IF s.type == "Relationship" OR s.type == "Entity" OR s.type == "Concept" THEN
+          IF s.type == "Entity" THEN
             @@final_retrieval += (s.id -> s.definition)
           ELSE IF s.type == "Community" THEN
             @@final_retrieval += (s.id -> s.description)

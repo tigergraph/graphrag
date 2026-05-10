@@ -244,6 +244,12 @@ def test_04_initialize_graph_with_schema():
 
     The endpoint creates the structural GraphRAG schema first, then
     applies the domain types in a single atomic schema-change job.
+
+    The endpoint is async-job: POST returns ``{status: "submitted"}``
+    immediately and we poll ``/initialize_status`` until the
+    background task finishes. This avoids the browser/proxy
+    timeout that happens when retriever installs run for many
+    minutes inside one HTTP call.
     """
     _require_stage("schema_gsql")
     print(f"\n--- Stage 4: Initializing graph with extracted schema ---")
@@ -251,12 +257,52 @@ def test_04_initialize_graph_with_schema():
         f"{GRAPHRAG_URL}/ui/{GRAPH_NAME}/initialize_graph",
         json={"schema_gsql": _state["schema_gsql"]},
         auth=AUTH,
-        timeout=(60, None),
+        timeout=(60, 60),
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["status"] == "success", body.get("message")
-    domain_status = body.get("domain_schema_status") or {}
+    assert body["status"] == "submitted", body
+    print(f"Init job submitted: {body.get('message')}")
+
+    # Poll initialize_status until terminal.
+    init_timeout = int(os.getenv("INIT_TIMEOUT", "1800"))  # 30 min
+    poll_interval = 5
+    start = time.time()
+    last_message: str | None = None
+    final_state: dict | None = None
+    while time.time() - start < init_timeout:
+        time.sleep(poll_interval)
+        try:
+            sresp = requests.get(
+                f"{GRAPHRAG_URL}/ui/{GRAPH_NAME}/initialize_status",
+                auth=AUTH,
+                timeout=(30, 30),
+            )
+        except requests.RequestException as e:
+            print(f"  status poll transient error: {e}; retrying")
+            continue
+        if sresp.status_code != 200:
+            print(f"  status poll {sresp.status_code}: {sresp.text[:200]}")
+            continue
+        sdata = sresp.json()
+        msg = sdata.get("message")
+        if msg and msg != last_message:
+            print(f"  state={sdata.get('state')} message={msg}")
+            last_message = msg
+        if sdata.get("state") == "completed":
+            final_state = sdata
+            break
+        if sdata.get("state") == "error":
+            pytest.fail(
+                f"Init failed: {sdata.get('error') or sdata.get('message')}"
+            )
+    assert final_state is not None, (
+        f"Init did not reach 'completed' within {init_timeout}s"
+    )
+
+    result = final_state.get("result") or {}
+    assert result.get("status") == "success", result.get("message")
+    domain_status = result.get("domain_schema_status") or {}
     print(f"Domain schema status: {domain_status.get('status')}")
     print(f"Statements applied: {len(domain_status.get('statements', []))}")
     if domain_status.get("metadata"):

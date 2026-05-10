@@ -1001,20 +1001,45 @@ const [activeTab, setActiveTab] = useState("upload");
     }
   }, [refreshOpen, refreshGraphName]);
 
-  // Load available graphs from sessionStorage on mount
+  // Load available graphs. Seed from sessionStorage, then refresh from
+  // /ui/list_graphs so a graph created mid-session is visible without
+  // re-login (the post-init success path that updates sessionStorage
+  // can be skipped if the init fetch times out client-side even though
+  // the backend completed).
   useEffect(() => {
     const store = JSON.parse(sessionStorage.getItem("site") || "{}");
     if (store.graphs && Array.isArray(store.graphs)) {
       setAvailableGraphs(store.graphs);
-      // Auto-select first graph if available
       if (store.graphs.length > 0 && !ingestGraphName) {
         setIngestGraphName(store.graphs[0]);
       }
-      // Auto-select first graph for refresh as well
       if (store.graphs.length > 0 && !refreshGraphName) {
         setRefreshGraphName(store.graphs[0]);
       }
     }
+    const creds = sessionStorage.getItem("creds");
+    if (!creds) return;
+    fetch("/ui/list_graphs", {
+      headers: { Authorization: `Basic ${creds}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data || !Array.isArray(data.graphs)) return;
+        const graphs: string[] = data.graphs;
+        setAvailableGraphs(graphs);
+        const cached = JSON.parse(sessionStorage.getItem("site") || "{}");
+        cached.graphs = graphs;
+        sessionStorage.setItem("site", JSON.stringify(cached));
+        if (graphs.length > 0 && !ingestGraphName) {
+          setIngestGraphName(graphs[0]);
+        }
+        if (graphs.length > 0 && !refreshGraphName) {
+          setRefreshGraphName(graphs[0]);
+        }
+      })
+      .catch(() => {
+        /* keep cached value; not fatal */
+      });
   }, []);
 
   // Load files when ingest dialog opens or graph name changes

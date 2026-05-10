@@ -14,6 +14,8 @@ import logging
 from pathlib import Path
 from typing import Iterable, Optional
 
+from common.db.schema_utils import gsql_output_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -151,8 +153,8 @@ def install_retrievers(
         try:
             out = conn.gsql(block)
             results[query_name] = out
-            lower = out.lower() if isinstance(out, str) else ""
-            if "error" in lower or "failed" in lower:
+            err = gsql_output_error(out) if isinstance(out, str) else None
+            if err:
                 logger.warning(
                     f"install_retrievers: {query_name} install reported "
                     f"errors: {_summarize(out)}"
@@ -190,8 +192,8 @@ async def install_retrievers_async(
             else:
                 out = await conn.gsql(block)
             results[query_name] = out
-            lower = out.lower() if isinstance(out, str) else ""
-            if "error" in lower or "failed" in lower:
+            err = gsql_output_error(out) if isinstance(out, str) else None
+            if err:
                 logger.warning(
                     f"install_retrievers_async: {query_name} install "
                     f"reported errors: {str(out)[:300]}"

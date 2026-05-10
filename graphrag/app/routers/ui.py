@@ -378,6 +378,17 @@ def login(auth: Annotated[list[str], Depends(ui_basic_auth)]):
     return {"graphs": graphs, "roles": global_roles, "graph_roles": graph_roles}
 
 
+@router.get(f"{route_prefix}/list_graphs")
+def list_graphs(auth: Annotated[list[str], Depends(ui_basic_auth)]):
+    """Return the live list of graphs the authenticated user has access
+    to. UI clients call this on mount to refresh their cached graph
+    list, so a graph created or initialized after login (or during a
+    session where the init request failed client-side but succeeded
+    server-side) becomes visible without re-login.
+    """
+    return {"graphs": auth[0]}
+
+
 @router.post(f"{route_prefix}/feedback")
 def add_feedback(
     message: Message,
@@ -491,14 +502,43 @@ def create_graph(
             }
 
 
+# Per-graph init state store. Init runs as a BackgroundTask so the HTTP
+# request returns immediately; the UI polls /initialize_status for
+# progress/completion. The browser used to drop the request after ~5
+# minutes of silent response on long inits (TG schema-change + retriever
+# installs can run for 10+ minutes), even though the backend completed
+# successfully — see ``ERR_TIMED_OUT`` reports during v1.4.0 schema-aware
+# init.
+_init_state: dict[str, dict] = {}
+_init_state_lock = threading.Lock()
+
+
+def _set_init_state(graphname: str, **fields) -> None:
+    with _init_state_lock:
+        cur = _init_state.get(graphname, {})
+        cur.update(fields)
+        _init_state[graphname] = cur
+
+
+def _get_init_state(graphname: str) -> dict:
+    with _init_state_lock:
+        return dict(_init_state.get(graphname, {"state": "unknown"}))
+
+
 @router.post(route_prefix + "/{graphname}/initialize_graph")
 def init_graph(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    bg_tasks: BackgroundTasks,
     payload: Annotated[dict | None, Body()] = None,
 ):
     """
-    Initialize a TigerGraph knowledge graph with GraphRAG schema.
+    Submit a TigerGraph knowledge-graph initialization job.
+
+    Returns 202 immediately with ``{"status": "submitted", "graphname": ...}``;
+    the long-running work (structural schema, optional domain schema apply,
+    retriever installs) runs in a BackgroundTask. UI clients poll
+    ``GET /ui/{graphname}/initialize_status`` for state and final result.
 
     The structural GraphRAG schema (Document, DocumentChunk, Entity,
     EntityType, RelationshipType, Content, Community, Image and their
@@ -506,79 +546,136 @@ def init_graph(
 
     Optionally accepts a JSON body with a domain-schema proposal:
 
-        {"schema_gsql": "ADD VERTEX Company(...);  ADD DIRECTED EDGE PUBLISHES(FROM Company, TO Report);"}
+        {"schema_gsql": "ADD VERTEX Company(...); ..."}
 
     When ``schema_gsql`` is provided, the pasted text is parsed
-    permissively (``ADD`` form *or* ``gsql ls`` output), structural-type
-    collisions and dangling pairs are silently dropped, the diff against
-    the current graph is computed, and the additive delta is applied as a
-    single atomic ``SCHEMA_CHANGE JOB``. Existing types are never dropped.
+    permissively, structural-type collisions and dangling pairs are
+    dropped, the diff against the current graph is computed, and the
+    additive delta is applied. Existing types are never dropped.
     """
-    try:
-        # Extract credentials from the dependency (same pattern as other endpoints)
-        creds = creds[1]
-        auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
-        _, conn = ws_basic_auth(auth, graphname)
+    cur = _get_init_state(graphname)
+    if cur.get("state") in {"queued", "running"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Initialization already in progress for graph '{graphname}'",
+        )
 
-        # Initialize the graph with GraphRAG schema
-        LogWriter.info(f"Initializing graph: {graphname}")
-        resp = supportai.init_supportai(conn, graphname)
-        schema_res, index_res, query_res = resp[0], resp[1], resp[2]
+    schema_gsql = (
+        (payload or {}).get("schema_gsql") if isinstance(payload, dict) else None
+    )
+    cred_obj = creds[1]
+    auth_b64 = base64.b64encode(
+        f"{cred_obj.username}:{cred_obj.password}".encode()
+    ).decode()
 
-        domain_schema_status: dict | None = None
-        schema_gsql = (payload or {}).get("schema_gsql") if isinstance(payload, dict) else None
-        if isinstance(schema_gsql, str) and schema_gsql.strip():
-            LogWriter.info(f"Applying domain schema proposal for graph: {graphname}")
-            proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
-            proposal.drop_dangling_pairs()
-            domain_schema_status = schema_utils_mod.apply_proposal(
-                conn, graphname, proposal
+    _set_init_state(
+        graphname,
+        state="queued",
+        message="Initialization queued",
+        started_at=time.time(),
+        completed_at=None,
+        result=None,
+        error=None,
+    )
+
+    def _run_init():
+        try:
+            _set_init_state(
+                graphname, state="running", message="Connecting to TigerGraph"
             )
-            LogWriter.info(
-                f"Domain schema status for {graphname}: "
-                f"{domain_schema_status['status']} "
-                f"({len(domain_schema_status['statements'])} stmts)"
+            _, conn = ws_basic_auth(auth_b64, graphname)
+
+            _set_init_state(graphname, message="Initializing structural schema")
+            LogWriter.info(f"Initializing graph: {graphname}")
+            resp = supportai.init_supportai(conn, graphname)
+            schema_res, index_res, query_res = resp[0], resp[1], resp[2]
+
+            domain_schema_status: dict | None = None
+            if isinstance(schema_gsql, str) and schema_gsql.strip():
+                _set_init_state(graphname, message="Applying domain schema")
+                LogWriter.info(
+                    f"Applying domain schema proposal for graph: {graphname}"
+                )
+                proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
+                proposal.drop_dangling_pairs()
+                domain_schema_status = schema_utils_mod.apply_proposal(
+                    conn, graphname, proposal
+                )
+                LogWriter.info(
+                    f"Domain schema status for {graphname}: "
+                    f"{domain_schema_status['status']} "
+                    f"({len(domain_schema_status['statements'])} stmts)"
+                )
+                if domain_schema_status.get("status") == "error":
+                    LogWriter.error(
+                        f"Domain schema apply failed for {graphname}: "
+                        f"{domain_schema_status.get('error')}"
+                    )
+                    _set_init_state(
+                        graphname,
+                        state="error",
+                        message="Domain schema apply failed",
+                        error=domain_schema_status.get("error"),
+                        completed_at=time.time(),
+                        result={"domain_schema_status": domain_schema_status},
+                    )
+                    return
+
+            LogWriter.info(f"Graph initialization completed for: {graphname}")
+
+            result = {
+                "status": "success",
+                "message": f"Graph '{graphname}' initialized successfully",
+                "graphname": graphname,
+                "host_name": conn._tg_connection.host,
+                "schema_creation_status": json.dumps(schema_res),
+                "index_creation_status": json.dumps(index_res),
+                "query_creation_status": json.dumps(query_res),
+            }
+            if domain_schema_status is not None:
+                result["domain_schema_status"] = domain_schema_status
+
+            _set_init_state(
+                graphname,
+                state="completed",
+                message="Initialization completed successfully",
+                completed_at=time.time(),
+                result=result,
             )
-            # apply_proposal returns status=error when the gsql output
-            # contains a known failure marker. Surface it as a 5xx so
-            # the caller doesn't falsely think the schema landed.
-            if domain_schema_status.get("status") == "error":
-                LogWriter.error(
-                    f"Domain schema apply failed for {graphname}: "
-                    f"{domain_schema_status.get('error')}"
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail={
-                        "message": "Domain schema apply failed",
-                        "error": domain_schema_status.get("error"),
-                        "gsql_output": domain_schema_status.get("gsql_output", "")[:1000],
-                        "statements": domain_schema_status.get("statements", []),
-                    },
-                )
+        except Exception as e:
+            LogWriter.error(f"Error initializing graph {graphname}: {str(e)}")
+            _set_init_state(
+                graphname,
+                state="error",
+                message=f"Initialization failed: {e}",
+                error=str(e),
+                completed_at=time.time(),
+            )
 
-        LogWriter.info(f"Graph initialization completed for: {graphname}")
+    bg_tasks.add_task(_run_init)
+    return {
+        "status": "submitted",
+        "graphname": graphname,
+        "message": "Initialization started; poll initialize_status for progress.",
+    }
 
-        result = {
-            "status": "success",
-            "message": f"Graph '{graphname}' initialized successfully",
-            "graphname": graphname,
-            "host_name": conn._tg_connection.host,
-            "schema_creation_status": json.dumps(schema_res),
-            "index_creation_status": json.dumps(index_res),
-            "query_creation_status": json.dumps(query_res),
-        }
-        if domain_schema_status is not None:
-            result["domain_schema_status"] = domain_schema_status
-        return result
 
-    except Exception as e:
-        LogWriter.error(f"Error initializing graph {graphname}: {str(e)}")
-        return {
-            "status": "error",
-            "message": f"Failed to initialize graph '{graphname}': {str(e)}",
-            "details": str(e)
-        }
+@router.get(route_prefix + "/{graphname}/initialize_status")
+def get_initialize_status(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Return the current init state for *graphname*.
+
+    States:
+      * ``unknown``  — no init has ever been submitted for this graph
+        (or the worker restarted, dropping in-memory state).
+      * ``queued``   — submitted, background task not yet running.
+      * ``running``  — backend is doing work; ``message`` describes the phase.
+      * ``completed``— done; ``result`` carries the final init payload.
+      * ``error``    — failed; ``error`` carries the failure reason.
+    """
+    return _get_init_state(graphname)
 
 
 @router.post(route_prefix + "/{graphname}/convert_sample_files")

@@ -192,7 +192,11 @@ const KGAdmin = () => {
   const [isCheckingStatus, setIsCheckingStatus] = useState(false);
   const [pollingActive, setPollingActive] = useState(false);
 
-  // Load available graphs
+  // Load available graphs. First seed from sessionStorage so the
+  // dropdown shows something immediately, then refresh from
+  // /ui/list_graphs so a graph created/initialized after login (or
+  // during a session where the init request failed client-side but
+  // succeeded server-side) is still visible without re-login.
   useEffect(() => {
     const store = JSON.parse(sessionStorage.getItem("site") || "{}");
     if (store.graphs && Array.isArray(store.graphs)) {
@@ -201,6 +205,26 @@ const KGAdmin = () => {
         setRefreshGraphName(store.graphs[0]);
       }
     }
+    const creds = sessionStorage.getItem("creds");
+    if (!creds) return;
+    fetch("/ui/list_graphs", {
+      headers: { Authorization: `Basic ${creds}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data || !Array.isArray(data.graphs)) return;
+        const graphs: string[] = data.graphs;
+        setAvailableGraphs(graphs);
+        const cached = JSON.parse(sessionStorage.getItem("site") || "{}");
+        cached.graphs = graphs;
+        sessionStorage.setItem("site", JSON.stringify(cached));
+        if (graphs.length > 0 && !refreshGraphName) {
+          setRefreshGraphName(graphs[0]);
+        }
+      })
+      .catch(() => {
+        /* keep cached value; not fatal */
+      });
   }, []);
 
   // Pull schema-init caps from /ui/config when the Initialize dialog opens.
@@ -274,6 +298,9 @@ const KGAdmin = () => {
       `Step 1/2: Converting ${sampleFiles.length} uploaded file${sampleFiles.length === 1 ? "" : "s"} to text…`
     );
     setStatusType("");
+    // The LLM call can take minutes; pause the idle timer so the
+    // user isn't logged out mid-extraction.
+    pauseIdleTimer();
     try {
       const creds = sessionStorage.getItem("creds");
       if (!creds) throw new Error("Not authenticated. Please login first.");
@@ -359,6 +386,7 @@ const KGAdmin = () => {
       setStatusMessage(`❌ ${error.message}`);
       setStatusType("error");
     } finally {
+      resumeIdleTimer();
       setIsExtractingSchema(false);
     }
   };
@@ -380,6 +408,9 @@ const KGAdmin = () => {
     setIsInitializing(true);
     setStatusMessage("Creating graph and initializing GraphRAG schema...");
     setStatusType("");
+    // Schema-change job + retriever installs can take minutes; pause
+    // the idle timer so the user isn't logged out mid-init.
+    pauseIdleTimer();
 
     try {
       const creds = sessionStorage.getItem("creds");
@@ -423,7 +454,7 @@ const KGAdmin = () => {
         }
       }
 
-      setStatusMessage("Step 2/2: Initializing GraphRAG schema...");
+      setStatusMessage("Step 2/2: Submitting GraphRAG schema initialization...");
       const initBody: { schema_gsql?: string } = {};
       if (schemaSource === "gsql" && pasteGsql.trim()) {
         initBody.schema_gsql = pasteGsql;
@@ -431,6 +462,10 @@ const KGAdmin = () => {
         const gsql = draftProposalToGsql(draftProposal).trim();
         if (gsql) initBody.schema_gsql = gsql;
       }
+      // Submit the init job. The backend kicks off a BackgroundTask
+      // and returns 202 immediately so the browser doesn't drop the
+      // request mid-flight on long inits (TG schema-change + retriever
+      // installs can take 10+ minutes).
       const initResponse = await fetch(`/ui/${graphName}/initialize_graph`, {
         method: "POST",
         headers: {
@@ -444,20 +479,60 @@ const KGAdmin = () => {
 
       if (!initResponse.ok) {
         throw new Error(
-          initData.detail || `Failed to initialize graph: ${initResponse.statusText}`
+          initData.detail || `Failed to submit init: ${initResponse.statusText}`
         );
       }
 
-      if (initData.status !== "success") {
-        setStatusMessage(
-          initData.message || `Failed to initialize graph: ${initData.details}`
+      if (initData.status !== "submitted") {
+        throw new Error(
+          initData.message || `Init submission failed: ${JSON.stringify(initData)}`
         );
-        setStatusType("error");
-        setIsInitializing(false);
-        return;
       }
 
-      const domain = initData.domain_schema_status;
+      // Poll for completion. The bg task updates per-graph state on
+      // the server; we read it every few seconds and surface progress.
+      setStatusMessage("Step 2/2: Initializing GraphRAG schema (this can take several minutes)...");
+      const pollIntervalMs = 5000;
+      const maxWaitMs = 30 * 60 * 1000; // 30 minutes hard cap
+      const start = Date.now();
+      let finalState: any = null;
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        if (Date.now() - start > maxWaitMs) {
+          throw new Error(
+            "Init still running after 30 minutes; check server logs."
+          );
+        }
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+        let statusResp: Response;
+        try {
+          statusResp = await fetch(
+            `/ui/${graphName}/initialize_status`,
+            { headers: { Authorization: `Basic ${creds}` } }
+          );
+        } catch {
+          // Transient network blip — retry on the next tick rather
+          // than aborting; the bg task is still working server-side.
+          continue;
+        }
+        if (!statusResp.ok) continue;
+        const statusData = await statusResp.json();
+        if (statusData.message) {
+          setStatusMessage(`Step 2/2: ${statusData.message}`);
+        }
+        if (statusData.state === "completed") {
+          finalState = statusData;
+          break;
+        }
+        if (statusData.state === "error") {
+          throw new Error(
+            statusData.error || statusData.message || "Init failed"
+          );
+        }
+      }
+
+      const result = finalState?.result || {};
+      const domain = result.domain_schema_status;
       let domainNote = "";
       if (domain && domain.status === "applied") {
         const stmts = domain.statements?.length ?? 0;
@@ -490,6 +565,7 @@ const KGAdmin = () => {
       setStatusMessage(`❌ Error: ${error.message}`);
       setStatusType("error");
     } finally {
+      resumeIdleTimer();
       setIsInitializing(false);
     }
   };

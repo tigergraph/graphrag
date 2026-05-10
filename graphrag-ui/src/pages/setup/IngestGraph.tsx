@@ -870,16 +870,37 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     }
   }, [isIngesting]);
 
-  // Load available graphs from sessionStorage on mount
+  // Load available graphs. Seed from sessionStorage for instant render,
+  // then refresh from /ui/list_graphs so newly-initialized graphs show
+  // up without a re-login.
   useEffect(() => {
     const store = JSON.parse(sessionStorage.getItem("site") || "{}");
     if (store.graphs && Array.isArray(store.graphs)) {
       setAvailableGraphs(store.graphs);
-      // Auto-select first graph if available
       if (store.graphs.length > 0 && !ingestGraphName) {
         setIngestGraphName(store.graphs[0]);
       }
     }
+    const creds = sessionStorage.getItem("creds");
+    if (!creds) return;
+    fetch("/ui/list_graphs", {
+      headers: { Authorization: `Basic ${creds}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data || !Array.isArray(data.graphs)) return;
+        const graphs: string[] = data.graphs;
+        setAvailableGraphs(graphs);
+        const cached = JSON.parse(sessionStorage.getItem("site") || "{}");
+        cached.graphs = graphs;
+        sessionStorage.setItem("site", JSON.stringify(cached));
+        if (graphs.length > 0 && !ingestGraphName) {
+          setIngestGraphName(graphs[0]);
+        }
+      })
+      .catch(() => {
+        /* keep cached value; not fatal */
+      });
   }, []);
 
   // Load files when graph name changes
