@@ -180,9 +180,10 @@ def test_resolve_sample_token_budget_handles_missing_config():
 def test_extract_schema_gsql_passes_structural_and_keyword_lists_to_llm():
     llm = _CapturingLLM(response="// A company.\nADD VERTEX Company();")
     samples = [{"doc_id": "x", "content": "Acme Corp issues bonds."}]
-    out = schema_extraction.extract_schema_gsql(llm, samples)
+    out, rendered = schema_extraction.extract_schema_gsql(llm, samples)
 
     assert out.startswith("// A company.")
+    assert "Stub schema-extraction prompt" in rendered
     assert len(llm.calls) == 1
     inputs = llm.calls[0]["inputs"]
     assert "samples" in inputs
@@ -215,7 +216,7 @@ def test_extract_schema_gsql_returns_str_for_object_response():
             return "ADD VERTEX Foo();"
 
     llm = _CapturingLLM(response=_ObjResp())
-    out = schema_extraction.extract_schema_gsql(
+    out, _ = schema_extraction.extract_schema_gsql(
         llm, [{"doc_id": "x", "content": "y"}]
     )
     assert "ADD VERTEX Foo" in out
@@ -244,7 +245,7 @@ def test_extract_schema_gsql_round_trips_through_parser():
         "UNDIRECTED EDGE COLLEAGUE_OF(FROM Person, TO Person);\n"
     )
     llm = _CapturingLLM(response=response)
-    gsql = schema_extraction.extract_schema_gsql(
+    gsql, _ = schema_extraction.extract_schema_gsql(
         llm, [{"doc_id": "x", "content": "y"}]
     )
     proposal = parse_gsql_schema(gsql)
@@ -277,7 +278,7 @@ def test_extract_schema_gsql_uses_llm_service_prompt_getter():
             )
 
     llm = _StubLLM(response="// V.\nVERTEX V();")
-    out = schema_extraction.extract_schema_gsql(
+    out, _ = schema_extraction.extract_schema_gsql(
         llm, [{"doc_id": "x", "content": "y"}]
     )
     assert "VERTEX V" in out
@@ -287,6 +288,91 @@ def test_extract_schema_gsql_uses_llm_service_prompt_getter():
     assert "samples" in inputs
     assert "structural_types" in inputs
     assert "tg_keywords" in inputs
+
+
+def test_render_type_hints_block_renders_both_categories():
+    block = schema_extraction.render_type_hints_block(
+        vertex_hints=[
+            {"name": "Company", "description": "publicly listed corporation"},
+            {"name": "Filing"},
+        ],
+        edge_hints=[
+            {"name": "PUBLISHES", "description": "Company publishes a Filing"},
+        ],
+    )
+    assert "## Suggested types" in block
+    assert "Vertex types to include" in block
+    assert "- Company: publicly listed corporation" in block
+    assert "- Filing" in block
+    assert "Edge types to include" in block
+    assert "- PUBLISHES: Company publishes a Filing" in block
+
+
+def test_render_type_hints_block_emits_endpoint_pair_for_edges():
+    """Edge hints carrying ``fromType`` / ``toType`` render with the
+    ``Name (From → To)`` form so the LLM sees the user's direction.
+    Vertex hints ignore endpoint fields even when present (defensive).
+    """
+    block = schema_extraction.render_type_hints_block(
+        vertex_hints=[
+            # Endpoint fields on a vertex hint are silently ignored.
+            {"name": "Company", "fromType": "X", "toType": "Y"},
+        ],
+        edge_hints=[
+            {
+                "name": "PUBLISHES",
+                "fromType": "Company",
+                "toType": "Filing",
+                "description": "Company publishes a Filing",
+            },
+            {"name": "OWNS", "fromType": "Company", "toType": "Asset"},
+            # No endpoints — renders as plain ``- WORKS_AT``.
+            {"name": "WORKS_AT"},
+        ],
+    )
+    # Vertex row is unchanged.
+    assert "- Company\n" in block or "- Company" in block.split("Edge types")[0]
+    # Edge rows include the endpoint arrow.
+    assert "- PUBLISHES (Company → Filing): Company publishes a Filing" in block
+    assert "- OWNS (Company → Asset)" in block
+    assert "- WORKS_AT" in block
+
+
+def test_render_type_hints_block_empty_returns_empty_string():
+    assert schema_extraction.render_type_hints_block(None, None) == ""
+    assert schema_extraction.render_type_hints_block([], []) == ""
+
+
+def test_extract_schema_gsql_injects_hints_block_into_prompt():
+    """The hints block must reach the LLM via the rendered prompt
+    template, and the rendered template returned to the caller must
+    contain the same block (so the UI can persist it as the per-graph
+    override after a successful init).
+    """
+
+    class _StubLLM(_CapturingLLM):
+        @property
+        def schema_extraction_prompt(self) -> str:
+            return (
+                "Schema extraction.\n\n"
+                "## Inputs\n"
+                "{samples}\n{structural_types}\n{tg_keywords}\n"
+            )
+
+    llm = _StubLLM(response="VERTEX V();")
+    out, rendered = schema_extraction.extract_schema_gsql(
+        llm,
+        [{"doc_id": "x", "content": "y"}],
+        vertex_hints=[{"name": "Company", "description": "a corp"}],
+        edge_hints=[{"name": "OWNS"}],
+    )
+    assert "VERTEX V" in out
+    # Rendered prompt has the hints block injected before the Inputs
+    # section so the LLM treats hints as guidance, not as content.
+    assert "## Suggested types" in rendered
+    assert "- Company: a corp" in rendered
+    assert "- OWNS" in rendered
+    assert rendered.index("## Suggested types") < rendered.index("## Inputs")
 
 
 def test_extract_schema_gsql_propagates_missing_prompt_file():

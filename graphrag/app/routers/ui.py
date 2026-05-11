@@ -389,6 +389,35 @@ def list_graphs(auth: Annotated[list[str], Depends(ui_basic_auth)]):
     return {"graphs": auth[0]}
 
 
+@router.get(f"{route_prefix}/schema_reserved_names")
+def schema_reserved_names(
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Return name sets the UI uses to reject suggested types up-front
+    in the Initialize Graph dialog. The downstream parser silently
+    drops these anyway, but inline rejection gives the user a clear
+    reason instead of a confusing "type didn't appear in the draft".
+
+    Returns three lists:
+      * ``gsql_keywords``           — GSQL reserved words (sourced from
+        pyTigerGraph). Naming a vertex/edge type after one would crash
+        the schema-change job.
+      * ``structural_vertex_types`` — GraphRAG always-present vertex
+        types (Document, DocumentChunk, Entity, ...).
+      * ``structural_edge_types``   — GraphRAG always-present edge
+        types (HAS_CONTENT, CONTAINS_ENTITY, ...).
+    """
+    return {
+        "gsql_keywords": sorted(schema_utils_mod.get_gsql_reserved_words()),
+        "structural_vertex_types": sorted(
+            schema_utils_mod.GRAPHRAG_STRUCTURAL_VERTEX_TYPES
+        ),
+        "structural_edge_types": sorted(
+            schema_utils_mod.GRAPHRAG_STRUCTURAL_EDGE_TYPES
+        ),
+    }
+
+
 @router.post(f"{route_prefix}/feedback")
 def add_feedback(
     message: Message,
@@ -851,13 +880,21 @@ def extract_schema_from_jsonl(
             detail="No extractable text in the converted files.",
         )
 
+    # Optional structured hints from the UI (TagInput chips). Each
+    # hint is ``{"name": str, "description": str}``. Backend ignores
+    # malformed entries silently — names are validated client-side.
+    vertex_hints = (payload or {}).get("vertex_hints") if isinstance(payload, dict) else None
+    edge_hints = (payload or {}).get("edge_hints") if isinstance(payload, dict) else None
+
     LogWriter.info(
         f"Running schema extraction LLM for {graphname} "
-        f"({len(jsonl_paths)} JSONLs, {len(samples)} doc parts)"
+        f"({len(jsonl_paths)} JSONLs, {len(samples)} doc parts, "
+        f"{len(vertex_hints or [])} vertex hints, {len(edge_hints or [])} edge hints)"
     )
     llm_service = get_llm_service(get_completion_config(graphname))
-    gsql_text = schema_extraction_mod.extract_schema_gsql(
-        llm_service, samples
+    gsql_text, rendered_prompt = schema_extraction_mod.extract_schema_gsql(
+        llm_service, samples,
+        vertex_hints=vertex_hints, edge_hints=edge_hints,
     )
     proposal = schema_utils_mod.parse_gsql_schema(gsql_text)
     proposal.drop_dangling_pairs()
@@ -868,6 +905,11 @@ def extract_schema_from_jsonl(
         "preview_gsql": schema_utils_mod.emit_preview_gsql(proposal),
         "proposal": proposal.to_dict(),
         "summary": schema_utils_mod.summarize(proposal),
+        # The fully-rendered prompt (default + suggested-types block).
+        # The UI saves this verbatim as the per-graph override after a
+        # successful initialize_graph so the addendum survives the
+        # session.
+        "rendered_prompt": rendered_prompt,
     }
 
 

@@ -488,17 +488,45 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       const creds = sessionStorage.getItem("creds");
       const folderPath = sourceType === "uploaded" ? `uploads/${ingestGraphName}` : `downloaded_files_cloud/${ingestGraphName}`;
 
-      // Use existing ingestJobData if available, otherwise construct from folder path
-      const jobData = ingestJobData || {
-        load_job_id: "load_documents_content_json",
-        data_source_id: {
-          data_source: "server",
-          data_source_config: { data_path: folderPath },
-          loader_config: {},
-          file_format: "multi"
-        },
-        data_path: folderPath,
-      };
+      // If no cached job from a prior create_ingest, run it now. The
+      // backend's /ingest endpoint expects the data_source_id dict
+      // shape that create_ingest emits (with the resolved JSONL temp
+      // folder at top-level ``data_path``); building a fallback in
+      // the UI loses that contract.
+      let jobData = ingestJobData;
+      if (!jobData) {
+        setIngestMessage("Step 1/2: Preparing ingest job...");
+        const createResp = await fetch(
+          `/ui/${ingestGraphName}/create_ingest`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Basic ${creds}`,
+            },
+            body: JSON.stringify({
+              data_source: "server",
+              data_source_config: { data_path: folderPath },
+              loader_config: {},
+              file_format: "multi",
+            }),
+          }
+        );
+        if (!createResp.ok) {
+          const err = await createResp.json();
+          throw new Error(
+            err.detail || `Failed to create ingest job: ${createResp.statusText}`
+          );
+        }
+        const createData = await createResp.json();
+        jobData = {
+          load_job_id: createData.load_job_id,
+          data_source_id: createData.data_source_id,
+          data_path: createData.data_path || folderPath,
+        };
+        setIngestJobData(jobData);
+        setIngestMessage("Step 2/2: Loading documents into knowledge graph...");
+      }
 
       const ingestResponse = await fetch(`/ui/${ingestGraphName}/ingest`, {
         method: "POST",

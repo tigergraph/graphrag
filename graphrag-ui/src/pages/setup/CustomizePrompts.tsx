@@ -11,6 +11,7 @@ const ALL_PROMPT_TYPES = [
   { id: "entity_relationship", name: "Entity Relationships", description: "Configure entity and relationship extraction from document chunks" },
   { id: "community_summarization", name: "Community Summarization", description: "Define how community summaries are generated" },
   { id: "query_generation", name: "Schema Instructions", description: "Configure instructions for schema filtering and schema generation" },
+  { id: "schema_extraction", name: "Schema Extraction", description: "Define the rules the LLM follows when proposing a domain schema from sample documents" },
 ];
 
 const CustomizePrompts = () => {
@@ -29,14 +30,16 @@ const CustomizePrompts = () => {
     entity_relationship: "",
     community_summarization: "",
     query_generation: "",
+    schema_extraction: "",
   });
-  
+
   // Template variables that should not be edited (stored separately)
   const [promptTemplates, setPromptTemplates] = useState({
     chatbot_response: "",
     entity_relationship: "",
     community_summarization: "",
     query_generation: "",
+    schema_extraction: "",
   });
 
   // Only render prompt types the backend returned for this user
@@ -126,6 +129,9 @@ const CustomizePrompts = () => {
         query_generation: data.prompts.query_generation?.editable_content !== undefined
           ? data.prompts.query_generation.editable_content
           : (typeof data.prompts.query_generation === 'string' ? data.prompts.query_generation : ""),
+        schema_extraction: data.prompts.schema_extraction?.editable_content !== undefined
+          ? data.prompts.schema_extraction.editable_content
+          : (typeof data.prompts.schema_extraction === 'string' ? data.prompts.schema_extraction : ""),
       });
 
       // Store template variables separately
@@ -134,6 +140,7 @@ const CustomizePrompts = () => {
         entity_relationship: data.prompts.entity_relationship?.template_variables || "",
         community_summarization: data.prompts.community_summarization?.template_variables || "",
         query_generation: data.prompts.query_generation?.template_variables || "",
+        schema_extraction: data.prompts.schema_extraction?.template_variables || "",
       });
 
       // Set configured provider

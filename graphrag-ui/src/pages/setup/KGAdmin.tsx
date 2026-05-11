@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { TagInput, TypeHint } from "@/components/ui/tag-input";
 import { Database, Loader2, RefreshCw, Upload } from "lucide-react";
 import { pauseIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
 import {
@@ -56,6 +57,11 @@ const KGAdmin = () => {
     setSampleFiles([]);
     setExtractedFingerprint(null);
     setAttributesCollapsed(false);
+    setCollapsedVertices(new Set());
+    setCollapsedEdges(new Set());
+    setVertexHints([]);
+    setEdgeHints([]);
+    setRenderedSchemaPrompt("");
     setIsInitComplete(false);
   };
 
@@ -109,6 +115,24 @@ const KGAdmin = () => {
   const [maxSampleFiles, setMaxSampleFiles] = useState<number>(5);
   const [maxTotalMb, setMaxTotalMb] = useState<number>(50);
   const [isExtractingSchema, setIsExtractingSchema] = useState(false);
+  // Optional structured guidance for the schema-extraction LLM.
+  // Each chip is a ``{name, description}`` pair entered as
+  // ``Name`` or ``Name: description`` in the TagInput. Backend
+  // injects these as a "Suggested types" block in the resolved
+  // prompt; on init success the rendered prompt is persisted as
+  // the per-graph override so future re-extractions reuse it.
+  const [vertexHints, setVertexHints] = useState<TypeHint[]>([]);
+  const [edgeHints, setEdgeHints] = useState<TypeHint[]>([]);
+  // Captures the rendered prompt returned by /extract_schema_from_jsonl
+  // so the post-init save flow can write it as the per-graph override.
+  const [renderedSchemaPrompt, setRenderedSchemaPrompt] = useState<string>("");
+  // Lookup of names the user CAN'T pick for suggested types: GSQL
+  // reserved words + GraphRAG structural type names. Keyed by
+  // lowercased name → reason string the TagInput surfaces inline.
+  // Same forbidden set feeds both Suggested Vertex Types and
+  // Suggested Edge Types so e.g. ``Document`` is rejected as a
+  // vertex name AND as an edge endpoint reference.
+  const [forbiddenNames, setForbiddenNames] = useState<Record<string, string>>({});
   // Fingerprint of the file set used for the most recent successful
   // extraction. Used to disable the *Extract draft schema* button
   // when the same files are selected (no new work to do).
@@ -116,6 +140,53 @@ const KGAdmin = () => {
   // True when the form-mode editor's per-card attribute lists are
   // hidden, for a cleaner overview of types.
   const [attributesCollapsed, setAttributesCollapsed] = useState<boolean>(false);
+  // Per-card collapse state in the draft-schema review form. When a
+  // type's index is in the set, only its name + description are shown
+  // (everything else — attributes, edge endpoints — is hidden).
+  // ``allCollapsed`` drives the toggle button label and lets us flip
+  // every card at once.
+  const [collapsedVertices, setCollapsedVertices] = useState<Set<number>>(new Set());
+  const [collapsedEdges, setCollapsedEdges] = useState<Set<number>>(new Set());
+  const allVerticesCollapsed =
+    !!draftProposal &&
+    draftProposal.vertices.length > 0 &&
+    collapsedVertices.size === draftProposal.vertices.length;
+  const allEdgesCollapsed =
+    !!draftProposal &&
+    draftProposal.edges.length > 0 &&
+    collapsedEdges.size === draftProposal.edges.length;
+  const toggleVertexCollapsed = (idx: number) =>
+    setCollapsedVertices((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  const toggleEdgeCollapsed = (idx: number) =>
+    setCollapsedEdges((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  const toggleAllVerticesCollapsed = () => {
+    if (!draftProposal) return;
+    if (allVerticesCollapsed) {
+      setCollapsedVertices(new Set());
+    } else {
+      setCollapsedVertices(
+        new Set(draftProposal.vertices.map((_, i) => i))
+      );
+    }
+  };
+  const toggleAllEdgesCollapsed = () => {
+    if (!draftProposal) return;
+    if (allEdgesCollapsed) {
+      setCollapsedEdges(new Set());
+    } else {
+      setCollapsedEdges(new Set(draftProposal.edges.map((_, i) => i)));
+    }
+  };
 
   const fingerprintFiles = (files: File[]): string =>
     files
@@ -123,7 +194,12 @@ const KGAdmin = () => {
       .sort()
       .join("|");
 
-  const sampleFingerprint = fingerprintFiles(sampleFiles);
+  // Composite fingerprint covering both the file set AND the hint
+  // chips so changing either re-enables the Extract button.
+  const sampleFingerprint =
+    fingerprintFiles(sampleFiles) +
+    "|hints:" +
+    JSON.stringify({ v: vertexHints, e: edgeHints });
 
   const PRIMITIVE_TYPES = [
     "STRING",
@@ -253,6 +329,32 @@ const KGAdmin = () => {
       .catch(() => {
         /* fall back to defaults */
       });
+    // Pull the list of names the user can't pick for suggested types.
+    // Empty / failed response leaves ``forbiddenNames`` as ``{}`` so
+    // the TagInput falls back to format-only validation — the
+    // downstream parser would still drop reserved/structural names,
+    // just without the inline message.
+    fetch(`/ui/schema_reserved_names`, {
+      headers: { Authorization: `Basic ${creds}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data) return;
+        const map: Record<string, string> = {};
+        for (const w of data.gsql_keywords || []) {
+          map[String(w).toLowerCase()] = "GSQL reserved word";
+        }
+        for (const t of data.structural_vertex_types || []) {
+          map[String(t).toLowerCase()] = "reserved structural vertex type";
+        }
+        for (const t of data.structural_edge_types || []) {
+          map[String(t).toLowerCase()] = "reserved structural edge type";
+        }
+        setForbiddenNames(map);
+      })
+      .catch(() => {
+        /* keep current value; not fatal */
+      });
   }, [initializeDialogOpen]);
 
   const handleSampleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -335,12 +437,21 @@ const KGAdmin = () => {
             Authorization: `Basic ${creds}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ filenames: convertData.saved_files || [] }),
+          body: JSON.stringify({
+            filenames: convertData.saved_files || [],
+            vertex_hints: vertexHints,
+            edge_hints: edgeHints,
+          }),
         }
       );
       const data = await resp.json();
       if (!resp.ok) {
         throw new Error(data.detail || `Extraction failed: ${resp.statusText}`);
+      }
+      // Stash the rendered prompt so the post-init save can write it
+      // as the per-graph schema_extraction.txt override.
+      if (typeof data.rendered_prompt === "string") {
+        setRenderedSchemaPrompt(data.rendered_prompt);
       }
       const proposal = data.proposal;
       if (
@@ -375,7 +486,9 @@ const KGAdmin = () => {
           })),
         })),
       });
-      setExtractedFingerprint(fingerprintFiles(sampleFiles));
+      // Capture the composite fingerprint (files + hint chips) so the
+      // Extract button stays disabled until something changes.
+      setExtractedFingerprint(sampleFingerprint);
       setStatusMessage(
         `Draft schema ready (${data.summary?.vertex_count ?? "?"} vertex types, ` +
           `${data.summary?.edge_count ?? "?"} edge types). Review/edit below, then click Initialize.`
@@ -545,6 +658,31 @@ const KGAdmin = () => {
       );
       setStatusType("success");
       setIsInitComplete(true);
+
+      // If the user supplied any structured hints, persist the
+      // rendered prompt (default + suggested-types block) as the
+      // per-graph schema_extraction.txt override so future
+      // re-extractions on this graph reuse the same hints. Failure
+      // here is non-fatal — the init itself already succeeded.
+      const hintCount = vertexHints.length + edgeHints.length;
+      if (hintCount > 0 && renderedSchemaPrompt) {
+        try {
+          await fetch("/ui/prompts", {
+            method: "POST",
+            headers: {
+              Authorization: `Basic ${creds}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              graphname: graphName,
+              prompt_type: "schema_extraction",
+              editable_content: renderedSchemaPrompt,
+            }),
+          });
+        } catch (e) {
+          console.warn("Saving per-graph schema prompt failed (non-fatal):", e);
+        }
+      }
 
       const newGraph = graphName;
       setAvailableGraphs(prev => {
@@ -925,6 +1063,46 @@ const KGAdmin = () => {
                       {sampleFiles.length > 0 &&
                         ` (${(sampleFiles.reduce((s, f) => s + f.size, 0) / (1024 * 1024)).toFixed(1)} MB)`}
                     </p>
+                    <div className="space-y-2">
+                      <p className="text-xs text-gray-600 dark:text-gray-300">
+                        Suggested types (optional). Vertex format:{" "}
+                        <code className="px-1 py-0.5 rounded bg-gray-100 dark:bg-shadeA font-semibold">Name</code>{" "}
+                        or{" "}
+                        <code className="px-1 py-0.5 rounded bg-gray-100 dark:bg-shadeA font-semibold">Name: description</code>.
+                        Edge format adds an optional endpoint pair:{" "}
+                        <code className="px-1 py-0.5 rounded bg-gray-100 dark:bg-shadeA font-semibold">Name (From -&gt; To)</code>{" "}
+                        or{" "}
+                        <code className="px-1 py-0.5 rounded bg-gray-100 dark:bg-shadeA font-semibold">Name (From -&gt; To): description</code>.
+                        Press Enter or comma to add each entry.
+                      </p>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 dark:text-[#D9D9D9] mb-1">
+                          Suggested Vertex Types
+                        </label>
+                        <TagInput
+                          values={vertexHints}
+                          onChange={setVertexHints}
+                          disabled={isInitializing || isExtractingSchema}
+                          placeholder="e.g., Company: publicly listed corporation, Filing, Person"
+                          ariaLabel="Suggested vertex types"
+                          forbiddenNames={forbiddenNames}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 dark:text-[#D9D9D9] mb-1">
+                          Suggested Edge Types
+                        </label>
+                        <TagInput
+                          values={edgeHints}
+                          onChange={setEdgeHints}
+                          disabled={isInitializing || isExtractingSchema}
+                          placeholder="e.g., PUBLISHES (Company -> Filing), OWNS, EMPLOYS: a Company employs a Person"
+                          ariaLabel="Suggested edge types"
+                          acceptsEndpoints
+                          forbiddenNames={forbiddenNames}
+                        />
+                      </div>
+                    </div>
                     <Button
                       onClick={handleExtractFromSamples}
                       disabled={
@@ -953,7 +1131,7 @@ const KGAdmin = () => {
 
                     {draftProposal && (
                       <div className="border border-gray-200 dark:border-[#3D3D3D] rounded p-3 space-y-4 max-h-[420px] overflow-y-auto">
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-2">
                           <p className="text-xs text-gray-500 dark:text-gray-400 flex-1 mr-2">
                             Review and edit the draft below. Each vertex auto-gets a primary
                             key <code>id</code> (STRING) — you don't need to add it. Click
@@ -971,31 +1149,47 @@ const KGAdmin = () => {
 
                         {/* Vertex types */}
                         <div>
-                          <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center justify-between mb-2 gap-2">
                             <h4 className="text-sm font-semibold text-black dark:text-white">
                               Vertex types ({draftProposal.vertices.length})
                             </h4>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={isInitializing || isExtractingSchema}
-                              onClick={() =>
-                                setDraftProposal((p) =>
-                                  p
-                                    ? {
-                                        ...p,
-                                        vertices: [
-                                          ...p.vertices,
-                                          { name: "", description: "", attributes: [] },
-                                        ],
-                                      }
-                                    : p
-                                )
-                              }
-                              className="text-xs h-7 dark:border-[#3D3D3D]"
-                            >
-                              + Add vertex
-                            </Button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={toggleAllVerticesCollapsed}
+                                disabled={
+                                  isInitializing ||
+                                  isExtractingSchema ||
+                                  draftProposal.vertices.length === 0
+                                }
+                                className="text-xs text-blue-600 hover:underline disabled:opacity-50 whitespace-nowrap"
+                              >
+                                {allVerticesCollapsed
+                                  ? "Expand all vertex types"
+                                  : "Collapse all vertex types"}
+                              </button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={isInitializing || isExtractingSchema}
+                                onClick={() =>
+                                  setDraftProposal((p) =>
+                                    p
+                                      ? {
+                                          ...p,
+                                          vertices: [
+                                            ...p.vertices,
+                                            { name: "", description: "", attributes: [] },
+                                          ],
+                                        }
+                                      : p
+                                  )
+                                }
+                                className="text-xs h-7 dark:border-[#3D3D3D]"
+                              >
+                                + Add vertex
+                              </Button>
+                            </div>
                           </div>
                           <div className="space-y-2">
                             {draftProposal.vertices.map((v, vIdx) => (
@@ -1004,6 +1198,18 @@ const KGAdmin = () => {
                                 className="border border-gray-200 dark:border-[#3D3D3D] rounded p-2 space-y-2"
                               >
                                 <div className="flex gap-2 items-center">
+                                  <button
+                                    type="button"
+                                    aria-label={
+                                      collapsedVertices.has(vIdx)
+                                        ? "Expand vertex type"
+                                        : "Collapse vertex type"
+                                    }
+                                    onClick={() => toggleVertexCollapsed(vIdx)}
+                                    className="text-xs text-gray-500 hover:text-gray-800 dark:hover:text-white w-5 h-7 flex items-center justify-center"
+                                  >
+                                    {collapsedVertices.has(vIdx) ? "▶" : "▼"}
+                                  </button>
                                   <Input
                                     placeholder="VertexName"
                                     value={v.name}
@@ -1022,6 +1228,11 @@ const KGAdmin = () => {
                                     disabled={isInitializing || isExtractingSchema}
                                     className="flex-1 h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
                                   />
+                                  {collapsedVertices.has(vIdx) && (
+                                    <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[40%]">
+                                      {v.attributes.length} attr{v.attributes.length === 1 ? "" : "s"}
+                                    </span>
+                                  )}
                                   <button
                                     type="button"
                                     disabled={isInitializing || isExtractingSchema}
@@ -1040,6 +1251,7 @@ const KGAdmin = () => {
                                     Remove
                                   </button>
                                 </div>
+                                {!collapsedVertices.has(vIdx) && (<>
                                 <Input
                                   placeholder="Description (1 sentence)"
                                   value={v.description}
@@ -1200,6 +1412,7 @@ const KGAdmin = () => {
                                     + Add attribute
                                   </button>
                                 )}
+                                </>)}
                               </div>
                             ))}
                           </div>
@@ -1207,36 +1420,52 @@ const KGAdmin = () => {
 
                         {/* Edge types */}
                         <div>
-                          <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center justify-between mb-2 gap-2">
                             <h4 className="text-sm font-semibold text-black dark:text-white">
                               Edge types ({draftProposal.edges.length})
                             </h4>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={isInitializing || isExtractingSchema}
-                              onClick={() =>
-                                setDraftProposal((p) =>
-                                  p
-                                    ? {
-                                        ...p,
-                                        edges: [
-                                          ...p.edges,
-                                          {
-                                            name: "",
-                                            description: "",
-                                            pairs: [["", ""]],
-                                            attributes: [],
-                                          },
-                                        ],
-                                      }
-                                    : p
-                                )
-                              }
-                              className="text-xs h-7 dark:border-[#3D3D3D]"
-                            >
-                              + Add edge
-                            </Button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={toggleAllEdgesCollapsed}
+                                disabled={
+                                  isInitializing ||
+                                  isExtractingSchema ||
+                                  draftProposal.edges.length === 0
+                                }
+                                className="text-xs text-blue-600 hover:underline disabled:opacity-50 whitespace-nowrap"
+                              >
+                                {allEdgesCollapsed
+                                  ? "Expand all edge types"
+                                  : "Collapse all edge types"}
+                              </button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={isInitializing || isExtractingSchema}
+                                onClick={() =>
+                                  setDraftProposal((p) =>
+                                    p
+                                      ? {
+                                          ...p,
+                                          edges: [
+                                            ...p.edges,
+                                            {
+                                              name: "",
+                                              description: "",
+                                              pairs: [["", ""]],
+                                              attributes: [],
+                                            },
+                                          ],
+                                        }
+                                      : p
+                                  )
+                                }
+                                className="text-xs h-7 dark:border-[#3D3D3D]"
+                              >
+                                + Add edge
+                              </Button>
+                            </div>
                           </div>
                           <div className="space-y-2">
                             {draftProposal.edges.map((e, eIdx) => (
@@ -1245,6 +1474,18 @@ const KGAdmin = () => {
                                 className="border border-gray-200 dark:border-[#3D3D3D] rounded p-2 space-y-2"
                               >
                                 <div className="flex gap-2 items-center">
+                                  <button
+                                    type="button"
+                                    aria-label={
+                                      collapsedEdges.has(eIdx)
+                                        ? "Expand edge type"
+                                        : "Collapse edge type"
+                                    }
+                                    onClick={() => toggleEdgeCollapsed(eIdx)}
+                                    className="text-xs text-gray-500 hover:text-gray-800 dark:hover:text-white w-5 h-7 flex items-center justify-center"
+                                  >
+                                    {collapsedEdges.has(eIdx) ? "▶" : "▼"}
+                                  </button>
                                   <Input
                                     placeholder="EDGE_NAME"
                                     value={e.name}
@@ -1265,6 +1506,12 @@ const KGAdmin = () => {
                                     disabled={isInitializing || isExtractingSchema}
                                     className="flex-1 h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
                                   />
+                                  {collapsedEdges.has(eIdx) && (
+                                    <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[40%]">
+                                      {e.pairs.length} pair{e.pairs.length === 1 ? "" : "s"}, {e.attributes.length} attr
+                                      {e.attributes.length === 1 ? "" : "s"}
+                                    </span>
+                                  )}
                                   <button
                                     type="button"
                                     disabled={isInitializing || isExtractingSchema}
@@ -1283,6 +1530,7 @@ const KGAdmin = () => {
                                     Remove
                                   </button>
                                 </div>
+                                {!collapsedEdges.has(eIdx) && (<>
                                 <Input
                                   placeholder="Description (1 sentence)"
                                   value={e.description}
@@ -1555,6 +1803,7 @@ const KGAdmin = () => {
                                     + Add attribute
                                   </button>
                                 )}
+                                </>)}
                               </div>
                             ))}
                           </div>

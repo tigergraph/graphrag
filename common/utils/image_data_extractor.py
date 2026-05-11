@@ -38,7 +38,9 @@ def describe_image_with_llm(file_path):
     """
     try:
         from PIL import Image as PILImage
-        
+        import os
+        import time
+
         client = _get_client()
         if not client:
             return "Image: Failed to create multimodal LLM client"
@@ -70,7 +72,27 @@ def describe_image_with_llm(file_path):
         ]
 
         langchain_client = client.llm
+        # Tag the upcoming chat completion as a multimodal image
+        # describe so it's distinguishable from text-only completions
+        # in the log stream (e.g. schema extraction, retriever LLM
+        # calls). Image-describe runs are typically dozens-to-hundreds
+        # per PDF, while text completions are one-shot.
+        image_basename = os.path.basename(str(file_path))
+        model_name = (
+            getattr(_multimodal_client, "config", {}).get("llm_model")
+            if _multimodal_client else None
+        ) or "?"
+        logger.info(
+            f"multimodal_describe: image={image_basename} "
+            f"model={model_name} provider={_multimodal_provider}"
+        )
+        t0 = time.monotonic()
         response = langchain_client.invoke(messages)
+        elapsed = time.monotonic() - t0
+        logger.info(
+            f"multimodal_describe done: image={image_basename} "
+            f"elapsed={elapsed:.2f}s"
+        )
         return response.content if hasattr(response, "content") else str(response)
     except Exception as e:
         error_str = str(e).lower()

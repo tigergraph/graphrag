@@ -25,6 +25,7 @@ other customizable prompt. The prompt itself lives at
 from __future__ import annotations
 
 import logging
+import re
 from typing import Iterable, List, Optional
 
 from langchain.prompts import PromptTemplate
@@ -213,14 +214,96 @@ def concatenate_samples(
     return "".join(parts).lstrip()
 
 
+def render_type_hints_block(
+    vertex_hints: Optional[List[dict]] = None,
+    edge_hints: Optional[List[dict]] = None,
+) -> str:
+    """Render structured type hints into a markdown block the LLM
+    can read. Empty inputs return an empty string so the prompt is
+    untouched when the user provides no hints.
+
+    Each hint is a ``{"name": str, "description": str}`` dict.
+    Edge hints may additionally carry ``"fromType"`` and ``"toType"``
+    when the user pinned a direction; the renderer emits
+    ``Name (From → To)`` in that case.
+    """
+    def _row(h: dict, with_endpoints: bool) -> str:
+        name = (h.get("name") or "").strip()
+        if not name:
+            return ""
+        from_type = (h.get("fromType") or "").strip() if with_endpoints else ""
+        to_type = (h.get("toType") or "").strip() if with_endpoints else ""
+        desc = (h.get("description") or "").strip()
+        head = name
+        if from_type and to_type:
+            head = f"{name} ({from_type} → {to_type})"
+        return f"- {head}: {desc}" if desc else f"- {head}"
+
+    def _block(items, label, action, with_endpoints):
+        rows = [r for r in (_row(h, with_endpoints) for h in items or []) if r]
+        if not rows:
+            return ""
+        return f"{label} {action}:\n" + "\n".join(rows)
+
+    blocks = []
+    v_block = _block(
+        vertex_hints, "Vertex types",
+        "to include if their instances appear in the documents", False,
+    )
+    if v_block:
+        blocks.append(v_block)
+    e_block = _block(
+        edge_hints, "Edge types",
+        "to include if supported by the documents", True,
+    )
+    if e_block:
+        blocks.append(e_block)
+    if not blocks:
+        return ""
+    return "## Suggested types\n\n" + "\n\n".join(blocks)
+
+
+def _build_prompt_with_hints(
+    llm_service, hints_block: str
+) -> tuple[PromptTemplate, str]:
+    """Build the prompt template, injecting *hints_block* before the
+    ``## Inputs`` section when non-empty. Falls back to appending if
+    no Inputs marker is found (defensive — the shipped default has it).
+
+    Returns ``(prompt_template, full_template_text)`` so the caller
+    can persist the rendered text as a per-graph override after a
+    successful init.
+    """
+    base = llm_service.schema_extraction_prompt
+    if hints_block:
+        m = re.search(r"^##\s*Inputs\b", base, re.MULTILINE)
+        if m:
+            template_str = base[: m.start()].rstrip() + "\n\n" + hints_block + "\n\n" + base[m.start():]
+        else:
+            template_str = base.rstrip() + "\n\n" + hints_block + "\n"
+    else:
+        template_str = base
+    return (
+        PromptTemplate(
+            template=template_str,
+            input_variables=["samples", "structural_types", "tg_keywords"],
+        ),
+        template_str,
+    )
+
+
 def extract_schema_gsql(
     llm_service,
     samples: Iterable[dict],
     max_tokens: Optional[int] = None,
-) -> str:
+    vertex_hints: Optional[List[dict]] = None,
+    edge_hints: Optional[List[dict]] = None,
+) -> tuple[str, str]:
     """Run the schema-extraction prompt against *llm_service*. Returns
-    the raw GSQL string the model produced (caller passes it to
-    ``schema_utils.parse_gsql_schema``).
+    ``(gsql_text, rendered_prompt)``: the raw GSQL the model produced
+    (caller passes it to ``schema_utils.parse_gsql_schema``) and the
+    fully-rendered prompt template (so the caller can persist it as a
+    per-graph override after a successful init).
 
     *llm_service* must expose ``schema_extraction_prompt`` (from
     :class:`common.llm_services.base_llm.LLM_Model`) and the standard
@@ -232,10 +315,16 @@ def extract_schema_gsql(
     budget is resolved from ``llm_service.config.token_limit`` if set,
     otherwise from the model's default context window. Tests can pass
     an explicit *max_tokens* to pin behavior independently of config.
+
+    *vertex_hints* / *edge_hints* are optional ``[{name, description}]``
+    lists from the UI's TagInputs. When non-empty, a "Suggested types"
+    block is injected before the ``## Inputs`` section of the resolved
+    prompt so the LLM treats them as must-include candidates.
     """
     if max_tokens is None:
         max_tokens = _resolve_sample_token_budget(llm_service)
-    prompt = _build_prompt(llm_service)
+    hints_block = render_type_hints_block(vertex_hints, edge_hints)
+    prompt, rendered_template = _build_prompt_with_hints(llm_service, hints_block)
     samples_blob = concatenate_samples(samples, max_tokens=max_tokens)
     structural_types = ", ".join(
         sorted(GRAPHRAG_STRUCTURAL_VERTEX_TYPES | GRAPHRAG_STRUCTURAL_EDGE_TYPES)
@@ -252,6 +341,5 @@ def extract_schema_gsql(
         },
         caller_name="schema_extraction",
     )
-    if isinstance(raw, str):
-        return raw.strip()
-    return str(raw).strip()
+    gsql_text = raw.strip() if isinstance(raw, str) else str(raw).strip()
+    return gsql_text, rendered_template
