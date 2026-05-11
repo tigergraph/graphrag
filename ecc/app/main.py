@@ -178,6 +178,27 @@ def root():
     return {"status": "ok"}
 
 
+@app.get("/version")
+def version():
+    """Return image-build version info. ``VERSION`` is the repo-root
+    file copied into the image; ``BUILD_DATE`` is stamped at build
+    time by the Dockerfile. Both fall back to ``unknown`` when the
+    files aren't present.
+    """
+    def _safe_read(path: str) -> str:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except Exception:
+            return "unknown"
+
+    return {
+        "component": "graphrag-ecc",
+        "version": _safe_read("/code/VERSION"),
+        "build_date": _safe_read("/code/BUILD_DATE"),
+    }
+
+
 @app.get("/{graphname}/{ecc_method}/rebuild_status")
 def rebuild_status(
     graphname: str,

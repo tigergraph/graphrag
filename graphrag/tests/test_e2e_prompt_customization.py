@@ -138,6 +138,12 @@ def test_02_save_customized_chatbot_response_round_trips():
     """Saving a customized chatbot_response prompt persists it; a
     follow-up GET returns the customized text with placeholders still
     hidden.
+
+    Wrapped in try/except so a mid-flight assertion failure still
+    reverts the file, instead of leaving the test-marker in
+    ``configs/prompts/chatbot_response.txt`` for every later run.
+    Stage 3 reverts again as its primary action; doing both is
+    idempotent.
     """
     if "originals" not in _state:
         pytest.skip("Skipped because Stage 1 did not capture originals")
@@ -147,36 +153,55 @@ def test_02_save_customized_chatbot_response_round_trips():
     custom_marker = "[E2E TEST EDIT — chatbot_response]"
     new_editable = f"{custom_marker}\n\n{original['editable_content']}"
 
-    resp = requests.post(
-        f"{GRAPHRAG_URL}/ui/prompts",
-        json={
-            "prompt_type": "chatbot_response",
-            "editable_content": new_editable,
-            "template_variables": original["template_variables"],
-        },
-        auth=AUTH,
-        timeout=180,
-    )
-    assert resp.status_code == 200, resp.text
+    saved = False
+    try:
+        resp = requests.post(
+            f"{GRAPHRAG_URL}/ui/prompts",
+            json={
+                "prompt_type": "chatbot_response",
+                "editable_content": new_editable,
+                "template_variables": original["template_variables"],
+            },
+            auth=AUTH,
+            timeout=180,
+        )
+        assert resp.status_code == 200, resp.text
+        saved = True
 
-    resp = requests.get(f"{GRAPHRAG_URL}/ui/prompts", auth=AUTH, timeout=180)
-    assert resp.status_code == 200, resp.text
-    after = resp.json()["prompts"]["chatbot_response"]
-    assert custom_marker in after["editable_content"], (
-        "Customized marker missing from chatbot_response after save+reload"
-    )
-    placeholders_in_editable = _placeholder_set(after["editable_content"])
-    assert not placeholders_in_editable, (
-        f"Placeholders leaked into editable_content after customize: "
-        f"{sorted(placeholders_in_editable)}"
-    )
-    required = REQUIRED_PLACEHOLDERS["chatbot_response"]
-    placeholders_in_tv = _placeholder_set(after["template_variables"])
-    missing = required - placeholders_in_tv
-    assert not missing, (
-        f"Required placeholders dropped during round-trip: {sorted(missing)}"
-    )
-    _state["chatbot_customized"] = True
+        resp = requests.get(f"{GRAPHRAG_URL}/ui/prompts", auth=AUTH, timeout=180)
+        assert resp.status_code == 200, resp.text
+        after = resp.json()["prompts"]["chatbot_response"]
+        assert custom_marker in after["editable_content"], (
+            "Customized marker missing from chatbot_response after save+reload"
+        )
+        placeholders_in_editable = _placeholder_set(after["editable_content"])
+        assert not placeholders_in_editable, (
+            f"Placeholders leaked into editable_content after customize: "
+            f"{sorted(placeholders_in_editable)}"
+        )
+        required = REQUIRED_PLACEHOLDERS["chatbot_response"]
+        placeholders_in_tv = _placeholder_set(after["template_variables"])
+        missing = required - placeholders_in_tv
+        assert not missing, (
+            f"Required placeholders dropped during round-trip: {sorted(missing)}"
+        )
+        _state["chatbot_customized"] = True
+    except BaseException:
+        if saved:
+            try:
+                requests.post(
+                    f"{GRAPHRAG_URL}/ui/prompts",
+                    json={
+                        "prompt_type": "chatbot_response",
+                        "editable_content": original["editable_content"],
+                        "template_variables": original["template_variables"],
+                    },
+                    auth=AUTH,
+                    timeout=180,
+                )
+            except Exception as revert_exc:
+                print(f"  chatbot_response revert failed: {revert_exc}")
+        raise
 
 
 @skip_unless_graphrag
@@ -215,6 +240,11 @@ def test_04_save_customized_schema_extraction_round_trips():
     """Same round-trip flow for schema_extraction (the prompt with
     the largest set of required placeholders / structural-context
     template variables).
+
+    Wrapped in try/finally so a failed assertion mid-flight always
+    reverts to the original — otherwise the marker leaks into
+    ``configs/prompts/schema_extraction.txt`` and pollutes every
+    subsequent extraction call.
     """
     if "originals" not in _state:
         pytest.skip("Skipped because Stage 1 did not capture originals")
@@ -224,48 +254,53 @@ def test_04_save_customized_schema_extraction_round_trips():
     custom_marker = "[E2E TEST EDIT — schema_extraction]"
     new_editable = f"{custom_marker}\n\n{original['editable_content']}"
 
-    resp = requests.post(
-        f"{GRAPHRAG_URL}/ui/prompts",
-        json={
-            "prompt_type": "schema_extraction",
-            "editable_content": new_editable,
-            "template_variables": original["template_variables"],
-        },
-        auth=AUTH,
-        timeout=180,
-    )
-    assert resp.status_code == 200, resp.text
+    saved = False
+    try:
+        resp = requests.post(
+            f"{GRAPHRAG_URL}/ui/prompts",
+            json={
+                "prompt_type": "schema_extraction",
+                "editable_content": new_editable,
+                "template_variables": original["template_variables"],
+            },
+            auth=AUTH,
+            timeout=180,
+        )
+        assert resp.status_code == 200, resp.text
+        saved = True
 
-    resp = requests.get(f"{GRAPHRAG_URL}/ui/prompts", auth=AUTH, timeout=180)
-    assert resp.status_code == 200, resp.text
-    after = resp.json()["prompts"]["schema_extraction"]
-    assert custom_marker in after["editable_content"], (
-        "Customized marker missing from schema_extraction after save+reload"
-    )
-    placeholders_in_editable = _placeholder_set(after["editable_content"])
-    assert not placeholders_in_editable, (
-        f"Placeholders leaked into editable_content after customize: "
-        f"{sorted(placeholders_in_editable)}"
-    )
-    required = REQUIRED_PLACEHOLDERS["schema_extraction"]
-    placeholders_in_tv = _placeholder_set(after["template_variables"])
-    missing = required - placeholders_in_tv
-    assert not missing, (
-        f"Required placeholders dropped during round-trip: {sorted(missing)}"
-    )
-
-    # Revert to keep the test idempotent.
-    resp = requests.post(
-        f"{GRAPHRAG_URL}/ui/prompts",
-        json={
-            "prompt_type": "schema_extraction",
-            "editable_content": original["editable_content"],
-            "template_variables": original["template_variables"],
-        },
-        auth=AUTH,
-        timeout=180,
-    )
-    assert resp.status_code == 200, resp.text
+        resp = requests.get(f"{GRAPHRAG_URL}/ui/prompts", auth=AUTH, timeout=180)
+        assert resp.status_code == 200, resp.text
+        after = resp.json()["prompts"]["schema_extraction"]
+        assert custom_marker in after["editable_content"], (
+            "Customized marker missing from schema_extraction after save+reload"
+        )
+        placeholders_in_editable = _placeholder_set(after["editable_content"])
+        assert not placeholders_in_editable, (
+            f"Placeholders leaked into editable_content after customize: "
+            f"{sorted(placeholders_in_editable)}"
+        )
+        required = REQUIRED_PLACEHOLDERS["schema_extraction"]
+        placeholders_in_tv = _placeholder_set(after["template_variables"])
+        missing = required - placeholders_in_tv
+        assert not missing, (
+            f"Required placeholders dropped during round-trip: {sorted(missing)}"
+        )
+    finally:
+        if saved:
+            try:
+                requests.post(
+                    f"{GRAPHRAG_URL}/ui/prompts",
+                    json={
+                        "prompt_type": "schema_extraction",
+                        "editable_content": original["editable_content"],
+                        "template_variables": original["template_variables"],
+                    },
+                    auth=AUTH,
+                    timeout=180,
+                )
+            except Exception as exc:
+                print(f"  schema_extraction revert failed: {exc}")
 
 
 @skip_unless_graphrag

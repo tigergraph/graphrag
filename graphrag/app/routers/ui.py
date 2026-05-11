@@ -378,6 +378,68 @@ def login(auth: Annotated[list[str], Depends(ui_basic_auth)]):
     return {"graphs": graphs, "roles": global_roles, "graph_roles": graph_roles}
 
 
+def _read_local_version(component: str) -> dict:
+    """Read the ``/code/VERSION`` (repo-root file copied into image)
+    and ``/code/BUILD_DATE`` (stamped at image build time).
+    """
+    def _safe_read(path: str) -> str:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except Exception:
+            return "unknown"
+
+    return {
+        "component": component,
+        "version": _safe_read("/code/VERSION"),
+        "build_date": _safe_read("/code/BUILD_DATE"),
+    }
+
+
+def _unknown_version(component: str) -> dict:
+    return {"component": component, "version": "unknown", "build_date": "unknown"}
+
+
+@router.get(f"{route_prefix}/version")
+def get_version():
+    """Return image-build version info for all running components.
+
+    The graphrag container reads its own ``/code/VERSION`` directly;
+    ``ecc`` and ``graphrag-ui`` are fetched over the network so this
+    one call surfaces every component a UI client cares about.
+    Unreachable components return ``unknown`` rather than failing the
+    whole call.
+    """
+    graphrag_version = _read_local_version("graphrag")
+
+    ecc_base = graphrag_config.get("ecc", "http://graphrag-ecc:8001")
+    try:
+        ecc_resp = httpx.get(f"{ecc_base}/version", timeout=5.0)
+        ecc_version = (
+            ecc_resp.json() if ecc_resp.status_code == 200
+            else _unknown_version("graphrag-ecc")
+        )
+    except Exception:
+        ecc_version = _unknown_version("graphrag-ecc")
+
+    ui_version = _unknown_version("graphrag-ui")
+    try:
+        # ``serve`` exposes static files at port 3000 inside the
+        # compose network; fall through quietly if it isn't reachable
+        # (e.g. running graphrag in isolation).
+        ui_resp = httpx.get("http://graphrag-ui:3000/version.json", timeout=5.0)
+        if ui_resp.status_code == 200:
+            ui_version = ui_resp.json()
+    except Exception:
+        pass
+
+    return {
+        "graphrag": graphrag_version,
+        "graphrag_ecc": ecc_version,
+        "graphrag_ui": ui_version,
+    }
+
+
 @router.get(f"{route_prefix}/list_graphs")
 def list_graphs(auth: Annotated[list[str], Depends(ui_basic_auth)]):
     """Return the live list of graphs the authenticated user has access
@@ -3117,6 +3179,11 @@ async def get_prompts(
                 (completion_llm, "map_question_schema_prompt"),
             "schema_extraction":
                 (completion_llm, "schema_extraction_prompt"),
+            # Free-form partial injected into the four query-related
+            # templates (map_question_to_schema, generate_function,
+            # generate_cypher, generate_gsql). Empty by default.
+            "query_guidance":
+                (completion_llm, "query_guidance_prompt"),
         }
 
         def _get_prompt(prompt_type: str) -> dict:
@@ -3262,10 +3329,27 @@ async def save_prompts(
             "community_summarization": "community_summarization.txt",
             "query_generation": "map_question_to_schema.txt",
             "schema_extraction": "schema_extraction.txt",
+            "query_guidance": "query_guidance.txt",
         }
 
         if prompt_type not in prompt_type_to_file:
             raise HTTPException(status_code=400, detail=f"Invalid prompt_type: {prompt_type}")
+
+        # Hard length cap on Query Guidance specifically. It's a
+        # free-form partial that flows into four templates; runaway
+        # content can push the surrounding prompts past the LLM's
+        # context window. 8000 chars ≈ 2K tokens is plenty for
+        # rules + a half-dozen examples while leaving room for
+        # everything else.
+        QUERY_GUIDANCE_MAX_CHARS = 8000
+        if prompt_type == "query_guidance" and len(content) > QUERY_GUIDANCE_MAX_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Query Guidance is too long ({len(content)} characters); "
+                    f"keep it under {QUERY_GUIDANCE_MAX_CHARS}."
+                ),
+            )
 
         # Gatekeepers — escape stray ``{token}`` occurrences (so user
         # examples like ``{example}`` don't crash str.format at call
@@ -3292,8 +3376,9 @@ async def save_prompts(
             "chatbot_response": "Chatbot response prompt saved successfully",
             "entity_relationship": "Entity relationship prompt saved successfully",
             "community_summarization": "Community summarization prompt saved successfully",
-            "query_generation": "Schema instructions prompt saved successfully",
+            "query_generation": "Question-to-schema mapping prompt saved successfully",
             "schema_extraction": "Schema extraction prompt saved successfully",
+            "query_guidance": "Query guidance saved successfully",
         }
         return {"status": "success", "message": messages.get(prompt_type, "Prompt saved successfully")}
 

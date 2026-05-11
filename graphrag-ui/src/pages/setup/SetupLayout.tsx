@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Database, Settings, FileText, ChevronRight } from "lucide-react";
@@ -18,6 +18,21 @@ const SetupLayout = () => {
   } = useRoles(location.pathname);
   const canAccessPrompts = canAccessSetup;
   const canAccessLlmConfig = canAccessSetup;
+
+  // Fetched once on mount and shown in the footer for support / version
+  // checks. Falls back to empty silently if the endpoint is unreachable.
+  const [version, setVersion] = useState<string>("");
+  useEffect(() => {
+    const creds = sessionStorage.getItem("creds");
+    if (!creds) return;
+    fetch("/ui/version", { headers: { Authorization: `Basic ${creds}` } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const v = data?.graphrag?.version;
+        if (v && v !== "unknown") setVersion(v);
+      })
+      .catch(() => {});
+  }, []);
 
   const menuItems = [
     {
@@ -205,8 +220,15 @@ const SetupLayout = () => {
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 overflow-y-auto">
-        <Outlet />
+      <div className="flex-1 overflow-y-auto flex flex-col">
+        <div className="flex-1">
+          <Outlet />
+        </div>
+        {version && (
+          <div className="text-xs text-gray-400 dark:text-gray-500 text-center py-2">
+            Version {version}
+          </div>
+        )}
       </div>
     </div>
   );

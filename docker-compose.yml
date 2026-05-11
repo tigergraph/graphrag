@@ -1,6 +1,6 @@
 services:
   graphrag:
-    image: tigergraph/graphrag:latest 
+    image: tigergraph/graphrag:latest
     platform: linux/amd64
     container_name: graphrag
     build:
@@ -51,12 +51,14 @@ services:
       - ./configs/:/configs
 
   graphrag-ui:
-    image: tigergraph/graphrag-ui:latest 
+    image: tigergraph/graphrag-ui:latest
     platform: linux/amd64
-    container_name: graphrag-ui 
+    container_name: graphrag-ui
     build:
       context: graphrag-ui
       dockerfile: Dockerfile
+      additional_contexts:
+        repo: .
     ports:
       - 3000:3000
     depends_on:

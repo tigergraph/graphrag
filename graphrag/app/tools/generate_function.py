@@ -150,7 +150,9 @@ class GenerateFunction(BaseTool):
                 "doc8",
             ],
             partial_variables={
-                "format_instructions": func_parser.get_format_instructions()
+                "format_instructions": func_parser.get_format_instructions(),
+                # See map_question_to_schema for the rationale.
+                "query_guidance": self.llm.query_guidance_block,
             },
         )
 

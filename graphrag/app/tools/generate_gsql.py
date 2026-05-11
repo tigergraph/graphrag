@@ -127,7 +127,12 @@ Edge Types:
                 "question",
                 "schema",
                 "history"
-            ]
+            ],
+            partial_variables={
+                # Pre-bind the Query Guidance partial; empty when no
+                # override is configured.
+                "query_guidance": self.llm.query_guidance_block,
+            },
         )
 
         LogWriter.info(f"request_id={req_id_cv.get()} ENTRY generate_gsql with {question}")

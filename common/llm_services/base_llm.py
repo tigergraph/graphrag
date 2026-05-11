@@ -189,7 +189,7 @@ class LLM_Model:
             return result
         return """# Map Question to Schema
 
-Replace entities and relationships in the question with their canonical schema names provided in the Inputs section below.
+Replace each entity in the question with its corresponding **vertex type name**, and each relationship with its corresponding **edge type name**, using the canonical schema names in the Inputs section below.
 
 ## Rules
 - If an entity (e.g. "John Doe") is referred to by different names or pronouns ("Joe", "he"), use the most complete identifier ("John Doe") consistently.
@@ -199,6 +199,8 @@ Replace entities and relationships in the question with their canonical schema n
 - For synonyms, output the canonical form from the schema choices.
 - Generate the **complete** rewritten question. Keep the case of schema elements unchanged.
 - Do NOT generate `target_vertex_ids` unless the term `id` is explicitly mentioned in the question.
+
+{query_guidance}
 
 ## Inputs
 - **Vertices**: {vertices}
@@ -228,6 +230,8 @@ Use the schema below to write the pyTigerGraph function call that answers the qu
 - When constructing `WHERE`, quote string attribute values properly. Example: `('Person', where='name="William Torres"')` — applies to every string attribute (name, email, address, etc.).
 - Do NOT generate `target_vertex_ids` unless the term `id` is explicitly mentioned in the question.
 - Pick exactly **one** function to execute.
+
+{query_guidance}
 
 ## Schema
 - **Vertex Types**: {vertex_types}
@@ -321,6 +325,8 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
 - For "summarize" / "write a summary" questions, fetch all neighbour nodes and edges.
 - Avoid invalid queries based on errors in the history above.
 
+{query_guidance}
+
 ## Supported
 - **Clauses**: `MATCH`, `OPTIONAL MATCH`, `MANDATORY MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `DELETE`, `DETACH DELETE`
 - **Operators**:
@@ -373,6 +379,8 @@ You are an expert in TigerGraph GSQL. Generate the GSQL query that retrieves the
 - Always use **double quotes** for strings.
 - Use aliases for `ORDER BY`. Aliases / attributes used in `ORDER BY` must also be in `PRINT`. Always specify `ASC` / `DESC` based on data type.
 - Avoid invalid queries based on errors in the history above.
+
+{query_guidance}
 
 ## Unsupported
 - **Clauses**: `CREATE`, `DELETE`, `INSERT`, `UPDATE`, `UPSERT`
@@ -613,6 +621,39 @@ You are a knowledge-graph schema architect. From the sample documents provided i
 
 {samples}
 """
+
+    @property
+    def query_guidance_prompt(self):
+        """User-editable Query Guidance partial. Domain-specific
+        instructions / few-shot examples the user provides on the
+        Customize Prompts page. Injected into the four query-related
+        templates (map_question_to_schema, generate_function,
+        generate_cypher, generate_gsql) *after* their hard rules so
+        the LLM treats the guidance as advisory.
+
+        Default is the empty string — the four templates render
+        unchanged from their pre-Query-Guidance form when no override
+        is configured.
+        """
+        result = self._read_prompt_file(self.prompt_path + "query_guidance.txt")
+        return (result or "").strip()
+
+    @property
+    def query_guidance_block(self):
+        """Wrap ``query_guidance_prompt`` in a markdown section so it
+        drops cleanly into a downstream template. Returns an empty
+        string when no guidance is configured — keeps the surrounding
+        prompts identical to today's behavior on the empty path.
+        """
+        text = self.query_guidance_prompt
+        if not text:
+            return ""
+        return (
+            "## Domain Hints\n"
+            "Use the following hints only when they do not conflict with the "
+            "rules above:\n\n"
+            f"{text}\n"
+        )
 
     @property
     def contextualize_question_prompt(self):

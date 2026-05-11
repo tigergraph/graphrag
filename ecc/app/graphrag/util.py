@@ -31,6 +31,7 @@ from common.config import (
     get_graphrag_config,
 )
 from common.db.schema_utils import (
+    gsql_output_error,
     is_structural_type,
     read_existing_schema_async,
     read_type_metadata_async,
@@ -101,8 +102,8 @@ async def install_queries(
     async with tg_sem:
         res = await conn.gsql(query)
         logger.info(f"INSTALL QUERY ALL returned: {str(res)[:200]}")
-        res_lower = res.lower() if isinstance(res, str) else ""
-        if "error" in res_lower or "does not exist" in res_lower or "failed" in res_lower:
+        err = gsql_output_error(res) if isinstance(res, str) else None
+        if err:
             raise Exception(res)
 
     max_wait = 600  # seconds

@@ -64,6 +64,9 @@ REQUIRED_VARS_BY_PROMPT_TYPE: dict = {
     },
     # common/db/schema_extraction.py.
     "schema_extraction": {"samples", "structural_types", "tg_keywords"},
+    # Free-form partial injected into the four query-related templates;
+    # no required placeholders — the user content IS the body.
+    "query_guidance": set(),
 }
 
 
@@ -74,8 +77,12 @@ ALLOWED_PARTIALS_BY_PROMPT_TYPE: dict = {
     "chatbot_response": {"format_instructions", "query", "history"},
     "entity_relationship": {"format_instructions", "input"},
     "community_summarization": {"format_instructions"},
-    "query_generation": {"format_instructions"},
+    # ``query_guidance`` is a partial the runtime supplies; allowing
+    # it here keeps a user-pasted ``{query_guidance}`` from being
+    # double-braced into a literal.
+    "query_generation": {"format_instructions", "query_guidance"},
     "schema_extraction": set(),
+    "query_guidance": set(),
 }
 
 

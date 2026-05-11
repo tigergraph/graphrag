@@ -89,7 +89,14 @@ class MapQuestionToSchema(BaseTool):
                 "edges",
                 "edgesInfo",
             ],
-            partial_variables={"format_instructions": parser.get_format_instructions()},
+            partial_variables={
+                "format_instructions": parser.get_format_instructions(),
+                # Pre-bind the Query Guidance partial so every render
+                # picks up the current per-graph / global override.
+                # ``query_guidance_block`` is empty when no override is
+                # configured, leaving the template effectively unchanged.
+                "query_guidance": self.llm.query_guidance_block,
+            },
         )
 
         schema_ver = get_schema_ver(self.conn)
