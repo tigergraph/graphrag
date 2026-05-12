@@ -410,7 +410,9 @@ async def get_commuinty_children(conn, i: int, c: str):
         try:
             resp = await conn.runInstalledQuery(
                 "get_community_children",
-                params={"comm": c, "iter": i}
+                # 1-tuple form for VERTEX<T> params; plain value
+                # is deprecated in current pyTigerGraph.
+                params={"comm": (c,), "iter": i}
             )
         except:
             logger.error(f"Get Children err:\n{traceback.format_exc()}")

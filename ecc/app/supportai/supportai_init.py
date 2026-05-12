@@ -59,7 +59,8 @@ async def stream_docs(
                     async with tg_sem:
                         res = await conn.runInstalledQuery(
                             "StreamDocContent",
-                            params={"doc": d},
+                            # 1-tuple form for VERTEX<T> params.
+                            params={"doc": (d,)},
                         )
                     logger.info("stream_docs writes to docs")    
                     await docs_chan.put(res[0]["DocContent"][0])
@@ -90,7 +91,7 @@ async def chunk_docs(
             # v_id = content["v_id"]
             # txt = content["attributes"]["text"]
 
-            logger.info("chunk writes to extract")
+            logger.debug("chunk writes to extract")
             # await embed_chan.put((v_id, txt, "Document"))
 
             task = sp.create_task(
@@ -137,7 +138,8 @@ async def embed(
     async with asyncio.TaskGroup() as sp:
         # consume task queue
         async for v_id, content, index_name in embed_chan:
-            logger.info(f"Embed to {graphname}_{index_name}: {v_id}")
+            # v_id derives from user content.
+            logger.debug(f"Embed to {graphname}_{index_name}: {v_id}")
             sp.create_task(
                 workers.embed(
                     get_embedding_service(),

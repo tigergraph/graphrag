@@ -71,9 +71,18 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
 
     window.addEventListener('focus', handleFocus);
 
+    // Stay in sync when another component (Refresh dialog, Ingest
+    // dialog, Customize Prompts) changes the shared selectedGraph.
+    const handleSelectedGraph = () => {
+      const next = sessionStorage.getItem("selectedGraph") || '';
+      if (next !== selectedGraph) setSelectedGraph(next);
+    };
+    window.addEventListener('graphrag:selectedGraph', handleSelectedGraph);
+
     // Cleanup
     return () => {
       window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('graphrag:selectedGraph', handleSelectedGraph);
     };
   }, []);
 

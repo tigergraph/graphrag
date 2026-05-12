@@ -94,30 +94,32 @@ async def chunk_doc(
         
         v_id = util.process_id(doc["v_id"])
         if v_id != doc["v_id"]:
-            logger.info(f"""Cloning doc/content {doc["v_id"]} -> {v_id}""")
+            # v_id is a sanitized form of a user document ID — DEBUG.
+            logger.debug(f"""Cloning doc/content {doc["v_id"]} -> {v_id}""")
             await upsert_chan.put((upsert_doc, (conn, v_id, chunker_type, doc["attributes"]["text"])))
-        
+
         # Use get_chunker for all types (including images)
         # For images, get_chunker returns SingleChunker which preserves markdown image references
         chunker = ecc_util.get_chunker(chunker_type, graphname=conn.graphname)
         # decode the text return from tigergraph as it was encoded when written into jsonl file for uploading
         chunks = chunker.chunk(doc["attributes"]["text"].encode('raw_unicode_escape').decode('unicode_escape'))
-       
-        logger.info(f"Chunking {v_id} into {len(chunks)} chunk(s)")
+
+        # v_id / chunk_id derive from user document content.
+        logger.debug(f"Chunking {v_id} into {len(chunks)} chunk(s)")
         for i, chunk in enumerate(chunks):
             chunk_id = f"{v_id}_chunk_{i}"
-            logger.info(f"Processing chunk {chunk_id}")
+            logger.debug(f"Processing chunk {chunk_id}")
 
             # send chunks to be upserted (func, args)
-            logger.info("chunk writes to upsert_chan")
+            logger.debug("chunk writes to upsert_chan")
             await upsert_chan.put((upsert_chunk, (conn, v_id, chunk_id, chunk)))
 
             # send chunks to have entities extracted
-            logger.info("chunk writes to extract_chan")
+            logger.debug("chunk writes to extract_chan")
             await extract_chan.put((chunk, chunk_id))
 
             # send chunks to be embedded
-            logger.info("chunk writes to embed_chan")
+            logger.debug("chunk writes to embed_chan")
             await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
 
     return v_id
@@ -142,7 +144,7 @@ async def upsert_doc(conn: AsyncTigerGraphConnection, doc_id, ctype, content_tex
     )
 
 async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk):
-    logger.info(f"Upserting chunk {chunk_id}")
+    logger.debug(f"Upserting chunk {chunk_id}")
     date_added = int(time.time())
     await util.upsert_vertex(
         conn,
@@ -198,11 +200,11 @@ async def embed(
             the vertex index to write to
     """
     async with embed_sem:
-        logger.info(f"Embedding {v_id}")
+        logger.debug(f"Embedding {v_id}")
 
         # if loader is running, wait until it's done
         if not util.loading_event.is_set():
-            logger.info("Embed worker waiting for loading event to finish")
+            logger.debug("Embed worker waiting for loading event to finish")
             await util.loading_event.wait()
         try:
             await embed_store.aadd_embeddings([(content, [])], [{"vertex_id": v_id}])
@@ -257,7 +259,8 @@ async def extract(
     async with extract_sem:
         try:
             extracted: list[GraphDocument] = await extractor.aextract(chunk)
-            logger.info(
+            # chunk_id is user-content-derived; demote.
+            logger.debug(
                 f"Extracting chunk: {chunk_id} ({len(extracted)} graph docs extracted)"
             )
         except Exception as e:
@@ -309,7 +312,7 @@ async def extract(
                     node_type_by_id[pid] = n.type
 
             for i, node in enumerate(doc.nodes):
-                logger.info(f"extract writes entity vert to upsert\nNode: {node.id}")
+                logger.debug(f"extract writes entity vert to upsert\nNode: {node.id}")
                 v_id = util.process_id(str(node.id))
                 if len(v_id) == 0:
                     continue
@@ -364,7 +367,7 @@ async def extract(
                         # ``investmentfund``.
                         meta_type_id = domain_vt
                 if meta_type_id:
-                    logger.info("extract writes type vert to upsert")
+                    logger.debug("extract writes type vert to upsert")
                     await upsert_chan.put(
                         (
                             util.upsert_vertex,
@@ -376,7 +379,7 @@ async def extract(
                             ),
                         )
                     )
-                    logger.info("extract writes entity_has_type edge to upsert")
+                    logger.debug("extract writes entity_has_type edge to upsert")
                     await upsert_chan.put(
                         (
                             util.upsert_edge,
@@ -393,7 +396,7 @@ async def extract(
                     )
 
                 # link the entity to the chunk it came from
-                logger.info("extract writes contains edge to upsert")
+                logger.debug("extract writes contains edge to upsert")
                 await upsert_chan.put(
                     (
                         util.upsert_edge,
@@ -415,7 +418,7 @@ async def extract(
                 # chunk via the multi-pair CONTAINS_ENTITY pair we
                 # added at init time.
                 if domain_vt is not None:
-                    logger.info(
+                    logger.debug(
                         f"extract writes domain {domain_vt} vert + CONTAINS_ENTITY pair"
                     )
                     # Domain VTs don't carry the ECC bookkeeping
@@ -466,7 +469,9 @@ async def extract(
                 )
 
             for edge in doc.relationships:
-                logger.info(
+                # Edge content includes entity names + relationship
+                # types pulled from user documents.
+                logger.debug(
                     f"extract writes relates edge to upsert:{edge.source.id} -({edge.type})->  {edge.target.id}"
                 )
                 src_id = util.process_id(edge.source.id)

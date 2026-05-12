@@ -49,7 +49,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Set, Tuple
 
 
 # -----------------------------------------------------------------------------
@@ -1106,6 +1106,87 @@ async def read_existing_schema_async(conn) -> "ExistingSchema":
     return snapshot
 
 
+def render_schema_rep(conn) -> Tuple[str, Optional[int]]:
+    """Render the live schema as a per-vertex / per-edge text block
+    suitable for inclusion in an LLM prompt (`generate_cypher`,
+    `generate_gsql`, etc.). Includes any user-supplied definitions
+    stored on the ``EntityType`` / ``RelationshipType`` meta vertices
+    via :func:`read_type_metadata`.
+
+    Returns ``(schema_text, schema_version)`` so the caller can cache
+    the text against the version and skip re-rendering on the next
+    call (schemas don't change between rebuilds in normal operation).
+    """
+    from common.db.connections import get_schema_ver as _get_schema_ver
+
+    schema_ver = _get_schema_ver(conn)
+    verts = conn.getVertexTypes()
+    edges = conn.getEdgeTypes()
+    try:
+        entity_descs, rel_defs = read_type_metadata(conn)
+    except Exception:
+        # Older / unmigrated graphs may lack the EntityType /
+        # RelationshipType meta-schema; render without definitions
+        # rather than failing.
+        entity_descs, rel_defs = {}, {}
+
+    vertex_blocks: List[str] = []
+    for vert in verts:
+        vinfo = conn.getVertexType(vert)
+        primary_id = vinfo["PrimaryId"]["AttributeName"]
+        attributes = "\n\t\t".join(
+            a["AttributeName"] + " of type " + a["AttributeType"]["Name"]
+            for a in vinfo["Attributes"]
+        ) or "No attributes"
+        defn_line = (
+            f"\n\tDefinition: {entity_descs[vert]}" if entity_descs.get(vert) else ""
+        )
+        vertex_blocks.append(
+            f"{vert}{defn_line}\n\tPrimary Id Attribute: {primary_id}"
+            f"\n\tAttributes: \n\t\t{attributes}"
+        )
+
+    edge_blocks: List[str] = []
+    for edge in edges:
+        einfo = conn.getEdgeType(edge)
+        from_vertex = einfo["FromVertexTypeName"]
+        to_vertex = einfo["ToVertexTypeName"]
+        direction = "Directed" if einfo["IsDirected"] else "Undirected"
+        attributes = "\n\t\t".join(
+            a["AttributeName"] + " of type " + a["AttributeType"]["Name"]
+            for a in einfo["Attributes"]
+        ) or "No attributes"
+        defn_line = (
+            f"\n\tDefinition: {rel_defs[edge]}" if rel_defs.get(edge) else ""
+        )
+        if from_vertex == "*" or to_vertex == "*":
+            for pair in einfo.get("EdgePairs", []):
+                pair_info = (
+                    f"From Vertex: {pair['From']}\n\tTo Vertex: {pair['To']}"
+                )
+                edge_blocks.append(
+                    f"{edge}{defn_line}\n\t{pair_info}"
+                    f"\n\tEdge direction: {direction}"
+                    f"\n\tAttributes: \n\t\t{attributes}"
+                )
+        else:
+            pair_info = f"From Vertex: {from_vertex}\n\tTo Vertex: {to_vertex}"
+            edge_blocks.append(
+                f"{edge}{defn_line}\n\t{pair_info}"
+                f"\n\tEdge direction: {direction}"
+                f"\n\tAttributes: \n\t\t{attributes}"
+            )
+
+    graphname = getattr(conn, "graphname", "") or ""
+    graph_label = f" {graphname}" if graphname else ""
+    text = (
+        f"The schema of the graph{graph_label} is as follows:\n"
+        f"Vertex Types:\n{chr(10).join(vertex_blocks)}\n\n"
+        f"Edge Types:\n{chr(10).join(edge_blocks)}\n"
+    )
+    return text, schema_ver
+
+
 async def read_type_metadata_async(conn) -> Tuple[dict, dict]:
     """Async counterpart to :func:`read_type_metadata` — used by the
     ECC pipeline where the available connection is
@@ -1202,6 +1283,7 @@ def apply_proposal(
     graphname: str,
     proposal: SchemaProposal,
     job_name: Optional[str] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Diff *proposal* against the current schema on *conn* and apply the
     additive delta as a single atomic ``SCHEMA_CHANGE JOB``.
@@ -1216,11 +1298,24 @@ def apply_proposal(
             "summary": {...},      # summarize(proposal)
         }
 
+    *progress* is an optional callback invoked at each sub-phase with a
+    short status string (e.g. ``"Creating new vertex/edge types"``,
+    ``"Installing retriever queries"``); the router uses it to drive
+    the init-dialog status line.
+
     Schema introspection errors propagate; the caller decides whether the
     overall init flow should be marked as failed. The structural GraphRAG
     schema must already exist on the graph (so the diff sees structural
     types and only emits domain-side ADDs).
     """
+    def _report(msg: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(msg)
+        except Exception:
+            pass
+
     existing = read_existing_schema(conn)
     domain_stmts = emit_add_statements(proposal, existing)
     # Run the structural-link emitter against an *augmented* snapshot
@@ -1237,9 +1332,13 @@ def apply_proposal(
     if not statements:
         # Even on no-op, refresh metadata so descriptions edited in the
         # review panel land on EntityType / RelationshipType vertices.
+        # The upsert is fast (<5s) so we don't surface it as its own
+        # status — the previous phase's message lingers through it.
         metadata = upsert_type_metadata(conn, proposal)
         retrievers = _install_retrievers_after_apply(
-            conn, graphname, proposal=proposal, pre_apply_existing=existing
+            conn, graphname,
+            proposal=proposal, pre_apply_existing=existing,
+            progress=progress,
         )
         return {
             "status": "no-op",
@@ -1270,6 +1369,13 @@ def apply_proposal(
                 pass
             raise
         return out, name
+
+    # The two-phase split (ADD then ALTER) is internal mechanics; the
+    # user just sees a single "Applying domain schema" message that
+    # spans both phases plus the brief metadata upsert. The wording
+    # matches both schema-source paths (sample extraction and pasted
+    # GSQL) — "extracted" would be misleading for the paste mode.
+    _report("Applying domain schema")
 
     phase_outputs: List[str] = []
     phase_jobs: List[str] = []
@@ -1304,9 +1410,12 @@ def apply_proposal(
                 "retrievers": {"status": "skipped", "reason": "schema apply failed"},
             }
 
+    # Metadata upsert is fast (<5s); no separate status message.
     metadata = upsert_type_metadata(conn, proposal)
     retrievers = _install_retrievers_after_apply(
-        conn, graphname, proposal=proposal, pre_apply_existing=existing
+        conn, graphname,
+        proposal=proposal, pre_apply_existing=existing,
+        progress=progress,
     )
     return {
         "status": "applied",
@@ -1358,6 +1467,7 @@ def _install_retrievers_after_apply(
     graphname: str,
     proposal: Optional[SchemaProposal] = None,
     pre_apply_existing: Optional[ExistingSchema] = None,
+    progress: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Re-render and install the templated retrievers against the live
     domain schema. No-op when no domain types are on the graph.
@@ -1432,6 +1542,7 @@ def _install_retrievers_after_apply(
             domain_vts=domain_vts,
             domain_edges=domain_edges,
             include_entity=include_entity,
+            progress=progress,
         ),
     }
     if transitional:

@@ -188,6 +188,26 @@ const CustomizePrompts = () => {
     }
   }, [graphOnly]);
 
+  // Stay in sync when another component (Bot, Refresh dialog,
+  // Ingest dialog) changes the shared selectedGraph. The prompts
+  // are scoped per graph, so a change triggers a re-fetch too.
+  useEffect(() => {
+    const handler = () => {
+      const next = sessionStorage.getItem("selectedGraph") || "";
+      if (next === selectedGraph) return;
+      setSelectedGraph(next);
+      if (next) {
+        setConfigScope("graph");
+        fetchPrompts(next);
+      } else if (!graphOnly) {
+        setConfigScope("global");
+        fetchPrompts("");
+      }
+    };
+    window.addEventListener("graphrag:selectedGraph", handler);
+    return () => window.removeEventListener("graphrag:selectedGraph", handler);
+  }, [selectedGraph, graphOnly]);
+
   return (
     <div className="p-8">
       <div className="max-w-5xl mx-auto">

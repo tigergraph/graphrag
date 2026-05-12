@@ -225,6 +225,7 @@ def rebuild_status(
             "method": ecc_method,
             "is_running": task_info.get("status") == "running",
             "status": task_info.get("status"),
+            "stage": task_info.get("stage"),
             "started_at": task_info.get("started_at"),
             "completed_at": task_info.get("completed_at"),
             "failed_at": task_info.get("failed_at"),
@@ -239,10 +240,24 @@ def rebuild_status(
     }
 
 
+def _set_stage(task_key: str, msg: str) -> None:
+    """Update the human-readable stage label for an in-flight task.
+    Pulled out so individual stage transitions don't have to know
+    about the ``running_tasks`` schema.
+    """
+    info = running_tasks.get(task_key)
+    if info is not None:
+        info["stage"] = msg
+
+
 async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
     """Wrapper to track running tasks"""
     try:
-        running_tasks[task_key] = {"status": "running", "started_at": time.time()}
+        running_tasks[task_key] = {
+            "status": "running",
+            "started_at": time.time(),
+            "stage": "Preparing rebuild",
+        }
         LogWriter.info(f"Starting ECC task: {task_key}")
 
         # Verify the graph still exists before doing any work
@@ -284,8 +299,16 @@ async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
         else:
             LogWriter.warning(f"GraphRAG config reload had issues: {graphrag_result['message']}")
         
-        # Now run the actual job with fresh config
-        await run_func(graphname, conn)
+        # Now run the actual job with fresh config. Pass a progress
+        # callback so sub-phases can surface in the UI rebuild dialog.
+        # ``run_func`` may ignore the kwarg (the supportai legacy path
+        # does); the call falls back to the no-progress signature on
+        # ``TypeError``.
+        progress_cb = lambda msg: _set_stage(task_key, msg)
+        try:
+            await run_func(graphname, conn, progress=progress_cb)
+        except TypeError:
+            await run_func(graphname, conn)
         running_tasks[task_key] = {"status": "completed", "completed_at": time.time()}
         LogWriter.info(f"Completed ECC task: {task_key}")
     except Exception as e:

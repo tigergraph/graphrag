@@ -89,26 +89,28 @@ async def chunk_doc(
     chunker = ecc_util.get_chunker(chunker_type, graphname=conn.graphname)
     chunks = chunker.chunk(doc["attributes"]["text"])
     
-    logger.info(f"Chunking {v_id} into {len(chunks)} chunk(s)")
+    # v_id / chunk_id derive from user document content; demote
+    # to DEBUG so the steady-state log doesn't carry data identifiers.
+    logger.debug(f"Chunking {v_id} into {len(chunks)} chunk(s)")
     for i, chunk in enumerate(chunks):
         chunk_id = f"{v_id}_chunk_{i}"
         # send chunks to be upserted (func, args)
-        logger.info("chunk writes to upsert_chan")
+        logger.debug("chunk writes to upsert_chan")
         await upsert_chan.put((upsert_chunk, (conn, v_id, chunk_id, chunk)))
 
         # send chunks to be embedded
-        logger.info("chunk writes to embed_chan")
+        logger.debug("chunk writes to embed_chan")
         await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
 
         # send chunks to have entities extracted
-        logger.info("chunk writes to extract_chan")
+        logger.debug("chunk writes to extract_chan")
         await extract_chan.put((chunk, chunk_id))
 
     return doc["v_id"]
 
 
 async def upsert_chunk(conn: TigerGraphConnection, doc_id, chunk_id, chunk):
-    logger.info(f"Upserting chunk {chunk_id}")
+    logger.debug(f"Upserting chunk {chunk_id}")
     date_added = int(time.time())
     await util.upsert_vertex(
         conn,
@@ -160,7 +162,7 @@ async def embed(
         index_name: str
             the vertex index to write to
     """
-    logger.info(f"Embedding {v_id}")
+    logger.debug(f"Embedding {v_id}")
 
     await embed_store.aadd_embeddings([(content, [])], [{"vertex_id": v_id}])
 
@@ -201,12 +203,12 @@ async def extract(
     chunk: str,
     chunk_id: str,
 ):
-    logger.info(f"Extracting chunk: {chunk_id}")
+    logger.debug(f"Extracting chunk: {chunk_id}")
     extracted: list[GraphDocument] = await extractor.aextract(chunk)
     # upsert nodes and edges to the graph
     for doc in extracted:
         for node in doc.nodes:
-            logger.info(f"extract writes entity vert to upsert\nNode: {node.id}")
+            logger.debug(f"extract writes entity vert to upsert\nNode: {node.id}")
             v_id = util.process_id(str(node.id))
             if len(v_id) == 0:
                 continue
@@ -231,7 +233,7 @@ async def extract(
             )
 
             # link the entity to the chunk it came from
-            logger.info("extract writes contains edge to upsert")
+            logger.debug("extract writes contains edge to upsert")
             await upsert_chan.put(
                 (
                     util.upsert_edge,
@@ -308,7 +310,7 @@ async def extract(
             # Entity instance. Legacy supportai ECC paths without
             # per-instance entity_type info skip the meta-layer.
             # link the relationship to the chunk it came from
-            logger.info("extract writes mentions edge to upsert")
+            logger.debug("extract writes mentions edge to upsert")
             await upsert_chan.put(
                 (
                     util.upsert_edge,

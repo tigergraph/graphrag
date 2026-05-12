@@ -182,10 +182,29 @@ class GenerateFunction(BaseTool):
             LogWriter.warning(f"request_id={req_id_cv.get()} WARN no documents found")
             raise NoDocumentsFoundException
 
+        # Enrich the vertex / edge type lists with their user-defined
+        # ``description`` / ``definition`` from EntityType /
+        # RelationshipType metadata so the LLM sees the same domain
+        # hints that ``generate_cypher`` / ``generate_gsql`` already
+        # consume. Empty descriptions render the bare name.
+        try:
+            from common.db.schema_utils import read_type_metadata
+            entity_descs, rel_defs = read_type_metadata(self.conn)
+        except Exception as exc:
+            logger.warning(f"read_type_metadata failed in generate_function: {exc}")
+            entity_descs, rel_defs = {}, {}
+
+        def _label(name: str, desc_map: dict) -> str:
+            d = desc_map.get(name)
+            return f"{name} ({d})" if d else name
+
+        vertex_types_for_llm = [_label(v, entity_descs) for v in target_vertex_types]
+        edge_types_for_llm = [_label(e, rel_defs) for e in target_edge_types]
+
         inputs = {
             "question": question,
-            "vertex_types": target_vertex_types,
-            "edge_types": target_edge_types,
+            "vertex_types": vertex_types_for_llm,
+            "edge_types": edge_types_for_llm,
             "vertex_attributes": target_vertex_attributes,
             "vertex_ids": target_vertex_ids,
             "edge_attributes": target_edge_attributes,

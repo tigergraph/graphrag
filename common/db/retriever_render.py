@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 from common.db.schema_utils import gsql_output_error
 
@@ -137,8 +137,14 @@ def install_retrievers(
     domain_edges: Iterable[str],
     include_entity: bool,
     retriever_dir: str = _RETRIEVER_DIR,
+    progress: Optional["Callable[[str], None]"] = None,
 ) -> dict:
-    """Render and install every templated retriever (sync)."""
+    """Render and install every templated retriever (sync).
+
+    *progress* is an optional callback invoked once per query with a
+    short status message; lets the caller surface per-query progress
+    in a UI (init dialog poll, etc.).
+    """
     rendered = render_retrievers(
         domain_vts, domain_edges, include_entity, retriever_dir
     )
@@ -147,8 +153,32 @@ def install_retrievers(
         f"vts={len(list(domain_vts))} edges={len(list(domain_edges))} "
         f"rendered={list(rendered.keys())}"
     )
+    # Group the four templated retrievers into two user-facing
+    # status messages — the text/vector variants of each family
+    # install back-to-back and a per-query message flickers too
+    # fast to be useful. The mapping is exhaustive over the
+    # current ``TEMPLATED_RETRIEVERS`` set; new entries fall
+    # through to a single "Installing retriever queries" message.
+    _GROUP_MESSAGE = {
+        "GraphRAG_Hybrid_Search": ("hybrid", "Installing hybrid retriever queries"),
+        "GraphRAG_Hybrid_Vector_Search": ("hybrid", "Installing hybrid retriever queries"),
+        "GraphRAG_Community_Search": ("community", "Installing community retriever queries"),
+        "GraphRAG_Community_Vector_Search": ("community", "Installing community retriever queries"),
+    }
+
     results: dict = {}
+    emitted_groups: set = set()
     for query_name, body in rendered.items():
+        if progress is not None:
+            group_key, group_msg = _GROUP_MESSAGE.get(
+                query_name, ("_other", "Installing retriever queries")
+            )
+            if group_key not in emitted_groups:
+                try:
+                    progress(group_msg)
+                except Exception:
+                    pass
+                emitted_groups.add(group_key)
         block = _install_block(graphname, query_name, body)
         try:
             out = conn.gsql(block)

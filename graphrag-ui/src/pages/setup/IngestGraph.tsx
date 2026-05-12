@@ -46,7 +46,11 @@ const formatBytes = (bytes: number) => {
 const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   const [confirm, confirmDialog] = useConfirm();
   const [availableGraphs, setAvailableGraphs] = useState<string[]>([]);
-  const [ingestGraphName, setIngestGraphName] = useState("");
+  // Seed from the shared ``selectedGraph`` so the dropdown matches
+  // whatever was last picked elsewhere (KGAdmin refresh, Bot, etc.).
+  const [ingestGraphName, setIngestGraphName] = useState(
+    sessionStorage.getItem("selectedGraph") || ""
+  );
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedFiles, setUploadedFiles] = useState<any[]>([]);
@@ -931,6 +935,18 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       });
   }, []);
 
+  // Keep the Ingest dialog's graph picker in sync with the shared
+  // ``selectedGraph`` so changing the graph elsewhere (KGAdmin
+  // refresh, Bot) immediately reflects here.
+  useEffect(() => {
+    const handler = () => {
+      const next = sessionStorage.getItem("selectedGraph") || "";
+      if (next && next !== ingestGraphName) setIngestGraphName(next);
+    };
+    window.addEventListener("graphrag:selectedGraph", handler);
+    return () => window.removeEventListener("graphrag:selectedGraph", handler);
+  }, [ingestGraphName]);
+
   // Load files when graph name changes
   useEffect(() => {
     if (ingestGraphName) {
@@ -963,7 +979,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             </label>
             <Select
               value={ingestGraphName}
-              onValueChange={setIngestGraphName}
+              onValueChange={(v) => {
+                setIngestGraphName(v);
+                sessionStorage.setItem("selectedGraph", v);
+                window.dispatchEvent(new Event("graphrag:selectedGraph"));
+              }}
               disabled={isIngesting}
             >
               <SelectTrigger

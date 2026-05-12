@@ -260,7 +260,12 @@ const KGAdmin = () => {
   };
 
   // Refresh state
-  const [refreshGraphName, setRefreshGraphName] = useState("");
+  // Seed from the shared ``selectedGraph`` so the dropdown
+  // matches whatever was last picked elsewhere (Bot, IngestGraph,
+  // etc.). Reacts to ``graphrag:selectedGraph`` events below.
+  const [refreshGraphName, setRefreshGraphName] = useState(
+    sessionStorage.getItem("selectedGraph") || ""
+  );
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState("");
   const [isRebuildRunning, setIsRebuildRunning] = useState(false);
@@ -302,6 +307,18 @@ const KGAdmin = () => {
         /* keep cached value; not fatal */
       });
   }, []);
+
+  // Keep the Refresh-dialog graph picker in sync with the shared
+  // ``selectedGraph`` so changing the graph elsewhere (Bot, the
+  // Ingest dialog) immediately reflects here.
+  useEffect(() => {
+    const handler = () => {
+      const next = sessionStorage.getItem("selectedGraph") || "";
+      if (next && next !== refreshGraphName) setRefreshGraphName(next);
+    };
+    window.addEventListener("graphrag:selectedGraph", handler);
+    return () => window.removeEventListener("graphrag:selectedGraph", handler);
+  }, [refreshGraphName]);
 
   // Pull schema-init caps from /ui/config when the Initialize dialog opens.
   // Read-only here; the values are edited on the GraphRAG Config page.
@@ -696,6 +713,13 @@ const KGAdmin = () => {
         return prev;
       });
 
+      // Make the just-initialized graph the default selection across
+      // the app (chat picker, ingest dialog, customize prompts, etc.).
+      // Bot.tsx listens to ``graphrag:selectedGraph`` events to refresh
+      // its dropdown; other pages re-read sessionStorage on mount.
+      sessionStorage.setItem("selectedGraph", newGraph);
+      window.dispatchEvent(new Event("graphrag:selectedGraph"));
+
       setRefreshGraphName(graphName);
       setGraphName("");
     } catch (error: any) {
@@ -740,8 +764,9 @@ const KGAdmin = () => {
           const startTime = statusData.started_at
             ? new Date(statusData.started_at * 1000).toLocaleString()
             : "unknown time";
+          const stage = statusData.stage ? ` — ${statusData.stage}` : "";
           setRefreshMessage(
-            `⚠️ A rebuild is already in progress for "${graphName}" (started at ${startTime}). Please wait for it to complete.`
+            `⚠️ A rebuild is already in progress for "${graphName}" (started at ${startTime})${stage}. Please wait for it to complete.`
           );
         } else if (wasRunning && statusData.status === "completed") {
           setRefreshMessage(`✅ Rebuild completed successfully for "${graphName}".`);
@@ -1970,7 +1995,11 @@ const KGAdmin = () => {
                 </label>
                 <Select
                   value={refreshGraphName}
-                  onValueChange={setRefreshGraphName}
+                  onValueChange={(v) => {
+                    setRefreshGraphName(v);
+                    sessionStorage.setItem("selectedGraph", v);
+                    window.dispatchEvent(new Event("graphrag:selectedGraph"));
+                  }}
                   disabled={isRefreshing || isRebuildRunning || isCheckingStatus}
                 >
                   <SelectTrigger

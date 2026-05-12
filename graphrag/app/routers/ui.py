@@ -672,11 +672,10 @@ def init_graph(
     def _run_init():
         try:
             _set_init_state(
-                graphname, state="running", message="Connecting to TigerGraph"
+                graphname, state="running",
+                message="Initializing structural schema",
             )
             _, conn = ws_basic_auth(auth_b64, graphname)
-
-            _set_init_state(graphname, message="Initializing structural schema")
             LogWriter.info(f"Initializing graph: {graphname}")
             resp = supportai.init_supportai(conn, graphname)
             schema_res, index_res, query_res = resp[0], resp[1], resp[2]
@@ -689,8 +688,14 @@ def init_graph(
                 )
                 proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
                 proposal.drop_dangling_pairs()
+                # Surface apply_proposal's sub-phases (schema-change,
+                # metadata, retriever installs) in the init-dialog
+                # poll instead of a static "Applying domain schema".
                 domain_schema_status = schema_utils_mod.apply_proposal(
-                    conn, graphname, proposal
+                    conn, graphname, proposal,
+                    progress=lambda msg: _set_init_state(
+                        graphname, message=msg
+                    ),
                 )
                 LogWriter.info(
                     f"Domain schema status for {graphname}: "
@@ -1651,11 +1656,22 @@ async def chat(
     3. Conversation ID (or "new" for new conversation)
     4. User messages
     """
+    # Embedding store unavailable: WebSocket routes can't return an
+    # HTTPException — ASGI requires the handshake to be sent (or the
+    # connection explicitly closed) before the callable returns.
+    # Accept, surface the error to the client, then close with a
+    # well-defined status code (1013 = Try Again Later).
     if service_status["embedding_store"]["error"]:
-        return HTTPException(
-            status_code=503,
-            detail=service_status["embedding_store"]["error"]
-        )
+        try:
+            await websocket.accept()
+            await websocket.send_json({
+                "error": service_status["embedding_store"]["error"],
+                "code": "embedding_store_unavailable",
+            })
+            await websocket.close(code=1013, reason="Embedding store unavailable")
+        except Exception:
+            pass
+        return
 
     await websocket.accept()
 

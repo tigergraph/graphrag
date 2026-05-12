@@ -87,7 +87,7 @@ def insert_description_by_id(md_text, image_id, description):
     """
     Replace the description for an image whose basename == image_id.
     """
-    safe_desc = description.replace("[", "(").replace("]", ")")
+    safe_desc = _sanitize_alt_text(description)
 
     def repl(m):
         old_path = m.group(2)
@@ -98,6 +98,40 @@ def insert_description_by_id(md_text, image_id, description):
 
         return m.group(0)
     return _md_pattern.sub(repl, md_text)
+
+
+# Maximum characters retained from an LLM image description when
+# rendered as markdown alt text. Long alt text bloats the chat
+# rendering and offers no extra accessibility value beyond the first
+# couple of sentences.
+_ALT_TEXT_MAX_CHARS = 400
+
+
+def _sanitize_alt_text(description: str) -> str:
+    """Collapse an LLM image description into a single-line, markdown-
+    safe alt-text string. The LLM is free to respond with headings,
+    paragraph breaks and bracketed phrases; the markdown image syntax
+    ``![alt](url)`` doesn't tolerate any of that — a newline or
+    unescaped ``]`` terminates the construct and the renderer falls
+    back to printing the raw text (the bug this guards against).
+    """
+    if not description:
+        return ""
+    text = str(description)
+    # Drop a leading markdown heading like ``# Image Description``
+    # the LLM tends to emit as a preamble.
+    text = re.sub(r"^\s*#{1,6}\s*[^\n]*\n+", "", text, count=1)
+    # Drop a literal "Image Description:" / "Description:" prefix that
+    # the LLM occasionally writes in place of (or alongside) a heading.
+    text = re.sub(r"^\s*(image\s+description|description)\s*:\s*", "", text, count=1, flags=re.IGNORECASE)
+    # Replace every newline + run of whitespace with a single space.
+    text = re.sub(r"\s+", " ", text).strip()
+    # ``]`` would close the alt-text bracket; ``[`` can also confuse
+    # some renderers. Swap both for round parens.
+    text = text.replace("[", "(").replace("]", ")")
+    if len(text) > _ALT_TEXT_MAX_CHARS:
+        text = text[: _ALT_TEXT_MAX_CHARS - 1].rstrip() + "…"
+    return text
 
 
 def replace_path_with_tg_protocol(md_text, image_id, tg_reference):

@@ -425,7 +425,8 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                         "vertex_id": v_id,
                     }
                 )
-                logger.info(f"Return result {res} for has_embeddings({v_ids})")
+                # v_ids carry user-content-derived identifiers; demote.
+                logger.debug(f"Return result {res} for has_embeddings({v_ids})")
                 found = False
                 if "results" in res[0]:
                     for v in res[0]["results"]:

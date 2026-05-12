@@ -60,10 +60,24 @@ def describe_image_with_llm(file_path):
                     {
                         "type": "text",
                         "text": (
-                            "Please describe what you see in this image and "
-                            "if the image has scanned text then extract all the text. "
-                            "If the image has any graph, chart, table, or other diagram, describe it. "
-                            "If the image has any logo, identify and describe the logo."
+                            "Describe the substantive CONTENT of this image so it "
+                            "can be retrieved alongside the surrounding document. "
+                            "Prioritize, in this order: (1) any text — copy it "
+                            "verbatim, including headings, labels, axis ticks, "
+                            "captions, and footnotes; (2) the data and structure of "
+                            "any chart, graph, or table — name the chart type, the "
+                            "axes / columns, and the values or trend the chart "
+                            "actually shows; (3) the entities, relationships, or "
+                            "process steps in any diagram or flowchart; (4) any logo "
+                            "or branding mark, identified by name. Do NOT describe "
+                            "layout, background color, decorative styling, slide "
+                            "templates, or generic visual impressions — those add "
+                            "no retrieval value. If the image is purely decorative "
+                            "(no text, no data, no diagram), reply with just "
+                            "\"decorative image\" and nothing else. Respond as a "
+                            "SINGLE plain-text paragraph — no markdown headings, no "
+                            "bullet lists, no blank lines. The reply is used "
+                            "verbatim as the alt-text inside `![alt](url)`."
                         ),
                     },
                     _build_image_content_block(image_base64, "image/jpeg"),
