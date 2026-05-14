@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useConfirm } from "@/hooks/useConfirm";
-import { pauseIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
+import { pingIdleTimer } from "@/hooks/useIdleTimeout";
 
 interface IngestGraphProps {
   isModal?: boolean;
@@ -893,14 +893,16 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     }
   };
 
-  // Pause idle timer while ingestion is running
+  // Keep the idle timer alive while any long-running upload / conversion
+  // / ingest is in flight. Ping every 60s — actively resets the idle
+  // countdown instead of relying on a pause/resume event sequence that
+  // can drift in nested-modal contexts.
   useEffect(() => {
-    if (isIngesting) {
-      pauseIdleTimer();
-    } else {
-      resumeIdleTimer();
-    }
-  }, [isIngesting]);
+    if (!(isUploading || isProcessingFiles || isIngesting)) return;
+    pingIdleTimer();
+    const id = setInterval(() => pingIdleTimer(), 60_000);
+    return () => clearInterval(id);
+  }, [isUploading, isProcessingFiles, isIngesting]);
 
   // Load available graphs. Seed from sessionStorage for instant render,
   // then refresh from /ui/list_graphs so newly-initialized graphs show
