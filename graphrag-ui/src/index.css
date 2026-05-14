@@ -185,7 +185,11 @@
 .fp .react-chatbot-kit-chat-message-container,
 .open-dg .react-chatbot-kit-chat-message-container {
   height: calc(100vh - 100px) !important;
-  max-width: 960px;
+  /* Scale with the available width so wider screens use more
+     horizontal space, but cap reading-line at a comfortable
+     length. Switch from a hard 960px cap that left huge gutters
+     on 1440p / 4K monitors. */
+  max-width: min(1280px, 90%);
   margin: 0 auto;
 }
 

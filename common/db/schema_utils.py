@@ -752,6 +752,64 @@ class ExistingSchema:
         return False
 
 
+@dataclass
+class AllowedSchema:
+    """Domain-schema bundle handed to the LLM entity/relationship
+    extractor. Carries one text rendering for the LLM prompt and the
+    structured maps the worker layer uses for runtime coercion and
+    endpoint validation.
+
+    All fields exclude GraphRAG structural types — only user-declared
+    domain types reach the extractor.
+
+    Fields:
+        schema_rep — rendered schema text suitable for an LLM prompt
+            (vertex types with attributes, edge types with endpoints,
+            inline definitions). Reuses the same shape that
+            ``render_schema_rep`` produces for query-side tools.
+        vertex_types / edge_types — name lists for fast allow-checks.
+        vertex_attributes / edge_attributes — ``{type: {attr: tg_type}}``
+            for typed-attribute coercion at upsert time.
+        vertex_definitions / edge_definitions — ``{type: description}``
+            from EntityType / RelationshipType meta-vertices.
+        edge_endpoints — ``{edge: [(from_vt, to_vt), ...]}`` for the
+            worker's endpoint-pair validation.
+    """
+
+    schema_rep: str = ""
+    schema_version: Optional[int] = None
+    vertex_types: List[str] = field(default_factory=list)
+    edge_types: List[str] = field(default_factory=list)
+    vertex_attributes: dict = field(default_factory=dict)
+    edge_attributes: dict = field(default_factory=dict)
+    vertex_definitions: dict = field(default_factory=dict)
+    edge_definitions: dict = field(default_factory=dict)
+    edge_endpoints: dict = field(default_factory=dict)
+
+
+# TG accepts only these types inside a DISCRIMINATOR(...) clause.
+# DOUBLE / FLOAT / BOOL are rejected at schema-change time.
+_DISCRIMINATOR_TYPES = frozenset({"INT", "UINT", "STRING", "DATETIME"})
+
+
+def _default_literal(tg_type: str) -> str:
+    """Return the GSQL literal for the per-type default — used inside
+    ``DISCRIMINATOR(... DEFAULT <literal>)`` clauses so the column is
+    non-nullable but per-instance upserts that omit the value still
+    succeed (the omitted attribute falls to the default).
+    """
+    t = (tg_type or "").upper()
+    if t in ("INT", "UINT"):
+        return "0"
+    if t in ("DOUBLE", "FLOAT"):
+        return "0.0"
+    if t == "BOOL":
+        return "false"
+    if t == "DATETIME":
+        return '"1970-01-01 00:00:00"'
+    return '""'
+
+
 def emit_add_statements(
     proposal: SchemaProposal,
     existing: Optional[ExistingSchema] = None,
@@ -799,11 +857,20 @@ def emit_add_statements(
             pairs_str = " | ".join(
                 f"FROM {src}, TO {tgt}" for src, tgt in e.pairs
             )
-            attrs_part = ""
-            if e.attributes:
-                attrs_part = ", " + ", ".join(
-                    f"{a.name} {a.type}" for a in e.attributes
-                )
+            # Promote discriminator-eligible attributes (per TG: INT,
+            # UINT, STRING, DATETIME) into a ``DISCRIMINATOR(...)``
+            # clause with type defaults. Other attribute types stay as
+            # regular nullable columns outside the clause.
+            disc_attrs = [a for a in e.attributes if a.type.upper() in _DISCRIMINATOR_TYPES]
+            plain_attrs = [a for a in e.attributes if a.type.upper() not in _DISCRIMINATOR_TYPES]
+            parts: List[str] = []
+            if disc_attrs:
+                parts.append("DISCRIMINATOR(" + ", ".join(
+                    f"{a.name} {a.type} DEFAULT {_default_literal(a.type)}"
+                    for a in disc_attrs
+                ) + ")")
+            parts.extend(f"{a.name} {a.type}" for a in plain_attrs)
+            attrs_part = (", " + ", ".join(parts)) if parts else ""
             edge_kw = "DIRECTED EDGE" if e.directed else "UNDIRECTED EDGE"
             # Undirected edges have no reverse companion, so omit the
             # WITH REVERSE_EDGE clause.
@@ -814,10 +881,10 @@ def emit_add_statements(
                 f'ADD {edge_kw} {e.name} ({pairs_str}{attrs_part}){with_clause}'
             )
         else:
-            # Existing edge: only ALTER ADD PAIR is supported. Attributes
-            # of an existing edge can't be added at the same time; that's
-            # a separate ALTER ATTRIBUTE statement and is out of scope
-            # for the additive Phase 1 diff emitter.
+            # Existing edge: only ALTER ADD PAIR is supported here.
+            # Adding attributes on an existing edge needs a separate
+            # ALTER ATTRIBUTE statement and is out of scope for this
+            # additive diff.
             for src, tgt in e.pairs:
                 if existing.has_edge_pair(e.name, src, tgt):
                     continue
@@ -1106,22 +1173,66 @@ async def read_existing_schema_async(conn) -> "ExistingSchema":
     return snapshot
 
 
-def render_schema_rep(conn) -> Tuple[str, Optional[int]]:
-    """Render the live schema as a per-vertex / per-edge text block
-    suitable for inclusion in an LLM prompt (`generate_cypher`,
-    `generate_gsql`, etc.). Includes any user-supplied definitions
-    stored on the ``EntityType`` / ``RelationshipType`` meta vertices
-    via :func:`read_type_metadata`.
+def _assemble_schema_rep(
+    *,
+    graphname: str,
+    schema_ver: Optional[int],
+    vertex_blocks: List[str],
+    edge_blocks: List[str],
+    exclude_structural: bool,
+    domain_verts: List[str],
+    domain_edge_types: List[str],
+    vertex_attributes: dict,
+    edge_attributes: dict,
+    entity_descs: dict,
+    rel_defs: dict,
+    edge_endpoints: dict,
+) -> AllowedSchema:
+    """Bundle pre-computed blocks into an ``AllowedSchema``. Shared by
+    the sync and async builders so both paths produce identical output.
+    """
+    if exclude_structural and not domain_verts and not domain_edge_types:
+        return AllowedSchema(schema_version=schema_ver)
+    graph_label = f" {graphname}" if graphname else ""
+    qualifier = "domain " if exclude_structural else ""
+    text = (
+        f"The {qualifier}schema of the graph{graph_label} is as follows:\n"
+        f"Vertex Types:\n{chr(10).join(vertex_blocks) if vertex_blocks else '(none)'}"
+        f"\n\nEdge Types:\n{chr(10).join(edge_blocks) if edge_blocks else '(none)'}\n"
+    )
+    domain_entity_defs = {v: entity_descs[v] for v in domain_verts if entity_descs.get(v)}
+    domain_rel_defs = {e: rel_defs[e] for e in domain_edge_types if rel_defs.get(e)}
+    return AllowedSchema(
+        schema_rep=text,
+        schema_version=schema_ver,
+        vertex_types=domain_verts,
+        edge_types=domain_edge_types,
+        vertex_attributes=vertex_attributes,
+        edge_attributes=edge_attributes,
+        vertex_definitions=domain_entity_defs,
+        edge_definitions=domain_rel_defs,
+        edge_endpoints=edge_endpoints,
+    )
 
-    Returns ``(schema_text, schema_version)`` so the caller can cache
-    the text against the version and skip re-rendering on the next
-    call (schemas don't change between rebuilds in normal operation).
+
+def render_schema_rep(conn, exclude_structural: bool = False) -> AllowedSchema:
+    """Read the live schema and return a full :class:`AllowedSchema`
+    bundle (rendered text + structured maps + version).
+
+    Used by both query-side tools (``generate_cypher`` / ``generate_gsql``
+    / ``map_question_to_schema``) and the ECC entity extractor. Pass
+    ``exclude_structural=True`` to drop GraphRAG structural types
+    (Entity, Document, Community, structural edges, etc.) — the
+    extractor uses this mode; query-side tools use the default so the
+    LLM sees the full graph including bookkeeping types.
+
+    Returns an :class:`AllowedSchema` with at least ``schema_version``
+    populated; when the graph has no types yet, the other fields stay
+    empty.
     """
     from common.db.connections import get_schema_ver as _get_schema_ver
-
     schema_ver = _get_schema_ver(conn)
-    verts = conn.getVertexTypes()
-    edges = conn.getEdgeTypes()
+
     try:
         entity_descs, rel_defs = read_type_metadata(conn)
     except Exception:
@@ -1130,61 +1241,253 @@ def render_schema_rep(conn) -> Tuple[str, Optional[int]]:
         # rather than failing.
         entity_descs, rel_defs = {}, {}
 
+    try:
+        all_verts = conn.getVertexTypes() or []
+    except Exception:
+        all_verts = []
+    domain_verts = (
+        [v for v in all_verts if not is_structural_type(v)]
+        if exclude_structural else list(all_verts)
+    )
+
+    vertex_attributes: dict = {}
     vertex_blocks: List[str] = []
-    for vert in verts:
-        vinfo = conn.getVertexType(vert)
-        primary_id = vinfo["PrimaryId"]["AttributeName"]
-        attributes = "\n\t\t".join(
-            a["AttributeName"] + " of type " + a["AttributeType"]["Name"]
-            for a in vinfo["Attributes"]
-        ) or "No attributes"
+    for vert in sorted(domain_verts):
+        try:
+            vinfo = conn.getVertexType(vert) or {}
+        except Exception:
+            continue
+        primary_id_name = (vinfo.get("PrimaryId") or {}).get("AttributeName", "")
+        attrs_map, attr_lines = _collect_attrs(vinfo.get("Attributes"), primary_id_name)
+        vertex_attributes[vert] = attrs_map
         defn_line = (
             f"\n\tDefinition: {entity_descs[vert]}" if entity_descs.get(vert) else ""
         )
+        attrs_block = "\n\t\t".join(attr_lines) or "No attributes"
         vertex_blocks.append(
-            f"{vert}{defn_line}\n\tPrimary Id Attribute: {primary_id}"
-            f"\n\tAttributes: \n\t\t{attributes}"
+            f"{vert}{defn_line}\n\tPrimary Id Attribute: {primary_id_name}"
+            f"\n\tAttributes: \n\t\t{attrs_block}"
         )
 
+    try:
+        all_edges = conn.getEdgeTypes() or []
+    except Exception:
+        all_edges = []
+    edge_attributes: dict = {}
+    edge_endpoints: dict = {}
     edge_blocks: List[str] = []
-    for edge in edges:
-        einfo = conn.getEdgeType(edge)
-        from_vertex = einfo["FromVertexTypeName"]
-        to_vertex = einfo["ToVertexTypeName"]
-        direction = "Directed" if einfo["IsDirected"] else "Undirected"
-        attributes = "\n\t\t".join(
-            a["AttributeName"] + " of type " + a["AttributeType"]["Name"]
-            for a in einfo["Attributes"]
-        ) or "No attributes"
+    domain_edge_types: List[str] = []
+    for edge in sorted(all_edges):
+        if exclude_structural and is_structural_type(edge):
+            continue
+        try:
+            einfo = conn.getEdgeType(edge) or {}
+        except Exception:
+            continue
+        pairs = _collect_edge_pairs(einfo, exclude_structural)
+        if exclude_structural and not pairs:
+            continue
+        domain_edge_types.append(edge)
+        edge_endpoints[edge] = pairs
+        attrs_map, attr_lines = _collect_attrs(einfo.get("Attributes"), "")
+        edge_attributes[edge] = attrs_map
+        direction = "Directed" if einfo.get("IsDirected") else "Undirected"
         defn_line = (
             f"\n\tDefinition: {rel_defs[edge]}" if rel_defs.get(edge) else ""
         )
-        if from_vertex == "*" or to_vertex == "*":
-            for pair in einfo.get("EdgePairs", []):
-                pair_info = (
-                    f"From Vertex: {pair['From']}\n\tTo Vertex: {pair['To']}"
-                )
-                edge_blocks.append(
-                    f"{edge}{defn_line}\n\t{pair_info}"
-                    f"\n\tEdge direction: {direction}"
-                    f"\n\tAttributes: \n\t\t{attributes}"
-                )
-        else:
-            pair_info = f"From Vertex: {from_vertex}\n\tTo Vertex: {to_vertex}"
+        attrs_block = "\n\t\t".join(attr_lines) or "No attributes"
+        # Emit one block per (FROM, TO) pair — keeps the rendered
+        # text single-pair-per-block.
+        for src, tgt in pairs:
+            pair_info = f"From Vertex: {src}\n\tTo Vertex: {tgt}"
             edge_blocks.append(
                 f"{edge}{defn_line}\n\t{pair_info}"
                 f"\n\tEdge direction: {direction}"
-                f"\n\tAttributes: \n\t\t{attributes}"
+                f"\n\tAttributes: \n\t\t{attrs_block}"
             )
 
-    graphname = getattr(conn, "graphname", "") or ""
-    graph_label = f" {graphname}" if graphname else ""
-    text = (
-        f"The schema of the graph{graph_label} is as follows:\n"
-        f"Vertex Types:\n{chr(10).join(vertex_blocks)}\n\n"
-        f"Edge Types:\n{chr(10).join(edge_blocks)}\n"
+    return _assemble_schema_rep(
+        graphname=getattr(conn, "graphname", "") or "",
+        schema_ver=schema_ver,
+        vertex_blocks=vertex_blocks,
+        edge_blocks=edge_blocks,
+        exclude_structural=exclude_structural,
+        domain_verts=sorted(domain_verts) if exclude_structural else list(all_verts),
+        domain_edge_types=domain_edge_types,
+        vertex_attributes=vertex_attributes,
+        edge_attributes=edge_attributes,
+        entity_descs=entity_descs,
+        rel_defs=rel_defs,
+        edge_endpoints=edge_endpoints,
     )
-    return text, schema_ver
+
+
+def _collect_attrs(attr_list, skip_name: str) -> Tuple[dict, List[str]]:
+    """Walk an ``Attributes`` array from ``getVertexType`` /
+    ``getEdgeType`` and return ``({attr_name: tg_type}, ["name of type
+    type", ...])``. ``skip_name`` is the primary-id attribute that
+    shouldn't appear in the user-facing schema rep.
+    """
+    attrs_map: dict = {}
+    lines: List[str] = []
+    for a in attr_list or []:
+        a_name = a.get("AttributeName")
+        a_type = ((a.get("AttributeType") or {}).get("Name")) or "STRING"
+        if not a_name or a_name == skip_name:
+            continue
+        attrs_map[a_name] = a_type
+        lines.append(f"{a_name} of type {a_type}")
+    return attrs_map, lines
+
+
+def _collect_edge_pairs(einfo: dict, exclude_structural: bool) -> List[Tuple[str, str]]:
+    """Build the (FROM, TO) pair list for an edge, filtering out pairs
+    whose endpoint is a structural type when ``exclude_structural`` is
+    set. Used by both schema-rep paths.
+    """
+    pairs: List[Tuple[str, str]] = []
+    from_v = einfo.get("FromVertexTypeName")
+    to_v = einfo.get("ToVertexTypeName")
+    if from_v and to_v and from_v != "*" and to_v != "*":
+        if not (exclude_structural and (is_structural_type(from_v) or is_structural_type(to_v))):
+            pairs.append((from_v, to_v))
+    for ep in einfo.get("EdgePairs", []) or []:
+        f, t = ep.get("From"), ep.get("To")
+        if not (f and t):
+            continue
+        if exclude_structural and (is_structural_type(f) or is_structural_type(t)):
+            continue
+        pairs.append((f, t))
+    return pairs
+
+
+# Backwards-compatible alias for callers that still want the old name.
+# ``render_schema_rep(conn, exclude_structural=True)`` is the canonical
+# spelling; keep this until call sites migrate.
+def build_allowed_schema(conn) -> AllowedSchema:
+    """Back-compat alias for ``render_schema_rep(conn, exclude_structural=True)``."""
+    return render_schema_rep(conn, exclude_structural=True)
+
+
+    domain_entity_defs = {v: entity_descs[v] for v in domain_verts if entity_descs.get(v)}
+    domain_rel_defs = {e: rel_defs[e] for e in domain_edge_types if rel_defs.get(e)}
+
+    return AllowedSchema(
+        schema_rep=text,
+        vertex_types=domain_verts,
+        edge_types=domain_edge_types,
+        vertex_attributes=vertex_attributes,
+        edge_attributes=edge_attributes,
+        vertex_definitions=domain_entity_defs,
+        edge_definitions=domain_rel_defs,
+        edge_endpoints=edge_endpoints,
+    )
+
+
+async def render_schema_rep_async(
+    conn, exclude_structural: bool = False,
+) -> AllowedSchema:
+    """Async counterpart to :func:`render_schema_rep`. Used by the ECC
+    pipeline where ``conn`` is an ``AsyncTigerGraphConnection`` (whose
+    ``getVertexType`` / ``getEdgeType`` are coroutines).
+
+    Same semantics as the sync version — see :func:`render_schema_rep`.
+    """
+    from common.db.connections import get_schema_ver as _get_schema_ver
+
+    try:
+        schema_ver = _get_schema_ver(conn)
+    except Exception:
+        schema_ver = None
+
+    try:
+        entity_descs, rel_defs = await read_type_metadata_async(conn)
+    except Exception:
+        entity_descs, rel_defs = {}, {}
+
+    try:
+        all_verts = await conn.getVertexTypes() or []
+    except Exception:
+        all_verts = []
+    domain_verts = (
+        [v for v in all_verts if not is_structural_type(v)]
+        if exclude_structural else list(all_verts)
+    )
+
+    vertex_attributes: dict = {}
+    vertex_blocks: List[str] = []
+    for vert in sorted(domain_verts):
+        try:
+            vinfo = await conn.getVertexType(vert) or {}
+        except Exception:
+            continue
+        primary_id_name = (vinfo.get("PrimaryId") or {}).get("AttributeName", "")
+        attrs_map, attr_lines = _collect_attrs(vinfo.get("Attributes"), primary_id_name)
+        vertex_attributes[vert] = attrs_map
+        defn_line = (
+            f"\n\tDefinition: {entity_descs[vert]}" if entity_descs.get(vert) else ""
+        )
+        attrs_block = "\n\t\t".join(attr_lines) or "No attributes"
+        vertex_blocks.append(
+            f"{vert}{defn_line}\n\tPrimary Id Attribute: {primary_id_name}"
+            f"\n\tAttributes: \n\t\t{attrs_block}"
+        )
+
+    try:
+        all_edges = await conn.getEdgeTypes() or []
+    except Exception:
+        all_edges = []
+    edge_attributes: dict = {}
+    edge_endpoints: dict = {}
+    edge_blocks: List[str] = []
+    domain_edge_types: List[str] = []
+    for edge in sorted(all_edges):
+        if exclude_structural and is_structural_type(edge):
+            continue
+        try:
+            einfo = await conn.getEdgeType(edge) or {}
+        except Exception:
+            continue
+        pairs = _collect_edge_pairs(einfo, exclude_structural)
+        if exclude_structural and not pairs:
+            continue
+        domain_edge_types.append(edge)
+        edge_endpoints[edge] = pairs
+        attrs_map, attr_lines = _collect_attrs(einfo.get("Attributes"), "")
+        edge_attributes[edge] = attrs_map
+        direction = "Directed" if einfo.get("IsDirected") else "Undirected"
+        defn_line = (
+            f"\n\tDefinition: {rel_defs[edge]}" if rel_defs.get(edge) else ""
+        )
+        attrs_block = "\n\t\t".join(attr_lines) or "No attributes"
+        for src, tgt in pairs:
+            pair_info = f"From Vertex: {src}\n\tTo Vertex: {tgt}"
+            edge_blocks.append(
+                f"{edge}{defn_line}\n\t{pair_info}"
+                f"\n\tEdge direction: {direction}"
+                f"\n\tAttributes: \n\t\t{attrs_block}"
+            )
+
+    return _assemble_schema_rep(
+        graphname=getattr(conn, "graphname", "") or "",
+        schema_ver=schema_ver,
+        vertex_blocks=vertex_blocks,
+        edge_blocks=edge_blocks,
+        exclude_structural=exclude_structural,
+        domain_verts=sorted(domain_verts) if exclude_structural else list(all_verts),
+        domain_edge_types=domain_edge_types,
+        vertex_attributes=vertex_attributes,
+        edge_attributes=edge_attributes,
+        entity_descs=entity_descs,
+        rel_defs=rel_defs,
+        edge_endpoints=edge_endpoints,
+    )
+
+
+# Back-compat alias for the ECC pipeline.
+async def build_allowed_schema_async(conn) -> AllowedSchema:
+    """Back-compat alias for ``render_schema_rep_async(conn, exclude_structural=True)``."""
+    return await render_schema_rep_async(conn, exclude_structural=True)
 
 
 async def read_type_metadata_async(conn) -> Tuple[dict, dict]:
@@ -1352,9 +1655,9 @@ def apply_proposal(
         }
 
     # Split into two phases so TG's job-validator never sees an ALTER
-    # statement that references a vertex/edge type created elsewhere in
-    # the same job. Phase 1 ADDs new types; phase 2 ALTERs (e.g. ADD
-    # PAIR on existing edges) runs only after phase 1 commits.
+    # referencing a vertex/edge type created elsewhere in the same
+    # job. The ADD phase runs first; the ALTER phase (e.g. ADD PAIR
+    # on existing edges) runs only after the ADD phase commits.
     add_stmts = [s for s in statements if s.lstrip().upper().startswith("ADD ")]
     alter_stmts = [s for s in statements if s.lstrip().upper().startswith("ALTER ")]
 

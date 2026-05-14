@@ -150,14 +150,14 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
                 </Button>
               </DropdownMenuTrigger>
 
-            <DropdownMenuContent className="w-56">
+            <DropdownMenuContent className="min-w-[14rem] max-w-[32rem]">
               <DropdownMenuLabel>Select a KnowledgeGraph</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
                 {store?.graphs?.length > 0 ? (
                   store.graphs.map((f, i) => (
                     <DropdownMenuItem key={i} onSelect={() => handleSelect(f)}>
-                      <span>{f}</span>
+                      <span className="truncate">{f}</span>
                     </DropdownMenuItem>
                   ))
                 ) : (

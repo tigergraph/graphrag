@@ -272,6 +272,12 @@ Use the schema below to write the pyTigerGraph function call that answers the qu
 
 You are a top-tier algorithm designed for extracting information in structured formats to build a knowledge graph.
 
+## Faithfulness — Most Important Rule
+- Only emit entities, relationships, definitions, and attribute values that are **explicitly stated in the input text**.
+- Do NOT include information from your general knowledge, training data, or background context about well-known entities.
+- If a fact is not in the text, leave the corresponding field empty or omit the attribute — never guess, infer, or fill from outside knowledge.
+- A short, faithful description is always better than a long description that adds plausible-sounding facts.
+
 ## Goals
 - **Nodes** represent entities, concepts, and properties of entities.
 - Aim for simplicity and clarity so the graph is accessible to a vast audience.
@@ -284,6 +290,7 @@ You are a top-tier algorithm designed for extracting information in structured f
 - Incorporate as **attributes / properties** of the respective nodes.
 - Do NOT create separate nodes for dates or numerical values.
 - Properties are key-value. Use properties only for dates and numbers; string properties become new nodes.
+- Only include numerical or date values that are **explicitly written in the input text** — do NOT compute, estimate, or recall from memory.
 - Never use escaped single or double quotes within property values.
 - Use `camelCase` for property keys (e.g. `birthDate`).
 
@@ -596,9 +603,9 @@ You are a knowledge-graph schema architect. From the sample documents provided i
 2. **Skip layout**: do NOT produce types for axes, page numbers, captions, table cells, or other document-rendering artifacts.
 3. **Edge naming**: use a specific action verb. Include an edge type ONLY IF the source documents contain **2+ concrete instances** of that relationship between named entities — do NOT propose merely-plausible edges. Avoid generic edges (`RELATED_TO`, `CONNECTED_TO`, `ASSOCIATED_WITH`, `HAS`, `BELONGS_TO`). Use `DIRECTED EDGE` for asymmetric verbs and `UNDIRECTED EDGE` only for genuinely symmetric peer relationships.
 4. **Reserved names**: do NOT use a name (case-insensitive) matching any of the reserved structural types or GSQL keywords listed in the Inputs section. Pick a synonym or qualifier (e.g. `KeywordRecord`).
-5. **Attributes**: each `VERTEX` has **1–5** attributes; each `EDGE` has **0–3**. Primitive types only: `STRING`, `INT`, `UINT`, `DOUBLE`, `FLOAT`, `BOOL`, `DATETIME`. Do NOT include any id / primary-key field.
+5. **Attributes**: each `VERTEX` has **1–10** attributes; each `EDGE` has **0–5**. Primitive types only: `STRING`, `INT`, `UINT`, `DOUBLE`, `FLOAT`, `BOOL`, `DATETIME`. Do NOT include any id / primary-key field.
 6. **Comments**: every `VERTEX` and `EDGE` MUST be preceded by exactly one `// <one-sentence definition>` line.
-7. **Size**: produce **8–25** vertex types and **8–25** edge types.
+7. **Size**: produce at least 8 vertex types. Emit every edge type that rule 3 supports — no upper bound on edge count, but every edge must earn its place via 2+ concrete instances in the source documents.
 
 ## Example Output (illustrative — pick names that fit YOUR documents)
 

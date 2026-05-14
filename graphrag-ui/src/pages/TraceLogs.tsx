@@ -722,8 +722,17 @@ const TraceLogs: FC = () => {
 
   useEffect(() => {
     if (resolvedMessage || !messageId) return;
-    setLoading(true);
     const creds = sessionStorage.getItem("creds");
+    // Skip the API call when there are no creds — sending ``Basic null``
+    // makes FastAPI's HTTPBasic challenge with ``WWW-Authenticate: Basic``
+    // which triggers the browser's native auth popup. Better to show
+    // "no data" and let the user log back in via the normal flow.
+    if (!creds) {
+      setLoading(false);
+      setApiData(null);
+      return;
+    }
+    setLoading(true);
     fetch(`/ui/trace/${messageId}`, {
       headers: { Authorization: `Basic ${creds}` },
     })

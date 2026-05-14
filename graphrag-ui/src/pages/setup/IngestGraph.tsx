@@ -1070,10 +1070,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     </span>
                   </div>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                    Maximum upload per request: {MAX_UPLOAD_SIZE_MB} MB.{" "}
-                    {ingestGraphName
-                      ? `Upload destination: uploads/${ingestGraphName}/`
-                      : ""}
+                    Maximum upload per request: {MAX_UPLOAD_SIZE_MB} MB.
                   </p>
                   {selectedFiles && (() => {
                     const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".pdf", ".docx", ".doc", ".html", ".htm", ".json", ".csv", ".xlsx", ".xls", ".xml", ".jpeg", ".jpg", ".png", ".gif", ".jsonl"]);

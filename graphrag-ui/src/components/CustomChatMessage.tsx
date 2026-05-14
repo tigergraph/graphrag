@@ -13,6 +13,7 @@ import { IoIosCloseCircleOutline } from "react-icons/io";
 import { Interactions } from "./Interact";
 import { KnowledgeGraphPro } from "./graphs/KnowledgeGraphPro";
 import { KnowledgeTablPro } from "./tables/KnowledgeTablePro";
+import { useAlert } from "@/hooks/useAlert";
 interface IChatbotMessageProps {
   message?: any;
   withAvatar?: boolean;
@@ -172,6 +173,7 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   const [showResult, setShowResult] = useState<boolean>(false);
   const [showGraphVis, setShowGraphVis] = useState<boolean>(false);
   const [showTableVis, setShowTableVis] = useState<boolean>(false);
+  const [alert, alertDialog] = useAlert();
 
   // Error handling functions
   const handleShowExplain = () => {
@@ -191,7 +193,11 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   };
 
   const handleShowTable = () => {
-    if (message.response_type == 'history' || !message.query_sources?.result) {
+    // Allow opening the table view on history messages too — the
+    // chat-history backend preserves ``query_sources.result``, so
+    // there's no reason to deny it just because the message arrived
+    // from a reload rather than a fresh answer.
+    if (!message.query_sources?.result) {
       return false;
     }
     setShowTableVis(prev => !prev);
@@ -213,6 +219,7 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
 
   return (
     <>
+      {alertDialog}
       {typeof message === "string" ? (
         <div className="prose dark:prose-invert text-sm max-w-[230px] md:max-w-[80%] mt-7 mb-7">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message}</ReactMarkdown>
@@ -233,10 +240,40 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
               showExplain={handleShowExplain}
               showTable={handleShowTable}
               showGraph={handleShowGraph}
-              onViewTrace={() => {
+              onViewTrace={async () => {
                 const messageId = message.messageId || message.message_id || "";
-                // Store message in sessionStorage so the new tab reads it directly
-                // without needing an authenticated API fetch (which triggers browser auth dialog).
+                if (!messageId) {
+                  await alert("Trace log unavailable: this message has no trace ID.");
+                  return;
+                }
+                // Guard against a missing/invalid creds value. If we send
+                // ``Basic null`` (or other unparsable base64), FastAPI's
+                // HTTPBasic returns 401 + ``WWW-Authenticate: Basic`` and
+                // the browser pops up its native auth dialog. Better to
+                // tell the user to sign in again than to flash that popup.
+                const creds = sessionStorage.getItem("creds");
+                if (!creds) {
+                  await alert("Your session has expired. Please log in again.");
+                  return;
+                }
+                // Trace JSON lives under /code/trace_logs inside the
+                // graphrag container and is wiped on container recreate.
+                // Probe first so we never open a blank tab when the file is gone.
+                try {
+                  const probe = await fetch(`/ui/trace/${messageId}`, {
+                    method: "GET",
+                    headers: { Authorization: `Basic ${creds}` },
+                  });
+                  if (!probe.ok) {
+                    await alert("Trace log not found.");
+                    return;
+                  }
+                } catch (err) {
+                  await alert("Failed to reach the trace log endpoint. Please try again.");
+                  return;
+                }
+                // Pass the message via sessionStorage so the new tab can
+                // render without a second authenticated fetch.
                 sessionStorage.setItem(`trace_msg_${messageId}`, JSON.stringify(message));
                 window.open(`/trace/${messageId}`, "_blank");
               }}

@@ -147,7 +147,12 @@ llm_config_lock = asyncio.Lock()
 # Key: (username, password_hash) -> (timestamp, (global_roles, graph_roles))
 _role_cache: dict[tuple[str, str], tuple[float, tuple[list[str], dict[str, list[str]]]]] = {}
 _role_cache_lock = threading.Lock()
-_ROLE_CACHE_TTL = 60  # seconds
+# Role changes (granting/revoking TG roles) are infrequent operator
+# actions, and the cache key already includes a password hash so credential
+# changes are picked up immediately. Match the UI idle timeout (1 hour) —
+# past that point the user gets logged out anyway and the next sign-in
+# refreshes roles. Increase if your operator workflows can wait longer.
+_ROLE_CACHE_TTL = 60 * 60  # seconds (1 hour)
 
 def _normalize_roles(raw_roles: str) -> list[str]:
     cleaned = re.sub(r"[\[\]]", "", raw_roles).strip()
@@ -220,13 +225,25 @@ def _get_user_role_details(username: str, password: str) -> tuple[list[str], dic
         restppPort=db_config.get("restppPort"),
         graphname="",
     )
-    user_info = conn.gsql("SHOW USER")
-    result = _parse_user_roles_detail(user_info, username)
 
-    with _role_cache_lock:
-        _role_cache[cache_key] = (now, result)
-
-    return result
+    # Transient GSQL hiccups when the role-cache TTL expires were
+    # surfacing as 403 "Unable to verify user roles" banners on the
+    # config pages. Retry once with a short backoff before giving up —
+    # the next attempt usually succeeds when the blip is over.
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            user_info = conn.gsql("SHOW USER")
+            result = _parse_user_roles_detail(user_info, username)
+            with _role_cache_lock:
+                _role_cache[cache_key] = (now, result)
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(0.5)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _get_user_roles(username: str, password: str) -> list[str]:
@@ -593,13 +610,10 @@ def create_graph(
             }
 
 
-# Per-graph init state store. Init runs as a BackgroundTask so the HTTP
-# request returns immediately; the UI polls /initialize_status for
-# progress/completion. The browser used to drop the request after ~5
-# minutes of silent response on long inits (TG schema-change + retriever
-# installs can run for 10+ minutes), even though the backend completed
-# successfully — see ``ERR_TIMED_OUT`` reports during v1.4.0 schema-aware
-# init.
+# Per-graph init state store. Init runs as a BackgroundTask so the
+# HTTP request returns immediately; clients poll /initialize_status
+# for progress / completion. Avoids browser timeouts on long inits
+# (TG schema-change + retriever installs can run for 10+ minutes).
 _init_state: dict[str, dict] = {}
 _init_state_lock = threading.Lock()
 
@@ -614,6 +628,270 @@ def _set_init_state(graphname: str, **fields) -> None:
 def _get_init_state(graphname: str) -> dict:
     with _init_state_lock:
         return dict(_init_state.get(graphname, {"state": "unknown"}))
+
+
+def _build_proposal_from_live_schema(
+    conn,
+    vertex_descriptions: dict | None = None,
+    edge_descriptions: dict | None = None,
+):
+    """Build a :class:`SchemaProposal` from the graph's current
+    user-defined vertex/edge types, suitable for feeding into
+    :func:`apply_proposal` on the ``use_existing_schema`` path.
+
+    The proposal carries names + edge pairs and optionally
+    user-supplied descriptions (collected by the Precheck dialog or
+    seeded by the suggest-description LLM call). Diff against the live
+    schema is a no-op; ``apply_proposal`` only installs retrievers and
+    writes type metadata.
+    """
+    from common.db.schema_utils import (
+        EdgeProposal,
+        GRAPHRAG_STRUCTURAL_EDGE_TYPES,
+        GRAPHRAG_STRUCTURAL_VERTEX_TYPES,
+        SchemaProposal,
+        VertexProposal,
+        read_existing_schema,
+    )
+    structural_v = {t.casefold() for t in GRAPHRAG_STRUCTURAL_VERTEX_TYPES}
+    structural_e = {t.casefold() for t in GRAPHRAG_STRUCTURAL_EDGE_TYPES}
+
+    vd = vertex_descriptions or {}
+    ed = edge_descriptions or {}
+
+    existing = read_existing_schema(conn)
+    vertices = [
+        VertexProposal(name=v, description=(vd.get(v) or "").strip())
+        for v in sorted(existing.vertex_types)
+        if v.casefold() not in structural_v
+    ]
+    edges: list[EdgeProposal] = []
+    for et, pairs in existing.edge_pairs.items():
+        folded = et.casefold()
+        if folded in structural_e or folded.startswith("reverse_"):
+            continue
+        edges.append(
+            EdgeProposal(
+                name=et,
+                pairs=list(pairs),
+                directed=et in existing.directed_edges,
+                description=(ed.get(et) or "").strip(),
+            )
+        )
+    return SchemaProposal(vertices=vertices, edges=edges)
+
+
+def _check_init_eligibility(auth_b64: str, graphname: str) -> dict:
+    """Introspect *graphname* and categorize its current schema state.
+
+    Returns a dict with key ``state`` set to one of:
+
+    * ``"empty"`` — graph has no schema, or none of its existing types
+      are GraphRAG structural or user-defined. Safe to initialize from
+      scratch.
+    * ``"structural_present"`` — graph already has one or more
+      GraphRAG structural vertex/edge types. Caller must reject.
+      ``structural_types`` lists the offending names.
+    * ``"user_types_present"`` — graph has user-defined vertex/edge
+      types (none structural). Lists in ``user_vertex_types`` and
+      ``user_edge_types``. Caller decides whether to reject or adopt.
+
+    Graphs that don't yet exist in TigerGraph behave like ``empty`` —
+    ``getVertexTypes`` raises or returns empty for missing graphs, which
+    we treat as "no schema yet".
+    """
+    from common.db.schema_utils import (
+        GRAPHRAG_STRUCTURAL_VERTEX_TYPES,
+        GRAPHRAG_STRUCTURAL_EDGE_TYPES,
+    )
+    structural_v = {t.casefold() for t in GRAPHRAG_STRUCTURAL_VERTEX_TYPES}
+    structural_e = {t.casefold() for t in GRAPHRAG_STRUCTURAL_EDGE_TYPES}
+
+    try:
+        _, conn = ws_basic_auth(auth_b64, graphname)
+    except Exception:
+        # Graph doesn't exist (or auth failed mid-flight); treat as empty
+        # so the create_graph + init path handles it.
+        return {"state": "empty"}
+
+    try:
+        vertex_types = list(conn.getVertexTypes() or [])
+        edge_types = list(conn.getEdgeTypes() or [])
+    except Exception:
+        return {"state": "empty"}
+
+    structural_hits: list[str] = []
+    user_vts: list[str] = []
+    for vt in vertex_types:
+        if vt.casefold() in structural_v:
+            structural_hits.append(vt)
+        else:
+            user_vts.append(vt)
+    user_edges: list[str] = []
+    for et in edge_types:
+        folded = et.casefold()
+        if folded in structural_e or folded.startswith("reverse_"):
+            structural_hits.append(et)
+        else:
+            user_edges.append(et)
+
+    if structural_hits:
+        return {
+            "state": "structural_present",
+            "structural_types": sorted(set(structural_hits)),
+        }
+    if user_vts or user_edges:
+        return {
+            "state": "user_types_present",
+            "user_vertex_types": sorted(user_vts),
+            "user_edge_types": sorted(user_edges),
+        }
+    return {"state": "empty"}
+
+
+@router.get(route_prefix + "/{graphname}/check_init_eligibility")
+def check_init_eligibility(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Introspect *graphname* and return an init-eligibility verdict.
+
+    Used by the Initialize Knowledge Graph dialog's *Precheck* button to
+    surface the same categorization that ``POST /initialize_graph`` runs
+    internally, without starting an init job.
+
+    Response::
+
+        {
+          "state": "empty" | "user_types_present" | "structural_present",
+          "structural_types": [...],          # present when state=structural_present
+          "user_vertex_types": [...],         # present when state=user_types_present
+          "user_edge_types": [...],           # present when state=user_types_present
+          "user_edge_pairs": {edge: [[from, to], ...]}  # for description hints
+        }
+    """
+    cred_obj = creds[1]
+    auth_b64 = base64.b64encode(
+        f"{cred_obj.username}:{cred_obj.password}".encode()
+    ).decode()
+    result = _check_init_eligibility(auth_b64, graphname)
+    # Include edge endpoint pairs so the UI can show "FILED_BY (Filing → Company)"
+    # alongside each edge name in the description-edit dialog.
+    if result.get("state") == "user_types_present" and result.get("user_edge_types"):
+        try:
+            _, conn = ws_basic_auth(auth_b64, graphname)
+            from common.db.schema_utils import read_existing_schema
+            existing = read_existing_schema(conn)
+            pairs_map: dict[str, list[list[str]]] = {}
+            for et in result["user_edge_types"]:
+                pairs = existing.edge_pairs.get(et, set())
+                pairs_map[et] = [[s, t] for s, t in sorted(pairs)]
+            result["user_edge_pairs"] = pairs_map
+        except Exception:
+            result["user_edge_pairs"] = {}
+    return result
+
+
+@router.post(route_prefix + "/{graphname}/suggest_type_descriptions")
+def suggest_type_descriptions(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict, Body(...)],
+):
+    """Call the completion LLM to suggest one-sentence descriptions for a
+    set of vertex/edge type names.
+
+    Request body::
+
+        {
+          "vertex_types": ["Company", "Person", ...],
+          "edge_types":   [{"name": "FILED_BY", "from": "Filing", "to": "Company"}, ...]
+        }
+
+    Response::
+
+        {
+          "vertex_descriptions": {"Company": "...", "Person": "...", ...},
+          "edge_descriptions":   {"FILED_BY": "...", ...}
+        }
+
+    Best-effort: on any LLM failure, the corresponding keys are empty
+    strings so the dialog can still render an editable form.
+    """
+    from langchain_core.prompts import PromptTemplate
+    from langchain_core.output_parsers import JsonOutputParser
+
+    vertex_types = [
+        str(v) for v in (payload.get("vertex_types") or [])
+        if isinstance(v, str) and v
+    ]
+    edge_items = payload.get("edge_types") or []
+    edges_brief: list[str] = []
+    for e in edge_items:
+        if not isinstance(e, dict):
+            continue
+        name = e.get("name")
+        f = e.get("from") or ""
+        t = e.get("to") or ""
+        if not name:
+            continue
+        if f and t:
+            edges_brief.append(f"{name} (FROM {f}, TO {t})")
+        else:
+            edges_brief.append(str(name))
+
+    if not vertex_types and not edges_brief:
+        return {"vertex_descriptions": {}, "edge_descriptions": {}}
+
+    llm_service = get_llm_service(get_completion_config(graphname))
+    prompt = PromptTemplate.from_template(
+        "Given the following graph-schema type names from a domain knowledge "
+        "graph, write a concise one-sentence description for each. Use plain "
+        "English; describe what the type represents, not its attributes.\n\n"
+        "Vertex types: {vertex_types}\n"
+        "Edge types: {edge_types}\n\n"
+        "Return JSON with this exact shape:\n"
+        "{{\"vertex_descriptions\": {{\"<name>\": \"<one sentence>\"}}, "
+        "\"edge_descriptions\": {{\"<name>\": \"<one sentence>\"}}}}\n"
+    )
+    try:
+        parsed = llm_service.invoke_with_parser(
+            prompt,
+            JsonOutputParser(),
+            {
+                "vertex_types": ", ".join(vertex_types) or "(none)",
+                "edge_types": ", ".join(edges_brief) or "(none)",
+            },
+            caller_name="suggest_type_descriptions",
+        )
+    except Exception as exc:
+        LogWriter.warning(
+            f"suggest_type_descriptions LLM call failed for {graphname}: {exc}"
+        )
+        return {
+            "vertex_descriptions": {v: "" for v in vertex_types},
+            "edge_descriptions": {
+                (e.get("name") if isinstance(e, dict) else ""): ""
+                for e in edge_items
+            },
+        }
+
+    vds = parsed.get("vertex_descriptions") if isinstance(parsed, dict) else {}
+    eds = parsed.get("edge_descriptions") if isinstance(parsed, dict) else {}
+    return {
+        "vertex_descriptions": {
+            v: (vds.get(v) or "").strip() if isinstance(vds, dict) else ""
+            for v in vertex_types
+        },
+        "edge_descriptions": {
+            (e.get("name") if isinstance(e, dict) else ""): (
+                (eds.get(e.get("name")) or "").strip()
+                if isinstance(eds, dict) and isinstance(e, dict)
+                else ""
+            )
+            for e in edge_items
+        },
+    }
 
 
 @router.post(route_prefix + "/{graphname}/initialize_graph")
@@ -635,14 +913,32 @@ def init_graph(
     EntityType, RelationshipType, Content, Community, Image and their
     structural edges) is always created if missing.
 
-    Optionally accepts a JSON body with a domain-schema proposal:
+    Optionally accepts a JSON body:
 
-        {"schema_gsql": "ADD VERTEX Company(...); ..."}
+        {"schema_gsql": "ADD VERTEX Company(...); ...",
+         "use_existing_schema": true}
 
     When ``schema_gsql`` is provided, the pasted text is parsed
     permissively, structural-type collisions and dangling pairs are
     dropped, the diff against the current graph is computed, and the
     additive delta is applied. Existing types are never dropped.
+
+    When ``use_existing_schema`` is true, the graph's current
+    user-defined vertex/edge types are adopted as the domain schema
+    (retrievers are installed against them). Mutually exclusive with
+    ``schema_gsql`` — sending both is a 400.
+
+    Pre-flight eligibility check rejects:
+      * ``structural_present`` — graph already has GraphRAG structural
+        types (Entity / Document / etc.). User must manually drop them
+        before re-initializing.
+      * ``user_types_present_strict`` — graph has user-defined types
+        AND the caller asked for a new schema (``schema_gsql``). Mixing
+        a fresh schema on top of pre-existing types risks corruption;
+        force a manual cleanup.
+      * ``user_types_present`` — graph has user-defined types and the
+        caller asked for ``none`` (no domain schema). The UI re-submits
+        with ``use_existing_schema=true`` if the user confirms.
     """
     cur = _get_init_state(graphname)
     if cur.get("state") in {"queued", "running"}:
@@ -654,10 +950,67 @@ def init_graph(
     schema_gsql = (
         (payload or {}).get("schema_gsql") if isinstance(payload, dict) else None
     )
+    use_existing_schema = bool(
+        (payload or {}).get("use_existing_schema") if isinstance(payload, dict) else False
+    )
+    existing_vertex_descs = (payload or {}).get("vertex_descriptions") or {}
+    existing_edge_descs = (payload or {}).get("edge_descriptions") or {}
+    if not isinstance(existing_vertex_descs, dict):
+        existing_vertex_descs = {}
+    if not isinstance(existing_edge_descs, dict):
+        existing_edge_descs = {}
+    if schema_gsql and use_existing_schema:
+        raise HTTPException(
+            status_code=400,
+            detail="schema_gsql and use_existing_schema are mutually exclusive.",
+        )
     cred_obj = creds[1]
     auth_b64 = base64.b64encode(
         f"{cred_obj.username}:{cred_obj.password}".encode()
     ).decode()
+
+    # Pre-flight eligibility check: introspect the live schema and
+    # decide whether to proceed, reject, or adopt existing types.
+    eligibility = _check_init_eligibility(auth_b64, graphname)
+    if eligibility["state"] == "structural_present":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "structural_present",
+                "message": "Existing GraphRAG schema detected, manual cleanup required.",
+                "structural_types": eligibility["structural_types"],
+            },
+        )
+    if eligibility["state"] == "user_types_present":
+        user_types = eligibility["user_vertex_types"] + eligibility["user_edge_types"]
+        if schema_gsql:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "user_types_present_strict",
+                    "message": (
+                        f"Graph already has types: {', '.join(user_types)}. "
+                        "Manual cleanup required before extracting or applying a new schema."
+                    ),
+                    "user_vertex_types": eligibility["user_vertex_types"],
+                    "user_edge_types": eligibility["user_edge_types"],
+                },
+            )
+        if not use_existing_schema:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "user_types_present",
+                    "message": (
+                        f"Graph '{graphname}' already has types: "
+                        f"{', '.join(user_types)}. "
+                        "Use them as the domain schema, or cancel and clean manually."
+                    ),
+                    "user_vertex_types": eligibility["user_vertex_types"],
+                    "user_edge_types": eligibility["user_edge_types"],
+                },
+            )
+    # else: state == "empty" → proceed normally
 
     _set_init_state(
         graphname,
@@ -681,13 +1034,32 @@ def init_graph(
             schema_res, index_res, query_res = resp[0], resp[1], resp[2]
 
             domain_schema_status: dict | None = None
+            proposal = None
             if isinstance(schema_gsql, str) and schema_gsql.strip():
+                proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
+                proposal.drop_dangling_pairs()
+            elif use_existing_schema:
+                # Build a proposal from the live user-defined types so
+                # apply_proposal registers them as the domain schema and
+                # installs retrievers. The diff is a no-op because the
+                # types already exist; this run only writes type
+                # metadata (descriptions) and re-creates retriever queries.
+                proposal = _build_proposal_from_live_schema(
+                    conn,
+                    vertex_descriptions=existing_vertex_descs,
+                    edge_descriptions=existing_edge_descs,
+                )
+                LogWriter.info(
+                    f"Adopting existing schema as domain for {graphname}: "
+                    f"{len(proposal.vertices)} vertex types, "
+                    f"{len(proposal.edges)} edge types"
+                )
+
+            if proposal is not None:
                 _set_init_state(graphname, message="Applying domain schema")
                 LogWriter.info(
                     f"Applying domain schema proposal for graph: {graphname}"
                 )
-                proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
-                proposal.drop_dangling_pairs()
                 # Surface apply_proposal's sub-phases (schema-change,
                 # metadata, retriever installs) in the init-dialog
                 # poll instead of a static "Applying domain schema".
@@ -792,13 +1164,15 @@ async def convert_sample_files(
     to ``POST /ui/<graph>/extract_schema_from_jsonl``.
 
     No LLM call. Caps come from ``graphrag_config``:
-      * ``schema_max_sample_files`` (default 5)
-      * ``schema_max_total_mb`` (default 50)
+      * ``schema_max_sample_files`` (default 5) — file count
+      * ``schema_max_total_mb`` (default 50) — cumulative upload size
+
+    Per-file size is bounded only by the cumulative cap, so a single
+    file may use the full budget.
     """
     max_files = int(graphrag_config.get("schema_max_sample_files", 5))
     max_total_mb = int(graphrag_config.get("schema_max_total_mb", 50))
     max_total_bytes = max_total_mb * 1024 * 1024
-    per_file_max_bytes = 10 * 1024 * 1024  # 10 MB per file (Phase 1 cap)
 
     if len(files) > max_files:
         raise HTTPException(
@@ -817,13 +1191,6 @@ async def convert_sample_files(
     total_bytes = 0
     for f in files:
         data = await f.read()
-        if len(data) > per_file_max_bytes:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"File {f.filename} exceeds the 10 MB per-file cap."
-                ),
-            )
         total_bytes += len(data)
         if total_bytes > max_total_bytes:
             raise HTTPException(
@@ -3099,8 +3466,8 @@ async def save_graphrag_config(
 #: Per-prompt-type list of regex patterns that mark the start of the
 #: placeholder-variables block. The first matching pattern wins.
 #: Patterns are tried in order so the canonical Markdown headers
-#: (``## Inputs`` / ``## Data``) match first; legacy patterns are
-#: kept as fallbacks for any older saved files.
+#: (``## Inputs`` / ``## Data``) match first; additional patterns
+#: are kept as fallbacks for files saved under earlier formats.
 _TEMPLATE_VAR_MARKERS = {
     "chatbot_response": [
         r'(?ms)^##\s*Inputs\b.*$',
@@ -3314,12 +3681,12 @@ async def save_prompts(
                 if (llm_cfg.get("prompt_path") or "").rstrip("/") != new_path.rstrip("/"):
                     llm_cfg["prompt_path"] = new_path
                     changed = True
-                # Strip per-service copies — they're redundant once the
-                # top-level field is set. Keeps the config clean and
-                # avoids stale per-service entries shadowing future
-                # global changes. ``embedding_service`` is included
-                # only to scrub stray legacy entries; embedding models
-                # never read prompt_path.
+                # Strip per-service copies — they're redundant once
+                # the top-level field is set. Keeps the config clean
+                # and avoids stale per-service entries shadowing the
+                # global value. ``embedding_service`` is included
+                # only to scrub stray entries; embedding models never
+                # read prompt_path.
                 for svc_key in (
                     "completion_service",
                     "chat_service",

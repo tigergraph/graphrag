@@ -288,14 +288,14 @@ async def extract(
             strict_mode = bool(extractor.strict_mode)
 
         # ``has_domain_types`` distinguishes the two meta-layer cases:
-        #   Case 1: no domain types on the graph or extracted — the
-        #     EntityType / RelationshipType layer becomes a free-text
-        #     catalog of whatever the LLM emitted (legacy behaviour).
+        #   Case 1: no domain types on the graph — the EntityType /
+        #     RelationshipType layer becomes a free-text catalog of
+        #     whatever the LLM emitted.
         #   Case 2: at least one domain type exists — the meta-layer
-        #     is restricted to the declared / matched domain types
-        #     only. Non-matched extractions still write to the legacy
-        #     Entity / RELATIONSHIP layer but DO NOT pollute the meta
-        #     layer.
+        #     is restricted to declared / matched domain types only.
+        #     Non-matched extractions still write to the parallel
+        #     Entity / RELATIONSHIP layer but do not pollute the
+        #     meta layer.
         has_domain_types = bool(domain_vt_canonical) or bool(domain_edge_canonical)
 
         # upsert nodes and edges to the graph
@@ -320,9 +320,8 @@ async def extract(
                 domain_vt = domain_vt_canonical.get(node_type_lower)
 
                 # Strict mode: drop nodes whose type isn't in the
-                # schema. The legacy raw-Entity fallback applies only
-                # when strict_mode is off OR the node matches a domain
-                # type.
+                # schema. When strict_mode is off, non-matched nodes
+                # fall through to the parallel Entity layer.
                 if strict_mode and domain_vt is None:
                     continue
 
@@ -421,9 +420,25 @@ async def extract(
                     logger.debug(
                         f"extract writes domain {domain_vt} vert + CONTAINS_ENTITY pair"
                     )
-                    # Domain VTs don't carry the ECC bookkeeping
-                    # ``epoch_added`` attribute — sending it makes TG
-                    # reject the whole batch.
+                    # Coerce + filter LLM-emitted properties against
+                    # the domain VT's attribute schema before upsert.
+                    # The ``description`` key is for the Entity row and
+                    # never belongs on the domain VT row, so strip it
+                    # before coercion. Domain VTs don't carry the ECC
+                    # bookkeeping ``epoch_added`` attribute either —
+                    # sending it makes TG reject the whole batch.
+                    raw_props = {
+                        k: v for k, v in (node.properties or {}).items()
+                        if k != "description"
+                    }
+                    attr_schema = (
+                        extractor.entity_type_attributes.get(domain_vt)
+                        if isinstance(extractor, LLMEntityRelationshipExtractor)
+                        else {}
+                    )
+                    domain_attrs = util.coerce_attrs_for_schema(
+                        raw_props, attr_schema or {}
+                    )
                     await upsert_chan.put(
                         (
                             util.upsert_vertex,
@@ -431,7 +446,7 @@ async def extract(
                                 conn,
                                 domain_vt,
                                 v_id,
-                                {},
+                                domain_attrs,
                             ),
                         )
                     )
@@ -564,7 +579,7 @@ async def extract(
                 #   Case 2 (domain types exist) with valid_pair:
                 #     same writes but using canonical (declared) names.
                 #   Case 2 without valid_pair: skip the meta-layer
-                #     entirely. The legacy Entity / RELATIONSHIP write
+                #     entirely. The Entity / RELATIONSHIP write
                 #     above is the only persistence for unmatched
                 #     extractions.
                 #
@@ -686,6 +701,22 @@ async def extract(
                             (conn, canonical_tgt_vt, tgt_id, {}),
                         )
                     )
+                    # Coerce + filter LLM-emitted edge properties
+                    # against the edge's attribute schema. ``description``
+                    # is the Entity-side payload and never belongs on
+                    # the domain edge row.
+                    edge_raw_props = {
+                        k: v for k, v in (edge.properties or {}).items()
+                        if k != "description"
+                    }
+                    edge_attr_schema = (
+                        extractor.relationship_type_attributes.get(canonical_rel)
+                        if isinstance(extractor, LLMEntityRelationshipExtractor)
+                        else {}
+                    )
+                    domain_edge_attrs = util.coerce_edge_attrs_for_schema(
+                        edge_raw_props, edge_attr_schema or {}
+                    )
                     await upsert_chan.put(
                         (
                             util.upsert_edge,
@@ -696,7 +727,7 @@ async def extract(
                                 canonical_rel,
                                 canonical_tgt_vt,
                                 tgt_id,
-                                None,
+                                domain_edge_attrs or None,
                             ),
                         )
                     )

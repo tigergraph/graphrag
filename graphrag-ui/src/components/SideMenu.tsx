@@ -60,7 +60,15 @@ import { useNavigate } from "react-router-dom";
 const WS_HISTORY_URL = "/ui/user";
 const WS_CONVO_URL = "/ui/conversation";
 
-const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetConversationId?: any }) => {
+const SideMenu = ({
+  height,
+  setGetConversationId,
+  width,
+}: {
+  height?: string;
+  setGetConversationId?: any;
+  width?: number;
+}) => {
   const getTheme = useTheme().theme;
   // const [conhistory, setConHistory] = useState([]);
   const [conversationId, setConversationId] = useState<any[]>([]);
@@ -409,7 +417,8 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
 
   return (
     <div
-      className={`hidden md:block w-[320px] md:min-w-[320px] overflow-y-auto ${height ? "" : "h-[100vh]"}`}
+      className={`hidden md:block overflow-y-auto ${height ? "" : "h-[100vh]"}`}
+      style={{ width: width ?? 320, minWidth: width ?? 320 }}
     >
       <div className="border-b border-gray-300 dark:border-[#3D3D3D] h-[70px]">
         <div className="flex items-center">

@@ -44,16 +44,19 @@ export function useIdleTimeout(timeoutMs: number = DEFAULT_TIMEOUT_MS) {
 
     const onPause = () => pause();
     const onResume = () => resetTimer();
+    const onPing = () => resetTimer();
 
     events.forEach((event) => window.addEventListener(event, resetTimer));
     window.addEventListener("idle-timer-pause", onPause);
     window.addEventListener("idle-timer-resume", onResume);
+    window.addEventListener("idle-timer-ping", onPing);
     resetTimer(); // Start the timer
 
     return () => {
       events.forEach((event) => window.removeEventListener(event, resetTimer));
       window.removeEventListener("idle-timer-pause", onPause);
       window.removeEventListener("idle-timer-resume", onResume);
+      window.removeEventListener("idle-timer-ping", onPing);
       if (timerRef.current) {
         clearTimeout(timerRef.current);
       }
@@ -69,4 +72,14 @@ export function pauseIdleTimer() {
 /** Resume the idle timer (e.g. when a long-running operation completes). */
 export function resumeIdleTimer() {
   window.dispatchEvent(new Event("idle-timer-resume"));
+}
+
+/**
+ * Reset the idle timer without requiring a user UI event. Call this
+ * after a successful status poll for a long-running, user-initiated
+ * backend flow (init, ingest, rebuild) so the session stays alive
+ * while the user is watching progress.
+ */
+export function pingIdleTimer() {
+  window.dispatchEvent(new Event("idle-timer-ping"));
 }

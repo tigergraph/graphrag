@@ -161,12 +161,17 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
             });
             loadedMessages.push(userMessage);
           } else if (msg.role === "system") {
-            // Create bot message
+            // Carry message_id + feedback through so history bubbles can
+            // open the trace page and reflect the prior thumbs-up/down
+            // state after a reload.
             const botMessage = createChatBotMessage({
               content: msg.content || "",
               response_type: "history",
               query_sources: msg.query_sources,
               answered_question: msg.answered_question,
+              message_id: msg.message_id,
+              messageId: msg.message_id,
+              feedback: msg.feedback,
             });
             loadedMessages.push(botMessage);
           }

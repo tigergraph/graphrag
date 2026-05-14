@@ -150,67 +150,28 @@ async def init(
     if graph_cfg.get("extractor") == "graphrag":
         extractor = GraphExtractor()
     elif graph_cfg.get("extractor") == "llm":
-        # Read the live schema directly (without going through the
-        # proposal-flow SchemaProposal type). This intentionally
-        # supports graphs whose domain types were created outside of
-        # the proposal flow — admin UI, prior releases,
-        # external migration scripts — as long as the domain types
-        # and the EntityType / RelationshipType metadata are on the
-        # graph, ECC will use them.
+        # Read the live schema and pack it into the LLM-extractor
+        # bundle. ``build_allowed_schema_async`` filters structural
+        # types, reads attribute schemas + definitions, and renders the
+        # prompt text in one pass — same shape that query-side tools
+        # consume via ``render_schema_rep``.
         try:
-            existing = await read_existing_schema_async(conn)
+            from common.db.schema_utils import build_allowed_schema_async, AllowedSchema
+            allowed_schema = await build_allowed_schema_async(conn)
         except Exception as exc:
-            logger.warning(f"Loading live schema for extractor failed: {exc}")
-            from common.db.schema_utils import ExistingSchema
-            existing = ExistingSchema()
-        try:
-            entity_descs, rel_defs = await read_type_metadata_async(conn)
-        except Exception as exc:
-            logger.warning(f"Loading type metadata for extractor failed: {exc}")
-            entity_descs, rel_defs = {}, {}
+            logger.warning(f"Loading domain schema for extractor failed: {exc}")
+            from common.db.schema_utils import AllowedSchema
+            allowed_schema = AllowedSchema()
 
-        # Filter to domain types (drop GraphRAG structural types and
-        # any pair whose endpoint touches a structural vertex).
-        domain_vertex_types = sorted(
-            v for v in existing.vertex_types if not is_structural_type(v)
-        )
-        domain_edge_endpoints: dict = {}
-        for edge_name, pairs in existing.edge_pairs.items():
-            if is_structural_type(edge_name):
-                continue
-            domain_pairs = [
-                (s, t)
-                for s, t in pairs
-                if not is_structural_type(s) and not is_structural_type(t)
-            ]
-            if domain_pairs:
-                domain_edge_endpoints[edge_name] = domain_pairs
-        domain_edge_types = sorted(domain_edge_endpoints.keys())
-
-        # Trim the descriptions to domain types only.
-        domain_entity_defs = {
-            vt: entity_descs[vt]
-            for vt in domain_vertex_types
-            if entity_descs.get(vt)
-        }
-        domain_rel_defs = {
-            et: rel_defs[et]
-            for et in domain_edge_types
-            if rel_defs.get(et)
-        }
-
-        # Strict-mode comes from graphrag_config; default false (legacy
-        # fallback to plain Entity vertices for non-domain extractions).
+        # Strict mode (graphrag_config.strict_mode, default false):
+        # when false, entities whose type doesn't match a domain VT
+        # still land in the plain Entity vertex.
         strict_mode = bool(graph_cfg.get("strict_mode", False))
 
         extractor = LLMEntityRelationshipExtractor(
             get_llm_service(get_completion_config(conn.graphname)),
-            allowed_entity_types=domain_vertex_types or None,
-            allowed_relationship_types=domain_edge_types or None,
+            allowed_schema=allowed_schema,
             strict_mode=strict_mode,
-            entity_type_definitions=domain_entity_defs,
-            relationship_type_definitions=domain_rel_defs,
-            domain_edge_endpoints=domain_edge_endpoints,
         )
     else:
         raise ValueError("Invalid extractor type")
@@ -344,6 +305,159 @@ async def upsert_vertex(
     vertex_id = vertex_id.replace(" ", "_")
     attrs = map_attrs(attributes)
     await load_q.put(("vertices", (vertex_type, vertex_id, attrs)))
+
+
+def coerce_attrs_for_schema(
+    props: dict,
+    schema: dict,
+) -> dict:
+    """Coerce LLM-emitted properties to the declared TigerGraph types
+    and drop anything not in *schema*.
+
+    *props* — dict the LLM produced (values may be strings, numbers,
+    bools depending on the model and the schema instruction).
+    *schema* — ``{attr_name: tg_type}`` for the destination type
+    (vertex or edge). ``tg_type`` is one of TG's primitive type names
+    (case-insensitive): ``STRING``, ``INT``, ``UINT``, ``DOUBLE``,
+    ``FLOAT``, ``BOOL``, ``DATETIME``.
+
+    Behavior:
+        * Attribute names are matched case-insensitively; the canonical
+          schema spelling is used in the returned dict.
+        * Values that can't be coerced (e.g. a non-numeric string for
+          an INT field) are silently dropped — partial coverage is
+          fine; a single bad value shouldn't reject the whole upsert.
+        * Empty strings / ``None`` / sentinel values like ``"N/A"`` /
+          ``"unknown"`` are dropped before coercion to avoid writing
+          junk into typed columns.
+    """
+    if not props or not schema:
+        return {}
+    # Build a case-folded lookup once.
+    schema_ci = {k.casefold(): k for k in schema.keys()}
+    out: dict = {}
+    for raw_name, raw_val in props.items():
+        if not raw_name:
+            continue
+        canonical = schema_ci.get(str(raw_name).casefold())
+        if not canonical:
+            continue
+        tg_type = (schema.get(canonical) or "").upper()
+        coerced = _coerce_value(raw_val, tg_type)
+        if coerced is not None:
+            out[canonical] = coerced
+    return out
+
+
+_LLM_NULL_SENTINELS = frozenset({
+    "", "n/a", "na", "none", "null", "unknown", "not specified",
+    "not available", "not applicable", "tbd", "?",
+})
+
+
+# Primitive types accepted inside a TG DISCRIMINATOR(...) clause.
+# Discriminator attrs must be present in every upsert; the worker
+# fills missing values from ``_DISCRIMINATOR_FALLBACKS`` below.
+_DISCRIMINATOR_TYPES = frozenset({"INT", "UINT", "STRING", "DATETIME"})
+
+_DISCRIMINATOR_FALLBACKS: dict = {
+    "INT": 0,
+    "UINT": 0,
+    "STRING": "",
+    "DATETIME": "1970-01-01 00:00:00",
+}
+
+
+def coerce_edge_attrs_for_schema(
+    props: dict,
+    schema: dict,
+) -> dict:
+    """Coerce LLM-emitted properties for an edge upsert.
+
+    Same matching + coercion as the vertex helper; additionally fills
+    in default values for any discriminator-typed schema attribute
+    the LLM did not provide, since TG requires every discriminator
+    attribute to be present in each upsert.
+    """
+    if not schema:
+        return {}
+    coerced = coerce_attrs_for_schema(props or {}, schema)
+    # Fill missing discriminator-typed attributes with type defaults.
+    schema_ci = {k.casefold(): k for k in schema.keys()}
+    for ci_name, canonical in schema_ci.items():
+        if canonical in coerced:
+            continue
+        tg_type = (schema.get(canonical) or "").upper()
+        if tg_type in _DISCRIMINATOR_TYPES:
+            coerced[canonical] = _DISCRIMINATOR_FALLBACKS[tg_type]
+    return coerced
+
+
+def _coerce_value(value, tg_type: str):
+    """Convert *value* to the TG type *tg_type*. Returns ``None`` when
+    coercion would lose meaning (empty value, sentinel like ``"N/A"``,
+    or a parse failure). Caller drops attrs that come back ``None``.
+    """
+    if value is None:
+        return None
+    # Quick string-sentinel filter — applies to every type.
+    if isinstance(value, str):
+        s = value.strip()
+        if s.casefold() in _LLM_NULL_SENTINELS:
+            return None
+
+    try:
+        if tg_type in ("INT", "UINT"):
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)):
+                v = int(value)
+            else:
+                # Strip thousand separators and surrounding whitespace.
+                v = int(float(str(value).replace(",", "").strip()))
+            if tg_type == "UINT" and v < 0:
+                return None
+            return v
+        if tg_type in ("DOUBLE", "FLOAT"):
+            if isinstance(value, bool):
+                return float(value)
+            if isinstance(value, (int, float)):
+                return float(value)
+            return float(str(value).replace(",", "").strip())
+        if tg_type == "BOOL":
+            if isinstance(value, bool):
+                return value
+            s = str(value).strip().casefold()
+            if s in ("true", "yes", "y", "1"):
+                return True
+            if s in ("false", "no", "n", "0"):
+                return False
+            return None
+        if tg_type == "DATETIME":
+            # TG accepts 'YYYY-MM-DD HH:MM:SS' (space-separated).
+            # Accept ISO-8601 with 'T' and normalize.
+            s = str(value).strip()
+            if not s:
+                return None
+            try:
+                from dateutil import parser as _dt_parser  # type: ignore
+                dt = _dt_parser.parse(s)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                # Fall back to a few common formats without dateutil.
+                from datetime import datetime as _dt
+                for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S",
+                            "%Y-%m-%d %H:%M:%S", "%Y/%m/%d"):
+                    try:
+                        return _dt.strptime(s, fmt).strftime("%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        continue
+                return None
+        # STRING (and anything we don't recognize): coerce to str.
+        s = str(value).strip()
+        return s or None
+    except (ValueError, TypeError):
+        return None
 
 
 async def upsert_batch(conn: AsyncTigerGraphConnection, data: str):

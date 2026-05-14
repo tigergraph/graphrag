@@ -1260,7 +1260,7 @@ const LLMConfig = () => {
                   Completion Service
                 </h2>
                 <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-6">
-                  Configure the LLM provider used by the ECC service for document processing (entity extraction and community summarization)
+                  LLM provider for entity extraction and community summarization during document ingestion.
                 </p>
 
                 <div className="space-y-4">
@@ -1297,7 +1297,7 @@ const LLMConfig = () => {
                       }}
                     />
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Used by ECC for entity extraction and community summarization during document ingestion
+                      Model for entity extraction and community summarization.
                     </p>
                   </div>
                 </div>

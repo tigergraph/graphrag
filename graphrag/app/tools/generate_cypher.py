@@ -58,7 +58,8 @@ class GenerateCypher(BaseTool):
         # Schema rendering is shared with generate_gsql + the
         # question-mapping tools via ``schema_utils.render_schema_rep``;
         # we only keep the per-instance cache here.
-        text, schema_ver = render_schema_rep(self.conn)
+        snap = render_schema_rep(self.conn)
+        text, schema_ver = snap.schema_rep, snap.schema_version
         if schema_ver is not None and self.schema_ver == schema_ver and self.schema_rep:
             logger.info(f"Reusing existing schema rep for schema version {schema_ver}")
             return self.schema_rep

@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TagInput, TypeHint } from "@/components/ui/tag-input";
 import { Database, Loader2, RefreshCw, Upload } from "lucide-react";
-import { pauseIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
+import { pauseIdleTimer, resumeIdleTimer, pingIdleTimer } from "@/hooks/useIdleTimeout";
 import {
   Dialog,
   DialogContent,
@@ -20,11 +20,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useConfirm } from "@/hooks/useConfirm";
+import { useAlert } from "@/hooks/useAlert";
 import { useNavigate } from "react-router-dom";
 import IngestGraph from "./IngestGraph";
 
 const KGAdmin = () => {
   const [confirm, confirmDialog, isConfirmDialogOpen] = useConfirm();
+  const [showAlert, alertDialog] = useAlert();
   const navigate = useNavigate();
   const [availableGraphs, setAvailableGraphs] = useState<string[]>([]);
   
@@ -63,6 +65,10 @@ const KGAdmin = () => {
     setEdgeHints([]);
     setRenderedSchemaPrompt("");
     setIsInitComplete(false);
+    setPrecheckPassed(false);
+    setPrecheckMessage("");
+    setCollectedVertexDescs({});
+    setCollectedEdgeDescs({});
   };
 
   const handleRefreshDialogChange = (open: boolean) => {
@@ -81,6 +87,44 @@ const KGAdmin = () => {
   const [isInitializing, setIsInitializing] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [statusType, setStatusType] = useState<"success" | "error" | "">("");
+
+  // Graph-name combobox: dropdown of existing graphs that the user can
+  // filter by typing. The input is the single source of truth; clicking
+  // a row replaces the typed text.
+  const [graphNameDropdownOpen, setGraphNameDropdownOpen] = useState(false);
+  const graphNameComboRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!graphNameDropdownOpen) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (
+        graphNameComboRef.current &&
+        !graphNameComboRef.current.contains(e.target as Node)
+      ) {
+        setGraphNameDropdownOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [graphNameDropdownOpen]);
+
+  // Precheck state for the "none" schema-source path. The user clicks
+  // Precheck before Create & Init to either confirm the graph is new
+  // OR review/edit descriptions for pre-existing user-defined types.
+  const [precheckPassed, setPrecheckPassed] = useState(false);
+  const [precheckRunning, setPrecheckRunning] = useState(false);
+  const [precheckMessage, setPrecheckMessage] = useState("");
+  // Descriptions collected from the description-edit dialog. When non-empty,
+  // the Create & Init submission carries use_existing_schema=true and these
+  // maps so the backend stamps them onto EntityType / RelationshipType.
+  const [collectedVertexDescs, setCollectedVertexDescs] = useState<Record<string, string>>({});
+  const [collectedEdgeDescs, setCollectedEdgeDescs] = useState<Record<string, string>>({});
+  // Description-edit dialog state
+  const [descDialogOpen, setDescDialogOpen] = useState(false);
+  const [descDialogVertices, setDescDialogVertices] = useState<string[]>([]);
+  const [descDialogEdges, setDescDialogEdges] = useState<Array<{ name: string; from: string; to: string }>>([]);
+  const [descDialogVertexDescs, setDescDialogVertexDescs] = useState<Record<string, string>>({});
+  const [descDialogEdgeDescs, setDescDialogEdgeDescs] = useState<Record<string, string>>({});
+  const [descDialogLoading, setDescDialogLoading] = useState(false);
   // True only after the full create-graph + initialize-graph round
   // succeeds. The "Done" button gates on this — extraction success
   // alone (statusType === "success" mid-flow) must NOT show Done,
@@ -374,6 +418,15 @@ const KGAdmin = () => {
       });
   }, [initializeDialogOpen]);
 
+  // Any change to the graph name or schema source invalidates a prior
+  // precheck — the next Create & Init must re-run the eligibility flow.
+  useEffect(() => {
+    setPrecheckPassed(false);
+    setPrecheckMessage("");
+    setCollectedVertexDescs({});
+    setCollectedEdgeDescs({});
+  }, [graphName, schemaSource]);
+
   const handleSampleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const list = Array.from(e.target.files || []);
     if (list.length > maxSampleFiles) {
@@ -521,6 +574,104 @@ const KGAdmin = () => {
     }
   };
 
+  // Precheck for the "none" schema-source path.
+  //   * Empty graph  → precheckPassed = true, Create & Init becomes clickable.
+  //   * Structural   → alert "manual cleanup required", precheckPassed stays false.
+  //   * User types   → LLM seeds descriptions, description-edit dialog opens.
+  const handlePrecheck = async () => {
+    if (!graphName.trim()) {
+      setPrecheckMessage("Please enter a graph name first.");
+      return;
+    }
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(graphName)) {
+      setPrecheckMessage("Invalid graph name — must start with a letter or underscore.");
+      return;
+    }
+    setPrecheckRunning(true);
+    setPrecheckMessage("");
+    try {
+      const creds = sessionStorage.getItem("creds");
+      const eligResp = await fetch(`/ui/${graphName}/check_init_eligibility`, {
+        headers: { Authorization: `Basic ${creds}` },
+      });
+      const elig = await eligResp.json();
+      if (!eligResp.ok) {
+        setPrecheckMessage(`Precheck failed: ${elig?.detail || eligResp.statusText}`);
+        return;
+      }
+      if (elig.state === "structural_present") {
+        await showAlert(
+          "Existing GraphRAG schema detected, manual cleanup required."
+        );
+        setPrecheckPassed(false);
+        setPrecheckMessage("Existing GraphRAG schema present — cannot initialize.");
+        return;
+      }
+      if (elig.state === "empty") {
+        setPrecheckPassed(true);
+        setPrecheckMessage("Graph is empty or new — ready to initialize.");
+        return;
+      }
+      // state === "user_types_present" — seed descriptions and open the
+      // edit dialog. The Create & Init button stays disabled until the
+      // user accepts.
+      const vts: string[] = elig.user_vertex_types || [];
+      const ets: string[] = elig.user_edge_types || [];
+      const pairsMap: Record<string, string[][]> = elig.user_edge_pairs || {};
+      const edges = ets.map((name) => {
+        const pair = (pairsMap[name] || [])[0] || ["", ""];
+        return { name, from: pair[0] || "", to: pair[1] || "" };
+      });
+      setDescDialogVertices(vts);
+      setDescDialogEdges(edges);
+      setDescDialogVertexDescs(Object.fromEntries(vts.map((v) => [v, ""])));
+      setDescDialogEdgeDescs(Object.fromEntries(edges.map((e) => [e.name, ""])));
+      setDescDialogOpen(true);
+      setDescDialogLoading(true);
+      // LLM call to seed each description; best-effort. The dialog stays
+      // editable regardless.
+      try {
+        const sugResp = await fetch(
+          `/ui/${graphName}/suggest_type_descriptions`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Basic ${creds}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              vertex_types: vts,
+              edge_types: edges,
+            }),
+          }
+        );
+        if (sugResp.ok) {
+          const sug = await sugResp.json();
+          setDescDialogVertexDescs((prev) => ({ ...prev, ...(sug.vertex_descriptions || {}) }));
+          setDescDialogEdgeDescs((prev) => ({ ...prev, ...(sug.edge_descriptions || {}) }));
+        }
+      } catch {
+        // Silent — leave descriptions blank for the user to fill in.
+      } finally {
+        setDescDialogLoading(false);
+      }
+    } catch (err: any) {
+      setPrecheckMessage(`Precheck failed: ${err.message}`);
+    } finally {
+      setPrecheckRunning(false);
+    }
+  };
+
+  const handleAcceptDescriptions = () => {
+    setCollectedVertexDescs({ ...descDialogVertexDescs });
+    setCollectedEdgeDescs({ ...descDialogEdgeDescs });
+    setPrecheckPassed(true);
+    setPrecheckMessage(
+      `Adopting ${descDialogVertices.length} vertex and ${descDialogEdges.length} edge type${descDialogEdges.length === 1 ? "" : "s"} from existing schema.`
+    );
+    setDescDialogOpen(false);
+  };
+
   // Initialize Graph
   const handleInitializeGraph = async () => {
     if (!graphName.trim()) {
@@ -585,17 +736,22 @@ const KGAdmin = () => {
       }
 
       setStatusMessage("Step 2/2: Submitting GraphRAG schema initialization...");
-      const initBody: { schema_gsql?: string } = {};
+      const initBody: Record<string, any> = {};
+      const adoptingExisting =
+        schemaSource === "none" &&
+        (Object.keys(collectedVertexDescs).length > 0 ||
+          Object.keys(collectedEdgeDescs).length > 0);
       if (schemaSource === "gsql" && pasteGsql.trim()) {
         initBody.schema_gsql = pasteGsql;
       } else if (schemaSource === "samples" && draftProposal) {
         const gsql = draftProposalToGsql(draftProposal).trim();
         if (gsql) initBody.schema_gsql = gsql;
+      } else if (adoptingExisting) {
+        initBody.use_existing_schema = true;
+        initBody.vertex_descriptions = collectedVertexDescs;
+        initBody.edge_descriptions = collectedEdgeDescs;
       }
-      // Submit the init job. The backend kicks off a BackgroundTask
-      // and returns 202 immediately so the browser doesn't drop the
-      // request mid-flight on long inits (TG schema-change + retriever
-      // installs can take 10+ minutes).
+
       const initResponse = await fetch(`/ui/${graphName}/initialize_graph`, {
         method: "POST",
         headers: {
@@ -604,13 +760,28 @@ const KGAdmin = () => {
         },
         body: JSON.stringify(initBody),
       });
-
       const initData = await initResponse.json();
 
+      // Server-side preflight may still reject (e.g. graph state
+      // changed between Precheck and Create & Init, or the caller
+      // skipped Precheck on samples/gsql with pre-existing types).
+      if (initResponse.status === 409 && initData?.detail?.reason) {
+        const message: string = initData.detail.message;
+        await showAlert(message);
+        setStatusMessage(message);
+        setStatusType("error");
+        setIsInitializing(false);
+        return;
+      }
+
       if (!initResponse.ok) {
-        throw new Error(
-          initData.detail || `Failed to submit init: ${initResponse.statusText}`
-        );
+        const detail = initData?.detail;
+        const msg = typeof detail === "string"
+          ? detail
+          : detail?.message
+            ? detail.message
+            : `Failed to submit init: ${initResponse.statusText}`;
+        throw new Error(msg);
       }
 
       if (initData.status !== "submitted") {
@@ -646,6 +817,10 @@ const KGAdmin = () => {
           continue;
         }
         if (!statusResp.ok) continue;
+        // Successful status poll on a user-initiated long flow — keep
+        // the UI idle timer alive so the user isn't logged out while
+        // watching the init progress.
+        pingIdleTimer();
         const statusData = await statusResp.json();
         if (statusData.message) {
           setStatusMessage(`Step 2/2: ${statusData.message}`);
@@ -760,6 +935,9 @@ const KGAdmin = () => {
         isRebuildRunningRef.current = isCurrentlyRunning;
 
         if (isCurrentlyRunning) {
+          // Long-running flow with active user interest — keep the
+          // UI idle timer alive on each successful poll.
+          pingIdleTimer();
           setPollingActive(true);
           const startTime = statusData.started_at
             ? new Date(statusData.started_at * 1000).toLocaleString()
@@ -796,7 +974,7 @@ const KGAdmin = () => {
     }
   };
 
-  // Refresh Graph
+  // Rebuild Graph
   const handleRefreshGraph = async () => {
     if (!refreshGraphName) {
       setRefreshMessage("Please select a graph");
@@ -813,7 +991,7 @@ const KGAdmin = () => {
     setIsRefreshing(true);
 
     const shouldRefresh = await confirm(
-      `Are you sure you want to refresh the knowledge graph "${refreshGraphName}"? This will rebuild the graph content.`
+      `Are you sure you want to rebuild the knowledge graph "${refreshGraphName}"? This will rerun entity extraction and community detection.`
     );
     if (!shouldRefresh) {
       setRefreshMessage("Operation cancelled by user.");
@@ -858,7 +1036,7 @@ const KGAdmin = () => {
           return;
         }
         throw new Error(
-          errorData.detail || `Failed to refresh graph: ${response.statusText}`
+          errorData.detail || `Failed to rebuild graph: ${response.statusText}`
         );
       }
 
@@ -866,7 +1044,7 @@ const KGAdmin = () => {
       console.log("Refresh response:", data);
 
       setRefreshMessage(
-        `✅ Refresh submitted successfully! The knowledge graph "${refreshGraphName}" is being rebuilt.`
+        `✅ Rebuild submitted successfully! The knowledge graph "${refreshGraphName}" is being rebuilt.`
       );
       setIsRebuildRunning(true);
       isRebuildRunningRef.current = true;
@@ -963,17 +1141,17 @@ const KGAdmin = () => {
             </div>
           </div>
 
-          {/* Refresh Card */}
+          {/* Rebuild Card */}
           <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
             <div className="mb-4">
               <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
                 <RefreshCw className="h-6 w-6 text-tigerOrange" />
               </div>
               <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
-                Refresh Knowledge Graph
+                Rebuild Knowledge Graph
               </h2>
               <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
-                Process new documents in your knowledge graph to refresh its content.
+                Process documents and rerun entity extraction + community detection.
               </p>
             </div>
             <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
@@ -982,7 +1160,7 @@ const KGAdmin = () => {
                 className="gradient w-full text-white"
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
-                Refresh Graph
+                Rebuild Graph
               </Button>
             </div>
           </div>
@@ -1007,18 +1185,91 @@ const KGAdmin = () => {
                 <label className="block text-sm font-medium mb-2 text-black dark:text-white">
                   Knowledge Graph Name
                 </label>
-                <Input
-                  placeholder="e.g., MyKnowledgeGraph"
-                  value={graphName}
-                  onChange={(e) => setGraphName(e.target.value)}
-                  disabled={isInitializing || isExtractingSchema}
-                  className="dark:border-[#3D3D3D] dark:bg-shadeA"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !isInitializing && !isExtractingSchema) {
-                      handleInitializeGraph();
+                <div ref={graphNameComboRef} className="relative">
+                  {/* Wrapper carries the visual styling (matching the
+                      SelectTrigger used by other graph selectors); the
+                      inner <input> is borderless/transparent so its
+                      native text rendering can't clip the underscore
+                      glyph against the bottom border. */}
+                  <div
+                    className={
+                      "flex h-11 w-full items-center rounded-md border border-input " +
+                      "bg-background dark:border-[#3D3D3D] dark:bg-shadeA " +
+                      "px-3 text-sm focus-within:ring-2 focus-within:ring-ring " +
+                      "focus-within:ring-offset-2 ring-offset-background"
                     }
-                  }}
-                />
+                  >
+                    <input
+                      type="text"
+                      placeholder="Type a new name or pick an existing graph"
+                      value={graphName}
+                      onChange={(e) => {
+                        setGraphName(e.target.value);
+                        if (!graphNameDropdownOpen) setGraphNameDropdownOpen(true);
+                      }}
+                      onFocus={() => setGraphNameDropdownOpen(true)}
+                      disabled={isInitializing || isExtractingSchema}
+                      className="flex-1 bg-transparent outline-none border-0 p-0 text-sm text-black dark:text-white placeholder:text-muted-foreground disabled:opacity-50"
+                      // appearance:none disables Chrome's native input
+                      // rendering (which on macOS clips descenders like
+                      // '_' even when the wrapper has plenty of room).
+                      // lineHeight + a slightly taller wrapper finish
+                      // the job of making the underscore glyph fully
+                      // visible in long names.
+                      style={{
+                        WebkitAppearance: "none",
+                        appearance: "none",
+                        lineHeight: "1.5",
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !isInitializing && !isExtractingSchema) {
+                          handleInitializeGraph();
+                        } else if (e.key === "Escape") {
+                          setGraphNameDropdownOpen(false);
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setGraphNameDropdownOpen((o) => !o)}
+                      disabled={
+                        isInitializing ||
+                        isExtractingSchema ||
+                        availableGraphs.length === 0
+                      }
+                      aria-label="Toggle existing graphs"
+                      className="ml-2 p-0.5 text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                  </div>
+                  {graphNameDropdownOpen && (() => {
+                    const q = graphName.trim().toLowerCase();
+                    const filtered = q
+                      ? availableGraphs.filter((g) => g.toLowerCase().includes(q))
+                      : availableGraphs;
+                    if (filtered.length === 0) return null;
+                    return (
+                      <div className="absolute top-full left-0 right-0 mt-1 max-h-60 overflow-y-auto rounded-md border border-gray-300 dark:border-[#3D3D3D] bg-white dark:bg-shadeA shadow-md z-50">
+                        {filtered.map((g) => (
+                          <button
+                            key={g}
+                            type="button"
+                            onClick={() => {
+                              setGraphName(g);
+                              setGraphNameDropdownOpen(false);
+                            }}
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 text-black dark:text-white"
+                          >
+                            {g}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
               </div>
 
               <div className="mb-4">
@@ -1071,6 +1322,45 @@ const KGAdmin = () => {
                     <span>Paste GSQL schema</span>
                   </label>
                 </div>
+
+                {schemaSource === "none" && (
+                  <div className="space-y-2 mt-3">
+                    {precheckMessage ? (
+                      <p
+                        className={`text-xs ${
+                          precheckPassed
+                            ? "text-green-600 dark:text-green-400"
+                            : "text-amber-600 dark:text-amber-400"
+                        }`}
+                      >
+                        {precheckMessage}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Click <strong>Check existing schema</strong> to verify the graph before initializing.
+                      </p>
+                    )}
+                    <Button
+                      onClick={handlePrecheck}
+                      disabled={
+                        isInitializing ||
+                        isExtractingSchema ||
+                        precheckRunning ||
+                        !graphName.trim()
+                      }
+                      className="gradient text-white"
+                    >
+                      {precheckRunning ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Checking…
+                        </>
+                      ) : (
+                        <>Check existing schema</>
+                      )}
+                    </Button>
+                  </div>
+                )}
 
                 {schemaSource === "samples" && (
                   <div className="space-y-3">
@@ -1911,6 +2201,11 @@ const KGAdmin = () => {
                       isInitializing ||
                       isExtractingSchema ||
                       !graphName.trim() ||
+                      // "None" requires a successful precheck before
+                      // Create & Init becomes clickable. Precheck
+                      // verifies the graph is new or, if it has
+                      // existing types, collects descriptions for them.
+                      (schemaSource === "none" && !precheckPassed) ||
                       // "Generate from sample documents" is only ready
                       // to submit once the LLM has returned a draft
                       // proposal with at least one vertex.
@@ -1938,6 +2233,118 @@ const KGAdmin = () => {
                   </Button>
                 </>
               )}
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Description-edit dialog for the adopt-existing path. Names
+            are read-only; the user reviews/edits LLM-seeded descriptions
+            and clicks Accept to unlock Create & Initialize. */}
+        <Dialog
+          open={descDialogOpen}
+          onOpenChange={(open) => {
+            if (!open) setDescDialogOpen(false);
+          }}
+        >
+          <DialogContent
+            className="sm:max-w-[760px] max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+            onInteractOutside={(e) => e.preventDefault()}
+          >
+            <DialogHeader>
+              <DialogTitle className="text-black dark:text-white">
+                Use existing schema as domain types
+              </DialogTitle>
+              <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
+                Review and edit descriptions for each existing type. They will be saved with the graph and used by query and extraction tools.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="py-4 space-y-4">
+              {descDialogLoading && (
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  <Loader2 className="h-3 w-3 mr-2 animate-spin inline" />
+                  Generating description suggestions...
+                </p>
+              )}
+
+              {descDialogVertices.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-semibold mb-2 text-black dark:text-white">
+                    Vertex types
+                  </h3>
+                  <div className="space-y-2">
+                    {descDialogVertices.map((v) => (
+                      <div key={v} className="grid grid-cols-[10rem_1fr] gap-3 items-start">
+                        <span className="text-sm font-mono text-black dark:text-white pt-2 break-all">
+                          {v}
+                        </span>
+                        <Input
+                          value={descDialogVertexDescs[v] || ""}
+                          onChange={(e) =>
+                            setDescDialogVertexDescs((prev) => ({
+                              ...prev,
+                              [v]: e.target.value,
+                            }))
+                          }
+                          placeholder="One-sentence description"
+                          className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {descDialogEdges.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-semibold mb-2 text-black dark:text-white">
+                    Edge types
+                  </h3>
+                  <div className="space-y-2">
+                    {descDialogEdges.map((e) => (
+                      <div key={e.name} className="grid grid-cols-[10rem_1fr] gap-3 items-start">
+                        <div className="text-sm pt-2">
+                          <div className="font-mono text-black dark:text-white break-all">
+                            {e.name}
+                          </div>
+                          {e.from && e.to && (
+                            <div className="text-xs text-gray-500 dark:text-gray-400">
+                              {e.from} → {e.to}
+                            </div>
+                          )}
+                        </div>
+                        <Input
+                          value={descDialogEdgeDescs[e.name] || ""}
+                          onChange={(ev) =>
+                            setDescDialogEdgeDescs((prev) => ({
+                              ...prev,
+                              [e.name]: ev.target.value,
+                            }))
+                          }
+                          placeholder="One-sentence description"
+                          className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setDescDialogOpen(false)}
+                className="dark:border-[#3D3D3D]"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleAcceptDescriptions}
+                className="gradient text-white"
+              >
+                Accept
+              </Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -1975,23 +2382,23 @@ const KGAdmin = () => {
           </DialogContent>
         </Dialog>
 
-        {/* Refresh Dialog */}
+        {/* Rebuild Dialog */}
         <Dialog open={refreshDialogOpen} onOpenChange={handleRefreshDialogChange}>
           <DialogContent
             className="sm:max-w-[500px] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>
-              <DialogTitle className="text-black dark:text-white">Refresh Knowledge Graph</DialogTitle>
+              <DialogTitle className="text-black dark:text-white">Rebuild Knowledge Graph</DialogTitle>
               <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
-                Rebuild the graph content and rerun community detection for your knowledge graph
+                Process documents and rerun entity extraction + community detection for your knowledge graph.
               </DialogDescription>
             </DialogHeader>
 
             <div className="py-4 space-y-4">
               <div>
                 <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                  Select Graph to Refresh
+                  Select Graph to Rebuild
                 </label>
                 <Select
                   value={refreshGraphName}
@@ -2079,7 +2486,7 @@ const KGAdmin = () => {
                 ) : (
                   <>
                     <RefreshCw className="h-4 w-4 mr-2" />
-                    Confirm & Refresh
+                    Confirm & Rebuild
                   </>
                 )}
               </Button>
@@ -2088,6 +2495,7 @@ const KGAdmin = () => {
         </Dialog>
       </div>
       {confirmDialog}
+      {alertDialog}
     </div>
   );
 };

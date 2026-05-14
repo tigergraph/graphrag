@@ -47,7 +47,7 @@ export function ModeToggle() {
   };
 
   return (
-    <div className="absolute right-4 top-[13px] flex items-center gap-2">
+    <div className="fixed right-4 top-[13px] z-[60] flex items-center gap-2">
       {!isLoginRoute && rolesLoaded && canAccessSetup && (
         <Button 
           variant="outline" 
