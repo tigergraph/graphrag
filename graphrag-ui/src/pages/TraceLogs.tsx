@@ -710,12 +710,7 @@ const TraceLogs: FC = () => {
   const stateMessage = location.state?.message;
   const stateUserQuery = location.state?.userQuery;
 
-  // Check sessionStorage for message stored by the opener tab before API fetch.
-  const sessionKey = messageId ? `trace_msg_${messageId}` : null;
-  const sessionRaw = sessionKey ? sessionStorage.getItem(sessionKey) : null;
-  const sessionMessage = sessionRaw ? JSON.parse(sessionRaw) : null;
-
-  const resolvedMessage = stateMessage || sessionMessage;
+  const resolvedMessage = stateMessage;
 
   const [apiData, setApiData] = useState<any>(null);
   const [loading, setLoading] = useState(!resolvedMessage);
@@ -751,7 +746,7 @@ const TraceLogs: FC = () => {
     response_type: apiData.response_type,
     query_sources: apiData.query_sources,
   } : null);
-  const userQuery = stateUserQuery || sessionMessage?.userQuery || apiData?.user_query;
+  const userQuery = stateUserQuery || apiData?.user_query;
 
   const trace = useMemo(
     () => (message ? buildTraceFromMessage(message, userQuery) : null),

@@ -272,9 +272,6 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
                   await alert("Failed to reach the trace log endpoint. Please try again.");
                   return;
                 }
-                // Pass the message via sessionStorage so the new tab can
-                // render without a second authenticated fetch.
-                sessionStorage.setItem(`trace_msg_${messageId}`, JSON.stringify(message));
                 window.open(`/trace/${messageId}`, "_blank");
               }}
             />
