@@ -88,6 +88,14 @@
   .react-chatbot-kit-chat-input-container {
     @apply !bg-background !border-[#3D3D3D];
   }
+  /* Block submitting another question while the previous answer is
+     still streaming. ActionProvider toggles ``chat-streaming`` on
+     ``document.body`` at stream start / end. */
+  body.chat-streaming .react-chatbot-kit-chat-input-container,
+  body.chat-streaming .react-chatbot-kit-chat-input-form {
+    pointer-events: none;
+    opacity: 0.5;
+  }
   .open-dg {
     @apply bg-background;
   }

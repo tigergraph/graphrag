@@ -1,6 +1,8 @@
 import { FC, useState, useMemo, useEffect } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import {
   LuArrowLeft,
   LuChevronDown,
@@ -702,21 +704,40 @@ const TokenOverviewPanel: FC<{ trace: TraceData }> = ({ trace }) => {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
-const TraceLogs: FC = () => {
+interface TraceLogsProps {
+  // When provided, the component renders inside a Dialog and uses these
+  // props instead of route params / location state. Closing the dialog
+  // calls onClose. When omitted, the component renders as a full page
+  // route (the original ``/trace/:messageId`` behaviour, kept for
+  // direct-link backward compat).
+  messageIdProp?: string;
+  onClose?: () => void;
+}
+
+const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { messageId } = useParams<{ messageId: string }>();
+  const params = useParams<{ messageId: string }>();
+  const messageId = messageIdProp || params.messageId;
+  const isDialog = !!onClose;
 
-  const stateMessage = location.state?.message;
-  const stateUserQuery = location.state?.userQuery;
-
-  const resolvedMessage = stateMessage;
+  const stateMessage = isDialog ? null : location.state?.message;
+  const stateUserQuery = isDialog ? null : location.state?.userQuery;
 
   const [apiData, setApiData] = useState<any>(null);
-  const [loading, setLoading] = useState(!resolvedMessage);
+  const [loading, setLoading] = useState(true);
 
+  // Always fetch the trace JSON — the backend writes it on every response,
+  // so the API is the canonical source. Falls back to the navigation-state
+  // message only if the API call fails (e.g. trace file got wiped by
+  // container recreation). Page-mode messages restored from chat history
+  // don't carry the full ``query_sources.agent_steps`` payload that the
+  // trace view needs, so we can't trust ``stateMessage`` alone.
   useEffect(() => {
-    if (resolvedMessage || !messageId) return;
+    if (!messageId) {
+      setLoading(false);
+      return;
+    }
     const creds = sessionStorage.getItem("creds");
     // Skip the API call when there are no creds — sending ``Basic null``
     // makes FastAPI's HTTPBasic challenge with ``WWW-Authenticate: Basic``
@@ -738,15 +759,15 @@ const TraceLogs: FC = () => {
       .then((data) => setApiData(data))
       .catch(() => setApiData(null))
       .finally(() => setLoading(false));
-  }, [messageId, resolvedMessage]);
+  }, [messageId]);
 
-  const message = resolvedMessage || (apiData ? {
+  const message = apiData ? {
     content: apiData.natural_language_response,
     response_time: apiData.response_time,
     response_type: apiData.response_type,
     query_sources: apiData.query_sources,
-  } : null);
-  const userQuery = stateUserQuery || apiData?.user_query;
+  } : stateMessage;
+  const userQuery = apiData?.user_query || stateUserQuery;
 
   const trace = useMemo(
     () => (message ? buildTraceFromMessage(message, userQuery) : null),
@@ -754,12 +775,14 @@ const TraceLogs: FC = () => {
   );
 
   const handleBack = () => {
-    // Trace opens in a new tab — closing it returns the user to the chat tab.
-    // If the tab cannot be closed (e.g. opened via direct link), fall back to navigate.
-    if (window.opener || window.history.length <= 1) {
-      window.close();
-    } else {
+    if (onClose) {
+      onClose();
+      return;
+    }
+    if (window.history.length > 1) {
       navigate(-1);
+    } else {
+      navigate("/chat");
     }
   };
 
@@ -776,50 +799,74 @@ const TraceLogs: FC = () => {
     URL.revokeObjectURL(url);
   };
 
+  const wrap = (inner: JSX.Element) => {
+    if (isDialog) {
+      return (
+        <Dialog open onOpenChange={(o) => !o && onClose && onClose()}>
+          <DialogContent
+            className="w-fit min-w-[400px] max-w-[min(95vw,768px)] max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] p-0"
+            onInteractOutside={(e) => e.preventDefault()}
+            onOpenAutoFocus={(e) => e.preventDefault()}
+          >
+            {inner}
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    return <div className="min-h-screen bg-background">{inner}</div>;
+  };
+
   if (loading) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
+    return wrap(
+      <div className="flex items-center justify-center py-16">
         <p className="text-muted-foreground">Loading trace data...</p>
       </div>
     );
   }
 
   if (!trace) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
+    return wrap(
+      <div className="flex items-center justify-center py-16">
         <p className="text-muted-foreground">Trace data not found.</p>
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <div className="sticky top-0 z-10 bg-background border-b border-border">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div>
-            <button
-              onClick={handleBack}
-              className="flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400 hover:underline mb-1"
-            >
-              <LuArrowLeft className="w-4 h-4" />
-              Close &amp; Back to Chat
-            </button>
-            <h1 className="text-xl font-semibold">Trace Logs</h1>
-          </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleDownload}
-              className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-            >
-              <LuDownload className="w-4 h-4" />
-              Download
-            </button>
+  return wrap(
+    <>
+      {/* Header — only the title in dialog mode (Download moves to the
+          footer alongside Close), so nothing constrains dialog width.
+          Page mode keeps the original sticky flex bar with Back +
+          Download. */}
+      {isDialog ? (
+        <h1 className="absolute left-6 top-4 text-xl font-semibold">Trace Logs</h1>
+      ) : (
+        <div className="sticky top-0 z-10 bg-background border-b border-border">
+          <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+            <div>
+              <button
+                onClick={handleBack}
+                className="flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400 hover:underline mb-1"
+              >
+                <LuArrowLeft className="w-4 h-4" />
+                Close &amp; Back to Chat
+              </button>
+              <h1 className="text-xl font-semibold">Trace Logs</h1>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleDownload}
+                className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+              >
+                <LuDownload className="w-4 h-4" />
+                Download
+              </button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      <div className="max-w-5xl mx-auto px-6 py-6 space-y-6">
+      <div className={isDialog ? "px-6 pt-16 pb-6 space-y-6" : "max-w-5xl mx-auto px-6 py-6 space-y-6"}>
         {/* Original Query */}
         <div className="bg-card border border-border rounded-lg p-5">
           <h2 className="text-sm font-semibold mb-2">Original Query</h2>
@@ -952,8 +999,27 @@ const TraceLogs: FC = () => {
             </div>
           </div>
         )}
+
+        {/* Footer — Download (primary action style) + Close (outline,
+            matches other dialogs). Replaces the top-right Download in
+            dialog mode so the dialog can size to content. */}
+        <div className="flex justify-end gap-2 pt-2">
+          {isDialog && (
+            <Button onClick={handleDownload} className="gradient text-white">
+              <LuDownload className="w-4 h-4 mr-1.5" />
+              Download
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            onClick={handleBack}
+            className="dark:border-[#3D3D3D]"
+          >
+            Close
+          </Button>
+        </div>
       </div>
-    </div>
+    </>
   );
 };
 

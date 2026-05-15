@@ -11,7 +11,7 @@ import { IoIosArrowForward } from "react-icons/io";
 import { useTheme } from "@/components/ThemeProvider";
 import { safeJson } from "@/utils/safeJson";
 import { GoGear } from "react-icons/go";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Popover,
   PopoverContent,
@@ -52,7 +52,7 @@ import {
 } from "@/components/ui/select"
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { FaPaperclip } from "react-icons/fa6";
-import { useEffect, useCallback } from "react";
+import { useCallback } from "react";
 import { conversationManager } from "../actions/ActionProvider";
 import { useNavigate } from "react-router-dom";
 
@@ -76,6 +76,20 @@ const SideMenu = ({
   const [newSet, setNewSet] = useState<any[]>([]);
   const [expandedConversations, setExpandedConversations] = useState<Set<string>>(new Set());
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  // Fade + disable the side menu (conversation list + New Chat) while
+  // the chat is streaming an answer, so the user can't unmount Chat by
+  // switching conversations mid-response.
+  const [chatStreaming, setChatStreaming] = useState(false);
+  useEffect(() => {
+    const onStart = () => setChatStreaming(true);
+    const onEnd = () => setChatStreaming(false);
+    window.addEventListener("chat:streaming-start", onStart);
+    window.addEventListener("chat:streaming-end", onEnd);
+    return () => {
+      window.removeEventListener("chat:streaming-start", onStart);
+      window.removeEventListener("chat:streaming-end", onEnd);
+    };
+  }, []);
   const navigate = useNavigate();
 
 
@@ -417,8 +431,10 @@ const SideMenu = ({
 
   return (
     <div
-      className={`hidden md:block overflow-y-auto ${height ? "" : "h-[100vh]"}`}
+      className={`hidden md:block overflow-y-auto ${height ? "" : "h-[100vh]"} ${chatStreaming ? "pointer-events-none opacity-50" : ""}`}
       style={{ width: width ?? 320, minWidth: width ?? 320 }}
+      aria-disabled={chatStreaming}
+      title={chatStreaming ? "Disabled while the chat is generating an answer" : undefined}
     >
       <div className="border-b border-gray-300 dark:border-[#3D3D3D] h-[70px]">
         <div className="flex items-center">

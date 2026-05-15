@@ -14,6 +14,7 @@ import { Interactions } from "./Interact";
 import { KnowledgeGraphPro } from "./graphs/KnowledgeGraphPro";
 import { KnowledgeTablPro } from "./tables/KnowledgeTablePro";
 import { useAlert } from "@/hooks/useAlert";
+import TraceLogs from "@/pages/TraceLogs";
 interface IChatbotMessageProps {
   message?: any;
   withAvatar?: boolean;
@@ -173,6 +174,7 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   const [showResult, setShowResult] = useState<boolean>(false);
   const [showGraphVis, setShowGraphVis] = useState<boolean>(false);
   const [showTableVis, setShowTableVis] = useState<boolean>(false);
+  const [traceMessageId, setTraceMessageId] = useState<string | null>(null);
   const [alert, alertDialog] = useAlert();
 
   // Error handling functions
@@ -220,6 +222,12 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   return (
     <>
       {alertDialog}
+      {traceMessageId && (
+        <TraceLogs
+          messageIdProp={traceMessageId}
+          onClose={() => setTraceMessageId(null)}
+        />
+      )}
       {typeof message === "string" ? (
         <div className="prose dark:prose-invert text-sm max-w-[230px] md:max-w-[80%] mt-7 mb-7">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message}</ReactMarkdown>
@@ -258,7 +266,7 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
                 }
                 // Trace JSON lives under /code/trace_logs inside the
                 // graphrag container and is wiped on container recreate.
-                // Probe first so we never open a blank tab when the file is gone.
+                // Probe first so we never open an empty dialog when the file is gone.
                 try {
                   const probe = await fetch(`/ui/trace/${messageId}`, {
                     method: "GET",
@@ -272,7 +280,7 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
                   await alert("Failed to reach the trace log endpoint. Please try again.");
                   return;
                 }
-                window.open(`/trace/${messageId}`, "_blank");
+                setTraceMessageId(messageId);
               }}
             />
           </div>

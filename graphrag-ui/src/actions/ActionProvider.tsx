@@ -231,6 +231,13 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
       messages: [...prev.messages, loading],
     }));
 
+    // Signal that the chat is now waiting on an answer. Layout chrome
+    // (Setup / Logout / conversation list / new-chat button) listens for
+    // this and disables itself so the user can't unmount the in-flight
+    // streaming connection by navigating away.
+    document.body.classList.add("chat-streaming");
+    window.dispatchEvent(new Event("chat:streaming-start"));
+
     // Dispatch event to refresh conversation list when user sends a question
     // This ensures the side menu updates when a new message is sent
     window.dispatchEvent(new CustomEvent('conversationUpdated'));
@@ -284,8 +291,15 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
         const botMessage = createChatBotMessage(messageData);
         setState((prev) => {
           const newPrevMsg = prev.messages.slice(0, -1);
-          return {...prev, messages: [...newPrevMsg, botMessage]};  
+          return {...prev, messages: [...newPrevMsg, botMessage]};
         });
+
+        // Final (non-progress) message ends the streaming gate; layout
+        // chrome re-enables. Progress messages keep the gate held.
+        if (messageData.response_type !== "progress") {
+          document.body.classList.remove("chat-streaming");
+          window.dispatchEvent(new Event("chat:streaming-end"));
+        }
       } catch (error) {
         console.error("Error parsing WebSocket message:", error);
         // Handle string messages (progress updates)

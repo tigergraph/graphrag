@@ -2193,7 +2193,7 @@ const KGAdmin = () => {
                     disabled={isInitializing}
                     className="dark:border-[#3D3D3D]"
                   >
-                    Cancel
+                    Close
                   </Button>
                   <Button
                     onClick={handleInitializeGraph}
