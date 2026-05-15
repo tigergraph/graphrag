@@ -1,7 +1,7 @@
 import { FC, useState, useMemo, useEffect } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import {
   LuArrowLeft,
@@ -15,8 +15,6 @@ import {
   LuCoins,
   LuInfo,
 } from "react-icons/lu";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -837,9 +835,15 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
       {/* Header — only the title in dialog mode (Download moves to the
           footer alongside Close), so nothing constrains dialog width.
           Page mode keeps the original sticky flex bar with Back +
-          Download. */}
+          Download. DialogTitle / DialogDescription wire up the
+          accessibility labels Radix expects on a Dialog. */}
       {isDialog ? (
-        <h1 className="absolute left-6 top-4 text-xl font-semibold">Trace Logs</h1>
+        <>
+          <DialogTitle className="absolute left-6 top-4 text-xl font-semibold">Trace Logs</DialogTitle>
+          <DialogDescription className="sr-only">
+            Execution trace, citations, and token usage for the selected chat response.
+          </DialogDescription>
+        </>
       ) : (
         <div className="sticky top-0 z-10 bg-background border-b border-border">
           <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
@@ -987,18 +991,6 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
             <TokenOverviewPanel trace={trace} />
           </TabsContent>
         </Tabs>
-
-        {/* Final Response */}
-        {trace.finalResponse && (
-          <div className="bg-card border border-border rounded-lg p-5">
-            <h2 className="text-sm font-semibold mb-3">Final Response</h2>
-            <div className="prose dark:prose-invert text-sm max-w-none">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {trace.finalResponse}
-              </ReactMarkdown>
-            </div>
-          </div>
-        )}
 
         {/* Footer — Download (primary action style) + Close (outline,
             matches other dialogs). Replaces the top-right Download in
