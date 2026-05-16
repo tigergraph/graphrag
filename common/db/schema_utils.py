@@ -1369,21 +1369,6 @@ def build_allowed_schema(conn) -> AllowedSchema:
     return render_schema_rep(conn, exclude_structural=True)
 
 
-    domain_entity_defs = {v: entity_descs[v] for v in domain_verts if entity_descs.get(v)}
-    domain_rel_defs = {e: rel_defs[e] for e in domain_edge_types if rel_defs.get(e)}
-
-    return AllowedSchema(
-        schema_rep=text,
-        vertex_types=domain_verts,
-        edge_types=domain_edge_types,
-        vertex_attributes=vertex_attributes,
-        edge_attributes=edge_attributes,
-        vertex_definitions=domain_entity_defs,
-        edge_definitions=domain_rel_defs,
-        edge_endpoints=edge_endpoints,
-    )
-
-
 async def render_schema_rep_async(
     conn, exclude_structural: bool = False,
 ) -> AllowedSchema:

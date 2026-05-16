@@ -185,6 +185,7 @@ def test_02_convert_sample_files():
     print(f"Saved files: {saved}")
     print(f"Total documents: {body.get('num_documents')}")
     _state["saved_files"] = saved
+    _state["request_id"] = body.get("request_id") or ""
 
 
 @skip_unless_graphrag
@@ -194,7 +195,10 @@ def test_03_extract_schema_from_jsonl():
     print(f"\n--- Stage 3: Running schema extraction ---")
     resp = requests.post(
         f"{GRAPHRAG_URL}/ui/{GRAPH_NAME}/extract_schema_from_jsonl",
-        json={"filenames": _state["saved_files"]},
+        json={
+            "filenames": _state["saved_files"],
+            "request_id": _state.get("request_id", ""),
+        },
         auth=AUTH,
         timeout=SCHEMA_EXTRACT_TIMEOUT,
     )

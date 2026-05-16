@@ -304,19 +304,28 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
     def _resolve_id_and_props(value):
         """Source / target in the LLM's ``rels`` list may come as a
         bare id string or as a dict with ``id`` + optional
-        ``properties``. Return ``(id_str, props_dict)``.
+        ``node_type`` + optional ``properties``. Return
+        ``(id_str, node_type_str, props_dict)``. ``node_type`` is the
+        empty string when the LLM didn't carry one on this endpoint;
+        callers should fall back to the entity's own node entry to
+        recover the type in that case.
         """
         if isinstance(value, dict):
             props = value.get("properties") or value.get("attributes") or {}
-            return str(value.get("id", "")), props if isinstance(props, dict) else {}
-        return str(value), {}
+            node_type = value.get("node_type") or value.get("type") or ""
+            return (
+                str(value.get("id", "")),
+                str(node_type),
+                props if isinstance(props, dict) else {},
+            )
+        return str(value), "", {}
 
     def _format_rels(self, rels_in: list) -> list:
         formatted = []
         for rels in rels_in or []:
             try:
-                src_id, src_props = self._resolve_id_and_props(rels["source"])
-                tgt_id, tgt_props = self._resolve_id_and_props(rels["target"])
+                src_id, src_type, src_props = self._resolve_id_and_props(rels["source"])
+                tgt_id, tgt_type, tgt_props = self._resolve_id_and_props(rels["target"])
                 if not (src_id and tgt_id):
                     continue
                 # Edge-level properties (typed attrs the LLM extracted
@@ -328,6 +337,8 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                 formatted.append({
                     "source": src_id,
                     "target": tgt_id,
+                    "source_type": src_type.replace(" ", "_").capitalize() if src_type else "",
+                    "target_type": tgt_type.replace(" ", "_").capitalize() if tgt_type else "",
                     "source_props": src_props,
                     "target_props": tgt_props,
                     "type": rels["relation_type"].replace(" ", "_").upper(),
@@ -379,10 +390,17 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                          "description": rel["definition"]}
             edge_props = {**(rel.get("properties") or {}),
                           "description": rel["definition"]}
+            # Use the canonical entity types when the LLM provided them
+            # on the relationship endpoints; fall back to the id so the
+            # field is never empty. Downstream endpoint-pair validation
+            # in the worker relies on these values matching the live
+            # schema's declared edge endpoints.
+            src_type = rel.get("source_type") or rel["source"]
+            tgt_type = rel.get("target_type") or rel["target"]
             relationships.append(Relationship(
-                source=Node(id=rel["source"], type=rel["source"],
+                source=Node(id=rel["source"], type=src_type,
                             properties=src_props),
-                target=Node(id=rel["target"], type=rel["target"],
+                target=Node(id=rel["target"], type=tgt_type,
                             properties=tgt_props),
                 type=rel["type"],
                 properties=edge_props,

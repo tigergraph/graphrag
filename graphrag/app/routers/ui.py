@@ -417,6 +417,23 @@ def _unknown_version(component: str) -> dict:
     return {"component": component, "version": "unknown", "build_date": "unknown"}
 
 
+def _coerce_version_payload(payload, component: str) -> dict:
+    """Return a payload shaped like ``_unknown_version`` regardless of
+    what a remote ``/version`` endpoint actually sent. A malformed or
+    compromised response (non-dict, missing keys, non-string values)
+    falls back to the unknown shape so clients always see the same
+    schema.
+    """
+    if not isinstance(payload, dict):
+        return _unknown_version(component)
+    result = _unknown_version(component)
+    for key in ("component", "version", "build_date"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            result[key] = value
+    return result
+
+
 @router.get(f"{route_prefix}/version")
 def get_version():
     """Return image-build version info for all running components.
@@ -432,10 +449,10 @@ def get_version():
     ecc_base = graphrag_config.get("ecc", "http://graphrag-ecc:8001")
     try:
         ecc_resp = httpx.get(f"{ecc_base}/version", timeout=5.0)
-        ecc_version = (
-            ecc_resp.json() if ecc_resp.status_code == 200
-            else _unknown_version("graphrag-ecc")
-        )
+        if ecc_resp.status_code == 200:
+            ecc_version = _coerce_version_payload(ecc_resp.json(), "graphrag-ecc")
+        else:
+            ecc_version = _unknown_version("graphrag-ecc")
     except Exception:
         ecc_version = _unknown_version("graphrag-ecc")
 
@@ -446,7 +463,7 @@ def get_version():
         # (e.g. running graphrag in isolation).
         ui_resp = httpx.get("http://graphrag-ui:3000/version.json", timeout=5.0)
         if ui_resp.status_code == 200:
-            ui_version = ui_resp.json()
+            ui_version = _coerce_version_payload(ui_resp.json(), "graphrag-ui")
     except Exception:
         pass
 
@@ -628,6 +645,29 @@ def _set_init_state(graphname: str, **fields) -> None:
 def _get_init_state(graphname: str) -> dict:
     with _init_state_lock:
         return dict(_init_state.get(graphname, {"state": "unknown"}))
+
+
+def _try_reserve_init(graphname: str) -> str | None:
+    """Atomically transition the graph into the ``queued`` state. Returns
+    ``None`` on success; returns the existing state string when another
+    request has already reserved or is running the init. Combines the
+    in-progress check and the queued-state set under the same lock so
+    concurrent ``POST /initialize_graph`` requests for the same graph
+    can't both pass the gate and enqueue duplicate background jobs.
+    """
+    with _init_state_lock:
+        cur = _init_state.get(graphname, {"state": "unknown"})
+        if cur.get("state") in {"queued", "running"}:
+            return cur.get("state")
+        _init_state[graphname] = {
+            "state": "queued",
+            "message": "Initialization queued",
+            "started_at": time.time(),
+            "completed_at": None,
+            "result": None,
+            "error": None,
+        }
+        return None
 
 
 def _build_proposal_from_live_schema(
@@ -940,13 +980,6 @@ def init_graph(
         caller asked for ``none`` (no domain schema). The UI re-submits
         with ``use_existing_schema=true`` if the user confirms.
     """
-    cur = _get_init_state(graphname)
-    if cur.get("state") in {"queued", "running"}:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Initialization already in progress for graph '{graphname}'",
-        )
-
     schema_gsql = (
         (payload or {}).get("schema_gsql") if isinstance(payload, dict) else None
     )
@@ -1012,15 +1045,14 @@ def init_graph(
             )
     # else: state == "empty" → proceed normally
 
-    _set_init_state(
-        graphname,
-        state="queued",
-        message="Initialization queued",
-        started_at=time.time(),
-        completed_at=None,
-        result=None,
-        error=None,
-    )
+    # Atomically check-and-reserve so two concurrent /initialize_graph
+    # requests for the same graph can't both enqueue background jobs.
+    reserved_collision = _try_reserve_init(graphname)
+    if reserved_collision is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Initialization already in progress for graph '{graphname}'",
+        )
 
     def _run_init():
         try:
@@ -1155,13 +1187,15 @@ async def convert_sample_files(
     """
     Step 1/2 of the sample-doc schema extraction flow:
 
-    Save uploaded sample files to ``uploads/<graphname>/`` and convert
-    each to JSONL under ``uploads/ingestion_temp/<graphname>/``. Files
-    are persisted so the Ingest Document dialog can reuse them, and
-    the JSONL cache means a subsequent Ingest run won't re-convert.
+    Save uploaded sample files into a fresh per-request subdirectory
+    under ``uploads/<graphname>/_schema_<request_id>/`` and convert
+    each to JSONL under
+    ``uploads/ingestion_temp/<graphname>/_schema_<request_id>/``.
+    Returns the list of saved filenames and the ``request_id`` so the
+    caller can pass both to ``POST /ui/<graph>/extract_schema_from_jsonl``.
 
-    Returns the list of saved filenames so the caller can pass them
-    to ``POST /ui/<graph>/extract_schema_from_jsonl``.
+    Each sample-upload request is isolated so stale files from prior
+    sessions can't be re-converted or pollute the resulting schema.
 
     No LLM call. Caps come from ``graphrag_config``:
       * ``schema_max_sample_files`` (default 5) — file count
@@ -1182,9 +1216,11 @@ async def convert_sample_files(
     if not files:
         raise HTTPException(status_code=400, detail="No files supplied.")
 
-    upload_dir = os.path.join("uploads", graphname)
+    request_id = uuid.uuid4().hex[:12]
+    request_subdir = f"_schema_{request_id}"
+    upload_dir = os.path.join("uploads", graphname, request_subdir)
     os.makedirs(upload_dir, exist_ok=True)
-    temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+    temp_folder = os.path.join("uploads", "ingestion_temp", graphname, request_subdir)
     os.makedirs(temp_folder, exist_ok=True)
 
     saved_basenames: list[str] = []
@@ -1225,12 +1261,13 @@ async def convert_sample_files(
         )
 
     LogWriter.info(
-        f"Converted sample files for {graphname}: {len(files)} uploaded, "
-        f"{result.get('num_documents', 0)} docs in JSONL"
+        f"Converted sample files for {graphname} (request {request_id}): "
+        f"{len(files)} uploaded, {result.get('num_documents', 0)} docs in JSONL"
     )
     return {
         "status": "success",
         "graphname": graphname,
+        "request_id": request_id,
         "saved_files": list(saved_basenames),
         "num_documents": result.get("num_documents", 0),
     }
@@ -1251,12 +1288,25 @@ def extract_schema_from_jsonl(
     form-mode editor.
 
     Body:
-        ``{"filenames": ["report1.pdf", "report2.docx"]}``
-    The endpoint reads ``uploads/ingestion_temp/<graphname>/<stem>.jsonl``
-    for each name. If ``filenames`` is absent or empty, every JSONL in
-    the temp folder is consumed.
+        ``{"request_id": "<id>", "filenames": ["report1.pdf", "report2.docx"]}``
+    ``request_id`` (returned by ``convert_sample_files``) selects the
+    per-request subdirectory under
+    ``uploads/ingestion_temp/<graphname>/_schema_<request_id>/`` so
+    only the JSONLs belonging to this sample-upload session feed the
+    LLM. If ``request_id`` is absent, the endpoint falls back to the
+    legacy per-graph temp folder for backward compatibility.
     """
-    temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+    request_id = ""
+    if isinstance(payload, dict):
+        request_id = str(payload.get("request_id") or "")
+    if request_id and not re.fullmatch(r"[A-Za-z0-9_-]+", request_id):
+        raise HTTPException(status_code=400, detail="Invalid request_id")
+    if request_id:
+        temp_folder = os.path.join(
+            "uploads", "ingestion_temp", graphname, f"_schema_{request_id}"
+        )
+    else:
+        temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
     if not os.path.isdir(temp_folder):
         raise HTTPException(
             status_code=400,

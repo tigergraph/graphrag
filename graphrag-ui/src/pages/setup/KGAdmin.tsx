@@ -508,6 +508,7 @@ const KGAdmin = () => {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
+            request_id: convertData.request_id || "",
             filenames: convertData.saved_files || [],
             vertex_hints: vertexHints,
             edge_hints: edgeHints,
