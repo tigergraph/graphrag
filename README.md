@@ -63,7 +63,7 @@
 ---
 
 ## Releases
-* **GraphRAG v1.4.0** (in progress): Schema-aware initialization. The *Initialize Knowledge Graph* dialog accepts an optional pasted GSQL schema; the backend parses, diffs, and applies domain types as a single atomic schema-change job. Type definitions captured at init time flow through to the entity-extraction prompt and the query-routing schema rep. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.0) when published.
+* **5/16/2026**: GraphRAG v1.4.0 released. Added schema-aware knowledge graphs, auto retrieval method selection, and a Trace Logs UI, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.0) for details.
 * **4/10/2026**: GraphRAG v1.3.0 released. Added an admin configuration UI with role-based access and per-graph chatbot LLM override, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.3.0) for details.
 * **2/28/2026**: GraphRAG v1.2.0 released. Added Admin UI for graph initialization, document ingestion, and knowledge graph rebuild, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.2.0) for details.
 * **9/22/2025**: GraphRAG is available now officially v1.1 (v1.1.0). AWS Bedrock support is completed with BDA integration for multimodal document ingestion. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.1.0) for details.
@@ -932,7 +932,7 @@ Today's primary lever is the **entity-extraction prompt**:
 - **Add 1–2 short domain examples** in the prompt. Even one well-chosen exemplar (an extracted entity with type and definition) dramatically improves consistency across chunks.
 - **List the canonical edge verbs you want.** Encourage `PUBLISHES`, `OWNS`, `ISSUES`, `MANAGES`, `REPORTS_ON` in the relationship-extraction prompt rather than letting the LLM emit ad-hoc nominal phrases.
 
-If extraction quality is still poor after iterating on the prompt, the next-best option today is to clear the graph's domain types and re-ingest with the improved prompt — schema growth is currently driven entirely by what extraction produces. (A schema-aware initialization flow that lets you supply a curated schema up front is on the roadmap.)
+If extraction quality is still poor after iterating on the prompt, declare a domain schema up front via the *Initialize Knowledge Graph* dialog (paste GSQL, or generate a draft from sample documents) so extraction populates the types you actually want instead of growing them organically from what the LLM happens to emit. See the Configuration table above for `strict_mode` and `retrieval_include_entity` for the schema-aware behavior knobs.
 
 **Note on LLM faithfulness.** Entity, relationship, and attribute extraction is best-effort and may include occasional errors, especially for well-known entities. For high-stakes applications, validate critical extracted values against your source documents before relying on them.
 
