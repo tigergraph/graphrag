@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useConfirm } from "@/hooks/useConfirm";
-import { pauseIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
+import { pingIdleTimer } from "@/hooks/useIdleTimeout";
 
 interface IngestGraphProps {
   isModal?: boolean;
@@ -46,7 +46,11 @@ const formatBytes = (bytes: number) => {
 const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   const [confirm, confirmDialog] = useConfirm();
   const [availableGraphs, setAvailableGraphs] = useState<string[]>([]);
-  const [ingestGraphName, setIngestGraphName] = useState("");
+  // Seed from the shared ``selectedGraph`` so the dropdown matches
+  // whatever was last picked elsewhere (KGAdmin refresh, Bot, etc.).
+  const [ingestGraphName, setIngestGraphName] = useState(
+    sessionStorage.getItem("selectedGraph") || ""
+  );
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedFiles, setUploadedFiles] = useState<any[]>([]);
@@ -488,17 +492,45 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       const creds = sessionStorage.getItem("creds");
       const folderPath = sourceType === "uploaded" ? `uploads/${ingestGraphName}` : `downloaded_files_cloud/${ingestGraphName}`;
 
-      // Use existing ingestJobData if available, otherwise construct from folder path
-      const jobData = ingestJobData || {
-        load_job_id: "load_documents_content_json",
-        data_source_id: {
-          data_source: "server",
-          data_source_config: { data_path: folderPath },
-          loader_config: {},
-          file_format: "multi"
-        },
-        data_path: folderPath,
-      };
+      // If no cached job from a prior create_ingest, run it now. The
+      // backend's /ingest endpoint expects the data_source_id dict
+      // shape that create_ingest emits (with the resolved JSONL temp
+      // folder at top-level ``data_path``); building a fallback in
+      // the UI loses that contract.
+      let jobData = ingestJobData;
+      if (!jobData) {
+        setIngestMessage("Step 1/2: Preparing ingest job...");
+        const createResp = await fetch(
+          `/ui/${ingestGraphName}/create_ingest`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Basic ${creds}`,
+            },
+            body: JSON.stringify({
+              data_source: "server",
+              data_source_config: { data_path: folderPath },
+              loader_config: {},
+              file_format: "multi",
+            }),
+          }
+        );
+        if (!createResp.ok) {
+          const err = await createResp.json();
+          throw new Error(
+            err.detail || `Failed to create ingest job: ${createResp.statusText}`
+          );
+        }
+        const createData = await createResp.json();
+        jobData = {
+          load_job_id: createData.load_job_id,
+          data_source_id: createData.data_source_id,
+          data_path: createData.data_path || folderPath,
+        };
+        setIngestJobData(jobData);
+        setIngestMessage("Step 2/2: Loading documents into knowledge graph...");
+      }
 
       const ingestResponse = await fetch(`/ui/${ingestGraphName}/ingest`, {
         method: "POST",
@@ -861,26 +893,61 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     }
   };
 
-  // Pause idle timer while ingestion is running
+  // Keep the idle timer alive while any long-running upload / conversion
+  // / ingest is in flight. Ping every 60s — actively resets the idle
+  // countdown instead of relying on a pause/resume event sequence that
+  // can drift in nested-modal contexts.
   useEffect(() => {
-    if (isIngesting) {
-      pauseIdleTimer();
-    } else {
-      resumeIdleTimer();
-    }
-  }, [isIngesting]);
+    if (!(isUploading || isProcessingFiles || isIngesting)) return;
+    pingIdleTimer();
+    const id = setInterval(() => pingIdleTimer(), 60_000);
+    return () => clearInterval(id);
+  }, [isUploading, isProcessingFiles, isIngesting]);
 
-  // Load available graphs from sessionStorage on mount
+  // Load available graphs. Seed from sessionStorage for instant render,
+  // then refresh from /ui/list_graphs so newly-initialized graphs show
+  // up without a re-login.
   useEffect(() => {
     const store = JSON.parse(sessionStorage.getItem("site") || "{}");
     if (store.graphs && Array.isArray(store.graphs)) {
       setAvailableGraphs(store.graphs);
-      // Auto-select first graph if available
       if (store.graphs.length > 0 && !ingestGraphName) {
         setIngestGraphName(store.graphs[0]);
       }
     }
+    const creds = sessionStorage.getItem("creds");
+    if (!creds) return;
+    fetch("/ui/list_graphs", {
+      headers: { Authorization: `Basic ${creds}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data || !Array.isArray(data.graphs)) return;
+        const graphs: string[] = data.graphs;
+        setAvailableGraphs(graphs);
+        const cached = JSON.parse(sessionStorage.getItem("site") || "{}");
+        cached.graphs = graphs;
+        sessionStorage.setItem("site", JSON.stringify(cached));
+        if (graphs.length > 0 && !ingestGraphName) {
+          setIngestGraphName(graphs[0]);
+        }
+      })
+      .catch(() => {
+        /* keep cached value; not fatal */
+      });
   }, []);
+
+  // Keep the Ingest dialog's graph picker in sync with the shared
+  // ``selectedGraph`` so changing the graph elsewhere (KGAdmin
+  // refresh, Bot) immediately reflects here.
+  useEffect(() => {
+    const handler = () => {
+      const next = sessionStorage.getItem("selectedGraph") || "";
+      if (next && next !== ingestGraphName) setIngestGraphName(next);
+    };
+    window.addEventListener("graphrag:selectedGraph", handler);
+    return () => window.removeEventListener("graphrag:selectedGraph", handler);
+  }, [ingestGraphName]);
 
   // Load files when graph name changes
   useEffect(() => {
@@ -914,7 +981,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             </label>
             <Select
               value={ingestGraphName}
-              onValueChange={setIngestGraphName}
+              onValueChange={(v) => {
+                setIngestGraphName(v);
+                sessionStorage.setItem("selectedGraph", v);
+                window.dispatchEvent(new Event("graphrag:selectedGraph"));
+              }}
               disabled={isIngesting}
             >
               <SelectTrigger
@@ -1001,11 +1072,34 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     </span>
                   </div>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                    Maximum upload per request: {MAX_UPLOAD_SIZE_MB} MB.{" "}
-                    {ingestGraphName
-                      ? `Upload destination: uploads/${ingestGraphName}/`
-                      : ""}
+                    Maximum upload per request: {MAX_UPLOAD_SIZE_MB} MB.
                   </p>
+                  {selectedFiles && (() => {
+                    const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".pdf", ".docx", ".doc", ".html", ".htm", ".json", ".csv", ".xlsx", ".xls", ".xml", ".jpeg", ".jpg", ".png", ".gif", ".jsonl"]);
+                    const files = Array.from(selectedFiles);
+                    const unsupported = files.filter((f) => !SUPPORTED_EXTENSIONS.has(f.name.slice(f.name.lastIndexOf(".")).toLowerCase()));
+                    const hasCsvExcel = files.some((f) => [".csv", ".xlsx", ".xls"].includes(f.name.slice(f.name.lastIndexOf(".")).toLowerCase()));
+                    return (
+                      <>
+                        {unsupported.length > 0 && (
+                          <div className="flex items-start gap-2 mt-2 p-2 rounded-md bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700">
+                            <span className="text-red-500 mt-0.5 shrink-0">⚠️</span>
+                            <p className="text-xs text-red-700 dark:text-red-300">
+                              Unsupported file type{unsupported.length > 1 ? "s" : ""}: <strong>{unsupported.map((f) => f.name).join(", ")}</strong>. These files will be skipped during ingestion.
+                            </p>
+                          </div>
+                        )}
+                        {hasCsvExcel && (
+                          <div className="flex items-start gap-2 mt-2 p-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700">
+                            <span className="text-amber-500 mt-0.5 shrink-0">ℹ️</span>
+                            <p className="text-xs text-amber-700 dark:text-amber-300">
+                              CSV and Excel files will be treated as unstructured text documents.
+                            </p>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
 
                 <div className="flex gap-2">

@@ -33,7 +33,7 @@ from base64 import b64decode
 from common.config import (
     db_config,
     graphrag_config,
-    embedding_service,
+    get_embedding_service,
     get_llm_service,
     get_completion_config,
     get_graphrag_config,
@@ -92,12 +92,17 @@ def initialize_eventual_consistency_checker(
 
     try:
         maj, minor, patch = conn.getVer().split(".")
-        if  maj >= "4" and minor >= "2":
+        if maj >= "4" and minor >= "2":
             # TigerGraph native vector support
             embedding_store = TigerGraphEmbeddingStore(
                 conn,
-                embedding_service,
+                get_embedding_service(),
                 support_ai_instance=False,
+            )
+        else:
+            raise ValueError(
+                f"TigerGraph version {maj}.{minor}.{patch} is not supported. "
+                "Requires >= 4.2."
             )
         graph_cfg = get_graphrag_config(graphname)
         index_names = graph_cfg.get(
@@ -108,7 +113,9 @@ def initialize_eventual_consistency_checker(
         if graph_cfg.get("extractor") == "llm":
             from common.extractors import LLMEntityRelationshipExtractor
 
-            extractor = LLMEntityRelationshipExtractor(get_llm_service(get_completion_config()))
+            extractor = LLMEntityRelationshipExtractor(
+                get_llm_service(get_completion_config(graphname))
+            )
         else:
             raise ValueError("Invalid extractor type")
 
@@ -116,7 +123,7 @@ def initialize_eventual_consistency_checker(
             graph_cfg.get("process_interval_seconds", 300),
             graph_cfg.get("cleanup_interval_seconds", 300),
             graphname,
-            embedding_service,
+            get_embedding_service(),
             embedding_store,
             index_names,
             conn,
@@ -171,6 +178,27 @@ def root():
     return {"status": "ok"}
 
 
+@app.get("/version")
+def version():
+    """Return image-build version info. ``VERSION`` is the repo-root
+    file copied into the image; ``BUILD_DATE`` is stamped at build
+    time by the Dockerfile. Both fall back to ``unknown`` when the
+    files aren't present.
+    """
+    def _safe_read(path: str) -> str:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except Exception:
+            return "unknown"
+
+    return {
+        "component": "graphrag-ecc",
+        "version": _safe_read("/code/VERSION"),
+        "build_date": _safe_read("/code/BUILD_DATE"),
+    }
+
+
 @app.get("/{graphname}/{ecc_method}/rebuild_status")
 def rebuild_status(
     graphname: str,
@@ -197,6 +225,7 @@ def rebuild_status(
             "method": ecc_method,
             "is_running": task_info.get("status") == "running",
             "status": task_info.get("status"),
+            "stage": task_info.get("stage"),
             "started_at": task_info.get("started_at"),
             "completed_at": task_info.get("completed_at"),
             "failed_at": task_info.get("failed_at"),
@@ -211,10 +240,24 @@ def rebuild_status(
     }
 
 
+def _set_stage(task_key: str, msg: str) -> None:
+    """Update the human-readable stage label for an in-flight task.
+    Pulled out so individual stage transitions don't have to know
+    about the ``running_tasks`` schema.
+    """
+    info = running_tasks.get(task_key)
+    if info is not None:
+        info["stage"] = msg
+
+
 async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
     """Wrapper to track running tasks"""
     try:
-        running_tasks[task_key] = {"status": "running", "started_at": time.time()}
+        running_tasks[task_key] = {
+            "status": "running",
+            "started_at": time.time(),
+            "stage": "Preparing rebuild",
+        }
         LogWriter.info(f"Starting ECC task: {task_key}")
 
         # Verify the graph still exists before doing any work
@@ -256,8 +299,16 @@ async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
         else:
             LogWriter.warning(f"GraphRAG config reload had issues: {graphrag_result['message']}")
         
-        # Now run the actual job with fresh config
-        await run_func(graphname, conn)
+        # Now run the actual job with fresh config. Pass a progress
+        # callback so sub-phases can surface in the UI rebuild dialog.
+        # ``run_func`` may ignore the kwarg (the supportai legacy path
+        # does); the call falls back to the no-progress signature on
+        # ``TypeError``.
+        progress_cb = lambda msg: _set_stage(task_key, msg)
+        try:
+            await run_func(graphname, conn, progress=progress_cb)
+        except TypeError:
+            await run_func(graphname, conn)
         running_tasks[task_key] = {"status": "completed", "completed_at": time.time()}
         LogWriter.info(f"Completed ECC task: {task_key}")
     except Exception as e:

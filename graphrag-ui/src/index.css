@@ -88,6 +88,14 @@
   .react-chatbot-kit-chat-input-container {
     @apply !bg-background !border-[#3D3D3D];
   }
+  /* Block submitting another question while the previous answer is
+     still streaming. ActionProvider toggles ``chat-streaming`` on
+     ``document.body`` at stream start / end. */
+  body.chat-streaming .react-chatbot-kit-chat-input-container,
+  body.chat-streaming .react-chatbot-kit-chat-input-form {
+    pointer-events: none;
+    opacity: 0.5;
+  }
   .open-dg {
     @apply bg-background;
   }
@@ -185,7 +193,11 @@
 .fp .react-chatbot-kit-chat-message-container,
 .open-dg .react-chatbot-kit-chat-message-container {
   height: calc(100vh - 100px) !important;
-  max-width: 960px;
+  /* Scale with the available width so wider screens use more
+     horizontal space, but cap reading-line at a comfortable
+     length. Switch from a hard 960px cap that left huge gutters
+     on 1440p / 4K monitors. */
+  max-width: min(1280px, 90%);
   margin: 0 auto;
 }
 

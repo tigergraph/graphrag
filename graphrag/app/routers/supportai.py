@@ -30,8 +30,8 @@ from supportai.retrievers import (
 from common.config import (
     db_config,
     graphrag_config,
-    embedding_service,
-    embedding_store,
+    get_embedding_service,
+    get_embedding_store,
     get_chat_config,
     get_llm_service,
     service_status,
@@ -52,10 +52,15 @@ security = HTTPBase(scheme="basic", auto_error=False)
 
 
 def check_embedding_store_status():
-    if service_status["embedding_store"]["error"]:
-        return HTTPException(
-            status_code=503, detail=service_status["embedding_store"]["error"]
-        )
+    """Return the embedding store if ready, else raise 503.
+
+    Replaces the old behavior that returned (rather than raised) an
+    HTTPException, leaving callers thinking the check succeeded.
+    """
+    try:
+        return get_embedding_store(timeout=0)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 @router.post("/{graphname}/graphrag/initialize")
@@ -119,7 +124,7 @@ def search(
         query.method_params["verbose"] = False
     if query.method.lower() == "hybrid":
         retriever = HybridRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         if "method" not in query.method_params:
             query.method_params["method"] = "similarity"
@@ -146,7 +151,7 @@ def search(
         if "index" not in query.method_params:
             raise Exception("Index name not provided")
         retriever = SimilarityRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         res = retriever.search(
             query.question,
@@ -160,7 +165,7 @@ def search(
         if "index" not in query.method_params:
             raise Exception("Index name not provided")
         retriever = SiblingRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         res = retriever.search(
             query.question,
@@ -174,12 +179,12 @@ def search(
         )
     elif query.method.lower() == "entityrelationship":
         retriever = EntityRelationshipRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         res = retriever.search(query.question, query.method_params["top_k"])
     elif query.method.lower() == "community":
         retriever = CommunityRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         if "with_chunk" not in query.method_params:
             query.method_params["with_chunk"] = True
@@ -222,7 +227,7 @@ def answer_question(
         query.method_params["verbose"] = False
     if query.method.lower() == "hybrid":
         retriever = HybridRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         if "method" not in query.method_params:
             query.method_params["method"] = "Similarity"
@@ -250,7 +255,7 @@ def answer_question(
         if "index" not in query.method_params:
             raise Exception("Index name not provided")
         retriever = SimilarityRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         res = retriever.retrieve_answer(
             query.question,
@@ -265,7 +270,7 @@ def answer_question(
         if "index" not in query.method_params:
             raise Exception("Index name not provided")
         retriever = SiblingRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         res = retriever.retrieve_answer(
             query.question,
@@ -280,13 +285,13 @@ def answer_question(
         )
     elif query.method.lower() == "entityrelationship":
         retriever = EntityRelationshipRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         res = retriever.retrieve_answer(query.question, query.method_params["top_k"])
 
     elif query.method.lower() == "community":
         retriever = CommunityRetriever(
-            embedding_service, embedding_store, get_llm_service(get_chat_config(graphname)), conn
+            get_embedding_service(), get_embedding_store(), get_llm_service(get_chat_config(graphname)), conn
         )
         if "with_chunk" not in query.method_params:
             query.method_params["with_chunk"] = True

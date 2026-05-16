@@ -1,4 +1,5 @@
-CREATE OR REPLACE DISTRIBUTED QUERY graphrag_louvain_init(UINT max_hop = 10, UINT n_batches = 1) {
+// Non-distributed form intentional; see v1.5 plan to revisit.
+CREATE OR REPLACE QUERY graphrag_louvain_init(UINT max_hop = 10, UINT n_batches = 1) {
     /*
      * Initialize GraphRAG's hierarchical communities.
      */
@@ -43,9 +44,6 @@ CREATE OR REPLACE DISTRIBUTED QUERY graphrag_louvain_init(UINT max_hop = 10, UIN
         ACCUM s.@k += wt,
               @@m += 1;
 
-    PRINT z.size();
-    PRINT z;
-    
     // Local moving
     INT hop = 0;
     Candidates = AllNodes;
@@ -183,7 +181,4 @@ CREATE OR REPLACE DISTRIBUTED QUERY graphrag_louvain_init(UINT max_hop = 10, UIN
           ACCUM
               DOUBLE w = @@source_target_k_in_map.get(s.@community_vid).get(t.@community_vid),
               INSERT INTO LINKS_TO VALUES (s.@community_vid+"_1", t.@community_vid+"_1", w);
-
-
-    PRINT @@source_target_k_in_map;
 }

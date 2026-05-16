@@ -87,7 +87,7 @@ def insert_description_by_id(md_text, image_id, description):
     """
     Replace the description for an image whose basename == image_id.
     """
-    safe_desc = description.replace("[", "(").replace("]", ")")
+    safe_desc = _sanitize_alt_text(description)
 
     def repl(m):
         old_path = m.group(2)
@@ -98,6 +98,40 @@ def insert_description_by_id(md_text, image_id, description):
 
         return m.group(0)
     return _md_pattern.sub(repl, md_text)
+
+
+# Maximum characters retained from an LLM image description when
+# rendered as markdown alt text. Long alt text bloats the chat
+# rendering and offers no extra accessibility value beyond the first
+# couple of sentences.
+_ALT_TEXT_MAX_CHARS = 400
+
+
+def _sanitize_alt_text(description: str) -> str:
+    """Collapse an LLM image description into a single-line, markdown-
+    safe alt-text string. The LLM is free to respond with headings,
+    paragraph breaks and bracketed phrases; the markdown image syntax
+    ``![alt](url)`` doesn't tolerate any of that — a newline or
+    unescaped ``]`` terminates the construct and the renderer falls
+    back to printing the raw text (the bug this guards against).
+    """
+    if not description:
+        return ""
+    text = str(description)
+    # Drop a leading markdown heading like ``# Image Description``
+    # the LLM tends to emit as a preamble.
+    text = re.sub(r"^\s*#{1,6}\s*[^\n]*\n+", "", text, count=1)
+    # Drop a literal "Image Description:" / "Description:" prefix that
+    # the LLM occasionally writes in place of (or alongside) a heading.
+    text = re.sub(r"^\s*(image\s+description|description)\s*:\s*", "", text, count=1, flags=re.IGNORECASE)
+    # Replace every newline + run of whitespace with a single space.
+    text = re.sub(r"\s+", " ", text).strip()
+    # ``]`` would close the alt-text bracket; ``[`` can also confuse
+    # some renderers. Swap both for round parens.
+    text = text.replace("[", "(").replace("]", ")")
+    if len(text) > _ALT_TEXT_MAX_CHARS:
+        text = text[: _ALT_TEXT_MAX_CHARS - 1].rstrip() + "…"
+    return text
 
 
 def replace_path_with_tg_protocol(md_text, image_id, tg_reference):
@@ -235,6 +269,7 @@ class TextExtractor:
 
         files_to_process = []
         jsonl_files_copied = []
+        cached_jsonl_skipped = []
         for file_path in safe_walk(folder_path_obj):
             if file_path.is_file():
                 if file_path.name.startswith(('.', '~', '$')) or 'BROMIUM' in file_path.name.upper():
@@ -252,9 +287,41 @@ class TextExtractor:
                     })
                     logger.info(f"Copied JSONL file directly: {file_path.name} ({num_lines} documents)")
                 elif file_ext in self.supported_extensions:
-                    files_to_process.append(file_path)
+                    # If a previous run (e.g. schema extraction) already
+                    # produced a matching JSONL in *temp_folder*, reuse
+                    # it instead of re-converting the source file. This
+                    # saves the per-file PDF / image conversion cost
+                    # when the user uploaded sample files via the
+                    # Initialize Graph dialog and is now ingesting them.
+                    cached_jsonl = os.path.join(
+                        temp_folder, f"{file_path.stem}.jsonl"
+                    )
+                    if os.path.exists(cached_jsonl):
+                        try:
+                            num_lines = sum(
+                                1 for _ in open(cached_jsonl, 'r', encoding='utf-8')
+                            )
+                        except Exception:
+                            num_lines = 0
+                        cached_jsonl_skipped.append({
+                            'file_path': str(file_path),
+                            'num_documents': num_lines,
+                            'jsonl_file': os.path.basename(cached_jsonl),
+                            'status': 'success',
+                            'cached': True,
+                        })
+                        logger.info(
+                            f"Reusing cached JSONL for {file_path.name} "
+                            f"({num_lines} documents) — skipping re-conversion"
+                        )
+                    else:
+                        files_to_process.append(file_path)
 
-        logger.info(f"Found {len(files_to_process)} files to process, {len(jsonl_files_copied)} JSONL files copied directly")
+        logger.info(
+            f"Found {len(files_to_process)} files to process, "
+            f"{len(jsonl_files_copied)} JSONL files copied directly, "
+            f"{len(cached_jsonl_skipped)} skipped via cached JSONL"
+        )
 
         semaphore = asyncio.Semaphore(max_concurrent)
 
@@ -265,8 +332,10 @@ class TextExtractor:
         tasks = [process_with_semaphore(fp) for fp in files_to_process]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        processed_files_info = list(jsonl_files_copied)
-        total_docs = sum(f['num_documents'] for f in jsonl_files_copied)
+        processed_files_info = list(jsonl_files_copied) + list(cached_jsonl_skipped)
+        total_docs = sum(
+            f['num_documents'] for f in jsonl_files_copied + cached_jsonl_skipped
+        )
 
         for result in results:
             if isinstance(result, Exception):
@@ -290,7 +359,7 @@ class TextExtractor:
                     'error': result.get('error', 'Unknown error')
                 })
 
-        logger.info(f"Prepared {len(processed_files_info)} files ({len(jsonl_files_copied)} JSONL copied, {len(files_to_process)} converted), {total_docs} total documents")
+        logger.info(f"Processed {len(processed_files_info)} files, extracted {total_docs} total documents")
         logger.info(f"Created {len([f for f in processed_files_info if f.get('status') == 'success'])} JSONL files in {temp_folder}")
 
         return {
@@ -457,54 +526,64 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
                 "content": markdown_content,
                 "position": 0
             }]
-        image_entries = []
-        image_counter = 0
-        for img_ref in image_refs:
-            try:
-                img_path = Path(img_ref["path"])  # convert to Path
-                image_id = img_ref["image_id"]
-                # Image description
-                description = describe_image_with_llm(str(img_path))
-                markdown_content = insert_description_by_id(
-                    markdown_content,
-                    image_id,
-                    description
-                )
-                # Convert image to base64
-                pil_image = PILImage.open(img_path)
-                buffer = io.BytesIO()
+        # Phase 1 — describe + base64-encode every image in parallel.
+        # Each worker hits Bedrock for the description and reads the
+        # image off disk, so they're I/O-bound; a small thread pool
+        # cuts wall-clock proportionally for image-heavy PDFs.
+        # Markdown mutations stay in phase 2 (next loop) because
+        # insert_description_by_id / replace_path_with_tg_protocol
+        # mutate the same shared string and must run in deterministic
+        # order. Concurrency cap is intentionally small to stay below
+        # Bedrock's per-account throttle.
+        image_workers = int(os.environ.get("PDF_IMAGE_CONCURRENCY", "8"))
 
+        def _describe_and_encode(img_ref: dict) -> dict:
+            """Run on a worker thread. Returns one of:
+              * ``{"ok": True, "img_ref", "description", "image_base64",
+                  "width", "height"}``
+              * ``{"ok": False, "img_ref", "error"}``
+            Never raises.
+            """
+            try:
+                img_path = Path(img_ref["path"])
+                description = describe_image_with_llm(str(img_path))
+                pil_image = PILImage.open(img_path)
                 if pil_image.mode != "RGB":
                     pil_image = pil_image.convert("RGB")
-
+                buffer = io.BytesIO()
                 pil_image.save(buffer, format="JPEG", quality=95)
                 image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-
-                image_counter += 1
-                image_doc_id = f"{base_doc_id}_image_{image_counter}".lower()
-
-                # Replace file path with tg:// protocol reference in markdown
-                markdown_content = replace_path_with_tg_protocol(
-                    markdown_content,
-                    image_id,
-                    image_doc_id
-                )
-
-                image_entries.append({
-                    "doc_id": image_doc_id,
-                    "doc_type": "image",
-                    "image_description": description,
-                    "image_data": image_base64,
-                    "image_format": "jpg",
-                    "parent_doc": base_doc_id,
-                    "page_number": 0,
+                return {
+                    "ok": True,
+                    "img_ref": img_ref,
+                    "description": description,
+                    "image_base64": image_base64,
                     "width": pil_image.width,
                     "height": pil_image.height,
-                    "position": image_counter
-                })
+                }
+            except Exception as img_error:  # noqa: BLE001 — keep going
+                return {"ok": False, "img_ref": img_ref, "error": img_error}
 
-            except Exception as img_error:
-                logger.warning(f"Failed to process image {img_ref.get('path')}: {img_error}")
+        if image_refs:
+            with ThreadPoolExecutor(
+                max_workers=max(1, min(image_workers, len(image_refs)))
+            ) as ex:
+                # executor.map preserves input ordering, which is what
+                # the markdown-mutation phase below relies on.
+                described = list(ex.map(_describe_and_encode, image_refs))
+        else:
+            described = []
+
+        # Phase 2 — apply markdown mutations and build image_entries
+        # in deterministic order using the parallel results.
+        image_entries: list[dict] = []
+        image_counter = 0
+        for d in described:
+            img_ref = d["img_ref"]
+            if not d.get("ok"):
+                logger.warning(
+                    f"Failed to process image {img_ref.get('path')}: {d.get('error')}"
+                )
                 failed_path = img_ref.get("path", "")
                 if failed_path:
                     markdown_content = re.sub(
@@ -512,6 +591,30 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
                         "",
                         markdown_content,
                     )
+                continue
+
+            image_id = img_ref["image_id"]
+            markdown_content = insert_description_by_id(
+                markdown_content, image_id, d["description"]
+            )
+
+            image_counter += 1
+            image_doc_id = f"{base_doc_id}_image_{image_counter}".lower()
+            markdown_content = replace_path_with_tg_protocol(
+                markdown_content, image_id, image_doc_id
+            )
+            image_entries.append({
+                "doc_id": image_doc_id,
+                "doc_type": "image",
+                "image_description": d["description"],
+                "image_data": d["image_base64"],
+                "image_format": "jpg",
+                "parent_doc": base_doc_id,
+                "page_number": 0,
+                "width": d["width"],
+                "height": d["height"],
+                "position": image_counter,
+            })
 
         # FINAL CLEANUP — delete folder after processing everything
         if image_output_folder.exists() and image_output_folder.is_dir():
@@ -613,9 +716,22 @@ def extract_text_from_file(file_path, graphname=None):
         if extension in ['.txt', '.md']:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read().strip()
-        elif extension in ['.html', '.htm', '.csv']:
+        elif extension in ['.html', '.htm']:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read().strip()
+        elif extension == '.csv':
+            raw = file_path.read_bytes()
+            # utf-8-sig handles UTF-8 with BOM (common Excel CSV export)
+            try:
+                return raw.decode('utf-8-sig').strip()
+            except UnicodeDecodeError:
+                pass
+            # Fall back to chardet detection
+            import chardet
+            detected = chardet.detect(raw)
+            encoding = detected.get('encoding') if detected.get('confidence', 0) >= 0.5 else None
+            # latin-1 as final fallback — never raises DecodeError
+            return raw.decode(encoding or 'latin-1').strip()
         elif extension == '.json':
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -624,6 +740,37 @@ def extract_text_from_file(file_path, graphname=None):
             import docx
             doc = docx.Document(file_path)
             return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        elif extension in ['.xlsx', '.xls']:
+            import pandas as pd
+            engine = 'openpyxl' if extension == '.xlsx' else 'xlrd'
+            try:
+                xl = pd.ExcelFile(file_path, engine=engine)
+            except Exception:
+                xl = pd.ExcelFile(file_path)
+            sheet_texts = []
+            for sheet_name in xl.sheet_names:
+                # Always read with header=None so no data row is silently
+                # consumed as column names for headerless spreadsheets.
+                df = xl.parse(sheet_name, header=None)
+                if df.empty:
+                    continue
+                df = df.fillna('')
+                first_row = df.iloc[0]
+                first_row_values = [str(v).strip() for v in first_row]
+                looks_like_header = (
+                    len(df) > 1
+                    and all(first_row_values)
+                    and len(set(first_row_values)) == len(first_row_values)
+                    and not any(v.isdigit() for v in first_row_values)
+                )
+                if looks_like_header:
+                    df.columns = first_row_values
+                    df = df.iloc[1:].reset_index(drop=True)
+                else:
+                    df.columns = [f"Column {i + 1}" for i in range(len(df.columns))]
+                sheet_md = df.to_markdown(index=False)
+                sheet_texts.append(f"## Sheet: {sheet_name}\n\n{sheet_md}")
+            return "\n\n".join(sheet_texts) if sheet_texts else "[Excel file is empty or contains no data]"
         elif extension == '.xml':
             import xml.etree.ElementTree as ET
             tree = ET.parse(file_path)
@@ -663,7 +810,7 @@ def get_doc_type_from_extension(extension):
 
 def get_supported_extensions():
     """Get list of supported file extensions."""
-    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.xml', '.jpeg', '.jpg', '.png', '.gif'}
+    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.doc', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls', '.jsonl'}
 
 def is_supported_file(file_path):
     """Check if a file is supported for text extraction."""

@@ -69,11 +69,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         tg_version = self.conn.getVer()
         ver = tg_version.split(".")
         if int(ver[0]) >= 4 and int(ver[1]) >= 2:
-            logger.info(f"Installing GDS library")
-            q_res = self.conn.gsql(
-                """USE GLOBAL\nimport package gds\ninstall function gds.**"""
-            )
-            logger.info(f"Done installing GDS library with status {q_res}")
+            self._ensure_gds_installed()
             if self.conn.graphname and not self.conn.graphname == "MyGraph":
                 current_schema = self.conn.gsql(f"USE GRAPH {self.conn.graphname}\n ls")
                 if "(Dimension=" in current_schema:
@@ -81,6 +77,47 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
             logger.info(f"TigerGraph embedding store is initialized with graph {self.conn.graphname}")
         else:
             raise Exception(f"Current TigerGraph version {ver} does not support vector feature!")
+
+    def _ensure_gds_installed(self) -> None:
+        """Install the gds package only if the gds.vector sub-package
+        isn't already present.
+
+        Probes via ``SHOW PACKAGE gds`` whose output looks like
+        ``Packages "gds":\\n  - Sub-Packages:\\n    - vector\\n`` when
+        the sub-package is installed (verified empirically). Checking
+        the sub-package (rather than just the top-level ``gds``) also
+        catches a partial-install state where ``gds`` is present but
+        ``gds.vector`` isn't.
+
+        The probe is a fast catalog read (~60ms) compared to
+        ``install function gds.**`` which takes a global catalog
+        write lock for the duration of the install scan (~3 minutes
+        against a remote TG). Skipping the install when the package
+        is present avoids that lock on every container restart.
+
+        Falls through to the install on any probe failure — better to
+        occasionally re-install than to skip an install that's
+        actually missing.
+        """
+        try:
+            sub_packages = self.conn.gsql("SHOW PACKAGE gds")
+        except Exception as exc:  # noqa: BLE001 — defensive
+            logger.warning(
+                f"GDS-presence probe failed: {exc}. Falling through to install."
+            )
+            sub_packages = ""
+        # The expected installed output is:
+        #   'Packages "gds":\n  - Sub-Packages:\n    - vector\n'
+        # When gds isn't installed at all, ``SHOW PACKAGE gds`` returns
+        # an error message instead, so this check fails closed.
+        if "- vector" in sub_packages:
+            logger.info("GDS library already installed; skipping install.")
+            return
+        logger.info("Installing GDS library")
+        q_res = self.conn.gsql(
+            """USE GLOBAL\nimport package gds\ninstall function gds.**"""
+        )
+        logger.info(f"Done installing GDS library with status {q_res}")
 
     def install_vector_queries(self):
         logger.info(f"Installing vector queries")
@@ -121,6 +158,12 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         self.vector_attr_cache = {}
         if self.conn.apiToken or self.conn.jwtToken:
             self.conn.getToken()
+        # Re-verify GDS presence on every graphname switch. Cheap when
+        # the package is already installed (one LS call) and recovers
+        # from a mid-flight DROP ALL or admin-side wipe before the
+        # per-graph vector-query install below tries to reference
+        # missing gds.vector.* UDFs.
+        self._ensure_gds_installed()
         if self.conn.graphname and not self.conn.graphname == "MyGraph":
             current_schema = self.conn.gsql(f"USE GRAPH {self.conn.graphname}\n ls")
             if "(Dimension=" in current_schema:
@@ -382,7 +425,8 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                         "vertex_id": v_id,
                     }
                 )
-                logger.info(f"Return result {res} for has_embeddings({v_ids})")
+                # v_ids carry user-content-derived identifiers; demote.
+                logger.debug(f"Return result {res} for has_embeddings({v_ids})")
                 found = False
                 if "results" in res[0]:
                     for v in res[0]["results"]:

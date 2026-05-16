@@ -155,24 +155,10 @@ class EventualConsistencyChecker:
                 for x in relationships
             ],
         )
-        self.conn.upsertEdges(
-            "Entity",
-            "IS_HEAD_OF",
-            "RelationshipType",
-            [
-                (x["source"], x["source"] + ":" + x["type"] + ":" + x["target"], {})
-                for x in relationships
-            ],
-        )
-        self.conn.upsertEdges(
-            "RelationshipType",
-            "HAS_TAIL",
-            "Entity",
-            [
-                (x["source"] + ":" + x["type"] + ":" + x["target"], x["target"], {})
-                for x in relationships
-            ],
-        )
+        # IS_HEAD_OF / HAS_TAIL are meta-schema edges (EntityType ↔
+        # RelationshipType); not per-instance. The legacy ECC path
+        # writes only MENTIONS_RELATIONSHIP from the chunk/document
+        # source to the RelationshipType meta-vertex.
         self.conn.upsertEdges(
             src_type,
             "MENTIONS_RELATIONSHIP",

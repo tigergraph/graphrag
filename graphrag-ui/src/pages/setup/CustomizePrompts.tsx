@@ -6,18 +6,27 @@ import ConfigScopeToggle from "@/components/ConfigScopeToggle";
 import { useRoles } from "@/hooks/useRoles";
 import { useLocation } from "react-router-dom";
 
+// Ordered to follow the lifecycle of a graph: setup → ingest → rebuild
+// → query. The Customize Prompts page lists them in the same order so
+// admins read them top-down in the order they fire.
+//
+// ``query_generation`` (map_question_to_schema) is intentionally not
+// listed here — Query Guidance now covers its only end-user-facing
+// customization need (domain hints + examples). The underlying prompt
+// is still available on disk and editable via direct API for advanced
+// use cases.
 const ALL_PROMPT_TYPES = [
-  { id: "chatbot_response", name: "Chatbot Responses", description: "Customize how the chatbot responds to user questions" },
-  { id: "entity_relationship", name: "Entity Relationships", description: "Configure entity and relationship extraction from document chunks" },
-  { id: "community_summarization", name: "Community Summarization", description: "Define how community summaries are generated" },
-  { id: "query_generation", name: "Schema Instructions", description: "Configure instructions for schema filtering and schema generation" },
+  { id: "schema_extraction", name: "Schema Extraction", description: "Rules the LLM follows when proposing a domain schema from sample documents (Initialize Graph dialog)." },
+  { id: "entity_relationship", name: "Entity Relationships", description: "Extract entities and relationships from document chunks during ingest." },
+  { id: "community_summarization", name: "Community Summarization", description: "Summarize each community after Louvain detection during rebuild." },
+  { id: "query_guidance", name: "Query Guidance", description: "Free-form domain hints and example mappings — injected into question-to-schema, generate-function, generate-cypher, and generate-gsql prompts. Empty by default. Max 8000 characters." },
+  { id: "chatbot_response", name: "Chatbot Responses", description: "How the chatbot composes the final answer to the user from retrieved context." },
 ];
 
 const CustomizePrompts = () => {
   const location = useLocation();
   const { isSuperuser, isGlobalDesigner } = useRoles(location.pathname);
   const graphOnly = !isSuperuser && !isGlobalDesigner;
-  const [configuredProvider, setConfiguredProvider] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [expandedPrompt, setExpandedPrompt] = useState<string | null>(null);
   // Only the prompt types returned by the backend (filtered by access level)
@@ -29,14 +38,18 @@ const CustomizePrompts = () => {
     entity_relationship: "",
     community_summarization: "",
     query_generation: "",
+    schema_extraction: "",
+    query_guidance: "",
   });
-  
+
   // Template variables that should not be edited (stored separately)
   const [promptTemplates, setPromptTemplates] = useState({
     chatbot_response: "",
     entity_relationship: "",
     community_summarization: "",
     query_generation: "",
+    schema_extraction: "",
+    query_guidance: "",
   });
 
   // Only render prompt types the backend returned for this user
@@ -126,6 +139,12 @@ const CustomizePrompts = () => {
         query_generation: data.prompts.query_generation?.editable_content !== undefined
           ? data.prompts.query_generation.editable_content
           : (typeof data.prompts.query_generation === 'string' ? data.prompts.query_generation : ""),
+        schema_extraction: data.prompts.schema_extraction?.editable_content !== undefined
+          ? data.prompts.schema_extraction.editable_content
+          : (typeof data.prompts.schema_extraction === 'string' ? data.prompts.schema_extraction : ""),
+        query_guidance: data.prompts.query_guidance?.editable_content !== undefined
+          ? data.prompts.query_guidance.editable_content
+          : (typeof data.prompts.query_guidance === 'string' ? data.prompts.query_guidance : ""),
       });
 
       // Store template variables separately
@@ -134,22 +153,11 @@ const CustomizePrompts = () => {
         entity_relationship: data.prompts.entity_relationship?.template_variables || "",
         community_summarization: data.prompts.community_summarization?.template_variables || "",
         query_generation: data.prompts.query_generation?.template_variables || "",
+        schema_extraction: data.prompts.schema_extraction?.template_variables || "",
+        query_guidance: data.prompts.query_guidance?.template_variables || "",
       });
-
-      // Set configured provider
-      const providerMap: Record<string, string> = {
-        openai: "OpenAI",
-        azure: "Azure OpenAI",
-        genai: "Google GenAI (Gemini)",
-        vertexai: "Google Vertex AI",
-        bedrock: "AWS Bedrock",
-        ollama: "Ollama",
-      };
-      const provider = data.configured_provider?.toLowerCase() || "openai";
-      setConfiguredProvider(providerMap[provider] || data.configured_provider || "OpenAI");
     } catch (error) {
       console.error("Error loading prompts:", error);
-      setConfiguredProvider("OpenAI");
     } finally {
       setIsLoading(false);
     }
@@ -179,6 +187,26 @@ const CustomizePrompts = () => {
       fetchPrompts("");
     }
   }, [graphOnly]);
+
+  // Stay in sync when another component (Bot, Refresh dialog,
+  // Ingest dialog) changes the shared selectedGraph. The prompts
+  // are scoped per graph, so a change triggers a re-fetch too.
+  useEffect(() => {
+    const handler = () => {
+      const next = sessionStorage.getItem("selectedGraph") || "";
+      if (next === selectedGraph) return;
+      setSelectedGraph(next);
+      if (next) {
+        setConfigScope("graph");
+        fetchPrompts(next);
+      } else if (!graphOnly) {
+        setConfigScope("global");
+        fetchPrompts("");
+      }
+    };
+    window.addEventListener("graphrag:selectedGraph", handler);
+    return () => window.removeEventListener("graphrag:selectedGraph", handler);
+  }, [selectedGraph, graphOnly]);
 
   return (
     <div className="p-8">
@@ -232,28 +260,6 @@ const CustomizePrompts = () => {
 
         <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
           <div className="space-y-6">
-            {/* Configured Provider - Read Only */}
-            <div>
-              <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                Configured LLM Provider
-              </label>
-              <div className="relative">
-                <Input
-                  value={isLoading ? "Loading..." : configuredProvider}
-                  disabled
-                  className="dark:border-[#3D3D3D] dark:bg-background opacity-75 cursor-not-allowed"
-                />
-                {isLoading && (
-                  <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                    <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
-                  </div>
-                )}
-              </div>
-              <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-                Prompts are configured for your currently active LLM provider. Change provider in Server Configuration.
-              </p>
-            </div>
-
             {/* Save Message */}
             {saveMessage && (
               <div

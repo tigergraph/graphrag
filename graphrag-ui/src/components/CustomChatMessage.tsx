@@ -13,6 +13,8 @@ import { IoIosCloseCircleOutline } from "react-icons/io";
 import { Interactions } from "./Interact";
 import { KnowledgeGraphPro } from "./graphs/KnowledgeGraphPro";
 import { KnowledgeTablPro } from "./tables/KnowledgeTablePro";
+import { useAlert } from "@/hooks/useAlert";
+import TraceLogs from "@/pages/TraceLogs";
 interface IChatbotMessageProps {
   message?: any;
   withAvatar?: boolean;
@@ -28,6 +30,48 @@ interface IChatbotMessageProps {
 }
 
 const urlRegex = /https?:\/\//
+
+// Phase 1.5 — render a subtle chip showing which retrieval method ran.
+// Reads the auto-selection metadata that supportai_search mirrors into
+// query_sources (chosen_retriever / chosen_retriever_reason / chosen_retriever_source).
+const METHOD_LABELS: Record<string, string> = {
+  similaritysearch: "Similarity",
+  contextualsearch: "Contextual",
+  hybridsearch: "Hybrid",
+  communitysearch: "Community",
+};
+
+const RetrieverBadge: FC<{ message: any }> = ({ message }) => {
+  const qs = message?.query_sources;
+  if (!qs || typeof qs !== "object") return null;
+  const method = qs.chosen_retriever as string | undefined;
+  if (!method) return null;
+  // Suppress for greetings / errors / progress events — those don't run a retriever.
+  if (
+    message.response_type === "progress" ||
+    message.response_type === "greeting" ||
+    message.response_type === "error"
+  ) {
+    return null;
+  }
+  const label = METHOD_LABELS[method] || method;
+  const reason = (qs.chosen_retriever_reason as string | undefined) || "";
+  const source = (qs.chosen_retriever_source as string | undefined) || "";
+  const sourceLabel = source === "manual" ? "manual" : "auto";
+  // Reason + source live in the hover tooltip so the inline chip stays
+  // glanceable; users who want the detail can hover.
+  const tooltip = reason ? `${sourceLabel}: ${reason}` : sourceLabel;
+  return (
+    <div
+      className="inline-flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-shadeA rounded-full px-2 py-0.5 mt-1"
+      title={tooltip}
+    >
+      <span>🔎</span>
+      <span className="font-medium">{label}</span>
+    </div>
+  );
+};
+
 const getReasoning = (msg) => {
   
   if(msg.query_sources.reasoning instanceof Array) {
@@ -130,6 +174,8 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   const [showResult, setShowResult] = useState<boolean>(false);
   const [showGraphVis, setShowGraphVis] = useState<boolean>(false);
   const [showTableVis, setShowTableVis] = useState<boolean>(false);
+  const [traceMessageId, setTraceMessageId] = useState<string | null>(null);
+  const [alert, alertDialog] = useAlert();
 
   // Error handling functions
   const handleShowExplain = () => {
@@ -149,7 +195,11 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   };
 
   const handleShowTable = () => {
-    if (message.response_type == 'history' || !message.query_sources?.result) {
+    // Allow opening the table view on history messages too — the
+    // chat-history backend preserves ``query_sources.result``, so
+    // there's no reason to deny it just because the message arrived
+    // from a reload rather than a fresh answer.
+    if (!message.query_sources?.result) {
       return false;
     }
     setShowTableVis(prev => !prev);
@@ -171,6 +221,13 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
 
   return (
     <>
+      {alertDialog}
+      {traceMessageId && (
+        <TraceLogs
+          messageIdProp={traceMessageId}
+          onClose={() => setTraceMessageId(null)}
+        />
+      )}
       {typeof message === "string" ? (
         <div className="prose dark:prose-invert text-sm max-w-[230px] md:max-w-[80%] mt-7 mb-7">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message}</ReactMarkdown>
@@ -185,11 +242,46 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
             ) : (
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} className={message.response_type === "history" ? undefined : "typewriter"}>{message.content}</ReactMarkdown>
             )}
+            <RetrieverBadge message={message} />
             <Interactions
               message={message} 
               showExplain={handleShowExplain}
               showTable={handleShowTable}
               showGraph={handleShowGraph}
+              onViewTrace={async () => {
+                const messageId = message.messageId || message.message_id || "";
+                if (!messageId) {
+                  await alert("Trace log unavailable: this message has no trace ID.");
+                  return;
+                }
+                // Guard against a missing/invalid creds value. If we send
+                // ``Basic null`` (or other unparsable base64), FastAPI's
+                // HTTPBasic returns 401 + ``WWW-Authenticate: Basic`` and
+                // the browser pops up its native auth dialog. Better to
+                // tell the user to sign in again than to flash that popup.
+                const creds = sessionStorage.getItem("creds");
+                if (!creds) {
+                  await alert("Your session has expired. Please log in again.");
+                  return;
+                }
+                // Trace JSON lives under /code/trace_logs inside the
+                // graphrag container and is wiped on container recreate.
+                // Probe first so we never open an empty dialog when the file is gone.
+                try {
+                  const probe = await fetch(`/ui/trace/${messageId}`, {
+                    method: "GET",
+                    headers: { Authorization: `Basic ${creds}` },
+                  });
+                  if (!probe.ok) {
+                    await alert("Trace log not found.");
+                    return;
+                  }
+                } catch (err) {
+                  await alert("Failed to reach the trace log endpoint. Please try again.");
+                  return;
+                }
+                setTraceMessageId(messageId);
+              }}
             />
           </div>
 

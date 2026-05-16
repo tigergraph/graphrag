@@ -12,12 +12,13 @@ from supportai import workers
 from pyTigerGraph import TigerGraphConnection
 
 from common.config import (
-    embedding_service,
+    get_embedding_service,
     graphrag_config,
     get_llm_service,
     get_completion_config,
     get_graphrag_config,
 )
+from common.db.schema_utils import gsql_output_error
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
 from common.extractors import GraphExtractor, LLMEntityRelationshipExtractor
@@ -64,8 +65,8 @@ async def install_queries(
     async with tg_sem:
         res = await conn.gsql(query)
         logger.info(f"INSTALL QUERY ALL returned: {str(res)[:200]}")
-        res_lower = res.lower() if isinstance(res, str) else ""
-        if "error" in res_lower or "does not exist" in res_lower or "failed" in res_lower:
+        err = gsql_output_error(res) if isinstance(res, str) else None
+        if err:
             raise Exception(res)
 
     max_wait = 300  # seconds
@@ -122,7 +123,7 @@ async def init(
 
     embedding_store = TigerGraphEmbeddingStore(
         conn,
-        embedding_service,
+        get_embedding_service(),
         support_ai_instance=True,
     )
     embedding_store.set_graphname(conn.graphname)

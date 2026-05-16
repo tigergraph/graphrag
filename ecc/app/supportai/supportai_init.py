@@ -21,7 +21,7 @@ import httpx
 from aiochannel import Channel
 from pyTigerGraph import TigerGraphConnection
 
-from common.config import embedding_service, entity_extraction_switch, doc_process_switch
+from common.config import get_embedding_service, entity_extraction_switch, doc_process_switch
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.extractors.BaseExtractor import BaseExtractor
 from supportai import workers
@@ -59,7 +59,8 @@ async def stream_docs(
                     async with tg_sem:
                         res = await conn.runInstalledQuery(
                             "StreamDocContent",
-                            params={"doc": d},
+                            # 1-tuple form for VERTEX<T> params.
+                            params={"doc": (d,)},
                         )
                     logger.info("stream_docs writes to docs")    
                     await docs_chan.put(res[0]["DocContent"][0])
@@ -90,7 +91,7 @@ async def chunk_docs(
             # v_id = content["v_id"]
             # txt = content["attributes"]["text"]
 
-            logger.info("chunk writes to extract")
+            logger.debug("chunk writes to extract")
             # await embed_chan.put((v_id, txt, "Document"))
 
             task = sp.create_task(
@@ -137,10 +138,11 @@ async def embed(
     async with asyncio.TaskGroup() as sp:
         # consume task queue
         async for v_id, content, index_name in embed_chan:
-            logger.info(f"Embed to {graphname}_{index_name}: {v_id}")
+            # v_id derives from user content.
+            logger.debug(f"Embed to {graphname}_{index_name}: {v_id}")
             sp.create_task(
                 workers.embed(
-                    embedding_service,
+                    get_embedding_service(),
                     embedding_store,
                     v_id,
                     content,

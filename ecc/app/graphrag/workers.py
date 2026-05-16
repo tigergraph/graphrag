@@ -94,30 +94,32 @@ async def chunk_doc(
         
         v_id = util.process_id(doc["v_id"])
         if v_id != doc["v_id"]:
-            logger.info(f"""Cloning doc/content {doc["v_id"]} -> {v_id}""")
+            # v_id is a sanitized form of a user document ID — DEBUG.
+            logger.debug(f"""Cloning doc/content {doc["v_id"]} -> {v_id}""")
             await upsert_chan.put((upsert_doc, (conn, v_id, chunker_type, doc["attributes"]["text"])))
-        
+
         # Use get_chunker for all types (including images)
         # For images, get_chunker returns SingleChunker which preserves markdown image references
         chunker = ecc_util.get_chunker(chunker_type, graphname=conn.graphname)
         # decode the text return from tigergraph as it was encoded when written into jsonl file for uploading
         chunks = chunker.chunk(doc["attributes"]["text"].encode('raw_unicode_escape').decode('unicode_escape'))
-       
-        logger.info(f"Chunking {v_id} into {len(chunks)} chunk(s)")
+
+        # v_id / chunk_id derive from user document content.
+        logger.debug(f"Chunking {v_id} into {len(chunks)} chunk(s)")
         for i, chunk in enumerate(chunks):
             chunk_id = f"{v_id}_chunk_{i}"
-            logger.info(f"Processing chunk {chunk_id}")
+            logger.debug(f"Processing chunk {chunk_id}")
 
             # send chunks to be upserted (func, args)
-            logger.info("chunk writes to upsert_chan")
+            logger.debug("chunk writes to upsert_chan")
             await upsert_chan.put((upsert_chunk, (conn, v_id, chunk_id, chunk)))
 
             # send chunks to have entities extracted
-            logger.info("chunk writes to extract_chan")
+            logger.debug("chunk writes to extract_chan")
             await extract_chan.put((chunk, chunk_id))
 
             # send chunks to be embedded
-            logger.info("chunk writes to embed_chan")
+            logger.debug("chunk writes to embed_chan")
             await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
 
     return v_id
@@ -142,7 +144,7 @@ async def upsert_doc(conn: AsyncTigerGraphConnection, doc_id, ctype, content_tex
     )
 
 async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk):
-    logger.info(f"Upserting chunk {chunk_id}")
+    logger.debug(f"Upserting chunk {chunk_id}")
     date_added = int(time.time())
     await util.upsert_vertex(
         conn,
@@ -198,11 +200,11 @@ async def embed(
             the vertex index to write to
     """
     async with embed_sem:
-        logger.info(f"Embedding {v_id}")
+        logger.debug(f"Embedding {v_id}")
 
         # if loader is running, wait until it's done
         if not util.loading_event.is_set():
-            logger.info("Embed worker waiting for loading event to finish")
+            logger.debug("Embed worker waiting for loading event to finish")
             await util.loading_event.wait()
         try:
             await embed_store.aadd_embeddings([(content, [])], [{"vertex_id": v_id}])
@@ -257,20 +259,72 @@ async def extract(
     async with extract_sem:
         try:
             extracted: list[GraphDocument] = await extractor.aextract(chunk)
-            logger.info(
+            # chunk_id is user-content-derived; demote.
+            logger.debug(
                 f"Extracting chunk: {chunk_id} ({len(extracted)} graph docs extracted)"
             )
         except Exception as e:
             logger.error(f"Failed to extract chunk {chunk_id}: {e}")
             extracted = []
 
+        # Schema-aware ingest helpers — derive case-insensitive
+        # lookups from the extractor once per chunk so the loops below
+        # can map LLM-emitted type strings back to canonical schema names.
+        domain_vt_canonical: dict = {}
+        domain_edge_canonical: dict = {}
+        edge_endpoint_pairs: dict = {}
+        strict_mode = False
+        if isinstance(extractor, LLMEntityRelationshipExtractor):
+            domain_vt_canonical = {
+                v.casefold(): v for v in (extractor.allowed_vertex_types or [])
+            }
+            domain_edge_canonical = {
+                e.casefold(): e for e in (extractor.allowed_edge_types or [])
+            }
+            edge_endpoint_pairs = {
+                name.casefold(): {(f.casefold(), t.casefold()) for f, t in pairs}
+                for name, pairs in (extractor.domain_edge_endpoints or {}).items()
+            }
+            strict_mode = bool(extractor.strict_mode)
+
+        # ``has_domain_types`` distinguishes the two meta-layer cases:
+        #   Case 1: no domain types on the graph — the EntityType /
+        #     RelationshipType layer becomes a free-text catalog of
+        #     whatever the LLM emitted.
+        #   Case 2: at least one domain type exists — the meta-layer
+        #     is restricted to declared / matched domain types only.
+        #     Non-matched extractions still write to the parallel
+        #     Entity / RELATIONSHIP layer but do not pollute the
+        #     meta layer.
+        has_domain_types = bool(domain_vt_canonical) or bool(domain_edge_canonical)
+
         # upsert nodes and edges to the graph
         for doc in extracted:
+            # Build a node_id → node_type lookup so the relationship
+            # loop below knows the source/target types (the parser
+            # currently doesn't carry endpoint types per relationship).
+            node_type_by_id: dict = {}
+            for n in doc.nodes:
+                if not n.id or not n.type:
+                    continue
+                pid = util.process_id(str(n.id))
+                if pid:
+                    node_type_by_id[pid] = n.type
+
             for i, node in enumerate(doc.nodes):
-                logger.info(f"extract writes entity vert to upsert\nNode: {node.id}")
+                logger.debug(f"extract writes entity vert to upsert\nNode: {node.id}")
                 v_id = util.process_id(str(node.id))
                 if len(v_id) == 0:
                     continue
+                node_type_lower = (node.type or "").casefold()
+                domain_vt = domain_vt_canonical.get(node_type_lower)
+
+                # Strict mode: drop nodes whose type isn't in the
+                # schema. When strict_mode is off, non-matched nodes
+                # fall through to the parallel Entity layer.
+                if strict_mode and domain_vt is None:
+                    continue
+
                 desc = await get_vert_desc(conn, v_id, node)
 
                 if len(desc[0]) == 0:
@@ -290,42 +344,58 @@ async def extract(
                         ),
                     )
                 )
+                # Meta-layer (EntityType / ENTITY_HAS_TYPE) population:
+                #   Case 1 (no domain types): write for every extracted
+                #     node using a normalized form of the LLM-emitted
+                #     type label so trivial variants
+                #     (``Company`` / ``Companies`` / ``company_type``)
+                #     collapse onto one EntityType row.
+                #   Case 2 (domain types exist): write only when the
+                #     node matches a declared domain VT, using the
+                #     canonical domain-VT name as the EntityType id.
+                meta_type_id = ""
                 if isinstance(extractor, LLMEntityRelationshipExtractor):
-                    logger.info("extract writes type vert to upsert")
-                    type_id = util.process_id(node.type)
-                    if len(type_id) == 0:
-                        continue
+                    if not has_domain_types:
+                        meta_type_id = util.normalize_type_name(node.type)
+                    elif domain_vt is not None:
+                        # Preserve the canonical schema casing
+                        # (``InvestmentFund``) so the EntityType id
+                        # matches what ``upsert_type_metadata`` writes
+                        # at schema-apply time. Lowercasing here would
+                        # produce a duplicate row keyed
+                        # ``investmentfund``.
+                        meta_type_id = domain_vt
+                if meta_type_id:
+                    logger.debug("extract writes type vert to upsert")
                     await upsert_chan.put(
                         (
-                            util.upsert_vertex,  # func to call
+                            util.upsert_vertex,
                             (
                                 conn,
-                                "EntityType",  # v_type
-                                type_id,  # v_id
-                                {  # attrs
-                                    "epoch_added": int(time.time()),
-                                },
-                            )
+                                "EntityType",
+                                meta_type_id,
+                                {"epoch_added": int(time.time())},
+                            ),
                         )
                     )
-                    logger.info("extract writes entity_has_type edge to upsert")
+                    logger.debug("extract writes entity_has_type edge to upsert")
                     await upsert_chan.put(
                         (
                             util.upsert_edge,
                             (
                                 conn,
-                                "Entity",  # src_type
-                                v_id,  # src_id
-                                "ENTITY_HAS_TYPE",  # edgeType
-                                "EntityType",  # tgt_type
-                                type_id,  # tgt_id
-                                None,  # attributes
+                                "Entity",
+                                v_id,
+                                "ENTITY_HAS_TYPE",
+                                "EntityType",
+                                meta_type_id,
+                                None,
                             ),
                         )
                     )
 
                 # link the entity to the chunk it came from
-                logger.info("extract writes contains edge to upsert")
+                logger.debug("extract writes contains edge to upsert")
                 await upsert_chan.put(
                     (
                         util.upsert_edge,
@@ -340,6 +410,60 @@ async def extract(
                         ),
                     )
                 )
+
+                # Schema-aware: when the node's type matches a domain
+                # vertex type from the live schema, ALSO upsert the
+                # vertex as that domain type and link it back to the
+                # chunk via the multi-pair CONTAINS_ENTITY pair we
+                # added at init time.
+                if domain_vt is not None:
+                    logger.debug(
+                        f"extract writes domain {domain_vt} vert + CONTAINS_ENTITY pair"
+                    )
+                    # Coerce + filter LLM-emitted properties against
+                    # the domain VT's attribute schema before upsert.
+                    # The ``description`` key is for the Entity row and
+                    # never belongs on the domain VT row, so strip it
+                    # before coercion. Domain VTs don't carry the ECC
+                    # bookkeeping ``epoch_added`` attribute either —
+                    # sending it makes TG reject the whole batch.
+                    raw_props = {
+                        k: v for k, v in (node.properties or {}).items()
+                        if k != "description"
+                    }
+                    attr_schema = (
+                        extractor.entity_type_attributes.get(domain_vt)
+                        if isinstance(extractor, LLMEntityRelationshipExtractor)
+                        else {}
+                    )
+                    domain_attrs = util.coerce_attrs_for_schema(
+                        raw_props, attr_schema or {}
+                    )
+                    await upsert_chan.put(
+                        (
+                            util.upsert_vertex,
+                            (
+                                conn,
+                                domain_vt,
+                                v_id,
+                                domain_attrs,
+                            ),
+                        )
+                    )
+                    await upsert_chan.put(
+                        (
+                            util.upsert_edge,
+                            (
+                                conn,
+                                "DocumentChunk",
+                                chunk_id,
+                                "CONTAINS_ENTITY",
+                                domain_vt,
+                                v_id,
+                                None,
+                            ),
+                        )
+                    )
                 for node2 in doc.nodes[i + 1:]:
                     v_id2 = util.process_id(str(node2.id))
                     if len(v_id2) == 0:
@@ -360,69 +484,253 @@ async def extract(
                 )
 
             for edge in doc.relationships:
-                logger.info(
+                # Edge content includes entity names + relationship
+                # types pulled from user documents.
+                logger.debug(
                     f"extract writes relates edge to upsert:{edge.source.id} -({edge.type})->  {edge.target.id}"
                 )
-                # upsert verts first to make sure their ID becomes an attr
-                v_id = util.process_id(edge.source.id)  # src_id
-                if len(v_id) == 0:
+                src_id = util.process_id(edge.source.id)
+                tgt_id = util.process_id(edge.target.id)
+                if len(src_id) == 0 or len(tgt_id) == 0:
                     continue
-                desc = await get_vert_desc(conn, v_id, edge.source)
-                if len(desc[0]) == 0:
-                    desc[0] = edge.source.id
-                await upsert_chan.put(
-                    (
-                        util.upsert_vertex,  # func to call
-                        (
-                            conn,
-                            "Entity",  # v_type
-                            v_id,
-                            {  # attrs
-                                "description": desc,
-                                "epoch_added": int(time.time()),
-                            },
-                        ),
-                    )
-                )
-                v_id = util.process_id(edge.target.id)
-                if len(v_id) == 0:
-                    continue
-                desc = await get_vert_desc(conn, v_id, edge.target)
-                if len(desc[0]) == 0:
-                    desc[0] = edge.target.id
-                await upsert_chan.put(
-                    (
-                        util.upsert_vertex,  # func to call
-                        (
-                            conn,
-                            "Entity",  # v_type
-                            v_id,  # src_id
-                            {  # attrs
-                                "description": desc,
-                                "epoch_added": int(time.time()),
-                            },
-                        ),
-                    )
+
+                # Look up the source / target types from the per-doc
+                # node lookup (the parser doesn't currently carry
+                # endpoint types per relationship).
+                src_type = node_type_by_id.get(src_id, "")
+                tgt_type = node_type_by_id.get(tgt_id, "")
+
+                rel_type_lower = (edge.type or "").casefold()
+                canonical_rel = domain_edge_canonical.get(rel_type_lower)
+                # Use the canonical-resolved name as the key for the
+                # endpoint-pair lookup so the check stays correct even
+                # if ``domain_edge_canonical`` later admits alias →
+                # canonical mappings.
+                canonical_rel_key = canonical_rel.casefold() if canonical_rel else ""
+                valid_pair = (
+                    canonical_rel is not None
+                    and (src_type.casefold(), tgt_type.casefold())
+                    in edge_endpoint_pairs.get(canonical_rel_key, set())
                 )
 
-                # upsert the edge between the two entities
+                # Strict mode: only write the typed pattern. Legacy
+                # Entity → RELATIONSHIP → Entity fallback applies only
+                # when strict_mode is off.
+                if strict_mode and not valid_pair:
+                    continue
+
+                # ---- Legacy raw layer: Entity src + Entity tgt + RELATIONSHIP edge ----
+                src_desc = await get_vert_desc(conn, src_id, edge.source)
+                if len(src_desc[0]) == 0:
+                    src_desc[0] = edge.source.id
+                await upsert_chan.put(
+                    (
+                        util.upsert_vertex,
+                        (
+                            conn,
+                            "Entity",
+                            src_id,
+                            {
+                                "description": src_desc,
+                                "epoch_added": int(time.time()),
+                            },
+                        ),
+                    )
+                )
+                tgt_desc = await get_vert_desc(conn, tgt_id, edge.target)
+                if len(tgt_desc[0]) == 0:
+                    tgt_desc[0] = edge.target.id
+                await upsert_chan.put(
+                    (
+                        util.upsert_vertex,
+                        (
+                            conn,
+                            "Entity",
+                            tgt_id,
+                            {
+                                "description": tgt_desc,
+                                "epoch_added": int(time.time()),
+                            },
+                        ),
+                    )
+                )
                 await upsert_chan.put(
                     (
                         util.upsert_edge,
                         (
                             conn,
-                            "Entity",  # src_type
-                            util.process_id(edge.source.id),  # src_id
-                            "RELATIONSHIP",  # edgeType
-                            "Entity",  # tgt_type
-                            util.process_id(edge.target.id),  # tgt_id
-                            {"relation_type": edge.type},  # attributes
+                            "Entity",
+                            src_id,
+                            "RELATIONSHIP",
+                            "Entity",
+                            tgt_id,
+                            {"relation_type": edge.type},
                         ),
                     )
                 )
-                # embed "RelationshipType",
-                # (v_id, content, index_name)
-                # right now, we're not embedding relationships in graphrag
+
+                # ---- Meta-schema typed-relationship layer ----
+                # Two cases:
+                #   Case 1 (no domain types): every extracted
+                #     relationship contributes RelationshipType (via
+                #     LLM-emitted edge.type) and IS_HEAD_OF / HAS_TAIL
+                #     edges between the corresponding EntityType
+                #     vertices (via LLM-emitted src_type / tgt_type).
+                #   Case 2 (domain types exist) with valid_pair:
+                #     same writes but using canonical (declared) names.
+                #   Case 2 without valid_pair: skip the meta-layer
+                #     entirely. The Entity / RELATIONSHIP write
+                #     above is the only persistence for unmatched
+                #     extractions.
+                #
+                # IS_HEAD_OF / HAS_TAIL connect EntityType ↔
+                # RelationshipType (meta layer), NOT individual domain
+                # vertex instances. Per-instance domain edges (e.g.
+                # ``Company → PUBLISHES → Report``) are written
+                # separately when valid_pair holds.
+                meta_rel_id = ""
+                meta_src_et_id = ""
+                meta_tgt_et_id = ""
+                if valid_pair:
+                    meta_rel_id = canonical_rel
+                    # Preserve canonical schema casing so the EntityType
+                    # id matches the entity-side write and the row that
+                    # ``upsert_type_metadata`` lays down at schema-apply
+                    # time (``InvestmentFund``, not
+                    # ``investmentfund``).
+                    meta_src_et_id = domain_vt_canonical.get(
+                        src_type.casefold(), ""
+                    )
+                    meta_tgt_et_id = domain_vt_canonical.get(
+                        tgt_type.casefold(), ""
+                    )
+                elif not has_domain_types:
+                    # Case 1: dedup variants via normalize_type_name so
+                    # the meta-layer doesn't overflow with near-duplicate
+                    # labels (``Company``/``Companies``,
+                    # ``WORKS_FOR``/``works_for_type``, etc.).
+                    meta_rel_id = util.normalize_type_name(edge.type)
+                    meta_src_et_id = util.normalize_type_name(src_type)
+                    meta_tgt_et_id = util.normalize_type_name(tgt_type)
+
+                if meta_rel_id and meta_src_et_id and meta_tgt_et_id:
+                    now = int(time.time())
+                    await upsert_chan.put(
+                        (
+                            util.upsert_vertex,
+                            (conn, "RelationshipType", meta_rel_id, {"epoch_added": now}),
+                        )
+                    )
+                    await upsert_chan.put(
+                        (
+                            util.upsert_vertex,
+                            (conn, "EntityType", meta_src_et_id, {"epoch_added": now}),
+                        )
+                    )
+                    await upsert_chan.put(
+                        (
+                            util.upsert_vertex,
+                            (conn, "EntityType", meta_tgt_et_id, {"epoch_added": now}),
+                        )
+                    )
+                    await upsert_chan.put(
+                        (
+                            util.upsert_edge,
+                            (
+                                conn,
+                                "EntityType",
+                                meta_src_et_id,
+                                "IS_HEAD_OF",
+                                "RelationshipType",
+                                meta_rel_id,
+                                None,
+                            ),
+                        )
+                    )
+                    await upsert_chan.put(
+                        (
+                            util.upsert_edge,
+                            (
+                                conn,
+                                "RelationshipType",
+                                meta_rel_id,
+                                "HAS_TAIL",
+                                "EntityType",
+                                meta_tgt_et_id,
+                                None,
+                            ),
+                        )
+                    )
+                    # Chunk → RelationshipType — fires whenever any
+                    # meta-layer write fires (Case 1 always, Case 2 on
+                    # valid_pair).
+                    await upsert_chan.put(
+                        (
+                            util.upsert_edge,
+                            (
+                                conn,
+                                "DocumentChunk",
+                                chunk_id,
+                                "MENTIONS_RELATIONSHIP",
+                                "RelationshipType",
+                                meta_rel_id,
+                                None,
+                            ),
+                        )
+                    )
+
+                if valid_pair:
+                    # Schema-aware: also write the canonical domain VT
+                    # instances and the per-instance domain edge (the
+                    # schema-declared edge name like ``PUBLISHES``).
+                    # Domain VTs don't carry the ECC bookkeeping
+                    # ``epoch_added`` attribute — sending it makes TG
+                    # reject the whole batch with ``Unknown vertex
+                    # attribute or vector name: epoch_added``.
+                    canonical_src_vt = domain_vt_canonical.get(src_type.casefold())
+                    canonical_tgt_vt = domain_vt_canonical.get(tgt_type.casefold())
+                    await upsert_chan.put(
+                        (
+                            util.upsert_vertex,
+                            (conn, canonical_src_vt, src_id, {}),
+                        )
+                    )
+                    await upsert_chan.put(
+                        (
+                            util.upsert_vertex,
+                            (conn, canonical_tgt_vt, tgt_id, {}),
+                        )
+                    )
+                    # Coerce + filter LLM-emitted edge properties
+                    # against the edge's attribute schema. ``description``
+                    # is the Entity-side payload and never belongs on
+                    # the domain edge row.
+                    edge_raw_props = {
+                        k: v for k, v in (edge.properties or {}).items()
+                        if k != "description"
+                    }
+                    edge_attr_schema = (
+                        extractor.relationship_type_attributes.get(canonical_rel)
+                        if isinstance(extractor, LLMEntityRelationshipExtractor)
+                        else {}
+                    )
+                    domain_edge_attrs = util.coerce_edge_attrs_for_schema(
+                        edge_raw_props, edge_attr_schema or {}
+                    )
+                    await upsert_chan.put(
+                        (
+                            util.upsert_edge,
+                            (
+                                conn,
+                                canonical_src_vt,
+                                src_id,
+                                canonical_rel,
+                                canonical_tgt_vt,
+                                tgt_id,
+                                domain_edge_attrs or None,
+                            ),
+                        )
+                    )
 
 
 comm_sem = asyncio.Semaphore(util._worker_concurrency)

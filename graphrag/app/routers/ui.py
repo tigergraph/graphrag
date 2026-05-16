@@ -53,6 +53,9 @@ from tools.validation_utils import MapQuestionToSchemaException
 
 from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
 from common.db.connections import get_db_connection_pwd_manual
+from common.db import schema_utils as schema_utils_mod
+from common.db import schema_extraction as schema_extraction_mod
+from common.utils.text_extractors import TextExtractor
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
@@ -70,6 +73,67 @@ from common.py_schemas.schemas import (
 
 logger = logging.getLogger(__name__)
 
+TRACE_LOGS_DIR = os.environ.get("TRACE_LOGS_DIR", "/code/trace_logs")
+
+
+def _cleanup_old_traces(max_age_days: int = 30):
+    """Delete trace log files older than max_age_days."""
+    try:
+        cutoff = time.time() - (max_age_days * 86400)
+        for filename in os.listdir(TRACE_LOGS_DIR):
+            if not filename.endswith(".json"):
+                continue
+            filepath = os.path.join(TRACE_LOGS_DIR, filename)
+            if os.path.getmtime(filepath) < cutoff:
+                os.remove(filepath)
+    except Exception:
+        logger.warning("Failed to clean up old trace logs", exc_info=True)
+
+
+def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float, username: str):
+    try:
+        if not isinstance(message_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", message_id):
+            logger.warning("Refusing to save trace log: invalid message_id %r", message_id)
+            return
+        if not isinstance(username, str) or not username:
+            # Without an owner we cannot enforce per-user access on read, so refuse to save.
+            logger.warning("Refusing to save trace log for %r: missing username", message_id)
+            return
+
+        os.makedirs(TRACE_LOGS_DIR, exist_ok=True)
+        base_dir = os.path.abspath(TRACE_LOGS_DIR)
+        filepath = os.path.abspath(os.path.join(base_dir, f"{message_id}.json"))
+        if os.path.commonpath([base_dir, filepath]) != base_dir:
+            logger.warning("Refusing to save trace log: path escapes TRACE_LOGS_DIR for %r", message_id)
+            return
+
+        _cleanup_old_traces()
+
+        # Strip chunk text from query_sources to keep trace files small.
+        # final_retrieval contains the full text of every retrieved chunk.
+        query_sources = dict(resp.query_sources) if resp.query_sources else {}
+        result = query_sources.get("result")
+        if isinstance(result, dict) and "final_retrieval" in result:
+            result = {k: v for k, v in result.items() if k != "final_retrieval"}
+            query_sources = {**query_sources, "result": result}
+
+        trace_data = {
+            "message_id": message_id,
+            "conversation_id": conversation_id,
+            "username": username,
+            "user_query": user_query,
+            "response_time": elapsed,
+            "response_type": resp.response_type,
+            "answered_question": resp.answered_question,
+            "query_sources": query_sources,
+            "natural_language_response": resp.natural_language_response,
+            "timestamp": time.time(),
+        }
+        with open(filepath, "w") as f:
+            json.dump(trace_data, f, default=str)
+    except Exception:
+        logger.warning(f"Failed to save trace log for message {message_id}", exc_info=True)
+
 # Validated graph name path parameter — rejects path traversal characters
 ValidGraphName = Annotated[str, Path(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 
@@ -83,7 +147,12 @@ llm_config_lock = asyncio.Lock()
 # Key: (username, password_hash) -> (timestamp, (global_roles, graph_roles))
 _role_cache: dict[tuple[str, str], tuple[float, tuple[list[str], dict[str, list[str]]]]] = {}
 _role_cache_lock = threading.Lock()
-_ROLE_CACHE_TTL = 60  # seconds
+# Role changes (granting/revoking TG roles) are infrequent operator
+# actions, and the cache key already includes a password hash so credential
+# changes are picked up immediately. Match the UI idle timeout (1 hour) —
+# past that point the user gets logged out anyway and the next sign-in
+# refreshes roles. Increase if your operator workflows can wait longer.
+_ROLE_CACHE_TTL = 60 * 60  # seconds (1 hour)
 
 def _normalize_roles(raw_roles: str) -> list[str]:
     cleaned = re.sub(r"[\[\]]", "", raw_roles).strip()
@@ -156,13 +225,25 @@ def _get_user_role_details(username: str, password: str) -> tuple[list[str], dic
         restppPort=db_config.get("restppPort"),
         graphname="",
     )
-    user_info = conn.gsql("SHOW USER")
-    result = _parse_user_roles_detail(user_info, username)
 
-    with _role_cache_lock:
-        _role_cache[cache_key] = (now, result)
-
-    return result
+    # Transient GSQL hiccups when the role-cache TTL expires were
+    # surfacing as 403 "Unable to verify user roles" banners on the
+    # config pages. Retry once with a short backoff before giving up —
+    # the next attempt usually succeeds when the blip is over.
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            user_info = conn.gsql("SHOW USER")
+            result = _parse_user_roles_detail(user_info, username)
+            with _role_cache_lock:
+                _role_cache[cache_key] = (now, result)
+            return result
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(0.5)
+    assert last_exc is not None
+    raise last_exc
 
 
 def _get_user_roles(username: str, password: str) -> list[str]:
@@ -314,6 +395,125 @@ def login(auth: Annotated[list[str], Depends(ui_basic_auth)]):
     return {"graphs": graphs, "roles": global_roles, "graph_roles": graph_roles}
 
 
+def _read_local_version(component: str) -> dict:
+    """Read the ``/code/VERSION`` (repo-root file copied into image)
+    and ``/code/BUILD_DATE`` (stamped at image build time).
+    """
+    def _safe_read(path: str) -> str:
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except Exception:
+            return "unknown"
+
+    return {
+        "component": component,
+        "version": _safe_read("/code/VERSION"),
+        "build_date": _safe_read("/code/BUILD_DATE"),
+    }
+
+
+def _unknown_version(component: str) -> dict:
+    return {"component": component, "version": "unknown", "build_date": "unknown"}
+
+
+def _coerce_version_payload(payload, component: str) -> dict:
+    """Return a payload shaped like ``_unknown_version`` regardless of
+    what a remote ``/version`` endpoint actually sent. A malformed or
+    compromised response (non-dict, missing keys, non-string values)
+    falls back to the unknown shape so clients always see the same
+    schema.
+    """
+    if not isinstance(payload, dict):
+        return _unknown_version(component)
+    result = _unknown_version(component)
+    for key in ("component", "version", "build_date"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            result[key] = value
+    return result
+
+
+@router.get(f"{route_prefix}/version")
+def get_version():
+    """Return image-build version info for all running components.
+
+    The graphrag container reads its own ``/code/VERSION`` directly;
+    ``ecc`` and ``graphrag-ui`` are fetched over the network so this
+    one call surfaces every component a UI client cares about.
+    Unreachable components return ``unknown`` rather than failing the
+    whole call.
+    """
+    graphrag_version = _read_local_version("graphrag")
+
+    ecc_base = graphrag_config.get("ecc", "http://graphrag-ecc:8001")
+    try:
+        ecc_resp = httpx.get(f"{ecc_base}/version", timeout=5.0)
+        if ecc_resp.status_code == 200:
+            ecc_version = _coerce_version_payload(ecc_resp.json(), "graphrag-ecc")
+        else:
+            ecc_version = _unknown_version("graphrag-ecc")
+    except Exception:
+        ecc_version = _unknown_version("graphrag-ecc")
+
+    ui_version = _unknown_version("graphrag-ui")
+    try:
+        # ``serve`` exposes static files at port 3000 inside the
+        # compose network; fall through quietly if it isn't reachable
+        # (e.g. running graphrag in isolation).
+        ui_resp = httpx.get("http://graphrag-ui:3000/version.json", timeout=5.0)
+        if ui_resp.status_code == 200:
+            ui_version = _coerce_version_payload(ui_resp.json(), "graphrag-ui")
+    except Exception:
+        pass
+
+    return {
+        "graphrag": graphrag_version,
+        "graphrag_ecc": ecc_version,
+        "graphrag_ui": ui_version,
+    }
+
+
+@router.get(f"{route_prefix}/list_graphs")
+def list_graphs(auth: Annotated[list[str], Depends(ui_basic_auth)]):
+    """Return the live list of graphs the authenticated user has access
+    to. UI clients call this on mount to refresh their cached graph
+    list, so a graph created or initialized after login (or during a
+    session where the init request failed client-side but succeeded
+    server-side) becomes visible without re-login.
+    """
+    return {"graphs": auth[0]}
+
+
+@router.get(f"{route_prefix}/schema_reserved_names")
+def schema_reserved_names(
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Return name sets the UI uses to reject suggested types up-front
+    in the Initialize Graph dialog. The downstream parser silently
+    drops these anyway, but inline rejection gives the user a clear
+    reason instead of a confusing "type didn't appear in the draft".
+
+    Returns three lists:
+      * ``gsql_keywords``           — GSQL reserved words (sourced from
+        pyTigerGraph). Naming a vertex/edge type after one would crash
+        the schema-change job.
+      * ``structural_vertex_types`` — GraphRAG always-present vertex
+        types (Document, DocumentChunk, Entity, ...).
+      * ``structural_edge_types``   — GraphRAG always-present edge
+        types (HAS_CONTENT, CONTAINS_ENTITY, ...).
+    """
+    return {
+        "gsql_keywords": sorted(schema_utils_mod.get_gsql_reserved_words()),
+        "structural_vertex_types": sorted(
+            schema_utils_mod.GRAPHRAG_STRUCTURAL_VERTEX_TYPES
+        ),
+        "structural_edge_types": sorted(
+            schema_utils_mod.GRAPHRAG_STRUCTURAL_EDGE_TYPES
+        ),
+    }
+
+
 @router.post(f"{route_prefix}/feedback")
 def add_feedback(
     message: Message,
@@ -336,6 +536,50 @@ def add_feedback(
         raise e
 
     return {"message": "feedback saved", "message_id": message.message_id}
+
+
+@router.get(route_prefix + "/trace/{message_id}")
+def get_trace_log(
+    message_id: str,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    # Trace logs contain user queries (potentially PII), full LLM responses,
+    # internal cypher, schema mappings, and per-call cost.
+    # Two layers of access control:
+    #   1. Role: must be a superuser.
+    #   2. Ownership: must be the user who originated the trace.
+    # This prevents cross-user disclosure even between superusers.
+    _require_roles(creds[1], {"superuser"})
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", message_id):
+        raise HTTPException(status_code=400, detail="Invalid message_id")
+    base_dir = os.path.abspath(TRACE_LOGS_DIR)
+    filepath = os.path.abspath(os.path.join(base_dir, f"{message_id}.json"))
+    if os.path.commonpath([base_dir, filepath]) != base_dir:
+        raise HTTPException(status_code=400, detail="Invalid message_id")
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Trace log not found")
+
+    try:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Failed to read trace log %r", message_id, exc_info=True)
+        raise HTTPException(status_code=404, detail="Trace log not found")
+
+    # Per-user segregation. Legacy files (saved before this fix) have no
+    # "username" field and therefore can't pass this check — they will 404
+    # for everyone and age out via the existing 30-day cleanup.
+    owner = data.get("username")
+    if owner != creds[1].username:
+        logger.warning(
+            "User %r attempted to read trace owned by %r (message_id=%s)",
+            creds[1].username, owner, message_id,
+        )
+        raise HTTPException(status_code=404, detail="Trace log not found")
+
+    return data
+
 
 
 @router.post(route_prefix + "/{graphname}/create_graph")
@@ -383,46 +627,774 @@ def create_graph(
             }
 
 
+# Per-graph init state store. Init runs as a BackgroundTask so the
+# HTTP request returns immediately; clients poll /initialize_status
+# for progress / completion. Avoids browser timeouts on long inits
+# (TG schema-change + retriever installs can run for 10+ minutes).
+_init_state: dict[str, dict] = {}
+_init_state_lock = threading.Lock()
+
+
+def _set_init_state(graphname: str, **fields) -> None:
+    with _init_state_lock:
+        cur = _init_state.get(graphname, {})
+        cur.update(fields)
+        _init_state[graphname] = cur
+
+
+def _get_init_state(graphname: str) -> dict:
+    with _init_state_lock:
+        return dict(_init_state.get(graphname, {"state": "unknown"}))
+
+
+def _try_reserve_init(graphname: str) -> str | None:
+    """Atomically transition the graph into the ``queued`` state. Returns
+    ``None`` on success; returns the existing state string when another
+    request has already reserved or is running the init. Combines the
+    in-progress check and the queued-state set under the same lock so
+    concurrent ``POST /initialize_graph`` requests for the same graph
+    can't both pass the gate and enqueue duplicate background jobs.
+    """
+    with _init_state_lock:
+        cur = _init_state.get(graphname, {"state": "unknown"})
+        if cur.get("state") in {"queued", "running"}:
+            return cur.get("state")
+        _init_state[graphname] = {
+            "state": "queued",
+            "message": "Initialization queued",
+            "started_at": time.time(),
+            "completed_at": None,
+            "result": None,
+            "error": None,
+        }
+        return None
+
+
+def _build_proposal_from_live_schema(
+    conn,
+    vertex_descriptions: dict | None = None,
+    edge_descriptions: dict | None = None,
+):
+    """Build a :class:`SchemaProposal` from the graph's current
+    user-defined vertex/edge types, suitable for feeding into
+    :func:`apply_proposal` on the ``use_existing_schema`` path.
+
+    The proposal carries names + edge pairs and optionally
+    user-supplied descriptions (collected by the Precheck dialog or
+    seeded by the suggest-description LLM call). Diff against the live
+    schema is a no-op; ``apply_proposal`` only installs retrievers and
+    writes type metadata.
+    """
+    from common.db.schema_utils import (
+        EdgeProposal,
+        GRAPHRAG_STRUCTURAL_EDGE_TYPES,
+        GRAPHRAG_STRUCTURAL_VERTEX_TYPES,
+        SchemaProposal,
+        VertexProposal,
+        read_existing_schema,
+    )
+    structural_v = {t.casefold() for t in GRAPHRAG_STRUCTURAL_VERTEX_TYPES}
+    structural_e = {t.casefold() for t in GRAPHRAG_STRUCTURAL_EDGE_TYPES}
+
+    vd = vertex_descriptions or {}
+    ed = edge_descriptions or {}
+
+    existing = read_existing_schema(conn)
+    vertices = [
+        VertexProposal(name=v, description=(vd.get(v) or "").strip())
+        for v in sorted(existing.vertex_types)
+        if v.casefold() not in structural_v
+    ]
+    edges: list[EdgeProposal] = []
+    for et, pairs in existing.edge_pairs.items():
+        folded = et.casefold()
+        if folded in structural_e or folded.startswith("reverse_"):
+            continue
+        edges.append(
+            EdgeProposal(
+                name=et,
+                pairs=list(pairs),
+                directed=et in existing.directed_edges,
+                description=(ed.get(et) or "").strip(),
+            )
+        )
+    return SchemaProposal(vertices=vertices, edges=edges)
+
+
+def _check_init_eligibility(auth_b64: str, graphname: str) -> dict:
+    """Introspect *graphname* and categorize its current schema state.
+
+    Returns a dict with key ``state`` set to one of:
+
+    * ``"empty"`` — graph has no schema, or none of its existing types
+      are GraphRAG structural or user-defined. Safe to initialize from
+      scratch.
+    * ``"structural_present"`` — graph already has one or more
+      GraphRAG structural vertex/edge types. Caller must reject.
+      ``structural_types`` lists the offending names.
+    * ``"user_types_present"`` — graph has user-defined vertex/edge
+      types (none structural). Lists in ``user_vertex_types`` and
+      ``user_edge_types``. Caller decides whether to reject or adopt.
+
+    Graphs that don't yet exist in TigerGraph behave like ``empty`` —
+    ``getVertexTypes`` raises or returns empty for missing graphs, which
+    we treat as "no schema yet".
+    """
+    from common.db.schema_utils import (
+        GRAPHRAG_STRUCTURAL_VERTEX_TYPES,
+        GRAPHRAG_STRUCTURAL_EDGE_TYPES,
+    )
+    structural_v = {t.casefold() for t in GRAPHRAG_STRUCTURAL_VERTEX_TYPES}
+    structural_e = {t.casefold() for t in GRAPHRAG_STRUCTURAL_EDGE_TYPES}
+
+    try:
+        _, conn = ws_basic_auth(auth_b64, graphname)
+    except Exception:
+        # Graph doesn't exist (or auth failed mid-flight); treat as empty
+        # so the create_graph + init path handles it.
+        return {"state": "empty"}
+
+    try:
+        vertex_types = list(conn.getVertexTypes() or [])
+        edge_types = list(conn.getEdgeTypes() or [])
+    except Exception:
+        return {"state": "empty"}
+
+    structural_hits: list[str] = []
+    user_vts: list[str] = []
+    for vt in vertex_types:
+        if vt.casefold() in structural_v:
+            structural_hits.append(vt)
+        else:
+            user_vts.append(vt)
+    user_edges: list[str] = []
+    for et in edge_types:
+        folded = et.casefold()
+        if folded in structural_e or folded.startswith("reverse_"):
+            structural_hits.append(et)
+        else:
+            user_edges.append(et)
+
+    if structural_hits:
+        return {
+            "state": "structural_present",
+            "structural_types": sorted(set(structural_hits)),
+        }
+    if user_vts or user_edges:
+        return {
+            "state": "user_types_present",
+            "user_vertex_types": sorted(user_vts),
+            "user_edge_types": sorted(user_edges),
+        }
+    return {"state": "empty"}
+
+
+@router.get(route_prefix + "/{graphname}/check_init_eligibility")
+def check_init_eligibility(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Introspect *graphname* and return an init-eligibility verdict.
+
+    Used by the Initialize Knowledge Graph dialog's *Precheck* button to
+    surface the same categorization that ``POST /initialize_graph`` runs
+    internally, without starting an init job.
+
+    Response::
+
+        {
+          "state": "empty" | "user_types_present" | "structural_present",
+          "structural_types": [...],          # present when state=structural_present
+          "user_vertex_types": [...],         # present when state=user_types_present
+          "user_edge_types": [...],           # present when state=user_types_present
+          "user_edge_pairs": {edge: [[from, to], ...]}  # for description hints
+        }
+    """
+    cred_obj = creds[1]
+    auth_b64 = base64.b64encode(
+        f"{cred_obj.username}:{cred_obj.password}".encode()
+    ).decode()
+    result = _check_init_eligibility(auth_b64, graphname)
+    # Include edge endpoint pairs so the UI can show "FILED_BY (Filing → Company)"
+    # alongside each edge name in the description-edit dialog.
+    if result.get("state") == "user_types_present" and result.get("user_edge_types"):
+        try:
+            _, conn = ws_basic_auth(auth_b64, graphname)
+            from common.db.schema_utils import read_existing_schema
+            existing = read_existing_schema(conn)
+            pairs_map: dict[str, list[list[str]]] = {}
+            for et in result["user_edge_types"]:
+                pairs = existing.edge_pairs.get(et, set())
+                pairs_map[et] = [[s, t] for s, t in sorted(pairs)]
+            result["user_edge_pairs"] = pairs_map
+        except Exception:
+            result["user_edge_pairs"] = {}
+    return result
+
+
+@router.post(route_prefix + "/{graphname}/suggest_type_descriptions")
+def suggest_type_descriptions(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict, Body(...)],
+):
+    """Call the completion LLM to suggest one-sentence descriptions for a
+    set of vertex/edge type names.
+
+    Request body::
+
+        {
+          "vertex_types": ["Company", "Person", ...],
+          "edge_types":   [{"name": "FILED_BY", "from": "Filing", "to": "Company"}, ...]
+        }
+
+    Response::
+
+        {
+          "vertex_descriptions": {"Company": "...", "Person": "...", ...},
+          "edge_descriptions":   {"FILED_BY": "...", ...}
+        }
+
+    Best-effort: on any LLM failure, the corresponding keys are empty
+    strings so the dialog can still render an editable form.
+    """
+    from langchain_core.prompts import PromptTemplate
+    from langchain_core.output_parsers import JsonOutputParser
+
+    vertex_types = [
+        str(v) for v in (payload.get("vertex_types") or [])
+        if isinstance(v, str) and v
+    ]
+    edge_items = payload.get("edge_types") or []
+    edges_brief: list[str] = []
+    for e in edge_items:
+        if not isinstance(e, dict):
+            continue
+        name = e.get("name")
+        f = e.get("from") or ""
+        t = e.get("to") or ""
+        if not name:
+            continue
+        if f and t:
+            edges_brief.append(f"{name} (FROM {f}, TO {t})")
+        else:
+            edges_brief.append(str(name))
+
+    if not vertex_types and not edges_brief:
+        return {"vertex_descriptions": {}, "edge_descriptions": {}}
+
+    llm_service = get_llm_service(get_completion_config(graphname))
+    prompt = PromptTemplate.from_template(
+        "Given the following graph-schema type names from a domain knowledge "
+        "graph, write a concise one-sentence description for each. Use plain "
+        "English; describe what the type represents, not its attributes.\n\n"
+        "Vertex types: {vertex_types}\n"
+        "Edge types: {edge_types}\n\n"
+        "Return JSON with this exact shape:\n"
+        "{{\"vertex_descriptions\": {{\"<name>\": \"<one sentence>\"}}, "
+        "\"edge_descriptions\": {{\"<name>\": \"<one sentence>\"}}}}\n"
+    )
+    try:
+        parsed = llm_service.invoke_with_parser(
+            prompt,
+            JsonOutputParser(),
+            {
+                "vertex_types": ", ".join(vertex_types) or "(none)",
+                "edge_types": ", ".join(edges_brief) or "(none)",
+            },
+            caller_name="suggest_type_descriptions",
+        )
+    except Exception as exc:
+        LogWriter.warning(
+            f"suggest_type_descriptions LLM call failed for {graphname}: {exc}"
+        )
+        return {
+            "vertex_descriptions": {v: "" for v in vertex_types},
+            "edge_descriptions": {
+                (e.get("name") if isinstance(e, dict) else ""): ""
+                for e in edge_items
+            },
+        }
+
+    vds = parsed.get("vertex_descriptions") if isinstance(parsed, dict) else {}
+    eds = parsed.get("edge_descriptions") if isinstance(parsed, dict) else {}
+    return {
+        "vertex_descriptions": {
+            v: (vds.get(v) or "").strip() if isinstance(vds, dict) else ""
+            for v in vertex_types
+        },
+        "edge_descriptions": {
+            (e.get("name") if isinstance(e, dict) else ""): (
+                (eds.get(e.get("name")) or "").strip()
+                if isinstance(eds, dict) and isinstance(e, dict)
+                else ""
+            )
+            for e in edge_items
+        },
+    }
+
+
 @router.post(route_prefix + "/{graphname}/initialize_graph")
 def init_graph(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    bg_tasks: BackgroundTasks,
+    payload: Annotated[dict | None, Body()] = None,
 ):
     """
-    Initialize a TigerGraph knowledge graph with GraphRAG schema.
-    This initializes the graph with SupportAI/GraphRAG schema, indexes, and queries.
-    Uses HTTP Basic Authentication to get credentials and create a connection.
+    Submit a TigerGraph knowledge-graph initialization job.
+
+    Returns 202 immediately with ``{"status": "submitted", "graphname": ...}``;
+    the long-running work (structural schema, optional domain schema apply,
+    retriever installs) runs in a BackgroundTask. UI clients poll
+    ``GET /ui/{graphname}/initialize_status`` for state and final result.
+
+    The structural GraphRAG schema (Document, DocumentChunk, Entity,
+    EntityType, RelationshipType, Content, Community, Image and their
+    structural edges) is always created if missing.
+
+    Optionally accepts a JSON body:
+
+        {"schema_gsql": "ADD VERTEX Company(...); ...",
+         "use_existing_schema": true}
+
+    When ``schema_gsql`` is provided, the pasted text is parsed
+    permissively, structural-type collisions and dangling pairs are
+    dropped, the diff against the current graph is computed, and the
+    additive delta is applied. Existing types are never dropped.
+
+    When ``use_existing_schema`` is true, the graph's current
+    user-defined vertex/edge types are adopted as the domain schema
+    (retrievers are installed against them). Mutually exclusive with
+    ``schema_gsql`` — sending both is a 400.
+
+    Pre-flight eligibility check rejects:
+      * ``structural_present`` — graph already has GraphRAG structural
+        types (Entity / Document / etc.). User must manually drop them
+        before re-initializing.
+      * ``user_types_present_strict`` — graph has user-defined types
+        AND the caller asked for a new schema (``schema_gsql``). Mixing
+        a fresh schema on top of pre-existing types risks corruption;
+        force a manual cleanup.
+      * ``user_types_present`` — graph has user-defined types and the
+        caller asked for ``none`` (no domain schema). The UI re-submits
+        with ``use_existing_schema=true`` if the user confirms.
     """
+    schema_gsql = (
+        (payload or {}).get("schema_gsql") if isinstance(payload, dict) else None
+    )
+    use_existing_schema = bool(
+        (payload or {}).get("use_existing_schema") if isinstance(payload, dict) else False
+    )
+    existing_vertex_descs = (payload or {}).get("vertex_descriptions") or {}
+    existing_edge_descs = (payload or {}).get("edge_descriptions") or {}
+    if not isinstance(existing_vertex_descs, dict):
+        existing_vertex_descs = {}
+    if not isinstance(existing_edge_descs, dict):
+        existing_edge_descs = {}
+    if schema_gsql and use_existing_schema:
+        raise HTTPException(
+            status_code=400,
+            detail="schema_gsql and use_existing_schema are mutually exclusive.",
+        )
+    cred_obj = creds[1]
+    auth_b64 = base64.b64encode(
+        f"{cred_obj.username}:{cred_obj.password}".encode()
+    ).decode()
+
+    # Pre-flight eligibility check: introspect the live schema and
+    # decide whether to proceed, reject, or adopt existing types.
+    eligibility = _check_init_eligibility(auth_b64, graphname)
+    if eligibility["state"] == "structural_present":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason": "structural_present",
+                "message": "Existing GraphRAG schema detected, manual cleanup required.",
+                "structural_types": eligibility["structural_types"],
+            },
+        )
+    if eligibility["state"] == "user_types_present":
+        user_types = eligibility["user_vertex_types"] + eligibility["user_edge_types"]
+        if schema_gsql:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "user_types_present_strict",
+                    "message": (
+                        f"Graph already has types: {', '.join(user_types)}. "
+                        "Manual cleanup required before extracting or applying a new schema."
+                    ),
+                    "user_vertex_types": eligibility["user_vertex_types"],
+                    "user_edge_types": eligibility["user_edge_types"],
+                },
+            )
+        if not use_existing_schema:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason": "user_types_present",
+                    "message": (
+                        f"Graph '{graphname}' already has types: "
+                        f"{', '.join(user_types)}. "
+                        "Use them as the domain schema, or cancel and clean manually."
+                    ),
+                    "user_vertex_types": eligibility["user_vertex_types"],
+                    "user_edge_types": eligibility["user_edge_types"],
+                },
+            )
+    # else: state == "empty" → proceed normally
+
+    # Atomically check-and-reserve so two concurrent /initialize_graph
+    # requests for the same graph can't both enqueue background jobs.
+    reserved_collision = _try_reserve_init(graphname)
+    if reserved_collision is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Initialization already in progress for graph '{graphname}'",
+        )
+
+    def _run_init():
+        try:
+            _set_init_state(
+                graphname, state="running",
+                message="Initializing structural schema",
+            )
+            _, conn = ws_basic_auth(auth_b64, graphname)
+            LogWriter.info(f"Initializing graph: {graphname}")
+            resp = supportai.init_supportai(conn, graphname)
+            schema_res, index_res, query_res = resp[0], resp[1], resp[2]
+
+            domain_schema_status: dict | None = None
+            proposal = None
+            if isinstance(schema_gsql, str) and schema_gsql.strip():
+                proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
+                proposal.drop_dangling_pairs()
+            elif use_existing_schema:
+                # Build a proposal from the live user-defined types so
+                # apply_proposal registers them as the domain schema and
+                # installs retrievers. The diff is a no-op because the
+                # types already exist; this run only writes type
+                # metadata (descriptions) and re-creates retriever queries.
+                proposal = _build_proposal_from_live_schema(
+                    conn,
+                    vertex_descriptions=existing_vertex_descs,
+                    edge_descriptions=existing_edge_descs,
+                )
+                LogWriter.info(
+                    f"Adopting existing schema as domain for {graphname}: "
+                    f"{len(proposal.vertices)} vertex types, "
+                    f"{len(proposal.edges)} edge types"
+                )
+
+            if proposal is not None:
+                _set_init_state(graphname, message="Applying domain schema")
+                LogWriter.info(
+                    f"Applying domain schema proposal for graph: {graphname}"
+                )
+                # Surface apply_proposal's sub-phases (schema-change,
+                # metadata, retriever installs) in the init-dialog
+                # poll instead of a static "Applying domain schema".
+                domain_schema_status = schema_utils_mod.apply_proposal(
+                    conn, graphname, proposal,
+                    progress=lambda msg: _set_init_state(
+                        graphname, message=msg
+                    ),
+                )
+                LogWriter.info(
+                    f"Domain schema status for {graphname}: "
+                    f"{domain_schema_status['status']} "
+                    f"({len(domain_schema_status['statements'])} stmts)"
+                )
+                if domain_schema_status.get("status") == "error":
+                    LogWriter.error(
+                        f"Domain schema apply failed for {graphname}: "
+                        f"{domain_schema_status.get('error')}"
+                    )
+                    _set_init_state(
+                        graphname,
+                        state="error",
+                        message="Domain schema apply failed",
+                        error=domain_schema_status.get("error"),
+                        completed_at=time.time(),
+                        result={"domain_schema_status": domain_schema_status},
+                    )
+                    return
+
+            LogWriter.info(f"Graph initialization completed for: {graphname}")
+
+            result = {
+                "status": "success",
+                "message": f"Graph '{graphname}' initialized successfully",
+                "graphname": graphname,
+                "host_name": conn._tg_connection.host,
+                "schema_creation_status": json.dumps(schema_res),
+                "index_creation_status": json.dumps(index_res),
+                "query_creation_status": json.dumps(query_res),
+            }
+            if domain_schema_status is not None:
+                result["domain_schema_status"] = domain_schema_status
+
+            _set_init_state(
+                graphname,
+                state="completed",
+                message="Initialization completed successfully",
+                completed_at=time.time(),
+                result=result,
+            )
+        except Exception as e:
+            LogWriter.error(f"Error initializing graph {graphname}: {str(e)}")
+            _set_init_state(
+                graphname,
+                state="error",
+                message=f"Initialization failed: {e}",
+                error=str(e),
+                completed_at=time.time(),
+            )
+
+    bg_tasks.add_task(_run_init)
+    return {
+        "status": "submitted",
+        "graphname": graphname,
+        "message": "Initialization started; poll initialize_status for progress.",
+    }
+
+
+@router.get(route_prefix + "/{graphname}/initialize_status")
+def get_initialize_status(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Return the current init state for *graphname*.
+
+    States:
+      * ``unknown``  — no init has ever been submitted for this graph
+        (or the worker restarted, dropping in-memory state).
+      * ``queued``   — submitted, background task not yet running.
+      * ``running``  — backend is doing work; ``message`` describes the phase.
+      * ``completed``— done; ``result`` carries the final init payload.
+      * ``error``    — failed; ``error`` carries the failure reason.
+    """
+    return _get_init_state(graphname)
+
+
+@router.post(route_prefix + "/{graphname}/convert_sample_files")
+async def convert_sample_files(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    files: Annotated[list[UploadFile], File(description="Sample documents (≤5)")],
+):
+    """
+    Step 1/2 of the sample-doc schema extraction flow:
+
+    Save uploaded sample files into a fresh per-request subdirectory
+    under ``uploads/<graphname>/_schema_<request_id>/`` and convert
+    each to JSONL under
+    ``uploads/ingestion_temp/<graphname>/_schema_<request_id>/``.
+    Returns the list of saved filenames and the ``request_id`` so the
+    caller can pass both to ``POST /ui/<graph>/extract_schema_from_jsonl``.
+
+    Each sample-upload request is isolated so stale files from prior
+    sessions can't be re-converted or pollute the resulting schema.
+
+    No LLM call. Caps come from ``graphrag_config``:
+      * ``schema_max_sample_files`` (default 5) — file count
+      * ``schema_max_total_mb`` (default 50) — cumulative upload size
+
+    Per-file size is bounded only by the cumulative cap, so a single
+    file may use the full budget.
+    """
+    max_files = int(graphrag_config.get("schema_max_sample_files", 5))
+    max_total_mb = int(graphrag_config.get("schema_max_total_mb", 50))
+    max_total_bytes = max_total_mb * 1024 * 1024
+
+    if len(files) > max_files:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files: got {len(files)}, max is {max_files}.",
+        )
+    if not files:
+        raise HTTPException(status_code=400, detail="No files supplied.")
+
+    request_id = uuid.uuid4().hex[:12]
+    request_subdir = f"_schema_{request_id}"
+    upload_dir = os.path.join("uploads", graphname, request_subdir)
+    os.makedirs(upload_dir, exist_ok=True)
+    temp_folder = os.path.join("uploads", "ingestion_temp", graphname, request_subdir)
+    os.makedirs(temp_folder, exist_ok=True)
+
+    saved_basenames: list[str] = []
+    total_bytes = 0
+    for f in files:
+        data = await f.read()
+        total_bytes += len(data)
+        if total_bytes > max_total_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Total upload exceeds {max_total_mb} MB cap."
+                ),
+            )
+        safe_name = os.path.basename(f.filename or "sample")
+        if safe_name in saved_basenames:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Duplicate filename '{safe_name}' in upload set. "
+                    "Rename one of the files and try again."
+                ),
+            )
+        target = os.path.join(upload_dir, safe_name)
+        with open(target, "wb") as out:
+            out.write(data)
+        saved_basenames.append(safe_name)
+
+    extractor = TextExtractor()
     try:
-        # Extract credentials from the dependency (same pattern as other endpoints)
-        creds = creds[1]
-        auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
-        _, conn = ws_basic_auth(auth, graphname)
+        result = await extractor._process_folder_async(
+            upload_dir, graphname, temp_folder
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Text extraction failed: {exc}",
+        )
 
-        # Initialize the graph with GraphRAG schema
-        LogWriter.info(f"Initializing graph: {graphname}")
-        resp = supportai.init_supportai(conn, graphname)
-        schema_res, index_res, query_res = resp[0], resp[1], resp[2]
+    LogWriter.info(
+        f"Converted sample files for {graphname} (request {request_id}): "
+        f"{len(files)} uploaded, {result.get('num_documents', 0)} docs in JSONL"
+    )
+    return {
+        "status": "success",
+        "graphname": graphname,
+        "request_id": request_id,
+        "saved_files": list(saved_basenames),
+        "num_documents": result.get("num_documents", 0),
+    }
 
-        LogWriter.info(f"Graph initialization completed for: {graphname}")
 
-        return {
-            "status": "success",
-            "message": f"Graph '{graphname}' initialized successfully",
-            "graphname": graphname,
-            "host_name": conn._tg_connection.host,
-            "schema_creation_status": json.dumps(schema_res),
-            "index_creation_status": json.dumps(index_res),
-            "query_creation_status": json.dumps(query_res),
-        }
+@router.post(route_prefix + "/{graphname}/extract_schema_from_jsonl")
+def extract_schema_from_jsonl(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict | None, Body()] = None,
+):
+    """
+    Step 2/2 of the sample-doc schema extraction flow:
 
-    except Exception as e:
-        LogWriter.error(f"Error initializing graph {graphname}: {str(e)}")
-        return {
-            "status": "error",
-            "message": f"Failed to initialize graph '{graphname}': {str(e)}",
-            "details": str(e)
-        }
+    Read the previously-converted JSONLs (from ``convert_sample_files``)
+    and run the schema-extraction LLM over them. Returns the proposed
+    domain schema as GSQL plus a structured proposal dict for the
+    form-mode editor.
+
+    Body:
+        ``{"request_id": "<id>", "filenames": ["report1.pdf", "report2.docx"]}``
+    ``request_id`` (returned by ``convert_sample_files``) selects the
+    per-request subdirectory under
+    ``uploads/ingestion_temp/<graphname>/_schema_<request_id>/`` so
+    only the JSONLs belonging to this sample-upload session feed the
+    LLM. If ``request_id`` is absent, the endpoint falls back to the
+    legacy per-graph temp folder for backward compatibility.
+    """
+    request_id = ""
+    if isinstance(payload, dict):
+        request_id = str(payload.get("request_id") or "")
+    if request_id and not re.fullmatch(r"[A-Za-z0-9_-]+", request_id):
+        raise HTTPException(status_code=400, detail="Invalid request_id")
+    if request_id:
+        temp_folder = os.path.join(
+            "uploads", "ingestion_temp", graphname, f"_schema_{request_id}"
+        )
+    else:
+        temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+    if not os.path.isdir(temp_folder):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No converted JSONLs found for graph {graphname}. "
+                "Run convert_sample_files first."
+            ),
+        )
+
+    requested = []
+    if isinstance(payload, dict):
+        requested = payload.get("filenames") or []
+
+    if requested:
+        jsonl_paths = []
+        missing_jsonls = []
+        for name in requested:
+            stem = os.path.splitext(os.path.basename(name))[0]
+            p = os.path.join(temp_folder, f"{stem}.jsonl")
+            if os.path.exists(p):
+                jsonl_paths.append(p)
+            else:
+                missing_jsonls.append(name)
+        if missing_jsonls:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Converted JSONL not found for: "
+                    + ", ".join(missing_jsonls)
+                    + ". Run convert_sample_files first for those files."
+                ),
+            )
+    else:
+        jsonl_paths = [
+            os.path.join(temp_folder, fn)
+            for fn in os.listdir(temp_folder)
+            if fn.endswith(".jsonl")
+        ]
+
+    samples: list[dict] = []
+    for jp in jsonl_paths:
+        with open(jp, "r", encoding="utf-8") as jf:
+            for line in jf:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    samples.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
+
+    if not samples:
+        raise HTTPException(
+            status_code=400,
+            detail="No extractable text in the converted files.",
+        )
+
+    # Optional structured hints from the UI (TagInput chips). Each
+    # hint is ``{"name": str, "description": str}``. Backend ignores
+    # malformed entries silently — names are validated client-side.
+    vertex_hints = (payload or {}).get("vertex_hints") if isinstance(payload, dict) else None
+    edge_hints = (payload or {}).get("edge_hints") if isinstance(payload, dict) else None
+
+    LogWriter.info(
+        f"Running schema extraction LLM for {graphname} "
+        f"({len(jsonl_paths)} JSONLs, {len(samples)} doc parts, "
+        f"{len(vertex_hints or [])} vertex hints, {len(edge_hints or [])} edge hints)"
+    )
+    llm_service = get_llm_service(get_completion_config(graphname))
+    gsql_text, rendered_prompt = schema_extraction_mod.extract_schema_gsql(
+        llm_service, samples,
+        vertex_hints=vertex_hints, edge_hints=edge_hints,
+    )
+    proposal = schema_utils_mod.parse_gsql_schema(gsql_text)
+    proposal.drop_dangling_pairs()
+    return {
+        "status": "success",
+        "graphname": graphname,
+        "schema_gsql": gsql_text,
+        "preview_gsql": schema_utils_mod.emit_preview_gsql(proposal),
+        "proposal": proposal.to_dict(),
+        "summary": schema_utils_mod.summarize(proposal),
+        # The fully-rendered prompt (default + suggested-types block).
+        # The UI saves this verbatim as the per-graph override after a
+        # successful initialize_graph so the addendum survives the
+        # session.
+        "rendered_prompt": rendered_prompt,
+    }
 
 
 @router.post(route_prefix + "/{graphname}/rebuild_graph")
@@ -1033,8 +2005,8 @@ async def graph_query(
             LogWriter.info(f"Continuing conversation with ID: {convo_id}")
 
         # create agent
-        # get retrieval pattern to use
-        rag_pattern = rag_pattern or "hybridsearch"
+        # get retrieval pattern to use; default "auto" lets RetrieverSelector pick.
+        rag_pattern = rag_pattern or "auto"
         agent = make_agent(graphname, conn, use_cypher, supportai_retriever=rag_pattern)
 
         prev_id = None
@@ -1074,6 +2046,7 @@ async def graph_query(
             query_sources=resp.query_sources,
         )
         await write_message_to_history(message, auth)
+        await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, creds.username)
         prev_id = message.message_id
 
         # reply
@@ -1100,11 +2073,22 @@ async def chat(
     3. Conversation ID (or "new" for new conversation)
     4. User messages
     """
+    # Embedding store unavailable: WebSocket routes can't return an
+    # HTTPException — ASGI requires the handshake to be sent (or the
+    # connection explicitly closed) before the callable returns.
+    # Accept, surface the error to the client, then close with a
+    # well-defined status code (1013 = Try Again Later).
     if service_status["embedding_store"]["error"]:
-        return HTTPException(
-            status_code=503,
-            detail=service_status["embedding_store"]["error"]
-        )
+        try:
+            await websocket.accept()
+            await websocket.send_json({
+                "error": service_status["embedding_store"]["error"],
+                "code": "embedding_store_unavailable",
+            })
+            await websocket.close(code=1013, reason="Embedding store unavailable")
+        except Exception:
+            pass
+        return
 
     await websocket.accept()
 
@@ -1114,6 +2098,8 @@ async def chat(
         usr_auth = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         logger.info(f"Received authentication data, length: {len(usr_auth)}")
         _, conn = ws_basic_auth(usr_auth, graphname)
+        # Extract the authenticated username for trace-log ownership tracking.
+        ws_username = base64.b64decode(usr_auth.encode()).decode().split(":", 1)[0]
         logger.info("Authentication successful")
     except asyncio.TimeoutError:
         logger.error("WebSocket authentication timeout - no credentials received")
@@ -1130,8 +2116,8 @@ async def chat(
             pass
         return
 
-    # Get RAG pattern
-    rag_pattern = rag_pattern or "hybridsearch"
+    # Get RAG pattern; default "auto" lets RetrieverSelector pick.
+    rag_pattern = rag_pattern or "auto"
 
     # Get conversation ID
     try:
@@ -1200,6 +2186,7 @@ async def chat(
                 query_sources=resp.query_sources,
             )
             await write_message_to_history(message, usr_auth)
+            await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, ws_username)
             prev_id = message.message_id
 
             # reply
@@ -2156,6 +3143,28 @@ def _prepare_llm_config(llm_config_data: dict):
             if isinstance(svc, dict) and svc.get("region_name") == top_region:
                 del svc["region_name"]
 
+    # Normalize prompt_path: promote from completion_service to top
+    # level, strip per-service copies if identical (same pattern as
+    # auth / region). The UI doesn't expose per-service prompt_paths;
+    # in practice all services share the completion value.
+    if "prompt_path" not in llm_config_data:
+        completion_svc = llm_config_data.get("completion_service")
+        if isinstance(completion_svc, dict) and "prompt_path" in completion_svc:
+            llm_config_data["prompt_path"] = completion_svc["prompt_path"]
+
+    top_prompt_path = llm_config_data.get("prompt_path")
+    if top_prompt_path:
+        # Embedding excluded — embedding services never use prompt_path.
+        for svc_key in ["completion_service", "multimodal_service", "chat_service"]:
+            svc = llm_config_data.get(svc_key)
+            if isinstance(svc, dict) and svc.get("prompt_path") == top_prompt_path:
+                del svc["prompt_path"]
+        # If embedding_service somehow has a prompt_path on disk, strip
+        # it — it's never read.
+        emb = llm_config_data.get("embedding_service")
+        if isinstance(emb, dict) and "prompt_path" in emb:
+            del emb["prompt_path"]
+
     return llm_config_data, graphname, scope
 
 
@@ -2504,35 +3513,57 @@ async def save_graphrag_config(
         raise HTTPException(status_code=500, detail=f"Failed to save GraphRAG config: {str(e)}")
 
 
+#: Per-prompt-type list of regex patterns that mark the start of the
+#: placeholder-variables block. The first matching pattern wins.
+#: Patterns are tried in order so the canonical Markdown headers
+#: (``## Inputs`` / ``## Data``) match first; additional patterns
+#: are kept as fallbacks for files saved under earlier formats.
+_TEMPLATE_VAR_MARKERS = {
+    "chatbot_response": [
+        r'(?ms)^##\s*Inputs\b.*$',
+        r'(?ms)^Question:\s*\{question\}.*$',
+    ],
+    "entity_relationship": [
+        # No placeholders in the entity-relationship system prompt.
+        # The whole content is editable.
+    ],
+    "community_summarization": [
+        r'(?ms)^##\s*Data\b.*$',
+        r'(?ms)^##\s*Inputs\b.*$',
+        r'(?ms)^#######\s*-Data-.*$',
+    ],
+    "query_generation": [
+        r'(?ms)^##\s*Inputs\b.*$',
+        r'(?ms)^\{format_instructions\}.*$',
+    ],
+    "schema_extraction": [
+        r'(?ms)^##\s*Inputs\b.*$',
+    ],
+}
+
+
 def split_prompt_template(prompt_content: str, prompt_type: str) -> dict:
+    """Split a prompt into editable prose and the trailing placeholder
+    block that users should not modify.
+
+    The placeholder block — everything from a canonical marker to end
+    of file — is preserved verbatim so the saved file always renders
+    with the original ``{placeholder}`` set even when the user's edit
+    inadvertently removes them from the prose. POST ``/prompts``
+    re-concatenates ``editable_content + "\\n\\n" + template_variables``
+    on save.
+
+    Returns ``{"editable_content": str, "template_variables": str}``.
     """
-    Split prompt into editable content and template variables that users should not modify.
-    Returns: {"editable_content": str, "template_variables": str}
-    """
-    if prompt_type == "chatbot_response":
-        pattern = r'(Question: \{question\}.*?)$'
-        match = re.search(pattern, prompt_content, re.DOTALL)
+    for pattern in _TEMPLATE_VAR_MARKERS.get(prompt_type, []):
+        match = re.search(pattern, prompt_content)
         if match:
-            template_vars = match.group(1).strip()
-            editable = prompt_content[:match.start()].strip()
-            return {"editable_content": editable, "template_variables": template_vars}
-
-    elif prompt_type == "query_generation":
-        pattern = r'(\{format_instructions\}.*?)$'
-        match = re.search(pattern, prompt_content, re.DOTALL)
-        if match:
-            template_vars = match.group(1).strip()
-            editable = prompt_content[:match.start()].strip()
-            return {"editable_content": editable, "template_variables": template_vars}
-
-    elif prompt_type == "community_summarization":
-        pattern = r'(#######\s*-Data-.*?)$'
-        match = re.search(pattern, prompt_content, re.DOTALL)
-        if match:
-            template_vars = match.group(1).strip()
-            editable = prompt_content[:match.start()].strip()
-            return {"editable_content": editable, "template_variables": template_vars}
-
+            template_vars = prompt_content[match.start():].strip()
+            editable = prompt_content[:match.start()].rstrip()
+            return {
+                "editable_content": editable,
+                "template_variables": template_vars,
+            }
     return {"editable_content": prompt_content, "template_variables": ""}
 
 
@@ -2547,42 +3578,68 @@ async def get_prompts(
     """
     try:
         access_level = _require_prompt_access(credentials, graphname)
-        active_config = get_chat_config(graphname)
-        default_prompt_path = active_config.get("prompt_path", "./common/prompts/openai_gpt4/")
+        chat_cfg = dict(get_chat_config(graphname))
+        completion_cfg = dict(get_completion_config(graphname))
+        if graphname:
+            chat_cfg["graphname"] = graphname
+            completion_cfg["graphname"] = graphname
+
+        # ``chatbot_response`` is consumed by the chat agent and must
+        # resolve through the chat service's ``prompt_path``. Every
+        # other prompt is consumed by completion-side code paths
+        # (entity / relationship extraction, schema extraction,
+        # community summarization, schema mapping) and resolves
+        # through the completion service's ``prompt_path``. When no
+        # ``chat_service`` is configured, ``get_chat_config`` already
+        # falls back to ``completion_service`` so this routing stays
+        # correct for single-service deployments.
+        chat_llm = get_llm_service(chat_cfg)
+        completion_llm = get_llm_service(completion_cfg)
+
+        # Each entry: (LLM service, base_llm property name). The
+        # property's resolution chain is graph-override →
+        # ``prompt_path`` file → hardcoded default in base_llm.py, so
+        # this single delegation gives the editor the right text in
+        # every case.
+        _PROMPT_SOURCE = {
+            "chatbot_response":
+                (chat_llm, "chatbot_response_prompt"),
+            "entity_relationship":
+                (completion_llm, "entity_relationship_extraction_prompt"),
+            "community_summarization":
+                (completion_llm, "community_summarize_prompt"),
+            "query_generation":
+                (completion_llm, "map_question_schema_prompt"),
+            "schema_extraction":
+                (completion_llm, "schema_extraction_prompt"),
+            # Free-form partial injected into the four query-related
+            # templates (map_question_to_schema, generate_function,
+            # generate_cypher, generate_gsql). Empty by default.
+            "query_guidance":
+                (completion_llm, "query_guidance_prompt"),
+        }
+
+        def _get_prompt(prompt_type: str) -> dict:
+            svc, prop = _PROMPT_SOURCE[prompt_type]
+            try:
+                text = getattr(svc, prop, "") or ""
+            except Exception as exc:
+                logger.warning(
+                    f"Falling back to empty content for {prompt_type}: {exc}"
+                )
+                text = ""
+            if not text:
+                return {"editable_content": "", "template_variables": ""}
+            return split_prompt_template(text, prompt_type)
+
+        prompts = {pt: _get_prompt(pt) for pt in _PROMPT_SOURCE}
+
+        default_prompt_path = chat_cfg.get(
+            "prompt_path", "./common/prompts/openai_gpt4/"
+        )
         if default_prompt_path.startswith("./"):
             default_prompt_path = default_prompt_path[2:]
         default_prompt_path = default_prompt_path.rstrip("/")
-
-        # Per-graph prompt overrides directory (only contains customized files)
-        graph_prompt_dir = f"configs/graph_configs/{graphname}/prompts" if graphname else None
-
-        def _resolve_prompt_file(filename: str) -> str | None:
-            """Find prompt file: graph override first, then default."""
-            if graph_prompt_dir:
-                graph_file = os.path.join(graph_prompt_dir, filename)
-                if os.path.exists(graph_file):
-                    return graph_file
-            default_file = os.path.join(default_prompt_path, filename)
-            if os.path.exists(default_file):
-                return default_file
-            return None
-
-        def _read_prompt(filename: str, prompt_type: str) -> dict:
-            filepath = _resolve_prompt_file(filename)
-            if filepath:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    return split_prompt_template(f.read(), prompt_type)
-            return {"editable_content": "", "template_variables": ""}
-
-        prompts = {}
-        prompts["chatbot_response"] = _read_prompt("chatbot_response.txt", "chatbot_response")
-        prompts["entity_relationship"] = _read_prompt("entity_relationship_extraction.txt", "entity_relationship")
-        prompts["community_summarization"] = _read_prompt("community_summarization.txt", "community_summarization")
-
-        query_gen = _read_prompt("map_question_to_schema.txt", "query_generation")
-        if not query_gen["editable_content"]:
-            query_gen = _read_prompt("query_generation.txt", "query_generation")
-        prompts["query_generation"] = query_gen
 
         # Graph-admin (chatbot_only) only sees chatbot_response
         if access_level == "chatbot_only":
@@ -2591,7 +3648,7 @@ async def get_prompts(
         return {
             "prompts": prompts,
             "prompt_path": default_prompt_path,
-            "configured_provider": active_config.get("llm_service", "openai")
+            "configured_provider": chat_cfg.get("llm_service", "openai"),
         }
 
     except HTTPException:
@@ -2644,44 +3701,103 @@ async def save_prompts(
             os.makedirs(graph_prompt_dir, exist_ok=True)
             prompt_path = graph_prompt_dir
         else:
-            # Global: seed persistent dir from defaults if needed
-            default_prompt_path = get_chat_config().get("prompt_path", "./common/prompts/openai_gpt4/")
-            if default_prompt_path.startswith("./"):
-                default_prompt_path = default_prompt_path[2:]
-            default_prompt_path = default_prompt_path.rstrip("/")
-
+            # Global: route writes to the persistent override dir
+            # ``configs/prompts/`` so user edits survive container
+            # restarts. The dir starts empty — base_llm.py serves the
+            # hardcoded default for every prompt the user hasn't
+            # touched.
+            #
+            # ``prompt_path`` lives at the top level of ``llm_config``
+            # and is injected into every service that doesn't override
+            # it (mirrors the ``authentication_configuration`` /
+            # ``region_name`` pattern). One write here suffices for
+            # every consumer (chatbot_response via chat_service,
+            # entity_relationship / schema_extraction via
+            # completion_service, multimodal via multimodal_service).
             persistent_prompt_dir = "configs/prompts"
-            if not default_prompt_path.startswith("configs/"):
-                os.makedirs(persistent_prompt_dir, exist_ok=True)
-                if os.path.exists(default_prompt_path):
-                    for fname in os.listdir(default_prompt_path):
-                        src = os.path.join(default_prompt_path, fname)
-                        dst = os.path.join(persistent_prompt_dir, fname)
-                        if os.path.isfile(src) and not os.path.exists(dst):
-                            shutil.copy2(src, dst)
-                from common.config import reload_llm_config, _config_file_lock
-                with _config_file_lock:
-                    with open(SERVER_CONFIG, "r") as f:
-                        server_cfg = json.load(f)
-                    server_cfg["llm_config"]["completion_service"]["prompt_path"] = f"./{persistent_prompt_dir}/"
+            os.makedirs(persistent_prompt_dir, exist_ok=True)
+            new_path = f"./{persistent_prompt_dir}/"
+
+            from common.config import reload_llm_config, _config_file_lock, SERVER_CONFIG
+            # Acquire the lock to read-modify-write the server config,
+            # then RELEASE before calling ``reload_llm_config()`` —
+            # reload acquires the same lock internally, so calling it
+            # while held would deadlock.
+            changed = False
+            with _config_file_lock:
+                with open(SERVER_CONFIG, "r") as f:
+                    server_cfg = json.load(f)
+                llm_cfg = server_cfg.setdefault("llm_config", {})
+                if (llm_cfg.get("prompt_path") or "").rstrip("/") != new_path.rstrip("/"):
+                    llm_cfg["prompt_path"] = new_path
+                    changed = True
+                # Strip per-service copies — they're redundant once
+                # the top-level field is set. Keeps the config clean
+                # and avoids stale per-service entries shadowing the
+                # global value. ``embedding_service`` is included
+                # only to scrub stray entries; embedding models never
+                # read prompt_path.
+                for svc_key in (
+                    "completion_service",
+                    "chat_service",
+                    "multimodal_service",
+                    "embedding_service",
+                ):
+                    svc = llm_cfg.get(svc_key)
+                    if isinstance(svc, dict) and "prompt_path" in svc:
+                        del svc["prompt_path"]
+                        changed = True
+                if changed:
                     temp_file = f"{SERVER_CONFIG}.tmp"
                     with open(temp_file, "w") as f:
                         json.dump(server_cfg, f, indent=2)
                     os.replace(temp_file, SERVER_CONFIG)
+            if changed:
                 reload_llm_config()
-                prompt_path = persistent_prompt_dir
-            else:
-                prompt_path = default_prompt_path
+            prompt_path = persistent_prompt_dir
 
         prompt_type_to_file = {
             "chatbot_response": "chatbot_response.txt",
             "entity_relationship": "entity_relationship_extraction.txt",
             "community_summarization": "community_summarization.txt",
             "query_generation": "map_question_to_schema.txt",
+            "schema_extraction": "schema_extraction.txt",
+            "query_guidance": "query_guidance.txt",
         }
 
         if prompt_type not in prompt_type_to_file:
             raise HTTPException(status_code=400, detail=f"Invalid prompt_type: {prompt_type}")
+
+        # Hard length cap on Query Guidance specifically. It's a
+        # free-form partial that flows into four templates; runaway
+        # content can push the surrounding prompts past the LLM's
+        # context window. 8000 chars ≈ 2K tokens is plenty for
+        # rules + a half-dozen examples while leaving room for
+        # everything else.
+        QUERY_GUIDANCE_MAX_CHARS = 8000
+        if prompt_type == "query_guidance" and len(content) > QUERY_GUIDANCE_MAX_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Query Guidance is too long ({len(content)} characters); "
+                    f"keep it under {QUERY_GUIDANCE_MAX_CHARS}."
+                ),
+            )
+
+        # Gatekeepers — escape stray ``{token}`` occurrences (so user
+        # examples like ``{example}`` don't crash str.format at call
+        # time) and reject saves that miss a required placeholder.
+        from common.utils.prompt_validation import validate_and_escape_prompt
+        content, missing = validate_and_escape_prompt(content, prompt_type)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Prompt is missing required placeholders: "
+                    + ", ".join("{" + m + "}" for m in missing)
+                    + ". Add them to the prompt before saving."
+                ),
+            )
 
         file_path = os.path.join(prompt_path, prompt_type_to_file[prompt_type])
         temp_file = f"{file_path}.tmp"
@@ -2693,9 +3809,11 @@ async def save_prompts(
             "chatbot_response": "Chatbot response prompt saved successfully",
             "entity_relationship": "Entity relationship prompt saved successfully",
             "community_summarization": "Community summarization prompt saved successfully",
-            "query_generation": "Schema instructions prompt saved successfully",
+            "query_generation": "Question-to-schema mapping prompt saved successfully",
+            "schema_extraction": "Schema extraction prompt saved successfully",
+            "query_guidance": "Query guidance saved successfully",
         }
-        return {"status": "success", "message": messages[prompt_type]}
+        return {"status": "success", "message": messages.get(prompt_type, "Prompt saved successfully")}
 
     except HTTPException:
         raise

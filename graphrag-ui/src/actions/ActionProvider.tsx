@@ -1,4 +1,4 @@
-import React, {useState, useCallback, useEffect, useContext} from 'react';
+import React, {useState, useRef, useCallback, useEffect, useContext} from 'react';
 import {createClientMessage} from 'react-chatbot-kit';
 import useWebSocket, {ReadyState} from 'react-use-websocket';
 import Loader from '../components/Loader';
@@ -81,6 +81,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
 }) => {
   const selectedGraph = useContext(SelectedGraphContext);
   const selectedRagPattern = useContext(RagPatternContext);
+  const lastUserQueryRef = useRef<string>("");
   const WS_URL = "/ui/" + selectedGraph + "/chat" + "?rag_pattern=" + selectedRagPattern;
   const [messageHistory, setMessageHistory] = useState<MessageEvent<Message>[]>(
     [],
@@ -160,12 +161,17 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
             });
             loadedMessages.push(userMessage);
           } else if (msg.role === "system") {
-            // Create bot message
+            // Carry message_id + feedback through so history bubbles can
+            // open the trace page and reflect the prior thumbs-up/down
+            // state after a reload.
             const botMessage = createChatBotMessage({
               content: msg.content || "",
               response_type: "history",
               query_sources: msg.query_sources,
               answered_question: msg.answered_question,
+              message_id: msg.message_id,
+              messageId: msg.message_id,
+              feedback: msg.feedback,
             });
             loadedMessages.push(botMessage);
           }
@@ -205,6 +211,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
   };
 
   const defaultQuestions = (msg: string) => {
+    lastUserQueryRef.current = msg;
     const clientMessage = createClientMessage(msg, {
       delay: 300,
     });
@@ -213,6 +220,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
   };
 
   const queryGraphragWs = (msg) => {
+    lastUserQueryRef.current = msg;
     const queryGraphragWsTest = (msg: string) => {
       sendMessage(msg);
     };
@@ -222,6 +230,13 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
       ...prev,
       messages: [...prev.messages, loading],
     }));
+
+    // Signal that the chat is now waiting on an answer. Layout chrome
+    // (Setup / Logout / conversation list / new-chat button) listens for
+    // this and disables itself so the user can't unmount the in-flight
+    // streaming connection by navigating away.
+    document.body.classList.add("chat-streaming");
+    window.dispatchEvent(new Event("chat:streaming-start"));
 
     // Dispatch event to refresh conversation list when user sends a question
     // This ensures the side menu updates when a new message is sent
@@ -269,12 +284,22 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
           return; // Don't create a bot message for conversation ID
         }
 
+        // Attach the user query so the trace page can display it
+        messageData.userQuery = lastUserQueryRef.current;
+
         // Handle regular bot messages
         const botMessage = createChatBotMessage(messageData);
         setState((prev) => {
           const newPrevMsg = prev.messages.slice(0, -1);
-          return {...prev, messages: [...newPrevMsg, botMessage]};  
+          return {...prev, messages: [...newPrevMsg, botMessage]};
         });
+
+        // Final (non-progress) message ends the streaming gate; layout
+        // chrome re-enables. Progress messages keep the gate held.
+        if (messageData.response_type !== "progress") {
+          document.body.classList.remove("chat-streaming");
+          window.dispatchEvent(new Event("chat:streaming-end"));
+        }
       } catch (error) {
         console.error("Error parsing WebSocket message:", error);
         // Handle string messages (progress updates)

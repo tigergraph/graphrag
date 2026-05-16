@@ -20,6 +20,7 @@ from langchain.tools import BaseTool
 from langchain.llms.base import LLM
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.db.connections import get_schema_ver
+from common.db.schema_utils import render_schema_rep
 from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
 
@@ -54,48 +55,16 @@ class GenerateGSQL(BaseTool):
         self.schema_ver = 0
     
     def _generate_schema_rep(self):
-        schema_ver = get_schema_ver(self.conn)
+        # Schema rendering is shared with generate_cypher + the
+        # question-mapping tools via ``schema_utils.render_schema_rep``;
+        # we only keep the per-instance cache here.
+        snap = render_schema_rep(self.conn)
+        text, schema_ver = snap.schema_rep, snap.schema_version
         if self.schema_rep and self.schema_ver == schema_ver:
             logger.info(f"Reusing existing schema rep for schema version {schema_ver}")
             return self.schema_rep
-        verts = self.conn.getVertexTypes()
-        edges = self.conn.getEdgeTypes()
-        vertex_schema = []
-        for vert in verts:
-            primary_id = self.conn.getVertexType(vert)["PrimaryId"]["AttributeName"]
-            attributes = "\n\t\t".join([attr["AttributeName"] + " of type " + attr["AttributeType"]["Name"] 
-                                        for attr in self.conn.getVertexType(vert)["Attributes"]])
-            if attributes == "":
-                attributes = "No attributes"
-            vertex_schema.append(f"{vert}\n\tPrimary Id Attribute: {primary_id}\n\tAttributes: \n\t\t{attributes}")
-
-        edge_schema = []
-        for edge in edges:
-            from_vertex = self.conn.getEdgeType(edge)["FromVertexTypeName"]
-            to_vertex = self.conn.getEdgeType(edge)["ToVertexTypeName"]
-            direction = "Directed" if self.conn.getEdgeType(edge)["IsDirected"] else "Undirected"
-            #reverse_edge = conn.getEdgeType(edge)["Config"].get("REVERSE_EDGE")
-            attributes = "\n\t\t".join([attr["AttributeName"] + " of type " + attr["AttributeType"]["Name"] 
-                                        for attr in self.conn.getEdgeType(edge)["Attributes"]])
-            if attributes == "":
-                attributes = "No attributes"
-            if from_vertex == "*" or to_vertex == "*":
-                edge_pairs = self.conn.getEdgeType(edge)["EdgePairs"]
-                for an_edge in edge_pairs:
-                    edge_info = f"""From Vertex: {an_edge["From"]}\n\tTo Vertex: {an_edge["To"]}"""
-                    edge_schema.append(f"""{edge}\n\t{edge_info}\n\tEdge direction: {direction}\n\tAttributes: \n\t\t{attributes}""")
-            else:
-                edge_info = f"""From Vertex: {from_vertex}\n\tTo Vertex: {to_vertex}"""
-                edge_schema.append(f"""{edge}\n\t{edge_info}\n\tEdge direction: {direction}\n\tAttributes: \n\t\t{attributes}""")
-
-        self.schema_rep = f"""The schema of the graph {self.conn.graphname} is as follows:
-Vertex Types:
-{chr(10).join(vertex_schema)}
-
-Edge Types:
-{chr(10).join(edge_schema)}
-"""
-        self.schema_ver = schema_ver
+        self.schema_rep = text
+        self.schema_ver = schema_ver if schema_ver is not None else 0
         return self.schema_rep
         
     def generate_gsql(self, question: str, history: Iterable[str]) -> str:
@@ -115,7 +84,12 @@ Edge Types:
                 "question",
                 "schema",
                 "history"
-            ]
+            ],
+            partial_variables={
+                # Pre-bind the Query Guidance partial; empty when no
+                # override is configured.
+                "query_guidance": self.llm.query_guidance_block,
+            },
         )
 
         LogWriter.info(f"request_id={req_id_cv.get()} ENTRY generate_gsql with {question}")

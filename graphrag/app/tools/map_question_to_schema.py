@@ -27,6 +27,7 @@ import logging
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.db.connections import get_schema_ver
+from common.db.schema_utils import read_type_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,14 @@ class MapQuestionToSchema(BaseTool):
                 "edges",
                 "edgesInfo",
             ],
-            partial_variables={"format_instructions": parser.get_format_instructions()},
+            partial_variables={
+                "format_instructions": parser.get_format_instructions(),
+                # Pre-bind the Query Guidance partial so every render
+                # picks up the current per-graph / global override.
+                # ``query_guidance_block`` is empty when no override is
+                # configured, leaving the template effectively unchanged.
+                "query_guidance": self.llm.query_guidance_block,
+            },
         )
 
         schema_ver = get_schema_ver(self.conn)
@@ -112,12 +120,30 @@ class MapQuestionToSchema(BaseTool):
         else:
             logger.info(f"Reusing existing schema rep for schema version {schema_ver}")
 
+        # Pull the user-defined ``description`` / ``definition`` from
+        # the EntityType / RelationshipType meta vertices so the LLM
+        # sees the same domain hints that the cypher/gsql generators
+        # already get. Empty when no metadata is set — the surface
+        # shape stays a plain list of names for those types.
+        try:
+            entity_descs, rel_defs = read_type_metadata(self.conn)
+        except Exception as exc:
+            logger.warning(f"read_type_metadata failed in mq2s: {exc}")
+            entity_descs, rel_defs = {}, {}
+
+        def _label(name: str, desc_map: dict) -> str:
+            d = desc_map.get(name)
+            return f"{name} ({d})" if d else name
+
+        vertices_for_llm = [_label(v, entity_descs) for v in self.vertices]
+        edges_for_llm = [_label(e, rel_defs) for e in self.edges]
+
         parsed_q = self.llm.invoke_with_parser(
             RESTATE_QUESTION_PROMPT, parser,
             {
-                "vertices": self.vertices,
+                "vertices": vertices_for_llm,
                 "verticesAttrs": self.vertices_info,
-                "edges": self.edges,
+                "edges": edges_for_llm,
                 "edgesInfo": self.edges_info,
                 "question": query,
                 "conversation": conversation,

@@ -14,7 +14,7 @@
  * limitations under the License.
 */
 
-CREATE OR REPLACE DISTRIBUTED QUERY Content_Similarity_Vector_Search(STRING v_type, LIST<FLOAT> query_vector, INT top_k=5, BOOL verbose = False) { 
+CREATE OR REPLACE DISTRIBUTED QUERY Content_Similarity_Vector_Search(STRING v_type, LIST<FLOAT> query_vector, INT top_k=5, BOOL verbose = False) {
   TYPEDEF tuple<Vertex v, Float score> Similarity_Results;
   TYPEDEF TUPLE<VERTEX v, STRING t> VertexTypes;
   SetAccum<VertexTypes> @@start_set_type;
@@ -22,31 +22,31 @@ CREATE OR REPLACE DISTRIBUTED QUERY Content_Similarity_Vector_Search(STRING v_ty
   HeapAccum<Similarity_Results>(top_k, score DESC) @@topk_set;
   SetAccum<VERTEX> @@start_set;
   MapAccum<STRING, STRING> @@final_retrieval;
-  
+
   vset = {v_type};
-  result = SELECT v FROM vset:v WHERE v.embedding.size() > 0 POST-ACCUM @@topk_set += Similarity_Results(v, 1 - gds.vector.distance(query_vector, v.embedding, "COSINE"));
+  result = SELECT v FROM vset:v POST-ACCUM @@topk_set += Similarity_Results(v, 1 - gds.vector.distance(query_vector, v.embedding, "COSINE"));
 
   FOREACH item IN @@topk_set DO
     @@start_set += item.v;
   END;
-    
+
   start = {@@start_set};
-    
+
   res = SELECT s FROM start:s -(:e)- :tgt WHERE s.type == v_type
         ACCUM @@start_set_type += VertexTypes(s, s.type),
           IF (s.type == "DocumentChunk" OR s.type == "Document") AND tgt.type == "Content" THEN
             @@final_retrieval += (s.id -> tgt.text)
           END
         POST-ACCUM
-          IF s.type == "RelationshipType" OR s.type == "Entity" THEN
+          IF s.type == "Entity" THEN
             @@final_retrieval += (s.id -> s.definition)
           ELSE IF s.type == "Community" THEN
             @@final_retrieval += (s.id -> s.description)
           END;
-    
+
   @@verbose_info += ("start_set" -> @@start_set_type);
 
-  PRINT @@final_retrieval as final_retrieval;    
+  PRINT @@final_retrieval as final_retrieval;
 
   IF verbose THEN
       PRINT @@verbose_info as verbose;

@@ -27,12 +27,27 @@ const GraphRAGConfig = () => {
   const [numSeenMin, setNumSeenMin] = useState("2");
   const [communityLevel, setCommunityLevel] = useState("2");
   const [docOnly, setDocOnly] = useState(false);
+  const [enableRouterFallback, setEnableRouterFallback] = useState(true);
 
-  // Advanced ingestion settings
+  // Collapsible section toggles (Configuration Scope and General Settings
+  // are always shown). Advanced Ingestion stays collapsed by default —
+  // matches the prior behavior.
+  const [showChunker, setShowChunker] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showSchema, setShowSchema] = useState(false);
+  const [showEndpoints, setShowEndpoints] = useState(false);
   const [loadBatchSize, setLoadBatchSize] = useState("500");
   const [upsertDelay, setUpsertDelay] = useState("0");
   const [maxConcurrency, setMaxConcurrency] = useState("10");
+
+  // Schema-aware initialization (Phase 1 sample-doc path)
+  const [schemaMaxSampleFiles, setSchemaMaxSampleFiles] = useState("5");
+  const [schemaMaxTotalMb, setSchemaMaxTotalMb] = useState("50");
+  // Dynamic schema behavior at extraction and retrieval time
+  const [strictMode, setStrictMode] = useState(false);
+  // Tri-state: "auto" leaves the key unset (server picks based on whether
+  // a domain schema exists); "true"/"false" force the behavior.
+  const [retrievalIncludeEntity, setRetrievalIncludeEntity] = useState<"auto" | "true" | "false">("auto");
 
   // Chunker-specific settings
   const [chunkSize, setChunkSize] = useState("");
@@ -72,9 +87,15 @@ const GraphRAGConfig = () => {
     setNumSeenMin(String(graphragConfig.num_seen_min ?? 2));
     setCommunityLevel(String(graphragConfig.community_level ?? 2));
     setDocOnly(graphragConfig.doc_only ?? false);
+    setEnableRouterFallback(graphragConfig.enable_router_fallback ?? true);
     setLoadBatchSize(String(graphragConfig.load_batch_size ?? 500));
     setUpsertDelay(String(graphragConfig.upsert_delay ?? 0));
     setMaxConcurrency(String(graphragConfig.default_concurrency ?? 10));
+    setSchemaMaxSampleFiles(String(graphragConfig.schema_max_sample_files ?? 5));
+    setSchemaMaxTotalMb(String(graphragConfig.schema_max_total_mb ?? 50));
+    setStrictMode(graphragConfig.strict_mode ?? false);
+    const rie = graphragConfig.retrieval_include_entity;
+    setRetrievalIncludeEntity(rie === undefined || rie === null ? "auto" : rie ? "true" : "false");
 
     const chunkerConfig = graphragConfig.chunker_config || {};
     setChunkSize(String(chunkerConfig.chunk_size ?? ""));
@@ -88,43 +109,79 @@ const GraphRAGConfig = () => {
     setIsLoading(true);
     const effectiveScope = scope ?? configScope;
     const effectiveGraph = graphname ?? selectedGraph;
-    try {
-      const creds = sessionStorage.getItem("creds");
-      const params = new URLSearchParams();
-      if (effectiveGraph) params.set("graphname", effectiveGraph);
-      if (effectiveScope === "graph") params.set("scope", "graph");
-      const queryString = params.toString() ? `?${params.toString()}` : "";
-      const response = await fetch(`/ui/config${queryString}`, {
-        headers: { Authorization: `Basic ${creds}` },
-      });
+    const creds = sessionStorage.getItem("creds");
+    const params = new URLSearchParams();
+    if (effectiveGraph) params.set("graphname", effectiveGraph);
+    if (effectiveScope === "graph") params.set("scope", "graph");
+    const queryString = params.toString() ? `?${params.toString()}` : "";
+    const url = `/ui/config${queryString}`;
 
-      if (!response.ok) {
-        throw new Error("Failed to fetch configuration");
+    // Transient backend failures (cold start, brief upstream timeouts via
+    // nginx, momentary 502/503/504) are common right after a service
+    // restart and produced the intermittent "Failed to fetch configuration"
+    // on this page. Retry a few times with backoff before surfacing an
+    // error to the user. Auth failures (401/403) and 4xx are not retried.
+    const shouldRetry = (status: number | null, err: unknown) => {
+      if (err && status === null) return true; // network error
+      if (status !== null && status >= 500) return true;
+      return false;
+    };
+
+    const maxAttempts = 3;
+    let lastErr: any = null;
+    let lastStatus: number | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await fetch(url, {
+          headers: { Authorization: `Basic ${creds}` },
+        });
+        lastStatus = response.status;
+        if (!response.ok) {
+          if (attempt < maxAttempts && shouldRetry(response.status, null)) {
+            await new Promise((r) => setTimeout(r, 500 * attempt));
+            continue;
+          }
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        const deepCopy = (obj: any) => JSON.parse(JSON.stringify(obj || {}));
+        loadedGlobalConfig.current = deepCopy(data.graphrag_config);
+
+        if (effectiveScope === "graph" && data.graphrag_overrides) {
+          loadedGraphOverrides.current = deepCopy(data.graphrag_overrides);
+          setGraphOverrides(data.graphrag_overrides);
+          // Show per-graph values: merge global + overrides for display
+          const merged = { ...data.graphrag_config, ...data.graphrag_overrides };
+          applyGraphragConfig(merged);
+        } else {
+          loadedGraphOverrides.current = {};
+          setGraphOverrides({});
+          applyGraphragConfig(data.graphrag_config);
+        }
+        // Clear any prior transient error banner on success.
+        setMessage("");
+        setMessageType("");
+        setIsLoading(false);
+        return;
+      } catch (error: any) {
+        lastErr = error;
+        if (attempt < maxAttempts && shouldRetry(lastStatus, error)) {
+          await new Promise((r) => setTimeout(r, 500 * attempt));
+          continue;
+        }
+        break;
       }
-
-      const data = await response.json();
-
-      const deepCopy = (obj: any) => JSON.parse(JSON.stringify(obj || {}));
-      loadedGlobalConfig.current = deepCopy(data.graphrag_config);
-
-      if (effectiveScope === "graph" && data.graphrag_overrides) {
-        loadedGraphOverrides.current = deepCopy(data.graphrag_overrides);
-        setGraphOverrides(data.graphrag_overrides);
-        // Show per-graph values: merge global + overrides for display
-        const merged = { ...data.graphrag_config, ...data.graphrag_overrides };
-        applyGraphragConfig(merged);
-      } else {
-        loadedGraphOverrides.current = {};
-        setGraphOverrides({});
-        applyGraphragConfig(data.graphrag_config);
-      }
-    } catch (error: any) {
-      console.error("Error fetching config:", error);
-      setMessage(`Failed to load configuration: ${error.message}`);
-      setMessageType("error");
-    } finally {
-      setIsLoading(false);
     }
+
+    console.error("Error fetching config:", lastErr, "status=", lastStatus);
+    setMessage(
+      `Failed to load configuration${lastStatus ? ` (HTTP ${lastStatus})` : ""}. Please retry.`
+    );
+    setMessageType("error");
+    setIsLoading(false);
   };
 
   const handleSave = async () => {
@@ -154,10 +211,21 @@ const GraphRAGConfig = () => {
         num_seen_min: parseInt(numSeenMin),
         community_level: parseInt(communityLevel),
         doc_only: docOnly,
+        enable_router_fallback: enableRouterFallback,
         load_batch_size: parseInt(loadBatchSize),
         upsert_delay: parseInt(upsertDelay),
         default_concurrency: parseInt(maxConcurrency),
+        schema_max_sample_files: parseInt(schemaMaxSampleFiles),
+        schema_max_total_mb: parseInt(schemaMaxTotalMb),
+        strict_mode: strictMode,
       };
+      // retrieval_include_entity: only include the key when the user has
+      // picked an explicit value. "auto" should leave it unset so the
+      // server-side fallback (False with domain schema, True otherwise)
+      // applies.
+      if (retrievalIncludeEntity !== "auto") {
+        currentConfig.retrieval_include_entity = retrievalIncludeEntity === "true";
+      }
 
       // Display defaults — used to avoid saving values the user never changed
       const displayDefaults: Record<string, any> = {
@@ -170,9 +238,13 @@ const GraphRAGConfig = () => {
         num_seen_min: 2,
         community_level: 2,
         doc_only: false,
+        enable_router_fallback: true,
         load_batch_size: 500,
         upsert_delay: 0,
         default_concurrency: 10,
+        schema_max_sample_files: 5,
+        schema_max_total_mb: 50,
+        strict_mode: false,
       };
 
       // Determine which config to diff against based on scope
@@ -455,19 +527,52 @@ const GraphRAGConfig = () => {
                   Retrieve original documents instead of document chunks in results
                 </p>
               </div>
+
+              <div>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="enableRouterFallback"
+                    className="rounded border-gray-300 dark:border-[#3D3D3D]"
+                    checked={enableRouterFallback}
+                    onChange={(e) => setEnableRouterFallback(e.target.checked)}
+                  />
+                  <label htmlFor="enableRouterFallback" className="text-sm font-medium text-black dark:text-white">
+                    Fallback to Vector Search on Structured-Data Failure
+                  </label>
+                </div>
+                <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 ml-6">
+                  Fall back to vector search when structured-data retrieval fails.
+                </p>
+              </div>
             </div>
           </div>
 
           {/* Chunker Settings */}
           <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
-            <h2 className="text-lg font-semibold mb-4 text-black dark:text-white">
-              Chunker Settings
-            </h2>
-            <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-6">
-              Configure document chunking for ingestion
-            </p>
+            <button
+              type="button"
+              onClick={() => setShowChunker(!showChunker)}
+              className="w-full flex items-center justify-between"
+            >
+              <h2 className="text-lg font-semibold text-black dark:text-white">
+                Chunker Settings
+              </h2>
+              <span className="text-sm text-gray-500 dark:text-gray-400">
+                {showChunker ? "▲ Collapse" : "▼ Expand"}
+              </span>
+            </button>
+            {!showChunker && (
+              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mt-2">
+                Configure document chunking for ingestion.
+              </p>
+            )}
 
-            <div className="space-y-4">
+            {showChunker && (
+            <div className="space-y-4 mt-4">
+              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-2">
+                Configure document chunking for ingestion.
+              </p>
               <div>
                 <label className="block text-sm font-medium mb-2 text-black dark:text-white">
                   Default Chunker
@@ -523,7 +628,7 @@ const GraphRAGConfig = () => {
                       onChange={(e) => setOverlapSize(e.target.value)}
                     />
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Overlap between consecutive chunks. Defaults to 1/8 of chunk size if empty.
+                      Overlap between consecutive chunks.
                     </p>
                   </div>
                 </div>
@@ -595,6 +700,7 @@ const GraphRAGConfig = () => {
                 </div>
               </div>
             </div>
+            )}
           </div>
 
           {message && (
@@ -649,7 +755,7 @@ const GraphRAGConfig = () => {
                       onChange={(e) => setLoadBatchSize(e.target.value)}
                     />
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Vertices per upsert batch
+                      Number of vertices written per batch.
                     </p>
                   </div>
 
@@ -691,17 +797,167 @@ const GraphRAGConfig = () => {
             )}
           </div>
 
-          {/* Service Endpoints (global only) */}
-          {configScope !== "graph" && (
-            <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
-              <h2 className="text-lg font-semibold mb-4 text-black dark:text-white">
-                Service Endpoints
+          {/* Schema extraction (sample-doc proposal path) + dynamic schema
+              behavior (how domain types are enforced and retrieved). */}
+          <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+            <button
+              type="button"
+              onClick={() => setShowSchema(!showSchema)}
+              className="w-full flex items-center justify-between"
+            >
+              <h2 className="text-lg font-semibold text-black dark:text-white">
+                Schema Extraction
               </h2>
-              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-6">
-                Configure internal service URLs. These are global settings and cannot be overridden per graph.
+              <span className="text-sm text-gray-500 dark:text-gray-400">
+                {showSchema ? "▲ Collapse" : "▼ Expand"}
+              </span>
+            </button>
+            {!showSchema && (
+              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mt-2">
+                Sample-doc schema extraction limits and runtime behavior of
+                the domain schema.
+              </p>
+            )}
+
+            {showSchema && (
+            <div className="mt-4">
+            <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-6">
+              Controls for the schema-extraction sample-doc workflow and the
+              runtime behavior of the dynamic (domain) schema during entity
+              extraction and retrieval.
+            </p>
+
+            {/* Schema extraction sub-section */}
+            <div className="border border-gray-200 dark:border-[#3D3D3D] rounded-lg p-4 mb-4">
+              <h3 className="text-sm font-medium mb-3 text-black dark:text-white">
+                Schema Extraction (Sample Documents)
+              </h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+                Limits for the <em>Generate from sample documents</em> path on
+                the <em>Initialize Knowledge Graph</em> dialog.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Max Sample Files
+                  </label>
+                  <Input
+                    type="number"
+                    min="1"
+                    max="20"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
+                    placeholder="5"
+                    value={schemaMaxSampleFiles}
+                    onChange={(e) => setSchemaMaxSampleFiles(e.target.value)}
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Maximum number of sample documents per schema-extraction run
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Max Total Size (MB)
+                  </label>
+                  <Input
+                    type="number"
+                    min="1"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
+                    placeholder="50"
+                    value={schemaMaxTotalMb}
+                    onChange={(e) => setSchemaMaxTotalMb(e.target.value)}
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Combined upload cap across all sample files
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Dynamic schema runtime sub-section */}
+            <div className="border border-gray-200 dark:border-[#3D3D3D] rounded-lg p-4">
+              <h3 className="text-sm font-medium mb-3 text-black dark:text-white">
+                Dynamic Schema Runtime
+              </h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+                How the domain schema is enforced during entity extraction and
+                used by retrievers at query time.
               </p>
 
               <div className="space-y-4">
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="strictMode"
+                      className="rounded border-gray-300 dark:border-[#3D3D3D]"
+                      checked={strictMode}
+                      onChange={(e) => setStrictMode(e.target.checked)}
+                    />
+                    <label htmlFor="strictMode" className="text-sm font-medium text-black dark:text-white">
+                      Strict Mode
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 ml-6">
+                    Drop extracted entities and relationships that don't match
+                    the domain schema.
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Include Generic Entity in Retrieval
+                  </label>
+                  <Select
+                    value={retrievalIncludeEntity}
+                    onValueChange={(v) =>
+                      setRetrievalIncludeEntity(v as "auto" | "true" | "false")
+                    }
+                  >
+                    <SelectTrigger className="dark:border-[#3D3D3D] dark:bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="auto">Auto (default)</SelectItem>
+                      <SelectItem value="true">Yes – always include Entity</SelectItem>
+                      <SelectItem value="false">No – domain types only</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Include generic entities in retrieval alongside domain types.
+                  </p>
+                </div>
+              </div>
+            </div>
+            </div>
+            )}
+          </div>
+
+          {/* Service Endpoints (global only) */}
+          {configScope !== "graph" && (
+            <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+              <button
+                type="button"
+                onClick={() => setShowEndpoints(!showEndpoints)}
+                className="w-full flex items-center justify-between"
+              >
+                <h2 className="text-lg font-semibold text-black dark:text-white">
+                  Service Endpoints
+                </h2>
+                <span className="text-sm text-gray-500 dark:text-gray-400">
+                  {showEndpoints ? "▲ Collapse" : "▼ Expand"}
+                </span>
+              </button>
+              {!showEndpoints && (
+                <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mt-2">
+                  Internal service URLs (global only).
+                </p>
+              )}
+
+              {showEndpoints && (
+              <div className="space-y-4 mt-4">
+                <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-2">
+                  Configure internal service URLs. These are global settings and cannot be overridden per graph.
+                </p>
                 <div>
                   <label className="block text-sm font-medium mb-2 text-black dark:text-white">
                     ECC Service URL
@@ -734,6 +990,7 @@ const GraphRAGConfig = () => {
                   </p>
                 </div>
               </div>
+              )}
             </div>
           )}
 

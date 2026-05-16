@@ -31,11 +31,12 @@ from graphrag.util import (
     load_q,
     loading_event,
     make_headers,
+    graphrag_mirror_communities,
     stream_ids,
     tg_sem,
     upsert_batch,
-    add_rels_between_types
 )
+from common.db.schema_utils import is_structural_type, read_existing_schema_async
 from pyTigerGraph import AsyncTigerGraphConnection
 
 from common.config import embedding_service, entity_extraction_switch, community_detection_switch, doc_process_switch, get_graphrag_config
@@ -50,11 +51,18 @@ async def stream_docs(
     conn: AsyncTigerGraphConnection,
     docs_chan: Channel,
     ttl_batches: int = 10,
+    progress=None,
 ):
     """
-    Streams the document contents into the docs_chan
+    Streams the document contents into the docs_chan.
+
+    *progress* (optional) is a callable invoked once when document
+    streaming completes — runtime hands the rebuild status forward
+    from "Chunking documents" to "Extracting entities and
+    relationships" at that boundary.
     """
-    logger.info("streaming docs")
+    logger.info(f"streaming docs ({ttl_batches} batches)")
+    n_docs = 0
     for i in range(ttl_batches):
         doc_ids = await stream_ids(conn, "Document", i, ttl_batches)
         if doc_ids["error"]:
@@ -67,19 +75,28 @@ async def stream_docs(
                 async with tg_sem:
                     res = await conn.runInstalledQuery(
                         "StreamDocContent",
-                        params={"doc": d},
+                        # 1-tuple form for VERTEX<T> params; see
+                        # stream_chunks for the deprecation context.
+                        params={"doc": (d,)},
                     )
-                logger.info(f"stream_docs writes {d} to docs")
+                # Demoted from INFO — ``d`` is a user document ID.
+                logger.debug(f"stream_docs writes {d} to docs")
                 await docs_chan.put(res[0]["DocContent"][0])
+                n_docs += 1
             except Exception as e:
                 exc = traceback.format_exc()
                 logger.error(f"Error retrieving doc: {d} --> {e}\n{exc}")
                 continue  # try retrieving the next doc
 
-    logger.info("stream_docs done")
+    logger.info(f"stream_docs done: {n_docs} document(s) streamed")
     # close the docs chan -- this function is the only sender
     logger.info("closing docs chan")
     docs_chan.close()
+    if progress is not None:
+        try:
+            progress("Extracting entities and relationships")
+        except Exception:
+            pass
 
 async def stream_chunks(
     conn: AsyncTigerGraphConnection,
@@ -90,7 +107,8 @@ async def stream_chunks(
     """
     Streams the chunk contents into the extract_chan and embed_chan
     """
-    logger.info("streaming chunks")
+    logger.info(f"streaming chunks ({ttl_batches} batches)")
+    n_chunks = 0
     for i in range(ttl_batches):
         chunk_ids = await stream_ids(conn, "DocumentChunk", i, ttl_batches)
         if chunk_ids["error"]:
@@ -98,24 +116,52 @@ async def stream_chunks(
 
         for c in chunk_ids["ids"]:
             try:
-                async with tg_sem:
-                    res = await conn.runInstalledQuery(
-                        "StreamChunkContent",
-                        params={"chunk": c},
+                # Retry briefly when ChunkContent is empty — that
+                # happens when stream_ids surfaced a DocumentChunk
+                # vertex but its HAS_CONTENT edge upsert hasn't
+                # flushed yet (the loader runs in batches). Without
+                # the retry the chunk gets silently dropped and
+                # extracted only on the next ECC sweep.
+                chunk_rows = []
+                for attempt in range(3):
+                    async with tg_sem:
+                        res = await conn.runInstalledQuery(
+                            "StreamChunkContent",
+                            # 1-tuple form is the supported shape for
+                            # VERTEX<T> params in current pyTigerGraph;
+                            # the plain-value form raises a deprecation
+                            # warning and falls back to a slower GET.
+                            params={"chunk": (c,)},
+                        )
+                    chunk_rows = (res[0] if res else {}).get("ChunkContent") or []
+                    if chunk_rows:
+                        break
+                    # Back off and try again — the loader's batch
+                    # interval is a few seconds.
+                    await asyncio.sleep(2 * (attempt + 1))
+                if not chunk_rows:
+                    logger.warning(
+                        f"No content row for chunk {c} after retries; skipping"
                     )
-                content = res[0]["ChunkContent"][0]["attributes"]["text"].encode('raw_unicode_escape').decode('unicode_escape')
-                logger.info("chunk writes to extract_chan")
+                    continue
+                content = chunk_rows[0]["attributes"]["text"].encode(
+                    'raw_unicode_escape'
+                ).decode('unicode_escape')
+                logger.debug("chunk writes to extract_chan")
                 await extract_chan.put((content, c))
 
                 # send chunks to be embedded
-                logger.info("chunk writes to embed_chan")
+                logger.debug("chunk writes to embed_chan")
                 await embed_chan.put((c, content, "DocumentChunk"))
+                n_chunks += 1
+                if n_chunks % 100 == 0:
+                    logger.info(f"streaming chunks: {n_chunks} streamed")
             except Exception as e:
                 exc = traceback.format_exc()
                 logger.error(f"Error retrieving chunk: {c} --> {e}\n{exc}")
                 continue  # try retrieving the next doc
 
-    logger.info("stream_chunks done")
+    logger.info(f"stream_chunks done: {n_chunks} chunk(s) streamed")
     logger.info("closing extract_chan")
     await extract_chan.put(None)
 
@@ -133,10 +179,12 @@ async def chunk_docs(
     """
     logger.info("Chunk Processing Start")
     doc_tasks = []
+    n_docs = 0
     async with asyncio.TaskGroup() as grp:
         while True:
             try:
                 content = await docs_chan.get()
+                n_docs += 1
                 task = grp.create_task(
                     workers.chunk_doc(conn, content, upsert_chan, embed_chan, extract_chan)
                 )
@@ -146,7 +194,7 @@ async def chunk_docs(
             except Exception:
                 raise
 
-    logger.info("Chunk Processing End")
+    logger.info(f"Chunk Processing End: {n_docs} document(s) processed")
 
     logger.info("closing extract_chan")
     await extract_chan.put(None)
@@ -160,20 +208,29 @@ async def upsert(upsert_chan: Channel):
     """
 
     logger.info("Data Upserting Start")
+    n_upserts = 0
     # consume task queue
     async with asyncio.TaskGroup() as grp:
         while True:
             try:
                 (func, args) = await upsert_chan.get()
-                logger.info(f"Upserting with {func.__name__}, {args[1:3]}")
+                # Demoted from INFO — ``args`` carries vertex IDs and
+                # payloads derived from user documents.
+                logger.debug(f"Upserting with {func.__name__}, {args[1:3]}")
                 # execute the task
                 grp.create_task(func(*args))
+                n_upserts += 1
+                # Heartbeat every 200 upserts so a long stage doesn't
+                # look stalled in the INFO log without exposing the
+                # underlying data.
+                if n_upserts % 200 == 0:
+                    logger.info(f"Data Upserting: {n_upserts} dispatched")
             except ChannelClosed:
                 break
             except Exception:
                 raise
 
-    logger.info("Data Upserting End")
+    logger.info(f"Data Upserting End: {n_upserts} dispatched")
     logger.info("closing load_q chan")
     load_q.close()
 
@@ -255,15 +312,19 @@ async def embed(
     (v_id, content, index_name) <- q.get()
     """
     logger.info("Embedding Processing Start")
+    n_embed = 0
+    n_reused = 0
     async with asyncio.TaskGroup() as grp:
         # consume task queue
         while True:
             try:
                 (v_id, content, index_name) = await embed_chan.get()
                 v_id = (v_id, index_name)
-                logger.info(f"Embed to {graphname}_{index_name}: {v_id}")
+                # v_id is a per-vertex identifier derived from user content.
+                logger.debug(f"Embed to {graphname}_{index_name}: {v_id}")
                 if get_graphrag_config(graphname).get("reuse_embedding", True) and embedding_store.has_embeddings([v_id]):
-                    logger.info(f"Embeddings for {v_id} already exists, skipping to save cost")
+                    logger.debug(f"Embeddings for {v_id} already exists, skipping to save cost")
+                    n_reused += 1
                     continue
                 grp.create_task(
                     workers.embed(
@@ -273,12 +334,17 @@ async def embed(
                         content,
                     )
                 )
+                n_embed += 1
+                if n_embed % 100 == 0:
+                    logger.info(f"Embedding Processing: {n_embed} embedded so far")
             except ChannelClosed:
                 break
             except Exception:
                 raise
 
-    logger.info("Embedding Processing End")
+    logger.info(
+        f"Embedding Processing End: {n_embed} embedded, {n_reused} reused"
+    )
 
 
 async def extract(
@@ -296,6 +362,7 @@ async def extract(
     """
     logger.info("Entity Extration Start")
     # consume task queue
+    n_chunks = 0
     async with asyncio.TaskGroup() as grp:
         done_count = 0
         while True:
@@ -311,12 +378,17 @@ async def extract(
                         grp.create_task(
                             workers.extract(upsert_chan, extractor, conn, *item)
                         )
+                        n_chunks += 1
+                        if n_chunks % 50 == 0:
+                            logger.info(
+                                f"Entity Extraction: {n_chunks} chunks dispatched"
+                            )
             except ChannelClosed:
                 break
             except Exception:
                 raise
 
-    logger.info("Entity Extration End")
+    logger.info(f"Entity Extration End: {n_chunks} chunks extracted")
 
     logger.info("closing extract, upsert and embed chan")
     extract_chan.close()
@@ -436,12 +508,21 @@ async def summarize_communities(
     upsert_chan: Channel,
     embed_chan: Channel,
 ):
+    logger.info("Community summarization started")
+    n_comm = 0
     async with asyncio.TaskGroup() as tg:
         while True:
             try:
                 c = await comm_process_chan.get()
                 tg.create_task(workers.process_community(conn, upsert_chan, embed_chan, *c))
                 logger.debug(f"Added community to process: {c}")
+                n_comm += 1
+                # Per-community summarization can take 30s; emit a
+                # heartbeat every 20 so a long run doesn't go silent.
+                if n_comm % 20 == 0:
+                    logger.info(
+                        f"Community summarization: {n_comm} dispatched"
+                    )
             except ChannelClosed:
                 break
             except Exception:
@@ -450,10 +531,12 @@ async def summarize_communities(
     logger.info("closing upsert_chan")
     upsert_chan.close()
     embed_chan.close()
-    logger.info("summarize_communities done")
+    logger.info(
+        f"Community summarization done: {n_comm} communities dispatched"
+    )
 
 
-async def run(graphname: str, conn: AsyncTigerGraphConnection):
+async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
     """
     Set up GraphRAG:
         - Install necessary queries.
@@ -463,12 +546,27 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
             - entities/relationships
             - upsert everything to the graph
         - Detect communities and summarize them
+
+    *progress* is an optional ``Callable[[str], None]`` invoked at
+    each user-visible sub-phase; ECC's ``run_with_tracking`` wires it
+    to the task's ``stage`` field so the UI rebuild dialog can show
+    where the job is.
     """
 
+    def _report(msg: str) -> None:
+        if progress is None:
+            return
+        try:
+            progress(msg)
+        except Exception:
+            pass
+
+    _report("Preparing rebuild")
     extractor, embedding_store = await init(conn)
     init_start = time.perf_counter()
 
     if doc_process_switch:
+        _report("Chunking documents")
         logger.info("Doc Processing Start")
         docs_chan = Channel(1)
         embed_chan = Channel()
@@ -478,7 +576,7 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
 
         async with asyncio.TaskGroup() as grp:
             # get docs
-            grp.create_task(stream_docs(conn, docs_chan, 100))
+            grp.create_task(stream_docs(conn, docs_chan, 100, progress=progress))
             # process docs
             grp.create_task(
                 chunk_docs(conn, docs_chan, embed_chan, upsert_chan, extract_chan)
@@ -506,16 +604,10 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
     init_end = time.perf_counter()
     logger.info("Doc Processing End")
 
-    # Type Resolution
+    # Type Resolution — IS_HEAD_OF / HAS_TAIL writes happen inline in
+    # the per-relationship extract step (workers.py); no post-processing
+    # query needed.
     type_start = time.perf_counter()
-    if entity_extraction_switch:
-        logger.info("Type Processing Start")
-        res = await add_rels_between_types(conn)
-        if res.get("error", False):
-            logger.error(f"Error adding relationships between types: {res}")
-        else:
-            logger.info(f"Added relationships between types: {res}")
-    logger.info("Type Processing End")
     type_end = time.perf_counter()
 
     # Community Detection
@@ -524,8 +616,22 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
     # schema edits could still leave queries missing.
     community_start = time.perf_counter()
     if community_detection_switch:
+        _report("Detecting communities")
         await install_queries(COMMUNITY_QUERIES, conn)
         logger.info("Community Processing Start")
+
+        # Clear pre-existing communities so re-detection is idempotent.
+        try:
+            async with tg_sem:
+                res = await conn.runInstalledQuery(
+                    "graphrag_delete_all_communities"
+                )
+            deleted = (res[0] if res else {}).get("deleted", 0)
+            if deleted:
+                logger.info(f"Cleared {deleted} pre-existing Community vertex(es)")
+        except Exception as e:
+            logger.warning(f"graphrag_delete_all_communities failed: {e}")
+
         comm_process_chan = Channel()
         upsert_chan = Channel()
         embed_chan = Channel()
@@ -547,6 +653,31 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection):
         await embed_chan.join()
         logger.info("Join upsert_chan")
         await upsert_chan.join()
+
+        # Mirror Entity → Community memberships onto domain-VT instances
+        # that share the same id.
+        try:
+            existing_schema = await read_existing_schema_async(conn)
+            domain_vts = sorted(
+                v for v in existing_schema.vertex_types if not is_structural_type(v)
+            )
+        except Exception as e:
+            logger.warning(f"read live schema for community mirror failed: {e}")
+            domain_vts = []
+        if domain_vts:
+            mirrorable = [
+                vt for vt in domain_vts
+                if existing_schema.has_edge_pair("IN_COMMUNITY", vt, "Community")
+            ]
+            skipped = sorted(set(domain_vts) - set(mirrorable))
+            if skipped:
+                logger.warning(
+                    f"skipping community mirror for {skipped}: "
+                    f"IN_COMMUNITY pair missing on schema"
+                )
+            if mirrorable:
+                _report("Updating domain types")
+                await graphrag_mirror_communities(conn, mirrorable)
     community_end = time.perf_counter()
     logger.info("Community Processing End")
 

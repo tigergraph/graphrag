@@ -38,7 +38,9 @@ def describe_image_with_llm(file_path):
     """
     try:
         from PIL import Image as PILImage
-        
+        import os
+        import time
+
         client = _get_client()
         if not client:
             return "Image: Failed to create multimodal LLM client"
@@ -58,10 +60,24 @@ def describe_image_with_llm(file_path):
                     {
                         "type": "text",
                         "text": (
-                            "Please describe what you see in this image and "
-                            "if the image has scanned text then extract all the text. "
-                            "If the image has any graph, chart, table, or other diagram, describe it. "
-                            "If the image has any logo, identify and describe the logo."
+                            "Describe the substantive CONTENT of this image so it "
+                            "can be retrieved alongside the surrounding document. "
+                            "Prioritize, in this order: (1) any text — copy it "
+                            "verbatim, including headings, labels, axis ticks, "
+                            "captions, and footnotes; (2) the data and structure of "
+                            "any chart, graph, or table — name the chart type, the "
+                            "axes / columns, and the values or trend the chart "
+                            "actually shows; (3) the entities, relationships, or "
+                            "process steps in any diagram or flowchart; (4) any logo "
+                            "or branding mark, identified by name. Do NOT describe "
+                            "layout, background color, decorative styling, slide "
+                            "templates, or generic visual impressions — those add "
+                            "no retrieval value. If the image is purely decorative "
+                            "(no text, no data, no diagram), reply with just "
+                            "\"decorative image\" and nothing else. Respond as a "
+                            "SINGLE plain-text paragraph — no markdown headings, no "
+                            "bullet lists, no blank lines. The reply is used "
+                            "verbatim as the alt-text inside `![alt](url)`."
                         ),
                     },
                     _build_image_content_block(image_base64, "image/jpeg"),
@@ -70,8 +86,31 @@ def describe_image_with_llm(file_path):
         ]
 
         langchain_client = client.llm
+        # Tag the upcoming chat completion as a multimodal image
+        # describe so it's distinguishable from text-only completions
+        # in the log stream (e.g. schema extraction, retriever LLM
+        # calls). Image-describe runs are typically dozens-to-hundreds
+        # per PDF, while text completions are one-shot.
+        image_basename = os.path.basename(str(file_path))
+        model_name = (
+            getattr(_multimodal_client, "config", {}).get("llm_model")
+            if _multimodal_client else None
+        ) or "?"
+        logger.info(
+            f"multimodal_describe: image={image_basename} "
+            f"model={model_name} provider={_multimodal_provider}"
+        )
+        t0 = time.monotonic()
         response = langchain_client.invoke(messages)
+        elapsed = time.monotonic() - t0
+        logger.info(
+            f"multimodal_describe done: image={image_basename} "
+            f"elapsed={elapsed:.2f}s"
+        )
         return response.content if hasattr(response, "content") else str(response)
     except Exception as e:
+        error_str = str(e).lower()
+        if "throttl" in error_str or "rate" in error_str or "too many" in error_str:
+            raise  # Let caller retry on rate limit
         logger.error(f"Failed to describe image with LLM: {str(e)}")
         return "Image: Error processing image description"

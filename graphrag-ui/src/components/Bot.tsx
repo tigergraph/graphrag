@@ -52,10 +52,11 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
       }
     }
 
-    // Set default ragPattern if no value in sessionStorage
+    // Set default ragPattern if no value in sessionStorage. "Auto" lets the
+    // backend RetrieverSelector pick a method per question.
     if (!sessionStorage.getItem("ragPattern")) {
-      setRagPattern("Hybrid Search");
-      sessionStorage.setItem("ragPattern", "Hybrid Search");
+      setRagPattern("Auto");
+      sessionStorage.setItem("ragPattern", "Auto");
     }
 
     const date = new Date();
@@ -70,9 +71,18 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
 
     window.addEventListener('focus', handleFocus);
 
+    // Stay in sync when another component (Refresh dialog, Ingest
+    // dialog, Customize Prompts) changes the shared selectedGraph.
+    const handleSelectedGraph = () => {
+      const next = sessionStorage.getItem("selectedGraph") || '';
+      if (next !== selectedGraph) setSelectedGraph(next);
+    };
+    window.addEventListener('graphrag:selectedGraph', handleSelectedGraph);
+
     // Cleanup
     return () => {
       window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('graphrag:selectedGraph', handleSelectedGraph);
     };
   }, []);
 
@@ -119,7 +129,7 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
                 <DropdownMenuLabel>Select a GraphRAG Pattern</DropdownMenuLabel>
                 <DropdownMenuSeparator />
                 <DropdownMenuGroup>
-                  {["Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
+                  {["Auto", "Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
                     <DropdownMenuItem key={i} onSelect={() => handleSelectRag(f)}>
                       {/* <User className="mr-2 h-4 w-4" /> */}
                       <span>{f}</span>
@@ -140,14 +150,14 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
                 </Button>
               </DropdownMenuTrigger>
 
-            <DropdownMenuContent className="w-56">
+            <DropdownMenuContent className="min-w-[14rem] max-w-[32rem]">
               <DropdownMenuLabel>Select a KnowledgeGraph</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>
                 {store?.graphs?.length > 0 ? (
                   store.graphs.map((f, i) => (
                     <DropdownMenuItem key={i} onSelect={() => handleSelect(f)}>
-                      <span>{f}</span>
+                      <span className="truncate">{f}</span>
                     </DropdownMenuItem>
                   ))
                 ) : (

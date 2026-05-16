@@ -30,6 +30,12 @@ from common.config import (
     get_completion_config,
     get_graphrag_config,
 )
+from common.db.schema_utils import (
+    gsql_output_error,
+    is_structural_type,
+    read_existing_schema_async,
+    read_type_metadata_async,
+)
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
 from common.extractors import GraphExtractor, LLMEntityRelationshipExtractor
@@ -53,6 +59,9 @@ COMMUNITY_QUERIES = [
     "common/gsql/graphrag/louvain/stream_community",
     "common/gsql/graphrag/get_community_children",
     "common/gsql/graphrag/communities_have_desc",
+    "common/gsql/graphrag/graphrag_delete_all_communities",
+    "common/gsql/graphrag/graphrag_stream_entity_community_pairs",
+    "common/gsql/graphrag/graphrag_stream_all_ids",
 ]
 
 REQUIRED_QUERIES = [
@@ -61,7 +70,6 @@ REQUIRED_QUERIES = [
     "common/gsql/graphrag/StreamChunkContent",
     "common/gsql/graphrag/SetEpochProcessing",
     "common/gsql/graphrag/get_vertices_or_remove",
-    "common/gsql/supportai/create_entity_type_relationships",
 ]
 load_q = reusable_channel.ReuseableChannel()
 
@@ -94,8 +102,8 @@ async def install_queries(
     async with tg_sem:
         res = await conn.gsql(query)
         logger.info(f"INSTALL QUERY ALL returned: {str(res)[:200]}")
-        res_lower = res.lower() if isinstance(res, str) else ""
-        if "error" in res_lower or "does not exist" in res_lower or "failed" in res_lower:
+        err = gsql_output_error(res) if isinstance(res, str) else None
+        if err:
             raise Exception(res)
 
     max_wait = 600  # seconds
@@ -142,7 +150,29 @@ async def init(
     if graph_cfg.get("extractor") == "graphrag":
         extractor = GraphExtractor()
     elif graph_cfg.get("extractor") == "llm":
-        extractor = LLMEntityRelationshipExtractor(get_llm_service(get_completion_config()))
+        # Read the live schema and pack it into the LLM-extractor
+        # bundle. ``build_allowed_schema_async`` filters structural
+        # types, reads attribute schemas + definitions, and renders the
+        # prompt text in one pass — same shape that query-side tools
+        # consume via ``render_schema_rep``.
+        try:
+            from common.db.schema_utils import build_allowed_schema_async, AllowedSchema
+            allowed_schema = await build_allowed_schema_async(conn)
+        except Exception as exc:
+            logger.warning(f"Loading domain schema for extractor failed: {exc}")
+            from common.db.schema_utils import AllowedSchema
+            allowed_schema = AllowedSchema()
+
+        # Strict mode (graphrag_config.strict_mode, default false):
+        # when false, entities whose type doesn't match a domain VT
+        # still land in the plain Entity vertex.
+        strict_mode = bool(graph_cfg.get("strict_mode", False))
+
+        extractor = LLMEntityRelationshipExtractor(
+            get_llm_service(get_completion_config(conn.graphname)),
+            allowed_schema=allowed_schema,
+            strict_mode=strict_mode,
+        )
     else:
         raise ValueError("Invalid extractor type")
 
@@ -216,6 +246,55 @@ def process_id(v_id: str):
     return v_id
 
 
+# Suffixes the LLM commonly tacks onto type labels without adding
+# semantic distinction. Stripped during meta-layer normalization so
+# ``Company_Type``, ``Company_Class``, ``Company_Entity`` collapse onto
+# the same canonical name.
+_TYPE_SUFFIXES = ("_type", "_class", "_entity", "_data", "_info", "_record")
+
+
+def normalize_type_name(name: str) -> str:
+    """Normalize an LLM-emitted vertex / edge type label so trivial
+    variants collapse onto a single canonical id.
+
+    Applies in order:
+
+    1. ``process_id`` (lowercase, whitespace → ``-``, strip parens).
+    2. Strip a single trailing semantic-suffix from
+       :data:`_TYPE_SUFFIXES` (e.g. ``company_type`` → ``company``).
+    3. Singularize trailing ``ies`` → ``y`` (``companies`` →
+       ``company``); strip a single trailing ``s`` only when the
+       preceding char is a consonant other than ``s``, ``i``, or ``u``
+       (``reports`` → ``report``; preserves ``series``, ``status``,
+       ``news``, ``business``).
+
+    Used only for the EntityType / RelationshipType meta-layer in
+    Case 1 (no domain types declared) — instance ids stay
+    untouched. Synonym consolidation (``Company`` vs ``Corporation``)
+    is out of scope for this deterministic pass.
+    """
+    base = process_id(name)
+    if not base:
+        return ""
+    for suffix in _TYPE_SUFFIXES:
+        if base.endswith(suffix) and len(base) > len(suffix):
+            base = base[: -len(suffix)]
+            break
+    # Singularize defensively. Length thresholds keep short words
+    # whose final ``s`` / ``ies`` is part of the singular stem
+    # (``News``, ``Series``, ``Bus``, ``Status``, ``Yes``).
+    if base.endswith("ies") and len(base) > 6:
+        base = base[:-3] + "y"
+    elif (
+        base.endswith("s")
+        and len(base) > 4
+        and base[-2] not in "siu"
+        and not base[-2].isdigit()
+    ):
+        base = base[:-1]
+    return base
+
+
 async def upsert_vertex(
     conn: AsyncTigerGraphConnection,
     vertex_type: str,
@@ -226,6 +305,159 @@ async def upsert_vertex(
     vertex_id = vertex_id.replace(" ", "_")
     attrs = map_attrs(attributes)
     await load_q.put(("vertices", (vertex_type, vertex_id, attrs)))
+
+
+def coerce_attrs_for_schema(
+    props: dict,
+    schema: dict,
+) -> dict:
+    """Coerce LLM-emitted properties to the declared TigerGraph types
+    and drop anything not in *schema*.
+
+    *props* — dict the LLM produced (values may be strings, numbers,
+    bools depending on the model and the schema instruction).
+    *schema* — ``{attr_name: tg_type}`` for the destination type
+    (vertex or edge). ``tg_type`` is one of TG's primitive type names
+    (case-insensitive): ``STRING``, ``INT``, ``UINT``, ``DOUBLE``,
+    ``FLOAT``, ``BOOL``, ``DATETIME``.
+
+    Behavior:
+        * Attribute names are matched case-insensitively; the canonical
+          schema spelling is used in the returned dict.
+        * Values that can't be coerced (e.g. a non-numeric string for
+          an INT field) are silently dropped — partial coverage is
+          fine; a single bad value shouldn't reject the whole upsert.
+        * Empty strings / ``None`` / sentinel values like ``"N/A"`` /
+          ``"unknown"`` are dropped before coercion to avoid writing
+          junk into typed columns.
+    """
+    if not props or not schema:
+        return {}
+    # Build a case-folded lookup once.
+    schema_ci = {k.casefold(): k for k in schema.keys()}
+    out: dict = {}
+    for raw_name, raw_val in props.items():
+        if not raw_name:
+            continue
+        canonical = schema_ci.get(str(raw_name).casefold())
+        if not canonical:
+            continue
+        tg_type = (schema.get(canonical) or "").upper()
+        coerced = _coerce_value(raw_val, tg_type)
+        if coerced is not None:
+            out[canonical] = coerced
+    return out
+
+
+_LLM_NULL_SENTINELS = frozenset({
+    "", "n/a", "na", "none", "null", "unknown", "not specified",
+    "not available", "not applicable", "tbd", "?",
+})
+
+
+# Primitive types accepted inside a TG DISCRIMINATOR(...) clause.
+# Discriminator attrs must be present in every upsert; the worker
+# fills missing values from ``_DISCRIMINATOR_FALLBACKS`` below.
+_DISCRIMINATOR_TYPES = frozenset({"INT", "UINT", "STRING", "DATETIME"})
+
+_DISCRIMINATOR_FALLBACKS: dict = {
+    "INT": 0,
+    "UINT": 0,
+    "STRING": "",
+    "DATETIME": "1970-01-01 00:00:00",
+}
+
+
+def coerce_edge_attrs_for_schema(
+    props: dict,
+    schema: dict,
+) -> dict:
+    """Coerce LLM-emitted properties for an edge upsert.
+
+    Same matching + coercion as the vertex helper; additionally fills
+    in default values for any discriminator-typed schema attribute
+    the LLM did not provide, since TG requires every discriminator
+    attribute to be present in each upsert.
+    """
+    if not schema:
+        return {}
+    coerced = coerce_attrs_for_schema(props or {}, schema)
+    # Fill missing discriminator-typed attributes with type defaults.
+    schema_ci = {k.casefold(): k for k in schema.keys()}
+    for ci_name, canonical in schema_ci.items():
+        if canonical in coerced:
+            continue
+        tg_type = (schema.get(canonical) or "").upper()
+        if tg_type in _DISCRIMINATOR_TYPES:
+            coerced[canonical] = _DISCRIMINATOR_FALLBACKS[tg_type]
+    return coerced
+
+
+def _coerce_value(value, tg_type: str):
+    """Convert *value* to the TG type *tg_type*. Returns ``None`` when
+    coercion would lose meaning (empty value, sentinel like ``"N/A"``,
+    or a parse failure). Caller drops attrs that come back ``None``.
+    """
+    if value is None:
+        return None
+    # Quick string-sentinel filter — applies to every type.
+    if isinstance(value, str):
+        s = value.strip()
+        if s.casefold() in _LLM_NULL_SENTINELS:
+            return None
+
+    try:
+        if tg_type in ("INT", "UINT"):
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)):
+                v = int(value)
+            else:
+                # Strip thousand separators and surrounding whitespace.
+                v = int(float(str(value).replace(",", "").strip()))
+            if tg_type == "UINT" and v < 0:
+                return None
+            return v
+        if tg_type in ("DOUBLE", "FLOAT"):
+            if isinstance(value, bool):
+                return float(value)
+            if isinstance(value, (int, float)):
+                return float(value)
+            return float(str(value).replace(",", "").strip())
+        if tg_type == "BOOL":
+            if isinstance(value, bool):
+                return value
+            s = str(value).strip().casefold()
+            if s in ("true", "yes", "y", "1"):
+                return True
+            if s in ("false", "no", "n", "0"):
+                return False
+            return None
+        if tg_type == "DATETIME":
+            # TG accepts 'YYYY-MM-DD HH:MM:SS' (space-separated).
+            # Accept ISO-8601 with 'T' and normalize.
+            s = str(value).strip()
+            if not s:
+                return None
+            try:
+                from dateutil import parser as _dt_parser  # type: ignore
+                dt = _dt_parser.parse(s)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                # Fall back to a few common formats without dateutil.
+                from datetime import datetime as _dt
+                for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S",
+                            "%Y-%m-%d %H:%M:%S", "%Y/%m/%d"):
+                    try:
+                        return _dt.strptime(s, fmt).strftime("%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        continue
+                return None
+        # STRING (and anything we don't recognize): coerce to str.
+        s = str(value).strip()
+        return s or None
+    except (ValueError, TypeError):
+        return None
 
 
 async def upsert_batch(conn: AsyncTigerGraphConnection, data: str):
@@ -292,7 +524,9 @@ async def get_commuinty_children(conn, i: int, c: str):
         try:
             resp = await conn.runInstalledQuery(
                 "get_community_children",
-                params={"comm": c, "iter": i}
+                # 1-tuple form for VERTEX<T> params; plain value
+                # is deprecated in current pyTigerGraph.
+                params={"comm": (c,), "iter": i}
             )
         except:
             logger.error(f"Get Children err:\n{traceback.format_exc()}")
@@ -318,17 +552,6 @@ async def get_commuinty_children(conn, i: int, c: str):
 
     return descrs
 
-
-async def add_rels_between_types(conn):
-    try:
-        async with tg_sem:
-            resp = await conn.runInstalledQuery(
-                "create_entity_type_relationships"
-            )
-    except Exception as e:
-        logger.error(f"Check Vert EntityType err:\n{e}")
-        return {"error": True, "message": e}        
-    return resp[0]
 
 async def check_vertex_has_desc(conn, i: int):
     try:
@@ -361,3 +584,82 @@ async def check_embedding_rebuilt(conn, v_type: str):
     logger.info(resp)
 
     return res
+
+
+async def graphrag_mirror_communities(
+    conn: AsyncTigerGraphConnection,
+    domain_vts: list[str],
+) -> int:
+    """Mirror Entity → Community memberships onto domain-VT instances
+    that share the same id. Returns the number of mirror edges written.
+    """
+    if not domain_vts:
+        return 0
+
+    async with tg_sem:
+        try:
+            res = await conn.runInstalledQuery(
+                "graphrag_stream_entity_community_pairs",
+                params={},
+                sizeLimit=1000000000,
+            )
+        except Exception as e:
+            logger.error(f"stream entity-community pairs failed: {e}")
+            return 0
+
+    pairs = (res[0] if res else {}).get("pairs", []) or []
+    if not pairs:
+        return 0
+
+    valid_ids_by_vt: dict[str, set[str]] = {}
+    for vt in domain_vts:
+        try:
+            async with tg_sem:
+                r = await conn.runInstalledQuery(
+                    "graphrag_stream_all_ids",
+                    params={"v_type": vt},
+                    sizeLimit=1000000000,
+                )
+        except Exception as e:
+            logger.warning(f"stream_all_ids({vt}) failed: {e}")
+            valid_ids_by_vt[vt] = set()
+            continue
+        ids = set((r[0] if r else {}).get("@@ids", []) or [])
+        valid_ids_by_vt[vt] = ids
+
+    written = 0
+    chunk_size = 5000
+    for vt, valid_ids in valid_ids_by_vt.items():
+        if not valid_ids:
+            continue
+        edges = [
+            (p["entity_id"], p["community_id"])
+            for p in pairs
+            if isinstance(p, dict)
+            and p.get("entity_id") in valid_ids
+            and p.get("community_id")
+        ]
+        if not edges:
+            continue
+        for i in range(0, len(edges), chunk_size):
+            chunk = edges[i:i + chunk_size]
+            async with tg_sem:
+                try:
+                    await conn.upsertEdges(
+                        sourceVertexType=vt,
+                        edgeType="IN_COMMUNITY",
+                        targetVertexType="Community",
+                        edges=chunk,
+                    )
+                    written += len(chunk)
+                except Exception as e:
+                    logger.error(
+                        f"upsertEdges IN_COMMUNITY for {vt} (chunk size "
+                        f"{len(chunk)}) failed: {e}"
+                    )
+
+    logger.info(
+        f"graphrag_mirror_communities: wrote {written} mirror "
+        f"IN_COMMUNITY edges across {len(domain_vts)} domain VT(s)"
+    )
+    return written

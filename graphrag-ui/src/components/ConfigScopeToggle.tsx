@@ -71,7 +71,7 @@ const ConfigScopeToggle: React.FC<ConfigScopeToggleProps> = ({
           disabled={configScope !== "graph"}
           onValueChange={(value) => onGraphChange(value)}
         >
-          <SelectTrigger className="w-48 dark:border-[#3D3D3D] dark:bg-background">
+          <SelectTrigger className="w-auto min-w-[16rem] max-w-[28rem] dark:border-[#3D3D3D] dark:bg-background">
             <SelectValue placeholder="Select a graph" />
           </SelectTrigger>
           <SelectContent>

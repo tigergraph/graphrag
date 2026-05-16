@@ -63,6 +63,7 @@
 ---
 
 ## Releases
+* **5/16/2026**: GraphRAG v1.4.0 released. Added schema-aware knowledge graphs, auto retrieval method selection, and a Trace Logs UI, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.0) for details.
 * **4/10/2026**: GraphRAG v1.3.0 released. Added an admin configuration UI with role-based access and per-graph chatbot LLM override, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.3.0) for details.
 * **2/28/2026**: GraphRAG v1.2.0 released. Added Admin UI for graph initialization, document ingestion, and knowledge graph rebuild, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.2.0) for details.
 * **9/22/2025**: GraphRAG is available now officially v1.1 (v1.1.0). AWS Bedrock support is completed with BDA integration for multimodal document ingestion. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.1.0) for details.
@@ -478,6 +479,11 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `chat_history_api` | string | `"http://chat-history:8002"` | URL of the chat history service. No change needed when using the provided Docker Compose file. |
 | `chunker` | string | `"semantic"` | Default document chunker. Options: `semantic`, `character`, `regex`, `markdown`, `html`, `recursive`. |
 | `extractor` | string | `"llm"` | Entity extraction method. Options: `llm`, `graphrag`. |
+| `strict_mode` | bool | `false` | Dynamic-schema enforcement during extraction. When `true`, entities and relationships that don't match the domain schema are dropped. When `false` (default), unmatched nodes fall back to generic `Entity` vertices. |
+| `retrieval_include_entity` | bool \| null | `null` (auto) | Whether retriever queries include the generic `Entity` vertex alongside domain types. When unset, the server uses `false` if a domain schema exists and `true` otherwise. Set explicitly to override. |
+| `schema_max_sample_files` | int | `5` | Maximum number of sample documents accepted by the *Generate from sample documents* path on the *Initialize Knowledge Graph* dialog. |
+| `schema_max_total_mb` | int | `50` | Combined upload cap (MB) across all sample files for schema extraction. Bounds the content sent to the LLM. A single file may use the full budget; no separate per-file cap. |
+| `enable_router_fallback` | bool | `true` | When the function-call or Cypher path fails after 3 retries, fall back to vector search instead of failing the query. |
 | `chunker_config` | object | `{}` | Chunker-specific settings (see sub-parameters below). All settings are saved regardless of which chunker is selected as default. |
 | ↳ `chunk_size` | int | `2048` | Maximum number of characters per chunk. Used by `character`, `markdown`, `html`, and `recursive` chunkers. Larger values produce fewer, bigger chunks; smaller values produce more, finer-grained chunks. |
 | ↳ `overlap_size` | int | 1/8 of `chunk_size` | Number of overlapping characters between consecutive chunks. Used by `character`, `markdown`, `html`, and `recursive` chunkers. More overlap preserves cross-chunk context but increases total chunk count. Set to `0` for no overlap. |
@@ -926,7 +932,9 @@ Today's primary lever is the **entity-extraction prompt**:
 - **Add 1–2 short domain examples** in the prompt. Even one well-chosen exemplar (an extracted entity with type and definition) dramatically improves consistency across chunks.
 - **List the canonical edge verbs you want.** Encourage `PUBLISHES`, `OWNS`, `ISSUES`, `MANAGES`, `REPORTS_ON` in the relationship-extraction prompt rather than letting the LLM emit ad-hoc nominal phrases.
 
-If extraction quality is still poor after iterating on the prompt, the next-best option today is to clear the graph's domain types and re-ingest with the improved prompt — schema growth is currently driven entirely by what extraction produces. (A schema-aware initialization flow that lets you supply a curated schema up front is on the roadmap.)
+If extraction quality is still poor after iterating on the prompt, declare a domain schema up front via the *Initialize Knowledge Graph* dialog (paste GSQL, or generate a draft from sample documents) so extraction populates the types you actually want instead of growing them organically from what the LLM happens to emit. See the Configuration table above for `strict_mode` and `retrieval_include_entity` for the schema-aware behavior knobs.
+
+**Note on LLM faithfulness.** Entity, relationship, and attribute extraction is best-effort and may include occasional errors, especially for well-known entities. For high-stakes applications, validate critical extracted values against your source documents before relying on them.
 
 ### 4. Retrieval — match context size to the question
 

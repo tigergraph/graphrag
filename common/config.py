@@ -166,6 +166,17 @@ def resolve_llm_services(llm_cfg: dict) -> dict:
             if svc_key in cfg and "region_name" not in cfg[svc_key]:
                 cfg[svc_key]["region_name"] = top_region
 
+    # Inject top-level prompt_path into LLM-prompted service configs
+    # if missing. The UI never lets users set per-service prompt_paths;
+    # in practice they are always identical to completion's.
+    # ``embedding_service`` is excluded — embedding models never load
+    # prompt files (their class hierarchy has no prompt-property machinery).
+    top_prompt_path = cfg.get("prompt_path")
+    if top_prompt_path:
+        for svc_key in ["completion_service", "multimodal_service", "chat_service"]:
+            if svc_key in cfg and "prompt_path" not in cfg[svc_key]:
+                cfg[svc_key]["prompt_path"] = top_prompt_path
+
     completion = cfg.get("completion_service", {})
 
     # Resolve embedding: inherit provider-level config from completion
@@ -366,6 +377,15 @@ if "region_name" in llm_config:
         if svc_key in llm_config and "region_name" not in llm_config[svc_key]:
             llm_config[svc_key]["region_name"] = llm_config["region_name"]
 
+# Inject top-level prompt_path into LLM-prompted service configs if
+# missing. Embedding service is excluded — embedding models never load
+# prompt files. Per-service entries on disk are accepted for backward
+# compat but never written by the UI.
+if "prompt_path" in llm_config:
+    for svc_key in ["completion_service", "multimodal_service", "chat_service"]:
+        if svc_key in llm_config and "prompt_path" not in llm_config[svc_key]:
+            llm_config[svc_key]["prompt_path"] = llm_config["prompt_path"]
+
 _comp = llm_config.get("completion_service")
 if _comp is None:
     raise Exception("completion_service is not found in llm_config")
@@ -414,6 +434,8 @@ if "chunker" not in graphrag_config:
     graphrag_config["chunker"] = "semantic"
 if "extractor" not in graphrag_config:
     graphrag_config["extractor"] = "llm"
+# ``retrieval_include_entity`` is resolved at install time
+# (see ``common.db.retriever_render.resolve_include_entity``).
 
 reuse_embedding = graphrag_config.get("reuse_embedding", True)
 doc_process_switch = graphrag_config.get("doc_process_switch", True)
@@ -440,6 +462,15 @@ elif llm_config["embedding_service"]["embedding_model_service"].lower() == "olla
     embedding_service = Ollama_Embedding(llm_config["embedding_service"])
 else:
     raise Exception("Embedding service not implemented")
+
+def get_embedding_service():
+    """Return the current embedding service instance.
+
+    Use this instead of importing ``embedding_service`` directly so
+    consumers always read the latest instance after a config reload.
+    """
+    return embedding_service
+
 
 def get_llm_service(service_config: dict) -> LLM_Model:
     """
@@ -474,25 +505,134 @@ def get_llm_service(service_config: dict) -> LLM_Model:
         raise Exception(f"LLM service '{service_name}' not supported")
 
 
-if os.getenv("INIT_EMBED_STORE", "true") == "true":
+# Module-level ``embedding_store`` is the back-compat default for
+# direct importers (``from common.config import embedding_store``).
+# It's populated by the background init thread below.
+#
+# ``_embedding_stores`` is the per-graph cache used by chatbot
+# retrievers via ``get_embedding_store(graphname=...)``. Each entry
+# has its own ``TigerGraphConnection`` bound to that graphname for
+# its lifetime — no in-place ``set_graphname`` mutation — so
+# concurrent chat across different graphs can't race over a shared
+# connection.
+embedding_store = None
+_embedding_store_ready = threading.Event()
+_embedding_stores: dict = {}
+_embedding_stores_lock = threading.Lock()
+service_status["embedding_store"] = {
+    "status": "initializing",
+    "error": "Embedding store is still initializing",
+}
+
+
+def _build_embedding_store(graphname: str = "") -> TigerGraphEmbeddingStore:
+    """Construct a fresh ``TigerGraphEmbeddingStore`` bound to *graphname*.
+
+    Uses the live globals (``db_config`` for the connection and
+    ``embedding_service`` for the model) so the result reflects the
+    current config.
+    """
     conn = TigerGraphConnection(
         host=db_config.get("hostname", "http://tigergraph"),
         username=db_config.get("username", "tigergraph"),
         password=db_config.get("password", "tigergraph"),
         gsPort=db_config.get("gsPort", "14240"),
         restppPort=db_config.get("restppPort", "9000"),
-        graphname=db_config.get("graphname", ""),
+        graphname=graphname or db_config.get("graphname", ""),
         apiToken=db_config.get("apiToken", ""),
     )
     if not db_config.get("apiToken") and db_config.get("getToken"):
         conn.getToken()
 
-    embedding_store = TigerGraphEmbeddingStore(
+    store = TigerGraphEmbeddingStore(
         conn,
         embedding_service,
         support_ai_instance=True,
     )
-    service_status["embedding_store"] = {"status": "ok", "error": None}
+    if graphname:
+        # Runs the GDS check and per-graph vector-query install.
+        store.set_graphname(graphname)
+    return store
+
+
+def _init_embedding_store():
+    """Background thread target. Builds the default embedding store
+    without blocking module import — TigerGraph may be slow on first
+    connect, and we don't want app startup to wait on it.
+    """
+    global embedding_store
+    try:
+        embedding_store = _build_embedding_store()
+        service_status["embedding_store"] = {"status": "ok", "error": None}
+    except Exception as e:
+        service_status["embedding_store"] = {"status": "error", "error": str(e)}
+        logger.error(f"Failed to initialize embedding store: {e}")
+    finally:
+        _embedding_store_ready.set()
+
+
+def get_embedding_store(graphname: str | None = None, timeout: float = 0):
+    """Return an embedding store.
+
+    Args:
+        graphname: When supplied, returns a per-graph instance built
+            and cached on first request (each cache entry has its own
+            connection bound to *graphname* for its lifetime).
+        timeout: Seconds to wait for the default-store init when
+            *graphname* is not supplied. Default 0 (non-blocking —
+            raises immediately if still initializing).
+
+    Raises:
+        RuntimeError: if not yet ready, timed out, or initialization failed.
+    """
+    if graphname:
+        with _embedding_stores_lock:
+            cached = _embedding_stores.get(graphname)
+            if cached is not None:
+                return cached
+        # Build outside the lock so first-time setup for one graph
+        # doesn't serialize first-time setup for another.
+        store = _build_embedding_store(graphname)
+        with _embedding_stores_lock:
+            existing = _embedding_stores.get(graphname)
+            if existing is not None:
+                return existing  # racing thread won
+            _embedding_stores[graphname] = store
+            return store
+
+    if not _embedding_store_ready.wait(timeout=timeout):
+        raise RuntimeError(
+            "Embedding store is still initializing. Please try again shortly."
+        )
+    if embedding_store is None:
+        error = service_status.get("embedding_store", {}).get("error", "Unknown error")
+        raise RuntimeError(f"Embedding store failed to initialize: {error}")
+    return embedding_store
+
+
+def reset_embedding_store() -> None:
+    """Drop the per-graph cache and the default store, then re-run the
+    background init so a config reload picks up the new
+    ``embedding_service`` and ``db_config``. Callers should swap the
+    inputs before calling. No-op when ``INIT_EMBED_STORE`` is disabled
+    (e.g. ECC).
+    """
+    global embedding_store
+    if os.getenv("INIT_EMBED_STORE", "true") != "true":
+        return
+    with _embedding_stores_lock:
+        _embedding_stores.clear()
+    embedding_store = None
+    _embedding_store_ready.clear()
+    service_status["embedding_store"] = {
+        "status": "initializing",
+        "error": "Embedding store is still initializing",
+    }
+    threading.Thread(target=_init_embedding_store, daemon=True).start()
+
+
+if os.getenv("INIT_EMBED_STORE", "true") == "true":
+    threading.Thread(target=_init_embedding_store, daemon=True).start()
 
 
 def reload_llm_config(new_llm_config: dict = None):
@@ -550,6 +690,14 @@ def reload_llm_config(new_llm_config: dict = None):
                 if svc_key in new_llm_config and "region_name" not in new_llm_config[svc_key]:
                     new_llm_config[svc_key]["region_name"] = new_llm_config["region_name"]
 
+        # Inject top-level prompt_path into LLM-prompted service configs
+        # if missing. Embedding service is excluded — embedding models
+        # never load prompt files.
+        if "prompt_path" in new_llm_config:
+            for svc_key in ["completion_service", "multimodal_service", "chat_service"]:
+                if svc_key in new_llm_config and "prompt_path" not in new_llm_config[svc_key]:
+                    new_llm_config[svc_key]["prompt_path"] = new_llm_config["prompt_path"]
+
         new_completion_config = new_llm_config.get("completion_service")
         new_embedding_config = new_llm_config.get("embedding_service")
 
@@ -594,6 +742,10 @@ def reload_llm_config(new_llm_config: dict = None):
             embedding_service = Ollama_Embedding(new_embedding_config)
         else:
             raise Exception("Embedding service not implemented")
+
+        # Clear per-graph cache + rebuild the default so callers don't
+        # keep references to the old embedding service.
+        reset_embedding_store()
 
         return {
             "status": "success",
@@ -644,6 +796,10 @@ def reload_db_config(new_db_config: dict = None):
         for k in old_db_keys - set(new_db_config.keys()):
             del db_config[k]
         db_config.update(new_db_config)
+
+        # Clear per-graph cache + rebuild the default so callers don't
+        # keep connections bound to the old credentials.
+        reset_embedding_store()
 
         return {
             "status": "success",

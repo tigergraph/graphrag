@@ -55,9 +55,7 @@ CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Hybrid_Vector_Search(Set<STRING> v_
     start = SELECT t FROM start:s -((RELATIONSHIP>|
                                      CONTAINS_ENTITY>|
                                      reverse_CONTAINS_ENTITY>|
-                                     IS_AFTER>|
-                                     IS_HEAD_OF>|
-                                     HAS_TAIL>):e)- :t
+                                     IS_AFTER>):e)- :t
             WHERE s.@visited < 1 AND t NOT IN s.@parents
             ACCUM s.@visited += 1, t.@num_times_seen += 1, t.@parents += s, t.@parents += s.@parents, t.@paths += s.@paths, t.@paths += e
             POST-ACCUM(t) @@tmp_set += t;
@@ -82,6 +80,10 @@ CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Hybrid_Vector_Search(Set<STRING> v_
             s.@context += tmp_dsc
           ELSE IF s.type == "DocumentChunk" THEN
             @@to_retrieve_content += s
+          ELSE
+            // Domain vertex type — surface "<TypeName>: <id>" so the
+            // LLM sees the schema-aware label.
+            s.@context += s.type + ": " + replace(s.id, "_", " ")
           END
         POST-ACCUM(s)
           IF NOT (chunk_only OR doc_only) OR (chunk_only OR doc_only) AND s.type == "DocumentChunk" THEN
