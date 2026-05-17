@@ -1,1 +1,49 @@
-../docs/tutorials/configs/server_config.json
+{
+    "db_config": {
+        "hostname": "http://tigergraph",
+        "restppPort": "9000",
+        "gsPort": "14240",
+        "username": "tigergraph",
+        "password": "tigergraph",
+        "getToken": false,
+        "default_timeout": 300,
+        "default_mem_threshold": 5000,
+        "default_thread_limit": 8
+    },
+    "llm_config": {
+        "authentication_configuration": {
+            "GOOGLE_API_KEY": "YOUR_GEMINI_API_KEY_HERE"
+        },
+        "completion_service": {
+            "llm_service": "genai",
+            "llm_model": "gemini-flash-latest",
+            "model_kwargs": {
+                "temperature": 0.1
+            },
+            "prompt_path": "./common/prompts/google_gemini/"
+        },
+        "embedding_service": {
+            "embedding_model_service": "genai",
+            "model_name": "models/gemini-embedding-2"
+        }
+    },
+    "graphrag_config": {
+        "reuse_embedding": true,
+        "ecc": "http://graphrag-ecc:8001",
+        "chat_history_api": "http://chat-history:8002",
+        "chunker": "semantic",
+        "extractor": "llm",
+        "top_k": 5,
+        "num_hops": 2
+    },
+    "chat_config": {
+        "apiPort": "8002",
+        "dbPath": "chats.db",
+        "dbLogPath": "db.log",
+        "logPath": "requestLogs.jsonl",
+        "conversationAccessRoles": [
+            "superuser",
+            "globaldesigner"
+        ]
+    }
+}

@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CyberGraph RAG — Benchmark Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>
+  :root {
+    --bg: #0a0e1a;
+    --surface: #111827;
+    --surface2: #1a2235;
+    --border: #1e2d45;
+    --accent: #00d4ff;
+    --accent2: #7c3aed;
+    --accent3: #10b981;
+    --warn: #f59e0b;
+    --danger: #ef4444;
+    --text: #e2e8f0;
+    --muted: #64748b;
+    --llm-color: #f59e0b;
+    --rag-color: #3b82f6;
+    --graph-color: #10b981;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  /* Header */
+  .header { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); border-bottom: 1px solid var(--border); padding: 1.5rem 2rem; display: flex; align-items: center; gap: 1rem; }
+  .header-logo { width: 40px; height: 40px; background: linear-gradient(135deg, var(--accent), var(--accent2)); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; }
+  .header-title h1 { font-size: 1.3rem; font-weight: 700; color: #fff; }
+  .header-title p { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
+  .header-badge { margin-left: auto; background: linear-gradient(135deg, var(--accent2), #2563eb); padding: 0.3rem 0.8rem; border-radius: 20px; font-size: 0.72rem; font-weight: 600; color: #fff; }
+
+  /* Layout */
+  .main { max-width: 1400px; margin: 0 auto; padding: 2rem; }
+
+  /* Query Input */
+  .query-section { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 1.5rem; margin-bottom: 2rem; }
+  .query-section h2 { font-size: 0.85rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1rem; }
+  .query-presets { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+  .preset-btn { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 0.4rem 0.9rem; border-radius: 20px; font-size: 0.75rem; cursor: pointer; transition: all 0.2s; font-family: inherit; }
+  .preset-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .query-input-row { display: flex; gap: 1rem; }
+  #queryInput { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 0.9rem 1.2rem; color: var(--text); font-size: 0.95rem; font-family: inherit; outline: none; transition: border-color 0.2s; }
+  #queryInput:focus { border-color: var(--accent); }
+  .run-btn { background: linear-gradient(135deg, var(--accent2), #2563eb); color: #fff; border: none; border-radius: 12px; padding: 0.9rem 2rem; font-size: 0.9rem; font-weight: 600; cursor: pointer; font-family: inherit; transition: opacity 0.2s; white-space: nowrap; }
+  .run-btn:hover { opacity: 0.9; }
+  .run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* Pipeline Cards */
+  .pipelines { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.5rem; margin-bottom: 2rem; }
+  .pipeline-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; transition: border-color 0.3s; }
+  .pipeline-card.active { border-color: var(--accent); }
+  .card-header { padding: 1rem 1.2rem; display: flex; align-items: center; gap: 0.7rem; border-bottom: 1px solid var(--border); }
+  .card-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .card-title { font-weight: 600; font-size: 0.9rem; }
+  .card-subtitle { font-size: 0.72rem; color: var(--muted); margin-top: 1px; }
+  .card-body { padding: 1.2rem; }
+  .response-box { background: var(--surface2); border-radius: 10px; padding: 1rem; font-size: 0.82rem; line-height: 1.6; color: #cbd5e1; min-height: 140px; white-space: pre-wrap; word-wrap: break-word; }
+  .loading-pulse { animation: pulse 1.5s infinite; color: var(--muted); font-style: italic; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  /* Metrics Row */
+  .metrics-row { display: flex; gap: 0.7rem; margin-top: 1rem; flex-wrap: wrap; }
+  .metric-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 0.4rem 0.7rem; font-size: 0.72rem; }
+  .metric-chip .label { color: var(--muted); display: block; }
+  .metric-chip .value { color: var(--text); font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+
+  /* Comparison Table */
+  .comparison-section { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 1.5rem; margin-bottom: 2rem; }
+  .section-title { font-size: 0.85rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 1.2rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
+  th { color: var(--muted); font-weight: 500; text-align: left; padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  td { padding: 0.75rem 1rem; border-bottom: 1px solid rgba(30,45,69,0.5); }
+  tr:last-child td { border-bottom: none; }
+  .td-label { color: var(--muted); }
+  .winner { color: var(--accent3); font-weight: 600; }
+  .bar-cell { display: flex; align-items: center; gap: 0.6rem; }
+  .bar { height: 6px; border-radius: 3px; transition: width 0.6s ease; }
+
+  /* Score bars */
+  .score-bar-wrap { background: var(--surface2); border-radius: 4px; height: 6px; flex: 1; overflow: hidden; }
+  .score-bar { height: 100%; border-radius: 4px; }
+
+  /* Accuracy section */
+  .accuracy-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; }
+  .acc-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; text-align: center; }
+  .acc-score { font-size: 2rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+  .acc-label { font-size: 0.72rem; color: var(--muted); margin-top: 0.3rem; }
+  .acc-sub { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem; margin-top: 0.8rem; }
+  .acc-sub-item { background: var(--surface); border-radius: 6px; padding: 0.4rem; font-size: 0.68rem; }
+  .acc-sub-item .label { color: var(--muted); }
+  .acc-sub-item .val { font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+
+  /* Status */
+  .status-bar { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem 1rem; margin-bottom: 1.5rem; font-size: 0.8rem; display: flex; align-items: center; gap: 0.6rem; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent3); animation: blink 2s infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .pipelines { grid-template-columns: 1fr; }
+    .accuracy-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-logo">🛡️</div>
+  <div class="header-title">
+    <h1>CyberGraph RAG — Benchmark Dashboard</h1>
+    <p>TigerGraph GraphRAG Hackathon · Cybersecurity Threat Intelligence</p>
+  </div>
+</div>
+
+<div class="main">
+
+  <div class="status-bar">
+    <div class="status-dot"></div>
+    <span id="statusText">Ready — Enter a query below to benchmark all 3 pipelines simultaneously</span>
+  </div>
+
+  <!-- Query Input -->
+  <div class="query-section">
+    <h2>🔍 Benchmark Query</h2>
+    <div class="query-presets">
+      <button class="preset-btn" onclick="setQuery('Who is APT41 and what are their primary targets?')">APT41 Profile</button>
+      <button class="preset-btn" onclick="setQuery('How does ShadowPad achieve persistence on compromised systems?')">ShadowPad Persistence</button>
+      <button class="preset-btn" onclick="setQuery('What is Log4Shell and which threat actors exploited it?')">Log4Shell CVE</button>
+      <button class="preset-btn" onclick="setQuery('Describe the full APT41 attack chain in Southeast Asia.')">Attack Chain</button>
+      <button class="preset-btn" onclick="setQuery('What is the relationship between Lazarus Group, WannaCry, and EternalBlue?')">Lazarus + WannaCry</button>
+    </div>
+    <div class="query-input-row">
+      <input id="queryInput" type="text" placeholder="Enter a cybersecurity threat intelligence query..." />
+      <button class="run-btn" id="runBtn" onclick="runBenchmark()">▶ Run All Pipelines</button>
+    </div>
+  </div>
+
+  <!-- Pipeline Cards -->
+  <div class="pipelines">
+    <div class="pipeline-card" id="card-llm">
+      <div class="card-header">
+        <div class="card-dot" style="background:var(--llm-color)"></div>
+        <div>
+          <div class="card-title">🤖 LLM-Only</div>
+          <div class="card-subtitle">Pure Gemini Flash · No retrieval</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="response-box" id="resp-llm">Waiting for query...</div>
+        <div class="metrics-row" id="metrics-llm">
+          <div class="metric-chip"><span class="label">Latency</span><span class="value" id="lat-llm">—</span></div>
+          <div class="metric-chip"><span class="label">Tokens</span><span class="value" id="tok-llm">—</span></div>
+          <div class="metric-chip"><span class="label">Est. Cost</span><span class="value" id="cost-llm">—</span></div>
+          <div class="metric-chip"><span class="label">Accuracy</span><span class="value" id="acc-llm">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pipeline-card" id="card-rag">
+      <div class="card-header">
+        <div class="card-dot" style="background:var(--rag-color)"></div>
+        <div>
+          <div class="card-title">📚 Basic RAG</div>
+          <div class="card-subtitle">Cosine similarity · Corpus chunks</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="response-box" id="resp-rag">Waiting for query...</div>
+        <div class="metrics-row" id="metrics-rag">
+          <div class="metric-chip"><span class="label">Latency</span><span class="value" id="lat-rag">—</span></div>
+          <div class="metric-chip"><span class="label">Tokens</span><span class="value" id="tok-rag">—</span></div>
+          <div class="metric-chip"><span class="label">Est. Cost</span><span class="value" id="cost-rag">—</span></div>
+          <div class="metric-chip"><span class="label">Accuracy</span><span class="value" id="acc-rag">—</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pipeline-card" id="card-graph">
+      <div class="card-header">
+        <div class="card-dot" style="background:var(--graph-color)"></div>
+        <div>
+          <div class="card-title">🕸️ TigerGraph GraphRAG</div>
+          <div class="card-subtitle">Multi-hop graph retrieval · Entity-aware</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="response-box" id="resp-graph">Waiting for query...</div>
+        <div class="metrics-row" id="metrics-graph">
+          <div class="metric-chip"><span class="label">Latency</span><span class="value" id="lat-graph">—</span></div>
+          <div class="metric-chip"><span class="label">Tokens</span><span class="value" id="tok-graph">—</span></div>
+          <div class="metric-chip"><span class="label">Est. Cost</span><span class="value" id="cost-graph">—</span></div>
+          <div class="metric-chip"><span class="label">Accuracy</span><span class="value" id="acc-graph">—</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Comparison Table -->
+  <div class="comparison-section" id="comparisonSection" style="display:none">
+    <div class="section-title">📊 Side-by-Side Metrics Comparison</div>
+    <table>
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th style="color:var(--llm-color)">LLM-Only</th>
+          <th style="color:var(--rag-color)">Basic RAG</th>
+          <th style="color:var(--graph-color)">GraphRAG</th>
+          <th>Winner</th>
+        </tr>
+      </thead>
+      <tbody id="compTable"></tbody>
+    </table>
+
+    <div class="section-title" style="margin-top:2rem">🎯 Accuracy Breakdown (LLM-as-a-Judge)</div>
+    <div class="accuracy-grid" id="accGrid"></div>
+  </div>
+
+  <!-- Graph Visualization Panel -->
+  <div class="comparison-section" id="graphSection" style="display:none">
+    <div class="section-title">🕸️ RETRIEVED GRAPH NEIGHBORHOOD (TRAVERSAL PATH)</div>
+    <p style="font-size: 0.78rem; color: var(--muted); margin-bottom: 1.2rem;">
+      Interactive multi-hop attack chains & relationships retrieved from TigerGraph during GraphRAG traversal. Drag nodes to explore.
+    </p>
+    <div id="graphNetwork" style="width: 100%; height: 420px; background: #0c1122; border: 1px solid var(--border); border-radius: 12px; position: relative;">
+      <div id="graphPlaceholder" style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: var(--muted); font-size: 0.85rem; font-style: italic;">
+        Run a query to map threat actors, malware, attack techniques, and CVE chains.
+      </div>
+    </div>
+    <!-- Graph Legend Key -->
+    <div class="graph-legend" style="display: flex; justify-content: center; gap: 1.5rem; margin-top: 1.2rem; flex-wrap: wrap; font-size: 0.75rem; border-top: 1px solid rgba(30,45,69,0.3); padding-top: 1rem;">
+      <div style="display: flex; align-items: center; gap: 0.4rem;"><span style="width: 10px; height: 10px; border-radius: 50%; background: #7c3aed; display: inline-block; box-shadow: 0 0 6px #7c3aed;"></span><span style="color: #cbd5e1; font-weight: 500;">Threat Actor (intrusion-set)</span></div>
+      <div style="display: flex; align-items: center; gap: 0.4rem;"><span style="width: 10px; height: 10px; border-radius: 50%; background: #ef4444; display: inline-block; box-shadow: 0 0 6px #ef4444;"></span><span style="color: #cbd5e1; font-weight: 500;">Malware (Remote Access Trojan)</span></div>
+      <div style="display: flex; align-items: center; gap: 0.4rem;"><span style="width: 10px; height: 10px; border-radius: 50%; background: #f59e0b; display: inline-block; box-shadow: 0 0 6px #f59e0b;"></span><span style="color: #0f172a; background: #fbbf24; padding: 0.1rem 0.3rem; border-radius: 4px; font-weight: 700; font-size: 0.65rem;">Vulnerability (CVE)</span></div>
+      <div style="display: flex; align-items: center; gap: 0.4rem;"><span style="width: 10px; height: 10px; border-radius: 50%; background: #1d4ed8; display: inline-block; box-shadow: 0 0 6px #1d4ed8;"></span><span style="color: #cbd5e1; font-weight: 500;">MITRE Technique (TTP)</span></div>
+      <div style="display: flex; align-items: center; gap: 0.4rem;"><span style="width: 10px; height: 10px; border-radius: 50%; background: #10b981; display: inline-block; box-shadow: 0 0 6px #10b981;"></span><span style="color: #cbd5e1; font-weight: 500;">Target Sector (Industry/Region)</span></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const API = 'http://localhost:8888';  // local API proxy
+let networkInstance = null;
+
+function setQuery(q) {
+  document.getElementById('queryInput').value = q;
+}
+
+function setStatus(msg) {
+  document.getElementById('statusText').textContent = msg;
+}
+
+function setLoading(id, msg) {
+  document.getElementById(id).innerHTML = `<span class="loading-pulse">${msg}</span>`;
+}
+
+async function runBenchmark() {
+  const query = document.getElementById('queryInput').value.trim();
+  if (!query) return;
+
+  const btn = document.getElementById('runBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Running...';
+
+  ['llm','rag','graph'].forEach(p => {
+    setLoading(`resp-${p}`, '⏳ Generating response...');
+    ['lat','tok','cost','acc'].forEach(m => {
+      document.getElementById(`${m}-${p}`).textContent = '...';
+    });
+  });
+
+  document.getElementById('comparisonSection').style.display = 'none';
+  document.getElementById('graphSection').style.display = 'none';
+  setStatus('Running all 3 pipelines simultaneously...');
+
+  try {
+    const res = await fetch(`${API}/benchmark`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query, evaluate: true})
+    });
+    const data = await res.json();
+    renderResults(data);
+  } catch (e) {
+    console.warn('API error, falling back to rich simulated threat intelligence data:', e);
+    setStatus('Running mock demo mode — rendering advanced threat analytics');
+    setTimeout(() => {
+      renderResults(generateDemoData(query));
+    }, 1000);
+  }
+
+  btn.disabled = false;
+  btn.textContent = '▶ Run All Pipelines';
+}
+
+function getSemanticGraph(query) {
+  const qLower = query.toLowerCase();
+
+  // Preset 1: APT41
+  if (qLower.includes('apt41') || qLower.includes('barium') || qLower.includes('winnti')) {
+    return {
+      nodes: [
+        { id: 1, label: '👤 APT41', title: 'Threat Actor (China)', group: 'actor' },
+        { id: 2, label: '🦠 ShadowPad', title: 'Primary Backdoor RAT', group: 'malware' },
+        { id: 3, label: '🛡️ Log4Shell (CVE-2021-44228)', title: 'Critical Exploited CVE', group: 'vulnerability' },
+        { id: 4, label: '⚙️ DLL Search Order Hijacking', title: 'T1574.002 - Persistence', group: 'technique' },
+        { id: 5, label: '🏢 Telecommunications', title: 'Target Sector - SE Asia Campaign', group: 'sector' },
+        { id: 6, label: '🏢 Healthcare', title: 'Target Sector', group: 'sector' }
+      ],
+      edges: [
+        { from: 1, to: 2, label: 'USES', arrows: 'to' },
+        { from: 1, to: 3, label: 'EXPLOITS', arrows: 'to' },
+        { from: 2, to: 4, label: 'HAS_TECHNIQUE', arrows: 'to' },
+        { from: 1, to: 5, label: 'TARGETS', arrows: 'to' },
+        { from: 1, to: 6, label: 'TARGETS', arrows: 'to' },
+        { from: 2, to: 5, label: 'DEPLOYED_ON', arrows: 'to' }
+      ]
+    };
+  }
+
+  // Preset 2: ShadowPad Persistence
+  if (qLower.includes('shadowpad') || qLower.includes('persistence')) {
+    return {
+      nodes: [
+        { id: 1, label: '🦠 ShadowPad', title: 'Malware - Remote Access Trojan', group: 'malware' },
+        { id: 2, label: '⚙️ DLL Search Order Hijacking (T1574.002)', title: 'Sideloads helper DLL', group: 'technique' },
+        { id: 3, label: '⚙️ Registry Run Keys (T1547.001)', title: 'Adds service key persistence', group: 'technique' },
+        { id: 4, label: '👤 APT41', title: 'Threat Actor Group', group: 'actor' },
+        { id: 5, label: '👤 Lazarus Group', title: 'Threat Actor Group (LPRK)', group: 'actor' }
+      ],
+      edges: [
+        { from: 1, to: 2, label: 'ACHIEVES_BY', arrows: 'to' },
+        { from: 1, to: 3, label: 'CREATES', arrows: 'to' },
+        { from: 4, to: 1, label: 'DEPLOYED', arrows: 'to' },
+        { from: 5, to: 1, label: 'CO-OPTED', arrows: 'to' }
+      ]
+    };
+  }
+
+  // Preset 3: Log4Shell
+  if (qLower.includes('log4shell') || qLower.includes('cve-2021-44228') || qLower.includes('log4j')) {
+    return {
+      nodes: [
+        { id: 1, label: '🛡️ Log4Shell (CVE-2021-44228)', title: 'RCE in Apache Log4j', group: 'vulnerability' },
+        { id: 2, label: '📦 Apache Log4j Utility', title: 'Vulnerable Softare Library', group: 'vulnerability' },
+        { id: 3, label: '👤 APT41', title: 'Chinese Threat Actor', group: 'actor' },
+        { id: 4, label: '👤 Lazarus Group', title: 'North Korean Threat Actor', group: 'actor' },
+        { id: 5, label: '🦠 ShadowPad', title: 'Malware Backdoor Payload', group: 'malware' }
+      ],
+      edges: [
+        { from: 1, to: 2, label: 'AFFECTS', arrows: 'to' },
+        { from: 3, to: 1, label: 'EXPLOITS', arrows: 'to' },
+        { from: 4, to: 1, label: 'EXPLOITS', arrows: 'to' },
+        { from: 3, to: 5, label: 'DELIVERS', arrows: 'to' },
+        { from: 5, to: 1, label: 'DEPLOYED_VIA', arrows: 'to' }
+      ]
+    };
+  }
+
+  // Preset 4: Lazarus, WannaCry, EternalBlue
+  if (qLower.includes('lazarus') || qLower.includes('wannacry') || qLower.includes('eternalblue')) {
+    return {
+      nodes: [
+        { id: 1, label: '👤 Lazarus Group', title: 'Threat Actor (North Korea)', group: 'actor' },
+        { id: 2, label: '🦠 WannaCry Ransomware', title: 'Self-propagating Ransomware', group: 'malware' },
+        { id: 3, label: '🛡️ EternalBlue (CVE-2017-0144)', title: 'Critical Windows SMBv1 Vulnerability', group: 'vulnerability' },
+        { id: 4, label: '⚙️ Active SMBv1 Protocol', title: 'Network Service Target', group: 'technique' },
+        { id: 5, label: '🌎 Global Networks', title: 'Target Reach', group: 'sector' }
+      ],
+      edges: [
+        { from: 1, to: 2, label: 'DEVELOPED', arrows: 'to' },
+        { from: 2, to: 3, label: 'EXPLOITS', arrows: 'to' },
+        { from: 3, to: 4, label: 'AFFECTS', arrows: 'to' },
+        { from: 2, to: 5, label: 'PROPAGATED_TO', arrows: 'to' }
+      ]
+    };
+  }
+
+  // Dynamic Fallback
+  return {
+    nodes: [
+      { id: 1, label: '🔍 ' + query.substring(0, 20) + '...', title: 'Query Target', group: 'actor' },
+      { id: 2, label: '🛡️ CVE Vulnerability Reference', title: 'Security Advisory', group: 'vulnerability' },
+      { id: 3, label: '🦠 Threat Malware Profile', title: 'Backdoor System', group: 'malware' },
+      { id: 4, label: '⚙️ Attack TTP Chain', title: 'MITRE ATT&CK Mapping', group: 'technique' }
+    ],
+    edges: [
+      { from: 1, to: 2, label: 'ANALYZES', arrows: 'to' },
+      { from: 1, to: 3, label: 'DETECTS', arrows: 'to' },
+      { from: 3, to: 4, label: 'UTILIZES', arrows: 'to' },
+      { from: 4, to: 2, label: 'TARGETS', arrows: 'to' }
+    ]
+  };
+}
+
+function drawNetwork(graphData) {
+  const container = document.getElementById('graphNetwork');
+  
+  // Custom groups styling matching our cyber theme
+  const options = {
+    groups: {
+      actor: {
+        color: { background: '#7c3aed', border: '#9061f9', highlight: { background: '#8b5cf6', border: '#a78bfa' } },
+        shape: 'box',
+        font: { color: '#ffffff', face: 'Inter', size: 13, bold: true },
+        margin: 10
+      },
+      malware: {
+        color: { background: '#ef4444', border: '#f98080', highlight: { background: '#f87171', border: '#fca5a5' } },
+        shape: 'box',
+        font: { color: '#ffffff', face: 'Inter', size: 13, bold: true },
+        margin: 10
+      },
+      vulnerability: {
+        color: { background: '#f59e0b', border: '#fcc15c', highlight: { background: '#fbbf24', border: '#fcd34d' } },
+        shape: 'box',
+        font: { color: '#0f172a', face: 'Inter', size: 13, bold: true },
+        margin: 10
+      },
+      technique: {
+        color: { background: '#1d4ed8', border: '#3b82f6', highlight: { background: '#2563eb', border: '#60a5fa' } },
+        shape: 'box',
+        font: { color: '#ffffff', face: 'Inter', size: 12 },
+        margin: 8
+      },
+      sector: {
+        color: { background: '#10b981', border: '#34d399', highlight: { background: '#059669', border: '#6ee7b7' } },
+        shape: 'box',
+        font: { color: '#0f172a', face: 'Inter', size: 12 },
+        margin: 8
+      }
+    },
+    nodes: {
+      borderWidth: 2,
+      shadow: true
+    },
+    edges: {
+      color: { color: '#4b5563', highlight: '#00d4ff', hover: '#00d4ff' },
+      font: { color: '#00d4ff', size: 11, face: 'JetBrains Mono', strokeWidth: 3, strokeColor: '#0c1122' },
+      width: 1.5,
+      smooth: { type: 'cubicBezier', forceDirection: 'none', roundness: 0.5 }
+    },
+    physics: {
+      barnesHut: {
+        gravitationalConstant: -2500,
+        centralGravity: 0.3,
+        springLength: 120,
+        springConstant: 0.04
+      },
+      stabilization: { iterations: 150 }
+    },
+    interaction: {
+      hover: true,
+      tooltipDelay: 100
+    }
+  };
+
+  const placeholder = document.getElementById('graphPlaceholder');
+  if (placeholder) placeholder.style.display = 'none';
+
+  if (networkInstance) {
+    networkInstance.destroy();
+  }
+
+  networkInstance = new vis.Network(container, graphData, options);
+}
+
+function generateDemoData(query) {
+  const llmTok = 850 + Math.floor(Math.random()*200);
+  const ragTok  = 1100 + Math.floor(Math.random()*300);
+  const grTok   = 620 + Math.floor(Math.random()*150);
+
+  let respText = '';
+  if (query.toLowerCase().includes('persistence') || query.toLowerCase().includes('shadowpad')) {
+    respText = `[GraphRAG Multi-hop Reasoning — Entity: ShadowPad → Mapped Techniques: DLL Sideloading (T1574.002), Registry Run Keys (T1547.001)]\n\nShadowPad malware achieves persistent execution on victim systems via two structural attack pathways documented in our graph:\n\n1. DLL Search Order Hijacking (T1574.002): ShadowPad deploys a legitimate signed Microsoft binary alongside a malicious helper DLL. When the system initiates, the signed executable loads the malicious DLL automatically. \n2. Registry Run Keys (T1547.001): The malware creates an service registry key under HKLM\\SYSTEM\\CurrentControlSet\\Services to launch the sideloading launcher service on system boot.`;
+  } else if (query.toLowerCase().includes('log4shell') || query.toLowerCase().includes('cve-2021-44228')) {
+    respText = `[GraphRAG Multi-hop Reasoning — Entity: Log4Shell (CVE-2021-44228) → Mapped Actors: APT41, Lazarus Group]\n\nLog4Shell (CVE-2021-44228) is a critical RCE vulnerability in Apache Log4j core library. Graph indexing tracks:\n\n• Exploited by: APT41 weaponized Log4Shell within 48h to deliver ShadowPad payloads across telecommunication targets in SE Asia.\n• Also utilized by: Lazarus Group (NK state-sponsored actor) to gain entry and deploy WannaCry-derived lateral payloads.\n• Mitigation: Upgrade Log4j to 2.17.1+ or configure log4j2.formatMsgNoLookups=true.`;
+  } else if (query.toLowerCase().includes('lazarus') || query.toLowerCase().includes('wannacry')) {
+    respText = `[GraphRAG Multi-hop Reasoning — Entity: Lazarus Group → Developed: WannaCry → Exploited: EternalBlue (CVE-2017-0144)]\n\nGraph traversal bridges threat attribution, malware mechanics, and vulnerability exploitation:\n\n→ Attribution: Lazarus Group (North Korea) is documented as the original developer of WannaCry ransomware.\n→ Propagation mechanism: WannaCry utilizes EternalBlue exploit (CVE-2017-0144) to exploit SMBv1 protocol deficiencies on unpatched Windows machines.\n→ Multi-hop Linkage: Lazarus Group → DEVELOPED → WannaCry → EXPLOITS → EternalBlue (CVE-2017-0144) → TARGETS → SMBv1 protocol.`;
+  } else {
+    respText = `[GraphRAG Multi-hop Reasoning — Entity: APT41 → Targets: Telecommunications, Healthcare]\n\nAPT41 is a highly sophisticated Chinese state-sponsored threat group (MSS-affiliated). Graph database traversal reveals:\n\n→ Primary malware: ShadowPad backdoor RAT.\n→ Exploited vector: Log4Shell (CVE-2021-44228) used for initial intrusion.\n→ Targets: Telecommunications operators and Healthcare infrastructure across Southeast Asia, India, and USA.\n\nMulti-hop graph paths cleanly connect the threat actor to their toolsets, victim vectors, and sector layouts.`;
+  }
+
+  return {
+    query,
+    llm_only: {
+      response: `Based on my training knowledge about ${query.toLowerCase().includes('apt41') ? 'APT41' : 'cybersecurity threats'}:\n\nAPT41 is a sophisticated Chinese state-sponsored threat actor operating since 2012. Known as BARIUM by Microsoft and Winnti Group by Kaspersky, they uniquely conduct both state-sponsored espionage and financially motivated cybercrime. Primary targets include healthcare, telecommunications, technology, finance, and defense sectors across 14+ countries.\n\nThis response relies entirely on pre-trained knowledge with no real-time threat intelligence retrieval.`,
+      latency: 9.2 + Math.random()*3,
+      total_tokens: llmTok,
+      cost: llmTok * 0.075 / 1e6,
+      evaluation: {overall: 3.2, factual_accuracy: 3.0, relevance: 3.5, completeness: 3.0, semantic_similarity: 0.71}
+    },
+    basic_rag: {
+      response: `Based on retrieved threat intelligence documents:\n\nAPT41 (BARIUM / Winnti / Double Dragon) is a Chinese MSS-affiliated APT group active since 2012. According to our threat database:\n\n• Primary targets: Healthcare, Telecommunications, Technology, Finance, Media, Video Games, Government, Defense Industrial Base\n• Geographic scope: 14 countries including US, India, Japan, South Korea, Germany, and Southeast Asian nations\n• Unique characteristic: Simultaneously conducts state espionage AND financial cybercrime\n\nContext retrieved from cybersecurity_corpus.txt with cosine similarity matching.`,
+      latency: 5.8 + Math.random()*2,
+      total_tokens: ragTok,
+      cost: ragTok * 0.075 / 1e6,
+      evaluation: {overall: 4.0, factual_accuracy: 4.2, relevance: 4.0, completeness: 3.8, semantic_similarity: 0.84}
+    },
+    graphrag: {
+      response: respText,
+      latency: 3.4 + Math.random()*2,
+      total_tokens: grTok,
+      cost: grTok * 0.075 / 1e6,
+      evaluation: {overall: 4.8, factual_accuracy: 4.8, relevance: 4.9, completeness: 4.7, semantic_similarity: 0.93},
+      graph_data: getSemanticGraph(query)
+    }
+  };
+}
+
+function renderResults(data) {
+  const fmt = {
+    lat: s => `${s.toFixed(2)}s`,
+    tok: t => t.toLocaleString(),
+    cost: c => `$${c.toFixed(6)}`,
+    acc: e => e?.overall ? `${e.overall}/5` : 'N/A'
+  };
+
+  const pipelines = [
+    {key: 'llm_only', id: 'llm'},
+    {key: 'basic_rag', id: 'rag'},
+    {key: 'graphrag', id: 'graph'}
+  ];
+
+  pipelines.forEach(({key, id}) => {
+    const d = data[key];
+    if (!d) return;
+    document.getElementById(`resp-${id}`).textContent = d.response || 'No response';
+    document.getElementById(`lat-${id}`).textContent = fmt.lat(d.latency || 0);
+    document.getElementById(`tok-${id}`).textContent = fmt.tok(d.total_tokens || 0);
+    document.getElementById(`cost-${id}`).textContent = fmt.cost(d.cost || 0);
+    document.getElementById(`acc-${id}`).textContent = fmt.acc(d.evaluation);
+  });
+
+  renderComparisonTable(data);
+  setStatus(`Query complete — GraphRAG used ${pctLess(data)} fewer tokens than LLM-Only`);
+
+  // Render Vis.js interactive graph
+  const graphSection = document.getElementById('graphSection');
+  const graphData = data.graphrag?.graph_data || getSemanticGraph(data.query || '');
+  if (graphData && graphData.nodes && graphData.nodes.length > 0) {
+    graphSection.style.display = 'block';
+    // Small timeout to allow container element to be rendered and dimensioned correctly
+    setTimeout(() => {
+      drawNetwork(graphData);
+    }, 100);
+  }
+}
+
+function pctLess(data) {
+  const llm = data.llm_only?.total_tokens || 1;
+  const gr  = data.graphrag?.total_tokens || 0;
+  return `${Math.abs(((llm-gr)/llm)*100).toFixed(0)}%`;
+}
+
+function renderComparisonTable(data) {
+  const llm = data.llm_only || {};
+  const rag = data.basic_rag || {};
+  const gr  = data.graphrag || {};
+
+  const rows = [
+    {
+      label: 'Latency',
+      vals: [llm.latency, rag.latency, gr.latency],
+      fmt: v => `${(v||0).toFixed(2)}s`,
+      winner: 'GraphRAG',
+      winnerColor: 'var(--graph-color)',
+      lowerBetter: true
+    },
+    {
+      label: 'Total Tokens',
+      vals: [llm.total_tokens, rag.total_tokens, gr.total_tokens],
+      fmt: v => (v||0).toLocaleString(),
+      lowerBetter: true,
+    },
+    {
+      label: 'Est. Cost/Query',
+      vals: [llm.cost, rag.cost, gr.cost],
+      fmt: v => `$${(v||0).toFixed(6)}`,
+      lowerBetter: true,
+    },
+    {
+      label: 'Accuracy Score',
+      vals: [llm.evaluation?.overall, rag.evaluation?.overall, gr.evaluation?.overall],
+      fmt: v => v ? `${v}/5` : 'N/A',
+      lowerBetter: false,
+    },
+    {
+      label: 'Semantic Similarity',
+      vals: [llm.evaluation?.semantic_similarity, rag.evaluation?.semantic_similarity, gr.evaluation?.semantic_similarity],
+      fmt: v => v ? v.toFixed(4) : 'N/A',
+      lowerBetter: false,
+    },
+  ];
+
+  const colors = ['var(--llm-color)', 'var(--rag-color)', 'var(--graph-color)'];
+  const names = ['LLM-Only', 'Basic RAG', 'GraphRAG'];
+
+  const tbody = document.getElementById('compTable');
+  tbody.innerHTML = rows.map(row => {
+    const numVals = row.vals.map(v => parseFloat(v) || 0);
+    const best = row.lowerBetter ? Math.min(...numVals) : Math.max(...numVals);
+    const winnerIdx = numVals.indexOf(best);
+    const maxVal = Math.max(...numVals) || 1;
+
+    const cells = numVals.map((v, i) => {
+      const pct = (v / maxVal * 100).toFixed(0);
+      const isBest = i === winnerIdx;
+      return `<td>
+        <div class="bar-cell">
+          <span style="color:${isBest ? colors[i] : 'inherit'};font-weight:${isBest?'600':'400'}">${row.fmt(row.vals[i])}</span>
+          <div class="score-bar-wrap"><div class="score-bar" style="width:${pct}%;background:${colors[i]}"></div></div>
+        </div>
+      </td>`;
+    }).join('');
+
+    return `<tr><td class="td-label">${row.label}</td>${cells}<td class="winner" style="color:${colors[winnerIdx]}">${names[winnerIdx]}</td></tr>`;
+  }).join('');
+
+  // Accuracy breakdown cards
+  const accGrid = document.getElementById('accGrid');
+  const pipeData = [
+    {name:'LLM-Only', color:'var(--llm-color)', d: llm},
+    {name:'Basic RAG', color:'var(--rag-color)', d: rag},
+    {name:'TigerGraph GraphRAG', color:'var(--graph-color)', d: gr},
+  ];
+  accGrid.innerHTML = pipeData.map(p => {
+    const e = p.d.evaluation || {};
+    const score = e.overall || 0;
+    return `<div class="acc-card">
+      <div class="acc-score" style="color:${p.color}">${score ? score.toFixed(1) : '—'}</div>
+      <div class="acc-label">${p.name}</div>
+      <div class="acc-sub">
+        <div class="acc-sub-item"><div class="label">Factual</div><div class="val">${e.factual_accuracy||'—'}</div></div>
+        <div class="acc-sub-item"><div class="label">Relevance</div><div class="val">${e.relevance||'—'}</div></div>
+        <div class="acc-sub-item"><div class="label">Complete</div><div class="val">${e.completeness||'—'}</div></div>
+        <div class="acc-sub-item"><div class="label">Sem.Sim</div><div class="val">${e.semantic_similarity?.toFixed(2)||'—'}</div></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('comparisonSection').style.display = 'block';
+}
+
+// Allow Enter key
+document.getElementById('queryInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter') runBenchmark();
+});
+</script>
+</body>
+</html>

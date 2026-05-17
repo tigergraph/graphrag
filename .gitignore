@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+.venv/
+venv/
+ENV/
+
+# System / OS
+.DS_Store
+Thumbs.db
+
+# Databases & Cache
+embeddings_cache.json
+chats.db
+db.log
+requestLogs.jsonl
+
+# Scratch & Temporary Files
+test.py
+test2.py
+test3.py
+scratch_tg_test.py
+threat_report.txt
+cybersecurity_test.txt
+
+# Local configurations / credentials
+.gemini/
