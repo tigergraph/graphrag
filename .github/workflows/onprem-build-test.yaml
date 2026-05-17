@@ -63,6 +63,11 @@ jobs:
       with:
         context: graphrag-ui/
         file: ./graphrag-ui/Dockerfile
+        # The UI Dockerfile reads VERSION from a named ``repo`` context;
+        # docker/build-push-action interprets undeclared contexts as image
+        # refs and tries to pull docker.io/library/repo:latest otherwise.
+        build-contexts: |
+          repo=.
         push: true
         tags: |
           tigergraph/graphrag-ui:${{steps.get-image.outputs.IMAGE}}
