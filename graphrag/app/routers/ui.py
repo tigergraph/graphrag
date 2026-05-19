@@ -49,6 +49,7 @@ from fastapi import (
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.security.http import HTTPBase
 from pyTigerGraph import TigerGraphConnection
+from pyTigerGraph.common.exception import TigerGraphException
 from tools.validation_utils import MapQuestionToSchemaException
 
 from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
@@ -357,6 +358,18 @@ def auth(usr: str, password: str, conn=None) -> tuple[list[str], TigerGraphConne
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
         )
+    except TigerGraphException as e:
+        # pyTigerGraph wraps auth rejections as a TigerGraphException
+        # ("Authentication failed.", ...) rather than HTTPError. Convert
+        # that class explicitly so the client sees a clean 401, not a
+        # generic 500.
+        msg = (str(e.args[0]) if e.args else str(e)).lower()
+        if "authentic" in msg or "token" in msg or "password" in msg:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication failed",
+            )
+        raise
     except Exception as e:
         raise e
     return graphs, conn
@@ -392,7 +405,12 @@ def login(auth: Annotated[list[str], Depends(ui_basic_auth)]):
     except Exception as e:
         logger.warning(f"Failed to fetch roles at login: {e}")
         global_roles, graph_roles = [], {}
-    return {"graphs": graphs, "roles": global_roles, "graph_roles": graph_roles}
+    return {
+        "graphs": graphs,
+        "roles": global_roles,
+        "graph_roles": graph_roles,
+        "username": creds.username,
+    }
 
 
 def _read_local_version(component: str) -> dict:

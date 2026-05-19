@@ -43,7 +43,22 @@ jobs:
         echo "IMAGE=$IMAGE" >> $GITHUB_OUTPUT
         VERSION=$(cat VERSION)
         echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
- 
+
+    # Only builds triggered from main update the :latest tag. Manual
+    # rebuilds of older release branches (e.g. release_1.3.1) skip
+    # :latest so a backport build doesn't overwrite the most recent
+    # published image.
+    - name: Decide whether to update :latest
+      id: latest-check
+      run: |
+        if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+          echo "push_latest=true" >> $GITHUB_OUTPUT
+          echo "Building from main — :latest will be updated."
+        else
+          echo "push_latest=false" >> $GITHUB_OUTPUT
+          echo "Not on main (ref=${GITHUB_REF}) — :latest will be left as-is."
+        fi
+
     - name: Build and push Docker image GraphRAG
       uses: docker/build-push-action@v5
       with:
@@ -53,8 +68,8 @@ jobs:
         tags: |
           tigergraph/graphrag:${{steps.get-image.outputs.IMAGE}}
           tigergraph/graphrag:${{steps.get-image.outputs.VERSION}}
-          tigergraph/graphrag:latest
- 
+          ${{ steps.latest-check.outputs.push_latest == 'true' && 'tigergraph/graphrag:latest' || '' }}
+
     - name: Build and push Docker image ECC
       uses: docker/build-push-action@v5
       with:
@@ -64,7 +79,7 @@ jobs:
         tags: |
           tigergraph/graphrag-ecc:${{steps.get-image.outputs.IMAGE}}
           tigergraph/graphrag-ecc:${{steps.get-image.outputs.VERSION}}
-          tigergraph/graphrag-ecc:latest
+          ${{ steps.latest-check.outputs.push_latest == 'true' && 'tigergraph/graphrag-ecc:latest' || '' }}
 
     - name: Build and push Docker image chat-history
       uses: docker/build-push-action@v5
@@ -75,8 +90,8 @@ jobs:
         tags: |
           tigergraph/chat-history:${{steps.get-image.outputs.IMAGE}}
           tigergraph/chat-history:${{steps.get-image.outputs.VERSION}}
-          tigergraph/chat-history:latest
-     
+          ${{ steps.latest-check.outputs.push_latest == 'true' && 'tigergraph/chat-history:latest' || '' }}
+
     - name: Build and push Docker image graphrag-ui
       uses: docker/build-push-action@v5
       with:
@@ -91,7 +106,7 @@ jobs:
         tags: |
           tigergraph/graphrag-ui:${{steps.get-image.outputs.IMAGE}}
           tigergraph/graphrag-ui:${{steps.get-image.outputs.VERSION}}
-          tigergraph/graphrag-ui:latest
+          ${{ steps.latest-check.outputs.push_latest == 'true' && 'tigergraph/graphrag-ui:latest' || '' }}
 
 #    - name: Set SSH key
 #      run: |
