@@ -1,0 +1,17 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ *
+ * Summary vertices linked from conversation (conv_pk = vertex PRIMARY_ID).
+ * V2 path pattern: directed hop has_summary is FROM conversation TO summary → use -(has_summary>)- .
+ */
+
+CREATE OR REPLACE DISTRIBUTED QUERY get_latest_summary(STRING conv_pk) SYNTAX V2 {
+  seeds = {conversation.*};
+  res = SELECT s
+        FROM seeds:c -(has_summary>)- summary:s
+        WHERE c.conversation_id == conv_pk;
+  PRINT res AS rows;
+}

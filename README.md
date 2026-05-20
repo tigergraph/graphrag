@@ -31,7 +31,7 @@
 - [More Detailed Configurations](#more-detailed-configurations)
   - [DB configuration](#db-configuration)
   - [GraphRAG configuration](#graphrag-configuration)
-  - [Chat History Configuration](#chat-history-configuration)
+  - [Chat memory (TigerGraph)](#chat-memory-tigergraph)
   - [LLM provider configuration](#llm-provider-configuration)
     - [Supported parameters](#supported-parameters)
     - [Provider examples](#provider-examples)
@@ -446,14 +446,15 @@ Copy the below into `configs/server_config.json` and edit the `hostname` and `ge
 | `default_thread_limit` | int | `8` | Max threads for query execution. |
 
 ### GraphRAG configuration
-Copy the below code into `configs/server_config.json`. You shouldn’t need to change anything unless you change the port of the chat history service in the Docker Compose file.
+Copy the below code into `configs/server_config.json`.
 
 ```json
 {
     "graphrag_config": {
         "reuse_embedding": false,
         "ecc": "http://graphrag-ecc:8001",
-        "chat_history_api": "http://chat-history:8002",
+        "tg_memory_enabled": true,
+        "tg_memory_schema_on_startup": true,
         "chunker": "semantic",
         "extractor": "llm",
         "top_k": 5,
@@ -466,7 +467,8 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | --- | --- | --- | --- |
 | `reuse_embedding` | bool | `true` | Reuse existing embeddings instead of regenerating them. |
 | `ecc` | string | `"http://graphrag-ecc:8001"` | URL of the knowledge graph build service. No change needed when using the provided Docker Compose file. |
-| `chat_history_api` | string | `"http://chat-history:8002"` | URL of the chat history service. No change needed when using the provided Docker Compose file. |
+| `tg_memory_enabled` | bool | `false` | When `true`, UI chat threads are persisted on TigerGraph (`conversation` / `message` vertices). |
+| `tg_memory_schema_on_startup` | bool | `true` | Install chat memory schema on existing graphs at GraphRAG startup (Docker-friendly). |
 | `chunker` | string | `"semantic"` | Default document chunker. Options: `semantic`, `character`, `regex`, `markdown`, `html`, `recursive`. |
 | `extractor` | string | `"llm"` | Entity extraction method. Options: `llm`, `graphrag`. |
 | `chunker_config` | object | `{}` | Chunker-specific settings (see sub-parameters below). All settings are saved regardless of which chunker is selected as default. |
@@ -494,20 +496,8 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `enable_consistency_checker` | bool | `false` | Enable the background consistency checker. |
 | `graph_names` | list | `[]` | Graphs to monitor when consistency checker is enabled. |
 
-### Chat History Configuration
-Copy the below code into `configs/server_config.json`. You shouldn’t need to change anything unless you change the port of the chat history service in the Docker Compose file.
-
-```json
-{
-    "chat-history": {
-        "apiPort":"8002",
-        "dbPath": "chats.db",
-        "dbLogPath": "db.log",
-        "logPath": "requestLogs.jsonl",
-        "conversationAccessRoles": ["superuser", "globaldesigner"]
-    }
-}
-```
+### Chat memory (TigerGraph)
+The UI stores chat history on the same TigerGraph graph as GraphRAG (see `tg_memory_enabled` and `common/gsql/memory/`). No separate chat-history service or SQLite database is used.
 
 [Go back to top](#top)
 

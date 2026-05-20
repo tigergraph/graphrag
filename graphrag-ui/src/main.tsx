@@ -59,6 +59,10 @@ const router = createBrowserRouter([
         element: <RequireAuth><ChatDialog /></RequireAuth>,
       },
       {
+        path: "/trace/:graphname/:messageId",
+        element: <RequireAuth><TraceLogs /></RequireAuth>,
+      },
+      {
         path: "/trace/:messageId",
         element: <RequireAuth><TraceLogs /></RequireAuth>,
       },

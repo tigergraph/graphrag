@@ -18,6 +18,8 @@ from common.py_schemas.schemas import (
     # SupportAIQuestion,
 )
 from common.utils.text_extractors import TextExtractor
+from common.memory import tg_memory
+
 logger = logging.getLogger(__name__)
 
 def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, dict]:
@@ -141,6 +143,11 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
         )
     )
     logger.info(f"Done installing supportai query all with status {query_res}")
+
+    try:
+        tg_memory.init_memory_schema(conn, graphname)
+    except Exception:
+        logger.warning("init_memory_schema failed for %s", graphname, exc_info=True)
 
     return schema_res, index_res, query_res
 

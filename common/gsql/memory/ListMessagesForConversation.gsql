@@ -1,0 +1,11 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * List message vertices for a conversation_id attribute (full thread load).
+ */
+
+CREATE OR REPLACE DISTRIBUTED QUERY list_messages_for_conversation(STRING conv_id) SYNTAX V2 {
+  seeds = {message.*};
+  res = SELECT m FROM seeds:m WHERE m.conversation_id == conv_id;
+  PRINT res AS rows;
+}

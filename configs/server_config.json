@@ -1,1 +1,69 @@
-../docs/tutorials/configs/server_config.json
+{
+    "db_config": {
+      "hostname": "http://tigergraph",
+      "restppPort": "9000",
+      "gsPort": "14240",
+      "username": "tigergraph",
+      "password": "tigergraph",
+      "getToken": false,
+      "default_timeout": 300,
+      "default_mem_threshold": 5000,
+      "default_thread_limit": 8
+    },
+    "graphrag_config": {
+      "reuse_embedding": false,
+      "tg_memory_schema_on_startup": true,
+      "tg_memory_enabled": true,
+      "ecc": "http://graphrag-ecc:8001",
+      "chunker": "semantic",
+      "chunker_config": {
+        "method": "percentile",
+        "threshold": 0.95
+      }
+    },
+    "llm_config": {
+      "authentication_configuration": {
+        "OPENAI_API_KEY": "<YOUR_OPENAI_API_KEY>"
+      },
+      "completion_service": {
+        "llm_service": "openai",
+        "llm_model": "gpt-4.1-mini",
+        "model_kwargs": {
+          "temperature": 0
+        },
+        "prompt_path": "./common/prompts/openai_gpt4/",
+        "chat_model": "gpt-4o-mini"
+      },
+      "embedding_service": {
+        "embedding_model_service": "openai",
+        "model_name": "text-embedding-3-small"
+      },
+      "multimodal_service": {
+        "llm_service": "openai",
+        "llm_model": "gpt-4o",
+        "model_kwargs": {
+          "temperature": 0
+        }
+      }
+    },
+    "memory": {
+      "mode": "hybrid",
+      "enabled": true,
+      "recent_budget_tokens": 1200,
+      "total_context_cap_tokens": 4000,
+      "reserve_for_answer_tokens": 800,
+      "summary_sub_cap_ratio": 0.4,
+      "summary_min_turns": 3,
+      "summary_refresh_every_turns": 2,
+      "summary_max_tokens": 800,
+      "summary_max_covered_messages_per_vertex": 50,
+      "summary_model": null,
+      "recall_enabled": false,
+      "verifier_enabled": false,
+      "routing_enabled": true,
+      "routing_fallback": "hybrid",
+      "message_retention_count": 10,
+      "conversation_retention_days": 15,
+      "summarizer_max_messages_per_run": 20
+    }
+  }

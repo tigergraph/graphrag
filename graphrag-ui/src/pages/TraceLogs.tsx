@@ -125,7 +125,13 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
   const sessionTs = now.toISOString().replace(/[-:T]/g, "").slice(0, 15);
   const sessionId = `chat_${sessionTs}`;
 
-  const query = userQuery || message?.originalQuery || message?.query || "N/A";
+  const query =
+    userQuery ||
+    message?.user_query ||
+    message?.originalQuery ||
+    message?.userQuery ||
+    message?.query ||
+    "N/A";
   const qs = message?.query_sources || {};
   const totalResponseTime = message?.response_time || 0;
   const ts = now.toLocaleTimeString();
@@ -156,10 +162,6 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
 
   // ── Citations ───────────────────────────────────────────────────────────
   const rawReasoning = qs.reasoning;
-  const finalRetrieval =
-    typeof qs.result === "object" && qs.result?.final_retrieval
-      ? qs.result.final_retrieval
-      : null;
   const citations: CitationEntry[] = [];
 
   if (rawReasoning && Array.isArray(rawReasoning)) {
@@ -169,17 +171,11 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
       const cited = raw.startsWith("* ");
       const chunkName = raw.replace(/^\*\s*/, "");
 
-      let chunkText = "";
-      if (finalRetrieval && finalRetrieval[chunkName]) {
-        const val = finalRetrieval[chunkName];
-        chunkText = Array.isArray(val) ? val.join("\n\n") : String(val);
-      }
-
       citations.push({
         id: i + 1,
         source: chunkName,
         cited,
-        text: chunkText,
+        text: "",
       });
     });
   }
@@ -235,9 +231,33 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
     { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: 0 } as TokenUsage
   );
 
+  const conversationLines: string[] = [];
+  const rawConvo = message?.conversation;
+  if (Array.isArray(rawConvo)) {
+    rawConvo.forEach((entry: any) => {
+      if (!entry) return;
+      if (typeof entry.role === "string" && typeof entry.content === "string") {
+        conversationLines.push(`${entry.role}: ${entry.content}`);
+        return;
+      }
+      if (typeof entry.query === "string" && entry.query) {
+        conversationLines.push(`user: ${entry.query}`);
+      }
+      if (typeof entry.response === "string" && entry.response) {
+        conversationLines.push(`assistant: ${entry.response}`);
+      }
+    });
+  }
+  if (conversationLines.length === 0) {
+    conversationLines.push(`user: ${query}`);
+  }
+
+  const finalResponse =
+    message?.natural_language_response || message?.content || "";
+
   return {
     originalQuery: query,
-    conversationContext: [`user: ${query}`],
+    conversationContext: conversationLines,
     status: "completed",
     sessionId,
     timing: {
@@ -252,7 +272,7 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
     citations,
     timeline,
     tokenUsage,
-    finalResponse: message?.content || "",
+    finalResponse,
   };
 }
 
@@ -524,47 +544,25 @@ const ToolCallsPanel: FC<{ trace: TraceData }> = ({ trace }) => (
 );
 
 
-const CitationRow: FC<{ c: CitationEntry }> = ({ c }) => {
-  const [open, setOpen] = useState(false);
-  return (
-    <div
-      className={`rounded-lg mb-2 overflow-hidden ${
-        c.cited
-          ? "bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800"
-          : "bg-orange-50 dark:bg-orange-900/15 border border-orange-200 dark:border-orange-800"
-      }`}
-    >
-      <div
-        className="flex items-center justify-between px-4 py-3 cursor-pointer"
-        onClick={() => setOpen((p) => !p)}
-      >
-        <div className="flex items-center gap-3 flex-1 min-w-0">
-          <LuBookOpen className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
-          <span className="text-sm font-semibold truncate">
-            [{c.source}]
-          </span>
-          {c.cited && (
-            <span className="bg-red-500 text-white text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0">
-              Cited
-            </span>
-          )}
-        </div>
-        <div className="ml-2 shrink-0">
-          {open ? (
-            <LuChevronUp className="w-4 h-4 text-muted-foreground" />
-          ) : (
-            <LuChevronDown className="w-4 h-4 text-muted-foreground" />
-          )}
-        </div>
-      </div>
-      {open && (
-        <div className="px-4 pb-4 text-sm text-foreground/80 whitespace-pre-wrap border-t border-amber-200 dark:border-amber-800 pt-3">
-          {c.text || "No content retrieved for this chunk."}
-        </div>
+const CitationRow: FC<{ c: CitationEntry }> = ({ c }) => (
+  <div
+    className={`rounded-lg mb-2 ${
+      c.cited
+        ? "bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800"
+        : "bg-orange-50 dark:bg-orange-900/15 border border-orange-200 dark:border-orange-800"
+    }`}
+  >
+    <div className="flex items-center gap-3 px-4 py-3">
+      <LuBookOpen className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
+      <span className="text-sm font-semibold truncate">[{c.source}]</span>
+      {c.cited && (
+        <span className="bg-red-500 text-white text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0">
+          Cited
+        </span>
       )}
     </div>
-  );
-};
+  </div>
+);
 
 const CitationsPanel: FC<{ trace: TraceData }> = ({ trace }) => (
   <div className="space-y-2">
@@ -737,7 +735,10 @@ const TokenOverviewPanel: FC<{ trace: TraceData }> = ({ trace }) => {
 const TraceLogs: FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { messageId } = useParams<{ messageId: string }>();
+  const { graphname: graphParam, messageId } = useParams<{
+    graphname?: string;
+    messageId: string;
+  }>();
 
   const stateMessage = location.state?.message;
   const stateUserQuery = location.state?.userQuery;
@@ -753,12 +754,23 @@ const TraceLogs: FC = () => {
   const [loading, setLoading] = useState(!resolvedMessage);
 
   useEffect(() => {
-    if (resolvedMessage || !messageId) return;
-    setLoading(true);
+    if (!messageId) return;
+    const graph = (graphParam || sessionStorage.getItem("selectedGraph") || "").trim();
+    if (!graph) {
+      // No graph context — render whatever we already have.
+      if (!resolvedMessage) setLoading(false);
+      return;
+    }
+    if (!resolvedMessage) {
+      setLoading(true);
+    }
     const creds = sessionStorage.getItem("creds");
-    fetch(`/ui/trace/${messageId}`, {
-      headers: { Authorization: `Basic ${creds}` },
-    })
+    fetch(
+      `/ui/${encodeURIComponent(graph)}/trace/${encodeURIComponent(messageId)}`,
+      {
+        headers: { Authorization: `Basic ${creds}` },
+      },
+    )
       .then((res) => {
         if (!res.ok) throw new Error("Not found");
         return res.json();
@@ -766,15 +778,38 @@ const TraceLogs: FC = () => {
       .then((data) => setApiData(data))
       .catch(() => setApiData(null))
       .finally(() => setLoading(false));
-  }, [messageId, resolvedMessage]);
+  }, [graphParam, messageId, resolvedMessage]);
 
-  const message = resolvedMessage || (apiData ? {
-    content: apiData.natural_language_response,
-    response_time: apiData.response_time,
-    response_type: apiData.response_type,
-    query_sources: apiData.query_sources,
-  } : null);
-  const userQuery = stateUserQuery || sessionMessage?.userQuery || apiData?.user_query;
+  const message = useMemo(() => {
+    if (!resolvedMessage && !apiData) return null;
+    const base: any = { ...(resolvedMessage || {}) };
+    if (apiData) {
+      // API data wins so the Trace page reflects the persisted DB tracelog.
+      if (apiData.query_sources) base.query_sources = apiData.query_sources;
+      if (apiData.response_time != null) base.response_time = apiData.response_time;
+      if (apiData.response_type) base.response_type = apiData.response_type;
+      if (apiData.answered_question != null) {
+        base.answered_question = apiData.answered_question;
+      }
+      if (apiData.natural_language_response) {
+        base.natural_language_response = apiData.natural_language_response;
+        if (!base.content) base.content = apiData.natural_language_response;
+      }
+      if (apiData.user_query) base.user_query = apiData.user_query;
+      if (Array.isArray(apiData.conversation)) {
+        base.conversation = apiData.conversation;
+      }
+    }
+    return base;
+  }, [resolvedMessage, apiData]);
+
+  const userQuery =
+    apiData?.user_query ||
+    sessionMessage?.userQuery ||
+    sessionMessage?.user_query ||
+    stateUserQuery ||
+    message?.user_query ||
+    message?.userQuery;
 
   const trace = useMemo(
     () => buildTraceFromMessage(message, userQuery),

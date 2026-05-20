@@ -1,15 +1,12 @@
-FROM node:23.7-slim 
+FROM node:23.7-slim
 WORKDIR /app
 
-ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
-RUN corepack enable
+# Use npm install (not npm ci) to handle cross-platform lockfile differences (Windows host → Linux container).
+COPY package.json package-lock.json ./
+RUN npm install --legacy-peer-deps
 
 COPY . .
-
-RUN pnpm install
-RUN pnpm run build
-RUN pnpm i -g serve
-
+RUN npm run build
+RUN npm i -g serve
 
 CMD [ "serve", "-s", "dist" ]

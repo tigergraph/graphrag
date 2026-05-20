@@ -414,6 +414,48 @@ if "chunker" not in graphrag_config:
     graphrag_config["chunker"] = "semantic"
 if "extractor" not in graphrag_config:
     graphrag_config["extractor"] = "llm"
+if "tg_memory_schema_on_startup" not in graphrag_config:
+    graphrag_config["tg_memory_schema_on_startup"] = True
+
+_DEFAULT_MEMORY_CONFIG: dict = {
+    "mode": "hybrid",
+    "enabled": False,
+    "recent_budget_tokens": 1200,
+    "total_context_cap_tokens": 4000,
+    "reserve_for_answer_tokens": 800,
+    "summary_sub_cap_ratio": 0.4,
+    "summary_min_turns": 10,
+    "summary_refresh_every_turns": 4,
+    "summary_max_tokens": 800,
+    "summary_max_covered_messages_per_vertex": 50,
+    "summary_model": None,
+    "recall_enabled": False,
+    "verifier_enabled": False,
+    "routing_enabled": False,
+    "routing_fallback": "hybrid",
+    "message_retention_count": 0,
+    "conversation_retention_days": 0,
+    "summarizer_max_messages_per_run": 0,
+}
+
+
+def get_memory_config(graphname=None):
+    """
+    Return merged hybrid-memory settings.
+
+    Resolution: defaults < global ``server_config['memory']`` < per-graph
+    ``configs/graph_configs/<graphname>/server_config.json`` ``memory`` overrides.
+    """
+    merged = _DEFAULT_MEMORY_CONFIG.copy()
+    top = server_config.get("memory")
+    if isinstance(top, dict):
+        merged.update(top)
+    if graphname:
+        graph_mem = _load_graph_config(graphname).get("memory")
+        if isinstance(graph_mem, dict):
+            merged.update(graph_mem)
+    return merged
+
 
 reuse_embedding = graphrag_config.get("reuse_embedding", True)
 doc_process_switch = graphrag_config.get("doc_process_switch", True)

@@ -109,55 +109,6 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: chat-history
-  namespace: graphrag
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: chat-history
-  template:
-    metadata:
-      labels:
-        app: chat-history
-    spec:
-      containers:
-        - name: chat-history
-          image: tigergraph/chat-history:latest
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 8002
-          env:
-            - name: CONFIG_FILES
-              value: "/configs/server_config.json"
-            - name: LOGLEVEL
-              value: "INFO"
-          volumeMounts:
-            - name: configs
-              mountPath: /configs
-      volumes:
-        - name: configs
-          hostPath:
-            path: /path/to/graphrag/configs
-            type: DirectoryOrCreate
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: chat-history
-  namespace: graphrag
-spec:
-  selector:
-    app: chat-history
-  ports:
-    - port: 8002
-      targetPort: 8002
-
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
   name: graphrag-ui
   namespace: graphrag
 spec:

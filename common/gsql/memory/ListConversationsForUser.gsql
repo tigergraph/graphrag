@@ -1,0 +1,11 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * List conversation vertices for a given user_id (chat memory sidebar).
+ */
+
+CREATE OR REPLACE DISTRIBUTED QUERY list_conversations_for_user(STRING uid) SYNTAX V2 {
+  seeds = {conversation.*};
+  res = SELECT c FROM seeds:c WHERE c.user_id == uid;
+  PRINT res AS rows;
+}

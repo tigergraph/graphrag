@@ -1,0 +1,19 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ *
+ * Updates rolling summary snapshot on conversation (conv_pk = vertex PRIMARY_ID).
+ */
+
+CREATE OR REPLACE DISTRIBUTED QUERY update_conversation_summary(
+    STRING conv_pk, STRING new_summary, UINT new_turn_count, UINT epoch
+) SYNTAX V2 {
+  seeds = {conversation.*};
+  res = SELECT c FROM seeds:c WHERE c.conversation_id == conv_pk
+        POST-ACCUM c.rolling_summary = new_summary,
+                   c.summary_turn_count = new_turn_count,
+                   c.summary_updated_epoch = epoch;
+  PRINT res AS rows;
+}

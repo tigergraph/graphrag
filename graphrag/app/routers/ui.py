@@ -40,6 +40,7 @@ from fastapi import (
     File,
     HTTPException,
     Path,
+    Query,
     Request,
     UploadFile,
     WebSocket,
@@ -51,7 +52,9 @@ from fastapi.security.http import HTTPBase
 from pyTigerGraph import TigerGraphConnection
 from tools.validation_utils import MapQuestionToSchemaException
 
-from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
+from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services, get_memory_config
+from common.memory import tg_memory
+from common.memory.context_builder import build_agent_context, refresh_summary_async
 from common.db.connections import get_db_connection_pwd_manual
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
@@ -72,7 +75,8 @@ logger = logging.getLogger(__name__)
 
 TRACE_LOGS_DIR = os.environ.get("TRACE_LOGS_DIR", "/code/trace_logs")
 
-def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float):
+def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float) -> dict | None:
+    """Write trace JSON to disk; returns the payload for tg_memory.tracelog when successful."""
     try:
         os.makedirs(TRACE_LOGS_DIR, exist_ok=True)
         trace_data = {
@@ -89,8 +93,10 @@ def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp
         filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
         with open(filepath, "w") as f:
             json.dump(trace_data, f, default=str)
+        return trace_data
     except Exception:
         logger.warning(f"Failed to save trace log for message {message_id}", exc_info=True)
+        return None
 
 # Validated graph name path parameter — rejects path traversal characters
 ValidGraphName = Annotated[str, Path(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
@@ -336,41 +342,92 @@ def login(auth: Annotated[list[str], Depends(ui_basic_auth)]):
     return {"graphs": graphs, "roles": global_roles, "graph_roles": graph_roles}
 
 
+@router.get(route_prefix + "/{graphname}/trace/{message_id}")
+def get_trace_log(
+    graphname: ValidGraphName,
+    message_id: str,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    graphs = creds[0]
+    cred = creds[1]
+    if graphname not in graphs:
+        raise HTTPException(status_code=403, detail="Insufficient permissions.")
+    auth = base64.b64encode(f"{cred.username}:{cred.password}".encode()).decode()
+    _, conn = ws_basic_auth(auth, graphname)
+
+    trace_data = tg_memory.get_message_tracelog(conn, graphname, message_id)
+    if not trace_data:
+        filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
+        if not os.path.exists(filepath):
+            raise HTTPException(status_code=404, detail="Trace log not found")
+        with open(filepath, "r") as f:
+            trace_data = json.load(f)
+
+    if not isinstance(trace_data, dict):
+        return trace_data
+
+    trace_data.setdefault("message_id", message_id)
+
+    # Attach the most recent exchanges from this conversation so the Trace page can render
+    # a real Conversation Context for both new and history-loaded messages.
+    convo_id = trace_data.get("conversation_id")
+    if convo_id:
+        try:
+            rows = tg_memory.list_messages_sorted_by_epoch(conn, graphname, convo_id)
+        except Exception:
+            rows = []
+        snapshot: list[dict[str, str]] = []
+        for row in rows[-4:]:
+            user_text = row.get("user_content") or ""
+            assistant_text = row.get("system_content") or ""
+            # Skip the assistant reply for the row this trace belongs to —
+            # the answer being traced should never appear inside its own context.
+            is_self = str(row.get("message_id") or "") == str(message_id)
+            if user_text:
+                snapshot.append({"role": "user", "content": user_text})
+            if assistant_text and not is_self:
+                snapshot.append({"role": "assistant", "content": assistant_text})
+        if snapshot:
+            trace_data["conversation"] = snapshot
+
+    return trace_data
+
+
 @router.post(f"{route_prefix}/feedback")
 def add_feedback(
     message: Message,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
-    creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+    """Persist a thumbs-up/down rating for an assistant message.
+
+    Stored as a sidecar JSON next to the trace log so downstream tools can pick
+    it up without requiring a TigerGraph schema change.
+    """
+    if not message.message_id:
+        raise HTTPException(status_code=400, detail="message_id is required")
+
     try:
-        res = httpx.post(
-            f"{graphrag_config['chat_history_api']}/conversation",
-            json=message.model_dump(),
-            headers={"Authorization": f"Basic {auth}"},
-        )
-        res.raise_for_status()
-    except Exception as e:
+        os.makedirs(TRACE_LOGS_DIR, exist_ok=True)
+        path = os.path.join(TRACE_LOGS_DIR, f"feedback_{message.message_id}.json")
+        payload = {
+            "message_id": message.message_id,
+            "conversation_id": message.conversation_id,
+            "feedback": message.feedback,
+            "comment": message.comment,
+            "role": message.role,
+            "response_type": message.response_type,
+            "timestamp": time.time(),
+        }
+        with open(path, "w") as f:
+            json.dump(payload, f)
+    except Exception:
         exc = traceback.format_exc()
-        logger.debug_pii(
+        LogWriter.error(
             f"/ui/feedback request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise e
+        raise HTTPException(status_code=500, detail="Failed to save feedback")
 
     return {"message": "feedback saved", "message_id": message.message_id}
-
-
-@router.get(route_prefix + "/trace/{message_id}")
-def get_trace_log(
-    message_id: str,
-    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
-):
-    filepath = os.path.join(TRACE_LOGS_DIR, f"{message_id}.json")
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="Trace log not found")
-    with open(filepath, "r") as f:
-        return json.load(f)
-
 
 
 @router.post(route_prefix + "/{graphname}/create_graph")
@@ -788,25 +845,31 @@ async def serve_image_from_vertex(
 @router.get(route_prefix + "/user/{user_id}")
 async def get_user_conversations(
     user_id: str,
+    graphname: Annotated[str, Query(description="TigerGraph graph for chat memory")],
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
-    creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+    graphs, cred = creds
+    validate_graphname(graphname)
+    if graphname not in graphs:
+        raise HTTPException(status_code=403, detail="Insufficient permissions for this graph.")
+    if user_id != cred.username:
+        raise HTTPException(
+            status_code=403,
+            detail="Not authorized to list conversations for another user.",
+        )
+    auth = base64.b64encode(f"{cred.username}:{cred.password}".encode()).decode()
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(
-                f"{graphrag_config['chat_history_api']}/user/{user_id}",
-                headers={"Authorization": f"Basic {auth}"},
-            )
-            res.raise_for_status()
+        _, conn = ws_basic_auth(auth, graphname)
+        convos = await asyncio.to_thread(
+            tg_memory.list_conversations_for_user, conn, graphname, user_id
+        )
+        return convos
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/ui/user/{user_id} request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise e
-
-    return res.json()
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get(route_prefix + "/roles")
@@ -822,76 +885,69 @@ async def get_user_roles(
 @router.get(route_prefix + "/conversation/{conversation_id}")
 async def get_conversation_contents(
     conversation_id: str,
+    graphname: Annotated[str, Query(description="TigerGraph graph for chat memory")],
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
-    creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+    graphs, cred = creds
+    validate_graphname(graphname)
+    if graphname not in graphs:
+        raise HTTPException(status_code=403, detail="Insufficient permissions for this graph.")
+    auth = base64.b64encode(f"{cred.username}:{cred.password}".encode()).decode()
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(
-                f"{graphrag_config['chat_history_api']}/conversation/{conversation_id}",
-                headers={"Authorization": f"Basic {auth}"},
-            )
-            res.raise_for_status()
+        _, conn = ws_basic_auth(auth, graphname)
+        if not tg_memory.verify_conversation_owner(conn, graphname, conversation_id, cred.username):
+            raise HTTPException(status_code=403, detail="Conversation not found or access denied.")
+        rows = await asyncio.to_thread(
+            tg_memory.list_messages_sorted_by_epoch,
+            conn,
+            graphname,
+            conversation_id,
+        )
+        model_name = get_chat_config(graphname).get("llm_model", "unknown")
+        messages = tg_memory.conversation_rows_to_ui_messages(
+            conversation_id, rows, model_name=model_name
+        )
+        return messages
+    except HTTPException:
+        raise
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/conversation/{conversation_id} request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise e
-
-    return res.json()
-
-@router.get(route_prefix + "/get_feedback")
-async def get_conversation_feedback(
-    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
-):
-    creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
-    try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(
-                f"{graphrag_config['chat_history_api']}/get_feedback",
-                headers={"Authorization": f"Basic {auth}"},
-            )
-            res.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error occurred: {e}")
-        raise HTTPException(status_code=e.response.status_code, detail="Failed to fetch feedback")
-    except Exception as e:
-        exc = traceback.format_exc()
-        logger.debug_pii(
-            f"/get_feedback request_id={req_id_cv.get()} Exception Trace:\n{exc}"
-        )
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-    return res.json()
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.delete(route_prefix + "/conversation/{conversation_id}")
 async def delete_conversation(
     conversation_id: str,
+    graphname: Annotated[str, Query(description="TigerGraph graph for chat memory")],
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
-    """Delete a conversation and all its messages."""
-    creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+    """Delete a conversation and all its messages from TigerGraph memory."""
+    graphs, cred = creds
+    validate_graphname(graphname)
+    if graphname not in graphs:
+        raise HTTPException(status_code=403, detail="Insufficient permissions for this graph.")
+    auth = base64.b64encode(f"{cred.username}:{cred.password}".encode()).decode()
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.delete(
-                f"{graphrag_config['chat_history_api']}/conversation/{conversation_id}",
-                headers={"Authorization": f"Basic {auth}"},
-            )
-            res.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error occurred: {e}")
-        raise HTTPException(status_code=e.response.status_code, detail="Failed to delete conversation")
+        _, conn = ws_basic_auth(auth, graphname)
+        if not tg_memory.verify_conversation_owner(conn, graphname, conversation_id, cred.username):
+            raise HTTPException(status_code=403, detail="Conversation not found or access denied.")
+        await asyncio.to_thread(
+            tg_memory.delete_conversation_thread,
+            conn,
+            graphname,
+            conversation_id,
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/conversation/{conversation_id} DELETE request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     return {"message": "Conversation deleted successfully"}
 
@@ -920,6 +976,10 @@ async def run_agent(
     conversation_history: list[dict[str, str]],
     graphname,
     ws: WebSocket,
+    *,
+    conn: TigerGraphConnection | None = None,
+    convo_id: str | None = None,
+    memory_enabled: bool = False,
 ) -> GraphRAGResponse:
     resp = GraphRAGResponse(
         natural_language_response="", answered_question=False, response_type="inquiryai"
@@ -930,9 +990,19 @@ async def run_agent(
 
         async with asyncio.TaskGroup() as tg:
             # run agent
+            if memory_enabled and conn is not None and convo_id:
+                ctx_for_agent = await asyncio.to_thread(
+                    build_agent_context,
+                    conn,
+                    graphname,
+                    convo_id,
+                    question=data or "",
+                )
+            else:
+                ctx_for_agent = conversation_history[-4:]
             a_resp = tg.create_task(
                 # TODO: make num mesages in history configureable
-                a_question_for_agent(data, conversation_history[-4:])
+                a_question_for_agent(data, ctx_for_agent)
             )
             # sample Q and emit events
             if ws:
@@ -979,70 +1049,39 @@ async def run_agent(
     return resp
 
 
-async def load_conversation_history(conversation_id: str, usr_auth: str) -> list[dict[str, str]]:
+async def load_conversation_history(
+    conn: TigerGraphConnection,
+    graphname: str,
+    conversation_id: str,
+) -> list[dict[str, str]]:
     """
-    Load conversation history from the chat history service.
+    Load conversation history from TigerGraph chat memory for the agent.
     Returns a list of dicts with 'query', 'response', 'create_ts', and 'update_ts' keys.
     """
     if not conversation_id or conversation_id == "new":
         return []
-    
-    ch = graphrag_config.get("chat_history_api")
-    if ch is None:
-        LogWriter.info("chat-history not enabled, returning empty history")
+    if not tg_memory.tg_memory_enabled(graphname):
         return []
-    
-    headers = {"Authorization": f"Basic {usr_auth}"}
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(
-                f"{ch}/conversation/{conversation_id}",
-                headers=headers,
-            )
-            res.raise_for_status()
-            conversation_data = res.json()
-            # Convert conversation messages to the format expected by the agent
-            history = []
-            for msg in conversation_data:
-                if msg.get("role") == "user":
-                    # Find the corresponding system response
-                    for response_msg in conversation_data:
-                        if (response_msg.get("role") == "system" and 
-                            response_msg.get("parent_id") == msg.get("message_id")):
-                            history.append({
-                                "query": msg.get("content", ""),
-                                "response": response_msg.get("content", ""),
-                                "create_ts": response_msg.get("create_ts"),
-                                "update_ts": response_msg.get("update_ts"),
-                            })
-                            break
-            
-            LogWriter.info(f"Loaded {len(history)} conversation history entries for conversation {conversation_id}")
-            return history
-            
+        rows = await asyncio.to_thread(
+            tg_memory.list_messages_sorted_by_epoch,
+            conn,
+            graphname,
+            conversation_id,
+        )
+        history = tg_memory.agent_history_from_messages(rows)
+        LogWriter.info(
+            f"Loaded {len(history)} conversation history entries for conversation {conversation_id}"
+        )
+        return history
     except Exception as e:
         exc = traceback.format_exc()
-        logger.debug_pii(f"Error loading conversation history for {conversation_id}\nException Trace:\n{exc}")
+        logger.debug_pii(
+            f"Error loading conversation history for {conversation_id}\nException Trace:\n{exc}"
+        )
         LogWriter.warning(f"Failed to load conversation history for {conversation_id}: {e}")
         return []
 
-
-async def write_message_to_history(message: Message, usr_auth: str):
-    ch = graphrag_config.get("chat_history_api")
-    if ch is not None:
-        headers = {"Authorization": f"Basic {usr_auth}"}
-        try:
-            async with httpx.AsyncClient() as client:
-                res = await client.post(
-                    f"{ch}/conversation", headers=headers, json=message.model_dump()
-                )
-                res.raise_for_status()
-        except Exception:  # catch all exceptions to log them, but don't raise
-            exc = traceback.format_exc()
-            logger.debug_pii(f"Error writing chat history\nException Trace:\n{exc}")
-
-    else:
-        LogWriter.info(f"chat-history not enabled. chat-history url: {ch}")
 
 @router.get(route_prefix + "/{graphname}/query")
 async def graph_query(
@@ -1056,13 +1095,25 @@ async def graph_query(
     auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
     _, conn = ws_basic_auth(auth, graphname)
     try:
-        # Load conversation history if conversation_id is provided
-        conversation_history = await load_conversation_history(conversation_id, auth) if conversation_id else []
+        started_new = not conversation_id or conversation_id == "new"
+        conversation_history = (
+            await load_conversation_history(conn, graphname, conversation_id)
+            if conversation_id and not started_new
+            else []
+        )
 
         # Use provided conversation ID or generate new one
-        if not conversation_id or conversation_id == "new":
+        if started_new:
             convo_id = str(uuid.uuid4())
             LogWriter.info(f"Starting new conversation with ID: {convo_id}")
+            if tg_memory.tg_memory_enabled(graphname):
+                await asyncio.to_thread(
+                    tg_memory.ensure_conversation_shell_for_ui,
+                    conn,
+                    graphname,
+                    convo_id,
+                    creds.username,
+                )
         else:
             convo_id = conversation_id
             LogWriter.info(f"Continuing conversation with ID: {convo_id}")
@@ -1072,34 +1123,33 @@ async def graph_query(
         rag_pattern = rag_pattern or "hybridsearch"
         agent = make_agent(graphname, conn, use_cypher, supportai_retriever=rag_pattern)
 
-        prev_id = None
         data = q
 
-        # make message from data
-        message = Message(
-            conversation_id=convo_id,
-            message_id=str(uuid.uuid4()),
-            parent_id=prev_id,
-            model=get_chat_config(graphname).get("llm_model", "unknown"),
-            content=data,
-            role=Role.USER,
+        mem = get_memory_config(graphname)
+        memory_enabled = (
+            bool(mem.get("enabled"))
+            and str(mem.get("mode") or "").lower() == "hybrid"
+            and tg_memory.tg_memory_enabled(graphname)
         )
-        # save message
-        await write_message_to_history(message, auth)
-        prev_id = message.message_id
 
         # generate response and keep track of response time
         start = time.monotonic()
         resp = await run_agent(
-            agent, data, conversation_history, graphname, None
+            agent,
+            data,
+            conversation_history,
+            graphname,
+            None,
+            conn=conn,
+            convo_id=convo_id,
+            memory_enabled=memory_enabled,
         )
         elapsed = time.monotonic() - start
 
-        # save message
         message = Message(
             conversation_id=convo_id,
             message_id=str(uuid.uuid4()),
-            parent_id=prev_id,
+            parent_id=None,
             model=get_chat_config(graphname).get("llm_model", "unknown"),
             content=resp.natural_language_response,
             role=Role.SYSTEM,
@@ -1108,9 +1158,24 @@ async def graph_query(
             response_type=resp.response_type,
             query_sources=resp.query_sources,
         )
-        await write_message_to_history(message, auth)
-        await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed)
-        prev_id = message.message_id
+        trace_data = await asyncio.to_thread(
+            _save_trace_log, message.message_id, convo_id, data, resp, elapsed
+        )
+        if tg_memory.tg_memory_enabled(graphname):
+            await asyncio.to_thread(
+                tg_memory.write_exchange_to_tg_memory,
+                conn,
+                graphname,
+                convo_id,
+                creds.username,
+                data or "",
+                resp.natural_language_response or "",
+                tracelog=json.dumps(trace_data, default=str) if trace_data else "",
+                exchange_message_id=message.message_id,
+                is_new_conversation=started_new,
+            )
+            if memory_enabled:
+                asyncio.create_task(refresh_summary_async(conn, graphname, convo_id))
 
         # reply
         return message.model_dump_json()
@@ -1150,6 +1215,7 @@ async def chat(
         usr_auth = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         logger.info(f"Received authentication data, length: {len(usr_auth)}")
         _, conn = ws_basic_auth(usr_auth, graphname)
+        tg_chat_user = base64.b64decode(usr_auth.encode()).decode().split(":", 1)[0]
         logger.info("Authentication successful")
     except asyncio.TimeoutError:
         logger.error("WebSocket authentication timeout - no credentials received")
@@ -1180,11 +1246,17 @@ async def chat(
         f"(graph={graphname}, rag_pattern={rag_pattern})"
     )
     
+    started_new_conversation = conversation_id == "new" or not conversation_id
+
     # Load conversation history if not a new conversation
-    conversation_history = await load_conversation_history(conversation_id, usr_auth)
-    
+    conversation_history = (
+        await load_conversation_history(conn, graphname, conversation_id)
+        if not started_new_conversation
+        else []
+    )
+
     # Use provided conversation ID or generate new one
-    if conversation_id == "new" or not conversation_id:
+    if started_new_conversation:
         convo_id = str(uuid.uuid4())
         LogWriter.info(f"Starting new conversation with ID: {convo_id}")
     else:
@@ -1194,35 +1266,44 @@ async def chat(
     # Send conversation ID to frontend
     await websocket.send_text(json.dumps({"conversation_id": convo_id}))
 
+    if started_new_conversation and tg_memory.tg_memory_enabled(graphname):
+        await asyncio.to_thread(
+            tg_memory.ensure_conversation_shell_for_ui,
+            conn,
+            graphname,
+            convo_id,
+            tg_chat_user,
+        )
+
     # create agent
     agent = make_agent(graphname, conn, use_cypher, ws=websocket, supportai_retriever=rag_pattern)
+
+    mem = get_memory_config(graphname)
+    memory_enabled = (
+        bool(mem.get("enabled"))
+        and str(mem.get("mode") or "").lower() == "hybrid"
+        and tg_memory.tg_memory_enabled(graphname)
+    )
 
     prev_id = None
     try:
         while True:
             data = await websocket.receive_text()
 
-            # make message from data
-            message = Message(
-                conversation_id=convo_id,
-                message_id=str(uuid.uuid4()),
-                parent_id=prev_id,
-                model=get_chat_config(graphname).get("llm_model", "unknown"),
-                content=data,
-                role=Role.USER,
-            )
-            # save message
-            await write_message_to_history(message, usr_auth)
-            prev_id = message.message_id
-
             # generate response and keep track of response time
             start = time.monotonic()
             resp = await run_agent(
-                agent, data, conversation_history, graphname, websocket
+                agent,
+                data,
+                conversation_history,
+                graphname,
+                websocket,
+                conn=conn,
+                convo_id=convo_id,
+                memory_enabled=memory_enabled,
             )
             elapsed = time.monotonic() - start
 
-            # save message
             message = Message(
                 conversation_id=convo_id,
                 message_id=str(uuid.uuid4()),
@@ -1235,8 +1316,25 @@ async def chat(
                 response_type=resp.response_type,
                 query_sources=resp.query_sources,
             )
-            await write_message_to_history(message, usr_auth)
-            await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed)
+            trace_data = await asyncio.to_thread(
+                _save_trace_log, message.message_id, convo_id, data, resp, elapsed
+            )
+            if tg_memory.tg_memory_enabled(graphname):
+                await asyncio.to_thread(
+                    tg_memory.write_exchange_to_tg_memory,
+                    conn,
+                    graphname,
+                    convo_id,
+                    tg_chat_user,
+                    data,
+                    resp.natural_language_response or "",
+                    tracelog=json.dumps(trace_data, default=str) if trace_data else "",
+                    exchange_message_id=message.message_id,
+                    is_new_conversation=started_new_conversation,
+                )
+                if memory_enabled:
+                    asyncio.create_task(refresh_summary_async(conn, graphname, convo_id))
+            started_new_conversation = False
             prev_id = message.message_id
 
             # reply

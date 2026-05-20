@@ -52,12 +52,29 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { FaPaperclip } from "react-icons/fa6";
 import { useEffect, useCallback } from "react";
-import { conversationManager } from "../actions/ActionProvider";
+import { conversationManager, persistActiveThread } from "../actions/ActionProvider";
 import { useNavigate } from "react-router-dom";
 
 // TODO make dynamic
 const WS_HISTORY_URL = "/ui/user";
 const WS_CONVO_URL = "/ui/conversation";
+
+function resolveChatUsername(): string | null {
+  const stored = sessionStorage.getItem("username");
+  if (stored) {
+    return stored;
+  }
+  const creds = sessionStorage.getItem("creds");
+  if (!creds) {
+    return null;
+  }
+  try {
+    const user = atob(creds).split(":")[0];
+    return user || null;
+  } catch {
+    return null;
+  }
+}
 
 const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetConversationId?: any }) => {
   const getTheme = useTheme().theme;
@@ -73,13 +90,19 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
   const fetchHistory2 = useCallback(async () => {
     setConversationId([]);
     const creds = sessionStorage.getItem("creds");
-    const username = sessionStorage.getItem("username");
+    const username = resolveChatUsername();
 
     if (!username) {
       return;
     }
 
     if (!creds) {
+      return;
+    }
+
+    const graphname = sessionStorage.getItem("selectedGraph");
+    if (!graphname) {
+      setConversationId([]);
       return;
     }
 
@@ -91,7 +114,10 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
       }
     }
     try {
-      const response = await fetch(`${WS_HISTORY_URL}/${username}`, settings);
+      const response = await fetch(
+        `${WS_HISTORY_URL}/${encodeURIComponent(username)}?graphname=${encodeURIComponent(graphname)}`,
+        settings
+      );
 
       if (!response.ok) {
         setConversationId([]);
@@ -116,7 +142,10 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
       // Wait for all conversation details to be fetched
       const conversationPromises = sortedData.map(async (item: any) => {
         try {
-          const response2 = await fetch(`${WS_CONVO_URL}/${item.conversation_id}`, settings);
+          const response2 = await fetch(
+            `${WS_CONVO_URL}/${encodeURIComponent(item.conversation_id)}?graphname=${encodeURIComponent(graphname)}`,
+            settings
+          );
           if (!response2.ok) {
             return null;
           }
@@ -199,7 +228,14 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
         }
       }
 
-      const response = await fetch(`${WS_CONVO_URL}/${id}`, settings);
+      const graphForConvo = sessionStorage.getItem("selectedGraph");
+      if (!graphForConvo) {
+        return;
+      }
+      const response = await fetch(
+        `${WS_CONVO_URL}/${encodeURIComponent(id)}?graphname=${encodeURIComponent(graphForConvo)}`,
+        settings
+      );
       if (!response.ok) {
         return;
       }
@@ -207,8 +243,8 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
       const data = await response.json();
       setConversationId2(data);
 
-      // Store the conversation data in sessionStorage for the chat component
       sessionStorage.setItem('selectedConversationData', JSON.stringify(data));
+      persistActiveThread(id, graphForConvo);
 
       // Force reload to restart the WebSocket connection with the conversation ID
       // This ensures the Bot component re-initializes and loads the conversation messages
@@ -366,10 +402,12 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
 
     window.addEventListener('conversationCreated', handleConversationEvent);
     window.addEventListener('conversationUpdated', handleConversationEvent);
+    window.addEventListener('graphrag:selectedGraph', handleConversationEvent);
 
     return () => {
       window.removeEventListener('conversationCreated', handleConversationEvent);
       window.removeEventListener('conversationUpdated', handleConversationEvent);
+      window.removeEventListener('graphrag:selectedGraph', handleConversationEvent);
     };
   }, [fetchHistory2]);
 
