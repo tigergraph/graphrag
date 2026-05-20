@@ -11,7 +11,8 @@
   "graphrag_config": {
     "reuse_embedding": true,
     "ecc": "http://graphrag-ecc:8001",
-    "chat_history_api": "http://chat-history:8002",
+    "tg_memory_schema_on_startup": true,
+    "tg_memory_enabled": true,
     "chunker_config": {}
   },
   "llm_config": {
@@ -40,14 +41,19 @@
       }
     }
   },
-  "chat_config": {
-    "apiPort": "8002",
-    "dbPath": "chats.db",
-    "dbLogPath": "db.log",
-    "logPath": "requestLogs.jsonl",
-    "conversationAccessRoles": [
-      "superuser",
-      "globaldesigner"
-    ]
+  "memory": {
+    "mode": "hybrid",
+    "enabled": false,
+    "recent_budget_tokens": 1200,
+    "total_context_cap_tokens": 4000,
+    "reserve_for_answer_tokens": 800,
+    "summary_sub_cap_ratio": 0.4,
+    "summary_min_turns": 10,
+    "summary_refresh_every_turns": 4,
+    "summary_max_tokens": 800,
+    "summary_max_covered_messages_per_vertex": 50,
+    "summary_model": null,
+    "recall_enabled": false,
+    "verifier_enabled": false
   }
 }

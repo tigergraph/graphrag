@@ -2,7 +2,7 @@ import "react-chatbot-kit/build/main.css";
 import { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import Chatbot from "react-chatbot-kit";
-import ActionProvider from "../actions/ActionProvider.js";
+import ActionProvider, { conversationManager } from "../actions/ActionProvider.js";
 import config from "../actions/config.js";
 import MessageParser from "../actions/MessageParser.js";
 import { MdKeyboardArrowDown } from "react-icons/md";
@@ -46,6 +46,7 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
         const firstGraph = availableGraphs[0];
         setSelectedGraph(firstGraph);
         sessionStorage.setItem("selectedGraph", firstGraph);
+        window.dispatchEvent(new Event("graphrag:selectedGraph"));
       } else {
         setSelectedGraph('');
         sessionStorage.removeItem("selectedGraph");
@@ -83,11 +84,17 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
   }, [location]);
 
   const handleSelect = (value) => {
+    const prev = sessionStorage.getItem("selectedGraph");
+    if (prev && prev !== value) {
+      sessionStorage.removeItem("selectedConversationData");
+      sessionStorage.removeItem("graphrag:activeConversationId");
+      sessionStorage.removeItem("graphrag:activeConversationGraph");
+      conversationManager.clearConversation();
+    }
     setSelectedGraph(value);
     sessionStorage.setItem("selectedGraph", value);
     window.dispatchEvent(new Event("graphrag:selectedGraph"));
     navigate("/chat");
-    //window.location.reload();
   };
 
   const handleSelectRag = (value) => {

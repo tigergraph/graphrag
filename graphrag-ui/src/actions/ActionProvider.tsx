@@ -1,4 +1,4 @@
-import React, {useState, useRef, useCallback, useEffect, useContext} from 'react';
+import React, {useState, useRef, useCallback, useEffect, useLayoutEffect, useContext} from 'react';
 import {createClientMessage} from 'react-chatbot-kit';
 import useWebSocket, {ReadyState} from 'react-use-websocket';
 import Loader from '../components/Loader';
@@ -12,12 +12,14 @@ interface ActionProviderProps {
 
 export enum Feedback {
   NoFeedback = 0,
-  LIKE,
-  DISLIKE,
+  LIKE = 1,
+  DISLIKE = 2,
 }
+
 export interface Message {
   conversationId: string;
   messageId: string;
+  message_id?: string;
   parentId: string;
   modelName: string;
   content: string;
@@ -25,8 +27,23 @@ export interface Message {
   response_type: string;
   query_sources: any;
   role: string;
-  feedback: Feedback;
-  comment: string;
+  feedback?: Feedback;
+  comment?: string;
+}
+
+/** Persist last active TG thread per graph — restored after full page reload. */
+const ACTIVE_CONVO_ID_KEY = "graphrag:activeConversationId";
+const ACTIVE_CONVO_GRAPH_KEY = "graphrag:activeConversationGraph";
+
+function clearPersistedActiveThread(): void {
+  sessionStorage.removeItem(ACTIVE_CONVO_ID_KEY);
+  sessionStorage.removeItem(ACTIVE_CONVO_GRAPH_KEY);
+}
+
+function persistActiveThread(conversationId: string, graphName: string): void {
+  if (!conversationId || !graphName) return;
+  sessionStorage.setItem(ACTIVE_CONVO_ID_KEY, conversationId);
+  sessionStorage.setItem(ACTIVE_CONVO_GRAPH_KEY, graphName);
 }
 
 // Conversation manager functionality
@@ -52,6 +69,7 @@ const conversationManager = {
   // Start a new conversation
   startNewConversation: () => {
     currentConversationId = null;
+    clearPersistedActiveThread();
     if (onNewConversationCallback) {
       onNewConversationCallback();
     }
@@ -72,7 +90,7 @@ const conversationManager = {
 };
 
 // Export conversation manager for use in other components
-export { conversationManager };
+export { conversationManager, persistActiveThread };
 
 const ActionProvider: React.FC<ActionProviderProps> = ({
   createChatBotMessage,
@@ -86,104 +104,211 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
   const [messageHistory, setMessageHistory] = useState<MessageEvent<Message>[]>(
     [],
   );
-  const { sendMessage, lastMessage, readyState } = useWebSocket(WS_URL, {
-    onOpen: () => {
-      // Send authentication credentials
-      const creds = sessionStorage.getItem("creds");
-      console.log("Sending credentials, length:", creds ? creds.length : 0);
-      queryGraphragWs2(creds!);
 
-      // Send RAG pattern
-      //sendMessage(selectedRagPattern);
+  // Runs before browser paint — must set conversation id before the WebSocket onOpen handshake.
+  useLayoutEffect(() => {
+    const graph = (selectedGraph || sessionStorage.getItem("selectedGraph") || "").trim();
 
-      // Send conversation ID (or "new" for new conversation)
-      const conversationId = conversationManager.getCurrentConversationId();
-      const conversationIdToSend = conversationId || "new";
-      console.log("WebSocket connection " + conversationIdToSend + " established to " + WS_URL);
-      sendMessage(conversationIdToSend);
-    },
-    onError: (error) => {
-      console.error("WebSocket error:", error);
-    },
-    onClose: (event) => {
-      console.log("WebSocket closed:", event.code, event.reason);
-    },
-    shouldReconnect: (closeEvent) => {
-      console.log("WebSocket should reconnect:", closeEvent.code !== 1000);
-      return closeEvent.code !== 1000; // Don't reconnect on normal closure
-    },
-  });
+    const resumeRaw = sessionStorage.getItem("selectedConversationData");
+    let cid: string | null = null;
 
-  // Initialize conversation manager and load conversation messages
+    if (resumeRaw) {
+      try {
+        const data = JSON.parse(resumeRaw);
+        if (Array.isArray(data) && data.length > 0) {
+          cid = data[0].conversation_id ?? null;
+        } else if (Array.isArray(data.messages) && data.messages?.length > 0) {
+          cid = data.messages[0]?.conversation_id ?? null;
+        } else if (Array.isArray(data.content) && data.content?.length > 0) {
+          cid = data.conversation_id ?? data.content[0]?.conversation_id ?? null;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (!cid && graph) {
+      const ag = sessionStorage.getItem(ACTIVE_CONVO_GRAPH_KEY);
+      const aid = sessionStorage.getItem(ACTIVE_CONVO_ID_KEY);
+      if (aid && ag === graph) {
+        cid = aid;
+      }
+    }
+
+    if (cid) {
+      conversationManager.loadConversation(cid);
+    }
+  }, [selectedGraph]);
+
+  const { sendMessage, lastMessage, readyState } = useWebSocket(
+    WS_URL,
+    {
+      onOpen: () => {
+        const creds = sessionStorage.getItem("creds");
+        console.log("Sending credentials, length:", creds ? creds.length : 0);
+        queryGraphragWs2(creds!);
+
+        const conversationId = conversationManager.getCurrentConversationId();
+        const conversationIdToSend = conversationId || "new";
+        console.log(
+          "WebSocket connection " + conversationIdToSend + " established to " + WS_URL,
+        );
+        sendMessage(conversationIdToSend);
+      },
+      onError: (error) => {
+        console.error("WebSocket error:", error);
+      },
+      onClose: (event) => {
+        console.log("WebSocket closed:", event.code, event.reason);
+      },
+      shouldReconnect: (closeEvent) => {
+        console.log("WebSocket should reconnect:", closeEvent.code !== 1000);
+        return closeEvent.code !== 1000; // Don't reconnect on normal closure
+      },
+    },
+    Boolean(selectedGraph),
+  );
+
+  // Hydrate chat from session (sidebar resume) or fetch last active thread after reload
   useEffect(() => {
-    const selectedConversationData = sessionStorage.getItem('selectedConversationData');
+    let cancelled = false;
+
+    const applySortedMessages = (sortedMessages: any[]) => {
+      const loadedMessages: any[] = [];
+      let lastUserContent = "";
+      const conversationWindow: { role: string; content: string }[] = [];
+
+      sortedMessages.forEach((msg: any) => {
+        if (msg.role === "user") {
+          lastUserContent = msg.content || "";
+          conversationWindow.push({ role: "user", content: lastUserContent });
+          if (conversationWindow.length > 4) conversationWindow.shift();
+          const userMessage = createClientMessage(msg.content || "", {
+            delay: 0,
+          });
+          loadedMessages.push(userMessage);
+        } else if (msg.role === "system") {
+          const userQuery = msg.user_query || lastUserContent || "";
+          const botMessage = createChatBotMessage({
+            content: msg.content || "",
+            response_type: "history",
+            query_sources: msg.query_sources ?? {},
+            answered_question: msg.answered_question,
+            response_time: msg.response_time,
+            message_id: msg.message_id,
+            messageId: msg.message_id,
+            user_query: userQuery,
+            userQuery,
+            conversation: [...conversationWindow],
+          });
+          conversationWindow.push({
+            role: "assistant",
+            content: msg.content || "",
+          });
+          if (conversationWindow.length > 4) conversationWindow.shift();
+          loadedMessages.push(botMessage);
+        }
+      });
+
+      if (loadedMessages.length > 0) {
+        setState((prev: any) => ({
+          ...prev,
+          messages: loadedMessages,
+        }));
+      }
+    };
+
+    const hydrateFromApiArray = (messages: any[], conversationId: string | null) => {
+      if (conversationId) {
+        conversationManager.setCurrentConversationId(conversationId);
+      }
+      const sortedMessages = [...messages].sort((a: any, b: any) => {
+        const timeA = a.create_ts ? new Date(a.create_ts).getTime() : 0;
+        const timeB = b.create_ts ? new Date(b.create_ts).getTime() : 0;
+        return timeA - timeB;
+      });
+      applySortedMessages(sortedMessages);
+    };
+
+    const selectedConversationData = sessionStorage.getItem("selectedConversationData");
     if (selectedConversationData) {
       try {
         const data = JSON.parse(selectedConversationData);
 
-        // Handle different data structures
         let messages: any[] = [];
         let conversationId: string | null = null;
 
         if (Array.isArray(data) && data.length > 0) {
-          // Direct array of messages from API
           messages = data;
           conversationId = data[0].conversation_id;
         } else if (data.messages && Array.isArray(data.messages)) {
-          // Wrapped in messages property
           messages = data.messages;
           conversationId = data.messages[0]?.conversation_id;
         } else if (data.content && Array.isArray(data.content)) {
-          // Wrapped in content property (from fetchHistory2)
           messages = data.content;
           conversationId = data.conversation_id || data.content[0]?.conversation_id;
         }
 
-        if (conversationId) {
-          conversationManager.setCurrentConversationId(conversationId);
+        // Only short-circuit when we actually restored messages. If session holds
+        // stale/empty JSON (truthy string but no rows), fall through so
+        // graphrag:activeConversationId + GET /ui/conversation can still hydrate.
+        if (messages.length > 0 && conversationId) {
+          hydrateFromApiArray(messages, conversationId);
+          return () => {
+            cancelled = true;
+          };
         }
-
-        // Load conversation messages into the chat UI
-        // Sort messages by timestamp if available to maintain chronological order
-        const sortedMessages = [...messages].sort((a: any, b: any) => {
-          const timeA = a.create_ts ? new Date(a.create_ts).getTime() : 0;
-          const timeB = b.create_ts ? new Date(b.create_ts).getTime() : 0;
-          return timeA - timeB; // Oldest first
-        });
-
-        const loadedMessages: any[] = [];
-
-        sortedMessages.forEach((msg: any) => {
-          if (msg.role === "user") {
-            // Create user message
-            const userMessage = createClientMessage(msg.content || "", {
-              delay: 0,
-            });
-            loadedMessages.push(userMessage);
-          } else if (msg.role === "system") {
-            // Create bot message
-            const botMessage = createChatBotMessage({
-              content: msg.content || "",
-              response_type: "history",
-              query_sources: msg.query_sources,
-              answered_question: msg.answered_question,
-            });
-            loadedMessages.push(botMessage);
-          }
-        });
-
-        // Set the loaded messages in the chat state
-        if (loadedMessages.length > 0) {
-          setState((prev: any) => ({
-            ...prev,
-            messages: loadedMessages,
-          }));
-        }
-      } catch (error) {
-        // Silently handle error parsing conversation data
+      } catch {
+        /* ignore — fall through to TG restore */
       }
     }
-  }, [createChatBotMessage, createClientMessage, setState]);
+
+    const graph = (selectedGraph || sessionStorage.getItem("selectedGraph") || "").trim();
+    const aid = sessionStorage.getItem(ACTIVE_CONVO_ID_KEY);
+    const ag = sessionStorage.getItem(ACTIVE_CONVO_GRAPH_KEY);
+    if (!graph || !aid || ag !== graph) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const creds = sessionStorage.getItem("creds");
+    if (!creds) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    (async () => {
+      try {
+        const response = await fetch(
+          `/ui/conversation/${encodeURIComponent(aid)}?graphname=${encodeURIComponent(graph)}`,
+          {
+            method: "GET",
+            headers: {
+              Authorization: `Basic ${creds}`,
+              "Content-Type": "application/json",
+            },
+          },
+        );
+        if (!response.ok || cancelled) {
+          return;
+        }
+        const data = await response.json();
+        if (!Array.isArray(data) || data.length === 0 || cancelled) {
+          return;
+        }
+        const conversationId = data[0].conversation_id ?? aid;
+        hydrateFromApiArray(data, conversationId);
+      } catch {
+        /* ignore */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedGraph, createChatBotMessage, createClientMessage, setState]);
 
   // eslint-disable-next-line
   // @ts-ignore
@@ -226,9 +351,6 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
       messages: [...prev.messages, loading],
     }));
 
-    // Dispatch event to refresh conversation list when user sends a question
-    // This ensures the side menu updates when a new message is sent
-    window.dispatchEvent(new CustomEvent('conversationUpdated'));
   };
 
   // FOR REFERENCE
@@ -265,15 +387,32 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
       try {
         const messageData = JSON.parse(lastMessage.data);
 
-        // Check if this is a conversation ID message (first message from backend)
-        if (messageData.conversation_id && !messageData.content) {
+        // Handshake-only payload is {"conversation_id": "..."}; do not confuse with replies that have empty text.
+        if (
+          messageData.conversation_id &&
+          messageData.message_id == null &&
+          messageData.messageId == null
+        ) {
           conversationManager.setCurrentConversationId(messageData.conversation_id);
-          // Don't dispatch refresh event here - refresh happens when user sends the question
-          return; // Don't create a bot message for conversation ID
+          const gHandshake = (
+            sessionStorage.getItem("selectedGraph") ||
+            selectedGraph ||
+            ""
+          ).trim();
+          if (gHandshake) {
+            persistActiveThread(messageData.conversation_id, gHandshake);
+          }
+          window.dispatchEvent(new CustomEvent("conversationCreated"));
+          return;
         }
 
         // Attach the user query so the trace page can display it
         messageData.userQuery = lastUserQueryRef.current;
+        messageData.user_query = lastUserQueryRef.current;
+
+        const isProgressUpdate =
+          messageData.response_type === "progress" ||
+          messageData.response_type === "PROGRESS";
 
         // Handle regular bot messages
         const botMessage = createChatBotMessage(messageData);
@@ -281,6 +420,19 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
           const newPrevMsg = prev.messages.slice(0, -1);
           return {...prev, messages: [...newPrevMsg, botMessage]};  
         });
+
+        // Sidebar lists from TigerGraph after each completed assistant turn (persisted server-side).
+        if (
+          !isProgressUpdate &&
+          (messageData.message_id || messageData.messageId)
+        ) {
+          const g =
+            (sessionStorage.getItem("selectedGraph") || selectedGraph || "").trim();
+          if (messageData.conversation_id && g) {
+            persistActiveThread(messageData.conversation_id, g);
+          }
+          window.dispatchEvent(new CustomEvent("conversationUpdated"));
+        }
       } catch (error) {
         console.error("Error parsing WebSocket message:", error);
         // Handle string messages (progress updates)
@@ -296,7 +448,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
         }
       }
     }
-  }, [lastMessage]);
+  }, [lastMessage, selectedGraph, createChatBotMessage, setState]);
 
   // FOR REFERENCE
   // const queryGraphrag = async (usrMsg: string) => {

@@ -53,16 +53,6 @@ jobs:
            ${{ env.IMAGE }}
            tigergraph/graphrag-ecc:dev
 
-    - name: Build and push Docker image chat-history
-      uses: docker/build-push-action@v5
-      with:
-        context: chat-history/
-        file: ./chat-history/Dockerfile
-        push: true
-        tags: |
-           ${{ env.IMAGE }}
-           tigergraph/chat-history:dev
-
     - name: Build and push Docker image graphrag-ui
       uses: docker/build-push-action@v5
       with:

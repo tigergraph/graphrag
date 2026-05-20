@@ -1,4 +1,4 @@
 node_modules
-*-lock.*
+pnpm-lock.yaml
 .gitignore
 
