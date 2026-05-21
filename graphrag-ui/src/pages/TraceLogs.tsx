@@ -1,6 +1,8 @@
 import { FC, useState, useMemo, useEffect } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import {
   LuArrowLeft,
   LuChevronDown,
@@ -13,8 +15,6 @@ import {
   LuCoins,
   LuInfo,
 } from "react-icons/lu";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -125,13 +125,7 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
   const sessionTs = now.toISOString().replace(/[-:T]/g, "").slice(0, 15);
   const sessionId = `chat_${sessionTs}`;
 
-  const query =
-    userQuery ||
-    message?.user_query ||
-    message?.originalQuery ||
-    message?.userQuery ||
-    message?.query ||
-    "N/A";
+  const query = userQuery || message?.originalQuery || message?.query || "N/A";
   const qs = message?.query_sources || {};
   const totalResponseTime = message?.response_time || 0;
   const ts = now.toLocaleTimeString();
@@ -231,33 +225,9 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
     { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: 0 } as TokenUsage
   );
 
-  const conversationLines: string[] = [];
-  const rawConvo = message?.conversation;
-  if (Array.isArray(rawConvo)) {
-    rawConvo.forEach((entry: any) => {
-      if (!entry) return;
-      if (typeof entry.role === "string" && typeof entry.content === "string") {
-        conversationLines.push(`${entry.role}: ${entry.content}`);
-        return;
-      }
-      if (typeof entry.query === "string" && entry.query) {
-        conversationLines.push(`user: ${entry.query}`);
-      }
-      if (typeof entry.response === "string" && entry.response) {
-        conversationLines.push(`assistant: ${entry.response}`);
-      }
-    });
-  }
-  if (conversationLines.length === 0) {
-    conversationLines.push(`user: ${query}`);
-  }
-
-  const finalResponse =
-    message?.natural_language_response || message?.content || "";
-
   return {
     originalQuery: query,
-    conversationContext: conversationLines,
+    conversationContext: [`user: ${query}`],
     status: "completed",
     sessionId,
     timing: {
@@ -272,7 +242,7 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
     citations,
     timeline,
     tokenUsage,
-    finalResponse,
+    finalResponse: message?.content || "",
   };
 }
 
@@ -732,45 +702,54 @@ const TokenOverviewPanel: FC<{ trace: TraceData }> = ({ trace }) => {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
-const TraceLogs: FC = () => {
+interface TraceLogsProps {
+  // When provided, the component renders inside a Dialog and uses these
+  // props instead of route params / location state. Closing the dialog
+  // calls onClose. When omitted, the component renders as a full page
+  // route (the original ``/trace/:messageId`` behaviour, kept for
+  // direct-link backward compat).
+  messageIdProp?: string;
+  onClose?: () => void;
+}
+
+const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { graphname: graphParam, messageId } = useParams<{
-    graphname?: string;
-    messageId: string;
-  }>();
+  const params = useParams<{ messageId: string }>();
+  const messageId = messageIdProp || params.messageId;
+  const isDialog = !!onClose;
 
-  const stateMessage = location.state?.message;
-  const stateUserQuery = location.state?.userQuery;
-
-  // Check sessionStorage for message stored by the opener tab before API fetch.
-  const sessionKey = messageId ? `trace_msg_${messageId}` : null;
-  const sessionRaw = sessionKey ? sessionStorage.getItem(sessionKey) : null;
-  const sessionMessage = sessionRaw ? JSON.parse(sessionRaw) : null;
-
-  const resolvedMessage = stateMessage || sessionMessage;
+  const stateMessage = isDialog ? null : location.state?.message;
+  const stateUserQuery = isDialog ? null : location.state?.userQuery;
 
   const [apiData, setApiData] = useState<any>(null);
-  const [loading, setLoading] = useState(!resolvedMessage);
+  const [loading, setLoading] = useState(true);
 
+  // Always fetch the trace JSON — the backend writes it on every response,
+  // so the API is the canonical source. Falls back to the navigation-state
+  // message only if the API call fails (e.g. trace file got wiped by
+  // container recreation). Page-mode messages restored from chat history
+  // don't carry the full ``query_sources.agent_steps`` payload that the
+  // trace view needs, so we can't trust ``stateMessage`` alone.
   useEffect(() => {
-    if (!messageId) return;
-    const graph = (graphParam || sessionStorage.getItem("selectedGraph") || "").trim();
-    if (!graph) {
-      // No graph context — render whatever we already have.
-      if (!resolvedMessage) setLoading(false);
+    if (!messageId) {
+      setLoading(false);
       return;
     }
-    if (!resolvedMessage) {
-      setLoading(true);
-    }
     const creds = sessionStorage.getItem("creds");
-    fetch(
-      `/ui/${encodeURIComponent(graph)}/trace/${encodeURIComponent(messageId)}`,
-      {
-        headers: { Authorization: `Basic ${creds}` },
-      },
-    )
+    // Skip the API call when there are no creds — sending ``Basic null``
+    // makes FastAPI's HTTPBasic challenge with ``WWW-Authenticate: Basic``
+    // which triggers the browser's native auth popup. Better to show
+    // "no data" and let the user log back in via the normal flow.
+    if (!creds) {
+      setLoading(false);
+      setApiData(null);
+      return;
+    }
+    setLoading(true);
+    fetch(`/ui/trace/${messageId}`, {
+      headers: { Authorization: `Basic ${creds}` },
+    })
       .then((res) => {
         if (!res.ok) throw new Error("Not found");
         return res.json();
@@ -778,55 +757,35 @@ const TraceLogs: FC = () => {
       .then((data) => setApiData(data))
       .catch(() => setApiData(null))
       .finally(() => setLoading(false));
-  }, [graphParam, messageId, resolvedMessage]);
+  }, [messageId]);
 
-  const message = useMemo(() => {
-    if (!resolvedMessage && !apiData) return null;
-    const base: any = { ...(resolvedMessage || {}) };
-    if (apiData) {
-      // API data wins so the Trace page reflects the persisted DB tracelog.
-      if (apiData.query_sources) base.query_sources = apiData.query_sources;
-      if (apiData.response_time != null) base.response_time = apiData.response_time;
-      if (apiData.response_type) base.response_type = apiData.response_type;
-      if (apiData.answered_question != null) {
-        base.answered_question = apiData.answered_question;
-      }
-      if (apiData.natural_language_response) {
-        base.natural_language_response = apiData.natural_language_response;
-        if (!base.content) base.content = apiData.natural_language_response;
-      }
-      if (apiData.user_query) base.user_query = apiData.user_query;
-      if (Array.isArray(apiData.conversation)) {
-        base.conversation = apiData.conversation;
-      }
-    }
-    return base;
-  }, [resolvedMessage, apiData]);
-
-  const userQuery =
-    apiData?.user_query ||
-    sessionMessage?.userQuery ||
-    sessionMessage?.user_query ||
-    stateUserQuery ||
-    message?.user_query ||
-    message?.userQuery;
+  const message = apiData ? {
+    content: apiData.natural_language_response,
+    response_time: apiData.response_time,
+    response_type: apiData.response_type,
+    query_sources: apiData.query_sources,
+  } : stateMessage;
+  const userQuery = apiData?.user_query || stateUserQuery;
 
   const trace = useMemo(
-    () => buildTraceFromMessage(message, userQuery),
+    () => (message ? buildTraceFromMessage(message, userQuery) : null),
     [message, userQuery]
   );
 
   const handleBack = () => {
-    // Trace opens in a new tab — closing it returns the user to the chat tab.
-    // If the tab cannot be closed (e.g. opened via direct link), fall back to navigate.
-    if (window.opener || window.history.length <= 1) {
-      window.close();
-    } else {
+    if (onClose) {
+      onClose();
+      return;
+    }
+    if (window.history.length > 1) {
       navigate(-1);
+    } else {
+      navigate("/chat");
     }
   };
 
   const handleDownload = () => {
+    if (!trace) return;
     const blob = new Blob([JSON.stringify(trace, null, 2)], {
       type: "application/json",
     });
@@ -838,42 +797,80 @@ const TraceLogs: FC = () => {
     URL.revokeObjectURL(url);
   };
 
+  const wrap = (inner: JSX.Element) => {
+    if (isDialog) {
+      return (
+        <Dialog open onOpenChange={(o) => !o && onClose && onClose()}>
+          <DialogContent
+            className="w-fit min-w-[400px] max-w-[min(95vw,768px)] max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] p-0"
+            onInteractOutside={(e) => e.preventDefault()}
+            onOpenAutoFocus={(e) => e.preventDefault()}
+          >
+            {inner}
+          </DialogContent>
+        </Dialog>
+      );
+    }
+    return <div className="min-h-screen bg-background">{inner}</div>;
+  };
+
   if (loading) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
+    return wrap(
+      <div className="flex items-center justify-center py-16">
         <p className="text-muted-foreground">Loading trace data...</p>
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <div className="sticky top-0 z-10 bg-background border-b border-border">
-        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div>
-            <button
-              onClick={handleBack}
-              className="flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400 hover:underline mb-1"
-            >
-              <LuArrowLeft className="w-4 h-4" />
-              Close &amp; Back to Chat
-            </button>
-            <h1 className="text-xl font-semibold">Trace Logs</h1>
-          </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleDownload}
-              className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-            >
-              <LuDownload className="w-4 h-4" />
-              Download
-            </button>
+  if (!trace) {
+    return wrap(
+      <div className="flex items-center justify-center py-16">
+        <p className="text-muted-foreground">Trace data not found.</p>
+      </div>
+    );
+  }
+
+  return wrap(
+    <>
+      {/* Header — only the title in dialog mode (Download moves to the
+          footer alongside Close), so nothing constrains dialog width.
+          Page mode keeps the original sticky flex bar with Back +
+          Download. DialogTitle / DialogDescription wire up the
+          accessibility labels Radix expects on a Dialog. */}
+      {isDialog ? (
+        <>
+          <DialogTitle className="absolute left-6 top-4 text-xl font-semibold">Trace Logs</DialogTitle>
+          <DialogDescription className="sr-only">
+            Execution trace, citations, and token usage for the selected chat response.
+          </DialogDescription>
+        </>
+      ) : (
+        <div className="sticky top-0 z-10 bg-background border-b border-border">
+          <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+            <div>
+              <button
+                onClick={handleBack}
+                className="flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400 hover:underline mb-1"
+              >
+                <LuArrowLeft className="w-4 h-4" />
+                Close &amp; Back to Chat
+              </button>
+              <h1 className="text-xl font-semibold">Trace Logs</h1>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleDownload}
+                className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+              >
+                <LuDownload className="w-4 h-4" />
+                Download
+              </button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
-      <div className="max-w-5xl mx-auto px-6 py-6 space-y-6">
+      <div className={isDialog ? "px-6 pt-16 pb-6 space-y-6" : "max-w-5xl mx-auto px-6 py-6 space-y-6"}>
         {/* Original Query */}
         <div className="bg-card border border-border rounded-lg p-5">
           <h2 className="text-sm font-semibold mb-2">Original Query</h2>
@@ -931,8 +928,17 @@ const TraceLogs: FC = () => {
         </div>
 
         {/* Tabs */}
-        <Tabs defaultValue="logs" className="w-full">
+        <Tabs defaultValue="citations" className="w-full">
           <TabsList className="w-full justify-start bg-transparent border-b border-border rounded-none h-auto p-0 gap-0">
+            <TabsTrigger
+              value="citations"
+              className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5"
+            >
+              Citations
+              <span className="ml-1.5 bg-muted text-muted-foreground text-xs px-1.5 py-0.5 rounded-full">
+                {trace.citations.length}
+              </span>
+            </TabsTrigger>
             <TabsTrigger
               value="logs"
               className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5"
@@ -947,15 +953,6 @@ const TraceLogs: FC = () => {
               Tool Calls
               <span className="ml-1.5 bg-muted text-muted-foreground text-xs px-1.5 py-0.5 rounded-full">
                 {trace.toolCalls.length}
-              </span>
-            </TabsTrigger>
-            <TabsTrigger
-              value="citations"
-              className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5"
-            >
-              Citations
-              <span className="ml-1.5 bg-muted text-muted-foreground text-xs px-1.5 py-0.5 rounded-full">
-                {trace.citations.length}
               </span>
             </TabsTrigger>
             <TabsTrigger
@@ -978,14 +975,14 @@ const TraceLogs: FC = () => {
             </TabsTrigger>
           </TabsList>
 
+          <TabsContent value="citations" className="pt-4">
+            <CitationsPanel trace={trace} />
+          </TabsContent>
           <TabsContent value="logs" className="pt-4">
             <LogsPanel trace={trace} />
           </TabsContent>
           <TabsContent value="toolcalls" className="pt-4">
             <ToolCallsPanel trace={trace} />
-          </TabsContent>
-          <TabsContent value="citations" className="pt-4">
-            <CitationsPanel trace={trace} />
           </TabsContent>
           <TabsContent value="timeline" className="pt-4">
             <TimelinePanel trace={trace} />
@@ -995,19 +992,26 @@ const TraceLogs: FC = () => {
           </TabsContent>
         </Tabs>
 
-        {/* Final Response */}
-        {trace.finalResponse && (
-          <div className="bg-card border border-border rounded-lg p-5">
-            <h2 className="text-sm font-semibold mb-3">Final Response</h2>
-            <div className="prose dark:prose-invert text-sm max-w-none">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                {trace.finalResponse}
-              </ReactMarkdown>
-            </div>
-          </div>
-        )}
+        {/* Footer — Download (primary action style) + Close (outline,
+            matches other dialogs). Replaces the top-right Download in
+            dialog mode so the dialog can size to content. */}
+        <div className="flex justify-end gap-2 pt-2">
+          {isDialog && (
+            <Button onClick={handleDownload} className="gradient text-white">
+              <LuDownload className="w-4 h-4 mr-1.5" />
+              Download
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            onClick={handleBack}
+            className="dark:border-[#3D3D3D]"
+          >
+            Close
+          </Button>
+        </div>
       </div>
-    </div>
+    </>
   );
 };
 

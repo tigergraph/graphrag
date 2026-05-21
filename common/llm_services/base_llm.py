@@ -267,10 +267,17 @@ class LLM_Model:
             return result
         return """\
 You are an expert at routing a user question to a vectorstore, function calls, or conversation history.
-Use the conversation history for questions that are similar to previous ones or that reference earlier answers or responses.
-Use the vectorstore for questions that would be best suited by text documents.
-Use the function calls for questions that ask about structured data, or operations on structured data.
-Questions referring to same entities in a previous, earlier, or above answer or response should be routed to the conversation history.
+
+CRITICAL - Route to 'history' when the conversation history is non-empty AND the question is about this conversation itself, such as:
+- What questions or messages were exchanged in this conversation ("what did I ask", "what questions did I ask previously", "what was asked before", "previous questions", "earlier questions")
+- What was said, discussed, or answered previously in this session
+- Recalling, summarising, or listing prior exchanges in this chat
+- Anything referencing "previous", "earlier", "before", "last time", "you said", "I asked", "we discussed", "prior" in the context of THIS conversation
+If the conversation history is EMPTY, do NOT route to 'history' — fall through to vectorstore or functions instead.
+
+Use the 'vectorstore' for questions best answered from text documents (articles, PDFs, knowledge base content).
+Use 'functions' for questions about structured data, graph statistics, or database queries.
+Questions referring to the same entities mentioned in a previous answer should be routed to 'history'.
 Keep in mind that some questions about documents such as "how many documents are there?" can be answered by function calls.
 The function calls can be used to answer questions about these entities: {v_types} and relationships: {e_types}.
 IMPORTANT: Questions about graph database statistics or metadata MUST be routed to function calls. This includes:

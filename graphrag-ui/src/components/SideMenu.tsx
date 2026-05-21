@@ -7,6 +7,7 @@ import { FiKey } from "react-icons/fi";
 import { IoIosHelpCircleOutline } from "react-icons/io";
 import { HiOutlineChatBubbleOvalLeft } from "react-icons/hi2";
 import { MdKeyboardArrowDown, MdKeyboardArrowUp } from "react-icons/md";
+import { RiDeleteBin6Line } from "react-icons/ri";
 import { IoIosArrowForward } from "react-icons/io";
 import { useTheme } from "@/components/ThemeProvider";
 import { GoGear } from "react-icons/go";
@@ -84,6 +85,7 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
   const [newSet, setNewSet] = useState<any[]>([]);
   const [expandedConversations, setExpandedConversations] = useState<Set<string>>(new Set());
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [deletingConvoId, setDeletingConvoId] = useState<string | null>(null);
   const navigate = useNavigate();
 
 
@@ -270,6 +272,37 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
     });
   }
 
+  const deleteConversation = async (conversationId: string) => {
+    const creds = sessionStorage.getItem("creds");
+    const graphname = sessionStorage.getItem("selectedGraph");
+    if (!creds || !graphname) return;
+    try {
+      const res = await fetch(
+        `/ui/conversation/${encodeURIComponent(conversationId)}?graphname=${encodeURIComponent(graphname)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Basic ${creds}` },
+        }
+      );
+      if (res.ok) {
+        setDeletingConvoId(null);
+        // Remove the deleted conversation from local state immediately
+        setConversationId((prev: any[]) =>
+          prev.filter((c: any) => c?.conversation_id !== conversationId)
+        );
+        // If the deleted conversation was the active one, start a new chat
+        if (conversationId === activeConversationId) {
+          conversationManager.startNewConversation();
+          sessionStorage.removeItem("selectedConversationData");
+        }
+        // Refresh list from server in background to stay in sync
+        fetchHistory2();
+      }
+    } catch {
+      setDeletingConvoId(null);
+    }
+  };
+
   const renderConvoHistory = () => {
     if (newSet.length === 0) {
       return (
@@ -318,7 +351,7 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
 
                   return (
                     <li key={`${item.conversation_id}-${idx}`} className="text-ellipsis">
-                      <div className={`${isActive ? 'bg-gray-100 dark:bg-gray-800' : ''} rounded`}>
+                      <div className={`${isActive ? 'bg-gray-100 dark:bg-gray-800' : ''} rounded group`}>
                         <a 
                           href="#" 
                           className={`flex py-3 my-3 px-3 items-center hover:bg-gray-100 dark:hover:bg-gray-800 rounded cursor-pointer ${isActive ? 'font-medium' : ''}`}
@@ -345,6 +378,18 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
                               )}
                             </button>
                           )}
+                          {/* Trash button — visible on hover */}
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setDeletingConvoId(item.conversation_id);
+                            }}
+                            className="ml-1 flex-shrink-0 p-1 opacity-0 group-hover:opacity-100 hover:bg-red-100 dark:hover:bg-red-900/40 text-red-500 rounded transition-opacity"
+                            title="Delete conversation"
+                          >
+                            <RiDeleteBin6Line className="text-base" />
+                          </button>
                         </a>
                         {isExpanded && userMessages.length > 1 && (
                           <div className="px-3 pb-3 ml-8 border-l-2 border-gray-300 dark:border-gray-600">
@@ -620,6 +665,29 @@ const SideMenu = ({ height, setGetConversationId }: { height?: string, setGetCon
         <img src="./tg-logo-bk.svg" className="mr-3 ml-2" />
         <span>Chat history</span>
       </h1>
+
+      {/* Delete conversation confirm dialog */}
+      <Dialog open={!!deletingConvoId} onOpenChange={(open) => { if (!open) setDeletingConvoId(null); }}>
+        <DialogContent className="sm:max-w-[400px]">
+          <DialogHeader>
+            <DialogTitle>Delete Conversation?</DialogTitle>
+            <DialogDescription>
+              This will permanently delete this conversation and all its messages. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => deletingConvoId && deleteConversation(deletingConvoId)}
+            >
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {renderConvoHistory()}
 

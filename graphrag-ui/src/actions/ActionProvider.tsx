@@ -310,6 +310,33 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
     };
   }, [selectedGraph, createChatBotMessage, createClientMessage, setState]);
 
+  // Listen for message-delete events fired by CustomChatMessage and remove
+  // both the bot answer and the preceding user question from chatbot state.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { msgId } = (e as CustomEvent).detail;
+      setState((prev: any) => {
+        const msgs: any[] = prev.messages || [];
+        const botIdx = msgs.findIndex(
+          (m: any) =>
+            m.message?.message_id === msgId ||
+            m.message?.messageId === msgId
+        );
+        if (botIdx === -1) return prev;
+        const toRemove = new Set<number>([botIdx]);
+        if (botIdx > 0 && msgs[botIdx - 1]?.type === "user") {
+          toRemove.add(botIdx - 1);
+        }
+        return {
+          ...prev,
+          messages: msgs.filter((_: any, i: number) => !toRemove.has(i)),
+        };
+      });
+    };
+    window.addEventListener("graphrag:messageDeleted", handler);
+    return () => window.removeEventListener("graphrag:messageDeleted", handler);
+  }, [setState]);
+
   // eslint-disable-next-line
   // @ts-ignore
   const queryGraphragWs2 = useCallback((msg: string) => {

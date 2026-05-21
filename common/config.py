@@ -414,6 +414,8 @@ if "chunker" not in graphrag_config:
     graphrag_config["chunker"] = "semantic"
 if "extractor" not in graphrag_config:
     graphrag_config["extractor"] = "llm"
+if "tg_memory_schema_on_startup" not in graphrag_config:
+    graphrag_config["tg_memory_schema_on_startup"] = True
 
 reuse_embedding = graphrag_config.get("reuse_embedding", True)
 doc_process_switch = graphrag_config.get("doc_process_switch", True)

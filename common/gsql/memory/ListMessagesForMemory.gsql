@@ -1,0 +1,15 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ *
+ * List message vertices for a conversation_id (application id on message rows).
+ * Python callers MUST strip tracelog — memory pipeline must not use tracelog.
+ */
+
+CREATE OR REPLACE DISTRIBUTED QUERY list_messages_for_memory(STRING conv_id) SYNTAX V2 {
+  seeds = {message.*};
+  res = SELECT m FROM seeds:m WHERE m.conversation_id == conv_id;
+  PRINT res AS rows;
+}

@@ -8,6 +8,7 @@ import {
 import { PiGraph } from "react-icons/pi";
 import { FaTable } from "react-icons/fa";
 import { LuInfo, LuActivity } from "react-icons/lu";
+import { RiDeleteBin6Line } from "react-icons/ri";
 import { Feedback, Message } from "@/actions/ActionProvider";
 import { useRoles } from "@/hooks/useRoles";
 
@@ -19,6 +20,7 @@ interface Interactions {
   showTable: () => boolean;
   showGraph: () => boolean;
   onViewTrace?: () => void;
+  onDelete?: () => void;
 }
 
 export const Interactions: FC<Interactions> = ({
@@ -27,6 +29,7 @@ export const Interactions: FC<Interactions> = ({
   showTable,
   showGraph,
   onViewTrace,
+  onDelete,
 }: Interactions) => {
   const { isSuperuser, isGlobalDesigner, isGraphAdmin } = useRoles();
   const canViewTrace = isSuperuser || isGlobalDesigner || isGraphAdmin;
@@ -135,6 +138,16 @@ export const Interactions: FC<Interactions> = ({
           >
             <FaTable className="text-[15px]" />
           </div>
+
+          {onDelete && (
+            <div
+              className="w-[28px] h-[28px] bg-shadeA flex items-center justify-center rounded-sm mr-1 cursor-pointer hover:bg-red-100 dark:hover:bg-red-900/40 text-red-500 ml-2"
+              title="Delete this message"
+              onClick={() => onDelete()}
+            >
+              <RiDeleteBin6Line className="text-[15px]" />
+            </div>
+          )}
         </>
       ) : null}
     </div>

@@ -134,6 +134,31 @@ class TigerGraphAgentGraph:
         )
         return state
 
+    # Patterns that clearly indicate the user is asking about THIS conversation's history.
+    # Checked before calling the LLM router to avoid misrouting to vectorstore.
+    _HISTORY_QUESTION_RE = re.compile(
+        r"\b("
+        r"previous(ly)?|earlier|before|prior|"
+        r"last\s+(message|question|chat|time|turn|exchange)|"
+        r"what\s+(did|have|has)\s+i\s+(ask(ed)?|said?|mention(ed)?|question(ed)?)|"
+        r"what\s+(was|were|have\s+been)\s+(asked|said?|discussed?|mention(ed)?|question(ed)?)|"
+        r"what\s+question(s)?\s+(did|have|were|was)|"
+        r"question(s)?\s+(i|we|you)?\s*(asked|said?|discussed?|mention(ed)?)|"
+        r"you\s+said|i\s+asked|we\s+discussed?|i\s+mention(ed)?|"
+        r"(conversation|chat)\s+history|previous\s+chat|"
+        r"recall|remind\s+me|list\s+(the\s+)?(previous|earlier|prior|all\s+the)|"
+        r"show\s+me\s+(the\s+)?(previous|earlier|prior)|"
+        r"summari[sz]e\s+(the\s+)?(conversation|chat|exchange)"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    def _is_history_question(self, question: str, conversation: list) -> bool:
+        """Return True if question is clearly about THIS conversation's history AND history exists."""
+        if not conversation:
+            return False
+        return bool(self._HISTORY_QUESTION_RE.search(question))
+
     def route_question(self, state):
         """
         Run the agent router.
@@ -142,6 +167,16 @@ class TigerGraphAgentGraph:
             return "apologize"
         if self._is_greeting(state["question"]):
             return "greeting"
+
+        # Fast-path: if the question is clearly about prior exchanges in this
+        # conversation AND there is actually history available, skip the LLM
+        # router and go straight to history lookup.
+        if self._is_history_question(state["question"], state.get("conversation", [])):
+            logger.debug_pii(
+                f"request_id={req_id_cv.get()} Pre-routing to history_lookup (keyword match)"
+            )
+            return "history_lookup"
+
         self.emit_progress("Thinking")
         step = TigerGraphAgentRouter(self.llm_provider, self.db_connection)
         logger.debug_pii(

@@ -6,13 +6,17 @@ import {
   DialogContent,
   DialogDescription,
   DialogHeader,
+  DialogFooter,
+  DialogClose,
   DialogTrigger,
 } from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
 import { ImEnlarge2 } from "react-icons/im";
 import { IoIosCloseCircleOutline } from "react-icons/io";
 import { Interactions } from "./Interact";
 import { KnowledgeGraphPro } from "./graphs/KnowledgeGraphPro";
 import { KnowledgeTablPro } from "./tables/KnowledgeTablePro";
+
 interface IChatbotMessageProps {
   message?: any;
   withAvatar?: boolean;
@@ -25,6 +29,7 @@ interface IChatbotMessageProps {
   customStyles: {
     backgroundColor: string;
   };
+  onDeleteMessage?: (messageId: string) => void;
 }
 
 const urlRegex = /https?:\/\//
@@ -130,6 +135,68 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   const [showResult, setShowResult] = useState<boolean>(false);
   const [showGraphVis, setShowGraphVis] = useState<boolean>(false);
   const [showTableVis, setShowTableVis] = useState<boolean>(false);
+  const [confirmDelete, setConfirmDelete] = useState<boolean>(false);
+  const [isDeleted, setIsDeleted] = useState<boolean>(false);
+
+  const handleDeleteMessage = async (msgId: string) => {
+    const creds = sessionStorage.getItem("creds");
+    const graphname = sessionStorage.getItem("selectedGraph");
+    if (!creds || !graphname || !msgId) return;
+    try {
+      const res = await fetch(
+        `/ui/message/${encodeURIComponent(msgId)}?graphname=${encodeURIComponent(graphname)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Basic ${creds}` },
+        }
+      );
+      if (res.ok) {
+        // Hide this bot message immediately via local state
+        setIsDeleted(true);
+        // Fire a window event so ActionProvider (which owns the real chatbot
+        // setState) can remove both this bot answer AND the preceding user question.
+        window.dispatchEvent(
+          new CustomEvent("graphrag:messageDeleted", { detail: { msgId } })
+        );
+        // Remove only the deleted Q&A pair from sessionStorage so a page
+        // refresh still shows the remaining messages (not a blank screen).
+        const convDataRaw = sessionStorage.getItem("selectedConversationData");
+        if (convDataRaw) {
+          try {
+            const convData = JSON.parse(convDataRaw);
+            let messages: any[] = [];
+            let wrap: (f: any[]) => any = (f) => f;
+            if (Array.isArray(convData)) {
+              messages = convData;
+            } else if (Array.isArray(convData.messages)) {
+              messages = convData.messages;
+              wrap = (f) => ({ ...convData, messages: f });
+            } else if (Array.isArray(convData.content)) {
+              messages = convData.content;
+              wrap = (f) => ({ ...convData, content: f });
+            }
+            const sysIdx = messages.findIndex((m: any) => m.message_id === msgId);
+            if (sysIdx !== -1) {
+              const toRemove = new Set([sysIdx]);
+              if (sysIdx > 0 && messages[sysIdx - 1]?.role === "user") {
+                toRemove.add(sysIdx - 1);
+              }
+              const filtered = messages.filter((_: any, i: number) => !toRemove.has(i));
+              sessionStorage.setItem("selectedConversationData", JSON.stringify(wrap(filtered)));
+            }
+          } catch { /* ignore */ }
+        }
+      } else {
+        const errText = await res.text().catch(() => "");
+        console.error(`Delete message failed (${res.status}):`, errText);
+        alert(`Failed to delete message: ${res.status} ${errText}`);
+      }
+    } catch (err) {
+      console.error("Delete message error:", err);
+    }
+  };
+
+  if (isDeleted) return null;
 
   // Error handling functions
   const handleShowExplain = () => {
@@ -190,8 +257,10 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
               showExplain={handleShowExplain}
               showTable={handleShowTable}
               showGraph={handleShowGraph}
+              onDelete={message.messageId || message.message_id ? () => setConfirmDelete(true) : undefined}
               onViewTrace={() => {
                 const messageId = message.messageId || message.message_id || "";
+                const graphname = sessionStorage.getItem("selectedGraph") || "";
                 const userQuery =
                   message.user_query ||
                   message.userQuery ||
@@ -207,12 +276,38 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
                   `trace_msg_${messageId}`,
                   JSON.stringify(payload),
                 );
-                window.open(
-                  `/trace/${encodeURIComponent(messageId)}`,
-                  "_blank",
-                );
+                const tracePath = graphname
+                  ? `/trace/${encodeURIComponent(graphname)}/${encodeURIComponent(messageId)}`
+                  : `/trace/${encodeURIComponent(messageId)}`;
+                window.open(tracePath, "_blank");
               }}
             />
+
+            {/* Confirm delete message dialog */}
+            <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+              <DialogContent className="sm:max-w-[380px]">
+                <DialogHeader>
+                  <DialogDescription>
+                    Delete this message? It will be removed from your chat memory and cannot be recovered.
+                  </DialogDescription>
+                </DialogHeader>
+                <DialogFooter>
+                  <DialogClose asChild>
+                    <Button variant="outline">Cancel</Button>
+                  </DialogClose>
+                  <Button
+                    variant="destructive"
+                    onClick={() => {
+                      setConfirmDelete(false);
+                      const msgId = message.messageId || message.message_id;
+                      if (msgId) handleDeleteMessage(msgId);
+                    }}
+                  >
+                    Delete
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
           </div>
 
           {showGraphVis ? (
