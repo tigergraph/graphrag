@@ -330,10 +330,10 @@ const KGAdmin = () => {
         setRefreshGraphName(store.graphs[0]);
       }
     }
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     if (!creds) return;
     fetch("/ui/list_graphs", {
-      headers: { Authorization: `Basic ${creds}` },
+      headers: { Authorization: creds! },
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -376,9 +376,9 @@ const KGAdmin = () => {
     if (isExtractingSchema || draftProposal) {
       setSchemaSource("samples");
     }
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     if (!creds) return;
-    fetch(`/ui/config`, { headers: { Authorization: `Basic ${creds}` } })
+    fetch(`/ui/config`, { headers: { Authorization: creds! } })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const cfg = data?.graphrag_config || {};
@@ -396,7 +396,7 @@ const KGAdmin = () => {
     // downstream parser would still drop reserved/structural names,
     // just without the inline message.
     fetch(`/ui/schema_reserved_names`, {
-      headers: { Authorization: `Basic ${creds}` },
+      headers: { Authorization: creds! },
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -474,7 +474,7 @@ const KGAdmin = () => {
     // user isn't logged out mid-extraction.
     pauseIdleTimer();
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       if (!creds) throw new Error("Not authenticated. Please login first.");
 
       // Step 1/2: upload + convert. Returns the saved filenames so we
@@ -485,7 +485,7 @@ const KGAdmin = () => {
         `/ui/${graphName}/convert_sample_files`,
         {
           method: "POST",
-          headers: { Authorization: `Basic ${creds}` },
+          headers: { Authorization: creds! },
           body: form,
         }
       );
@@ -504,7 +504,7 @@ const KGAdmin = () => {
         {
           method: "POST",
           headers: {
-            Authorization: `Basic ${creds}`,
+            Authorization: creds!,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -591,9 +591,9 @@ const KGAdmin = () => {
     setPrecheckRunning(true);
     setPrecheckMessage("");
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const eligResp = await fetch(`/ui/${graphName}/check_init_eligibility`, {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const elig = await eligResp.json();
       if (!eligResp.ok) {
@@ -637,7 +637,7 @@ const KGAdmin = () => {
           {
             method: "POST",
             headers: {
-              Authorization: `Basic ${creds}`,
+              Authorization: creds!,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
@@ -695,7 +695,7 @@ const KGAdmin = () => {
     pauseIdleTimer();
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       if (!creds) {
         throw new Error("Not authenticated. Please login first.");
       }
@@ -703,7 +703,7 @@ const KGAdmin = () => {
       setStatusMessage("Step 1/2: Creating graph...");
       const createResponse = await fetch(`/ui/${graphName}/create_graph`, {
         method: "POST",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       const createData = await createResponse.json();
@@ -756,7 +756,7 @@ const KGAdmin = () => {
       const initResponse = await fetch(`/ui/${graphName}/initialize_graph`, {
         method: "POST",
         headers: {
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(initBody),
@@ -810,7 +810,7 @@ const KGAdmin = () => {
         try {
           statusResp = await fetch(
             `/ui/${graphName}/initialize_status`,
-            { headers: { Authorization: `Basic ${creds}` } }
+            { headers: { Authorization: creds! } }
           );
         } catch {
           // Transient network blip — retry on the next tick rather
@@ -863,7 +863,7 @@ const KGAdmin = () => {
           await fetch("/ui/prompts", {
             method: "POST",
             headers: {
-              Authorization: `Basic ${creds}`,
+              Authorization: creds!,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
@@ -921,10 +921,10 @@ const KGAdmin = () => {
     }
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const statusResponse = await fetch(`/ui/${graphName}/rebuild_status`, {
         method: "GET",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (statusResponse.ok) {
@@ -1003,12 +1003,12 @@ const KGAdmin = () => {
     setRefreshMessage("Verifying rebuild status...");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
 
       // Final status check to prevent race conditions
       const statusCheckResponse = await fetch(`/ui/${refreshGraphName}/rebuild_status`, {
         method: "GET",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (statusCheckResponse.ok) {
@@ -1026,7 +1026,7 @@ const KGAdmin = () => {
 
       const response = await fetch(`/ui/${refreshGraphName}/rebuild_graph`, {
         method: "POST",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (!response.ok) {

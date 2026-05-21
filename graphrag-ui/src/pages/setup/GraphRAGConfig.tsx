@@ -109,7 +109,7 @@ const GraphRAGConfig = () => {
     setIsLoading(true);
     const effectiveScope = scope ?? configScope;
     const effectiveGraph = graphname ?? selectedGraph;
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     const params = new URLSearchParams();
     if (effectiveGraph) params.set("graphname", effectiveGraph);
     if (effectiveScope === "graph") params.set("scope", "graph");
@@ -134,7 +134,7 @@ const GraphRAGConfig = () => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const response = await fetch(url, {
-          headers: { Authorization: `Basic ${creds}` },
+          headers: { Authorization: creds! },
         });
         lastStatus = response.status;
         if (!response.ok) {
@@ -190,7 +190,7 @@ const GraphRAGConfig = () => {
     setMessageType("");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       
       // Build current UI state — only include non-empty fields
       const currentChunkerConfig: any = {};
@@ -321,7 +321,7 @@ const GraphRAGConfig = () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(graphragConfigData),
       });

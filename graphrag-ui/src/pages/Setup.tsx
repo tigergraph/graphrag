@@ -103,9 +103,9 @@ const [activeTab, setActiveTab] = useState("upload");
     if (!ingestGraphName) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(`/ui/${ingestGraphName}/uploads/list`, {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const data = await safeJson(response);
       setUploadedFiles(data.files || []);
@@ -152,13 +152,13 @@ const [activeTab, setActiveTab] = useState("upload");
     setUploadMessage("Uploading files...");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const formData = new FormData();
       filesArray.forEach((file) => formData.append("files", file));
 
       const response = await fetch(`/ui/${ingestGraphName}/uploads?overwrite=true`, {
         method: "POST",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
         body: formData,
       });
 
@@ -201,7 +201,7 @@ const [activeTab, setActiveTab] = useState("upload");
     setUploadMessage("Total size exceeds limit. Uploading files one by one...");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       let uploadedCount = 0;
       let failedCount = 0;
       const totalFiles = filesArray.length;
@@ -219,7 +219,7 @@ const [activeTab, setActiveTab] = useState("upload");
         try {
           const response = await fetch(`/ui/${ingestGraphName}/uploads?overwrite=true`, {
             method: "POST",
-            headers: { Authorization: `Basic ${creds}` },
+            headers: { Authorization: creds! },
             body: formData,
           });
 
@@ -274,13 +274,13 @@ const [activeTab, setActiveTab] = useState("upload");
     console.log("Deleting file:", filename);
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
 
       // Delete original file
       const url = `/ui/${ingestGraphName}/uploads?filename=${encodeURIComponent(filename)}`;
       const response = await fetch(url, {
           method: "DELETE",
-          headers: { Authorization: `Basic ${creds}` },
+          headers: { Authorization: creds! },
         });
       const data = await response.json();
       setUploadMessage(`✅ ${data.message}`);
@@ -302,10 +302,10 @@ const [activeTab, setActiveTab] = useState("upload");
     if (!shouldDelete) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(`/ui/${ingestGraphName}/uploads`, {
         method: "DELETE",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const data = await response.json();
       
@@ -324,9 +324,9 @@ const [activeTab, setActiveTab] = useState("upload");
     if (!ingestGraphName) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(`/ui/${ingestGraphName}/cloud/list`, {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const data = await response.json();
       setDownloadedFiles(data.files || []);
@@ -346,7 +346,7 @@ const [activeTab, setActiveTab] = useState("upload");
     setDownloadMessage("Downloading files from cloud storage...");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       
       // Prepare request body based on provider
       let requestBody: any = { provider: cloudProvider };
@@ -397,7 +397,7 @@ const [activeTab, setActiveTab] = useState("upload");
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(requestBody),
       });
@@ -438,13 +438,13 @@ const [activeTab, setActiveTab] = useState("upload");
     if (!ingestGraphName) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       
       // Delete original file
       const url = `/ui/${ingestGraphName}/cloud/delete?filename=${encodeURIComponent(filename)}`;
       const response = await fetch(url, {
           method: "DELETE",
-          headers: { Authorization: `Basic ${creds}` },
+          headers: { Authorization: creds! },
         }
       );
       const data = await response.json();
@@ -463,10 +463,10 @@ const [activeTab, setActiveTab] = useState("upload");
     if (!shouldDelete) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(`/ui/${ingestGraphName}/cloud/delete`, {
         method: "DELETE",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const data = await response.json();
       setDownloadMessage(`✅ ${data.message}`);
@@ -486,7 +486,7 @@ const [activeTab, setActiveTab] = useState("upload");
     setIsIngesting(true);
     setIngestMessage("Ingesting documents into knowledge graph...");
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const folderPath = sourceType === "uploaded" ? `uploads/${ingestGraphName}` : `downloaded_files_cloud/${ingestGraphName}`;
       
       // Use existing ingestJobData if available, otherwise construct from folder path
@@ -505,7 +505,7 @@ const [activeTab, setActiveTab] = useState("upload");
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify({
           load_job_id: jobData.load_job_id,
@@ -548,7 +548,7 @@ const [activeTab, setActiveTab] = useState("upload");
     setIngestMessage("Step 1/2: Creating ingest job...");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
 
       // Step 1: Create ingest job
       const createIngestConfig = {
@@ -564,7 +564,7 @@ const [activeTab, setActiveTab] = useState("upload");
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(createIngestConfig),
       });
@@ -602,7 +602,7 @@ const [activeTab, setActiveTab] = useState("upload");
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(loadingInfo),
       });
@@ -644,7 +644,7 @@ const [activeTab, setActiveTab] = useState("upload");
     console.log("fileCount:", fileCount);
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
 
       // Call create_ingest to process files
       const createIngestConfig = {
@@ -662,7 +662,7 @@ const [activeTab, setActiveTab] = useState("upload");
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(createIngestConfig),
       });
@@ -742,7 +742,7 @@ const [activeTab, setActiveTab] = useState("upload");
     setIsIngesting(true);
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       let loadingInfo: any = {};
 
       if (skipBDAProcessing) {
@@ -796,7 +796,7 @@ const [activeTab, setActiveTab] = useState("upload");
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Basic ${creds}`,
+            Authorization: creds!,
           },
           body: JSON.stringify(createIngestConfig),
         });
@@ -824,7 +824,7 @@ const [activeTab, setActiveTab] = useState("upload");
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(loadingInfo),
       });
@@ -860,11 +860,11 @@ const [activeTab, setActiveTab] = useState("upload");
     }
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const statusResponse = await fetch(`/ui/${graphName}/rebuild_status`, {
         method: "GET",
         headers: {
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
       });
 
@@ -931,13 +931,13 @@ const [activeTab, setActiveTab] = useState("upload");
     setRefreshMessage("Verifying rebuild status...");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
 
       // Final status check to prevent race conditions
       const statusCheckResponse = await fetch(`/ui/${refreshGraphName}/rebuild_status`, {
         method: "GET",
         headers: {
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
       });
 
@@ -957,7 +957,7 @@ const [activeTab, setActiveTab] = useState("upload");
       const response = await fetch(`/ui/${refreshGraphName}/rebuild_graph`, {
         method: "POST",
         headers: {
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
       });
 
@@ -1017,10 +1017,10 @@ const [activeTab, setActiveTab] = useState("upload");
         setRefreshGraphName(store.graphs[0]);
       }
     }
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     if (!creds) return;
     fetch("/ui/list_graphs", {
-      headers: { Authorization: `Basic ${creds}` },
+      headers: { Authorization: creds! },
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -1063,7 +1063,7 @@ const [activeTab, setActiveTab] = useState("upload");
 
     try {
       // Get credentials from sessionStorage
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       if (!creds) {
         throw new Error("Not authenticated. Please login first.");
       }
@@ -1073,7 +1073,7 @@ const [activeTab, setActiveTab] = useState("upload");
       const createResponse = await fetch(`/ui/${graphName}/create_graph`, {
         method: "POST",
         headers: {
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
       });
 
@@ -1105,7 +1105,7 @@ const [activeTab, setActiveTab] = useState("upload");
       const initResponse = await fetch(`/ui/${graphName}/initialize_graph`, {
         method: "POST",
         headers: {
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
       });
 

@@ -38,6 +38,7 @@ from fastapi import (
     Body,
     Depends,
     File,
+    Header,
     HTTPException,
     Path,
     Request,
@@ -46,8 +47,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.security.http import HTTPBase
+from fastapi.security import HTTPBasicCredentials
 from pyTigerGraph import TigerGraphConnection
 from pyTigerGraph.common.exception import TigerGraphException
 from tools.validation_utils import MapQuestionToSchemaException
@@ -141,7 +141,6 @@ ValidGraphName = Annotated[str, Path(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 use_cypher = os.getenv("USE_CYPHER", "false").lower() == "true"
 route_prefix = "/ui"  # APIRouter's prefix doesn't work with the websocket, so it has to be done here
 router = APIRouter(tags=["UI"])
-security = HTTPBasic()
 llm_config_lock = asyncio.Lock()
 
 # Cache for user role lookups (avoids repeated GSQL calls)
@@ -162,24 +161,44 @@ def _normalize_roles(raw_roles: str) -> list[str]:
     return [r.strip().lower() for r in re.split(r"[,\s]+", cleaned) if r.strip()]
 
 
-def _parse_user_roles_detail(user_info: str, username: str) -> tuple[list[str], dict[str, list[str]]]:
+def _parse_user_roles_detail(user_info: str) -> tuple[list[str], dict[str, list[str]], str]:
+    """Single-pass parser for ``SHOW USER`` output. Returns
+    ``(global_roles, graph_roles, current_user)`` where ``current_user``
+    is the username flagged by TG's ``*`` marker (the effective user
+    for the session that ran the call). Roles are extracted only from
+    that ``*``-marked block.
+
+    Returning the resolved user lets callers handle the case where the
+    login name was a sentinel like ``__GSQL__secret`` and the real
+    identity is whoever the secret belongs to.
+    """
     global_roles: list[str] = []
     graph_roles: dict[str, list[str]] = {}
+    current_user = ""
     is_user_section = False
     for line in user_info.splitlines():
-        line_stripped = line.strip()
+        line_stripped = line.lstrip()
+        # Capture the leading marker (``*`` for current user, ``-`` for
+        # the other users, possibly absent on a header) so we can pick
+        # the right block.
         match = re.match(
-            r"^[\*\-]?\s*\-?\s*(Name|User Name|User)\s*:\s*(.+)$",
+            r"^([\*\-])?\s*-?\s*(?:Name|User Name|User)\s*:\s*(.+)$",
             line_stripped,
             re.IGNORECASE,
         )
         if match:
-            current_name = match.group(2).strip()
-            is_user_section = current_name == username
+            marker = match.group(1)
+            name = match.group(2).strip()
+            if marker == "*":
+                current_user = name
+                is_user_section = True
+            else:
+                is_user_section = False
             continue
         if not is_user_section:
             continue
 
+        line_stripped = line_stripped.strip()
         roles_match = re.match(
             r"^[\*\-]?\s*\-?\s*(Global Roles|Roles)\s*:\s*(.+)$",
             line_stripped,
@@ -200,15 +219,26 @@ def _parse_user_roles_detail(user_info: str, username: str) -> tuple[list[str], 
             if roles:
                 graph_roles[graph_name] = roles
 
-    return global_roles, graph_roles
+    return global_roles, graph_roles, current_user
 
 
-def _parse_user_roles(user_info: str, username: str) -> list[str]:
-    global_roles, _ = _parse_user_roles_detail(user_info, username)
+def _parse_user_roles(user_info: str, username: str = "") -> list[str]:
+    # ``username`` kept for back-compat; the parser now resolves the
+    # active user from SHOW USER's ``*`` marker.
+    global_roles, _, _ = _parse_user_roles_detail(user_info)
     return global_roles
 
-def _get_user_role_details(username: str, password: str) -> tuple[list[str], dict[str, list[str]]]:
-    """Get user roles with short TTL cache to avoid repeated GSQL calls."""
+def _get_user_role_details(
+    username: str, password: str
+) -> tuple[list[str], dict[str, list[str]], str]:
+    """Get user roles + resolved username with a short TTL cache.
+
+    Returns ``(global_roles, graph_roles, resolved_username)`` where
+    ``resolved_username`` is the user TG marks as current in ``SHOW
+    USER`` output. For sentinel logins (e.g. ``__GSQL__secret``) this
+    is the secret's owner; for classic user/password logins it matches
+    the input.
+    """
     pwd_hash = hashlib.sha256(password.encode()).hexdigest()[:16]
     cache_key = (username, pwd_hash)
     now = time.time()
@@ -218,14 +248,28 @@ def _get_user_role_details(username: str, password: str) -> tuple[list[str], dic
         if cached and (now - cached[0]) < _ROLE_CACHE_TTL:
             return cached[1]
 
-    conn = TigerGraphConnection(
-        host=db_config.get("hostname"),
-        username=username,
-        password=password,
-        gsPort=db_config.get("gsPort"),
-        restppPort=db_config.get("restppPort"),
-        graphname="",
-    )
+    # Mirror the auth() dispatch — API-token logins build the
+    # connection with ``apiToken``; secret logins
+    # (``__GSQL__secret``) and classic user/password both go through
+    # the username/password slots (pyTigerGraph routes the secret
+    # case natively).
+    if username == _UI_TOKEN_SENTINEL:
+        conn = TigerGraphConnection(
+            host=db_config.get("hostname"),
+            gsPort=db_config.get("gsPort"),
+            restppPort=db_config.get("restppPort"),
+            graphname="",
+            apiToken=password,
+        )
+    else:
+        conn = TigerGraphConnection(
+            host=db_config.get("hostname"),
+            username=username,
+            password=password,
+            gsPort=db_config.get("gsPort"),
+            restppPort=db_config.get("restppPort"),
+            graphname="",
+        )
 
     # Transient GSQL hiccups when the role-cache TTL expires were
     # surfacing as 403 "Unable to verify user roles" banners on the
@@ -235,7 +279,10 @@ def _get_user_role_details(username: str, password: str) -> tuple[list[str], dic
     for attempt in range(2):
         try:
             user_info = conn.gsql("SHOW USER")
-            result = _parse_user_roles_detail(user_info, username)
+            roles, graph_roles, resolved = _parse_user_roles_detail(user_info)
+            if not resolved:
+                resolved = username
+            result = (roles, graph_roles, resolved)
             with _role_cache_lock:
                 _role_cache[cache_key] = (now, result)
             return result
@@ -248,7 +295,7 @@ def _get_user_role_details(username: str, password: str) -> tuple[list[str], dic
 
 
 def _get_user_roles(username: str, password: str) -> list[str]:
-    global_roles, _ = _get_user_role_details(username, password)
+    global_roles, _, _ = _get_user_role_details(username, password)
     return global_roles
 
 def _require_roles(credentials: HTTPBasicCredentials, allowed_roles: set[str]) -> list[str]:
@@ -289,7 +336,7 @@ def _require_prompt_access(credentials: HTTPBasicCredentials, graphname: str | N
     if graphname:
         validate_graphname(graphname)
     try:
-        global_roles, graph_roles = _get_user_role_details(credentials.username, credentials.password)
+        global_roles, graph_roles, _ = _get_user_role_details(credentials.username, credentials.password)
     except Exception as e:
         logger.error(f"Failed to resolve user roles: {e}")
         raise HTTPException(status_code=403, detail="Unable to verify user roles.")
@@ -306,7 +353,7 @@ def _resolve_llm_config_access(
     if graphname:
         validate_graphname(graphname)
     try:
-        global_roles, graph_roles = _get_user_role_details(
+        global_roles, graph_roles, _ = _get_user_role_details(
             credentials.username, credentials.password
         )
     except Exception as e:
@@ -343,11 +390,103 @@ def _ecc_jobs_running(graphs: list[str], auth_header: str) -> bool:
     return False
 
 
+_UI_TOKEN_SENTINEL = "__graphrag_token__"
+
+
+def _parse_auth_header(authorization: str | None) -> HTTPBasicCredentials:
+    """Parse an ``Authorization`` header value into ``HTTPBasicCredentials``.
+
+    ``Basic <b64>`` decodes to the real username/password pair.
+    ``Bearer <token>`` is mapped to a synthetic
+    ``(_UI_TOKEN_SENTINEL, token)`` pair so downstream code that already
+    dispatches on the sentinel for API-token logins keeps working
+    unchanged.
+    """
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization header",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    try:
+        scheme, _, value = authorization.partition(" ")
+    except Exception:
+        scheme, value = "", ""
+    scheme = scheme.strip().lower()
+    value = value.strip()
+    if scheme == "basic" and value:
+        try:
+            decoded = base64.b64decode(value).decode()
+            username, _, password = decoded.partition(":")
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Malformed Basic credentials",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        return HTTPBasicCredentials(username=username, password=password)
+    if scheme == "bearer" and value:
+        return HTTPBasicCredentials(username=_UI_TOKEN_SENTINEL, password=value)
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unsupported Authorization scheme",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+
+
+def _chat_history_auth_header(creds: HTTPBasicCredentials) -> str:
+    """Build the Basic-auth header used when proxying to chat-history.
+
+    Chat-history identifies the caller by the Basic-auth username only
+    (it ignores the password). For sentinel logins
+    (``__graphrag_token__`` / ``__GSQL__secret``) we substitute the
+    TG-resolved username so conversations get stored / fetched under
+    the user's real identity instead of the sentinel string.
+    """
+    try:
+        _, _, resolved = _get_user_role_details(creds.username, creds.password)
+    except Exception:
+        resolved = creds.username
+    username = resolved or creds.username
+    encoded = base64.b64encode(f"{username}:{creds.password}".encode()).decode()
+    return f"Basic {encoded}"
+
+
+def _ecc_auth_header(creds: HTTPBasicCredentials) -> str:
+    """Build the Authorization header used when forwarding to ECC.
+
+    API-token logins arrive as the ``__graphrag_token__`` sentinel;
+    forward them as ``Bearer <token>`` since ECC connects with the
+    token directly. Classic user/password and ``__GSQL__secret`` logins
+    forward as Basic, which ECC / pyTigerGraph handle natively.
+    """
+    if creds.username == _UI_TOKEN_SENTINEL:
+        return f"Bearer {creds.password}"
+    encoded = base64.b64encode(
+        f"{creds.username}:{creds.password}".encode()
+    ).decode()
+    return f"Basic {encoded}"
+
+
 def auth(usr: str, password: str, conn=None) -> tuple[list[str], TigerGraphConnection]:
     if conn is None:
-        conn = TigerGraphConnection(
-            host=db_config["hostname"], graphname="", username=usr, password=password
-        )
+        # Three Basic-auth shapes share the wire:
+        #   * regular ``user:password`` → classic mode
+        #   * ``__graphrag_token__:<jwt>`` → API token mode; pass the
+        #     token to pyTigerGraph as ``apiToken``
+        #   * ``__GSQL__secret:<secret>`` → TigerGraph's native secret
+        #     convention; pyTigerGraph already understands it when sent
+        #     as plain username/password, so no special handling here.
+        if usr == _UI_TOKEN_SENTINEL:
+            conn = TigerGraphConnection(
+                host=db_config["hostname"], graphname="",
+                apiToken=password,
+            )
+        else:
+            conn = TigerGraphConnection(
+                host=db_config["hostname"], graphname="",
+                username=usr, password=password,
+            )
 
     try:
         graph_list = conn.listGraphs()
@@ -376,17 +515,41 @@ def auth(usr: str, password: str, conn=None) -> tuple[list[str], TigerGraphConne
 
 
 def ws_basic_auth(auth_info: str, graphname=None):
-    auth_info = base64.b64decode(auth_info.encode()).decode()
-    auth_info = auth_info.split(":")
-    username = auth_info[0]
-    password = auth_info[1]
-    conn = get_db_connection_pwd_manual(graphname, username, password)
-    return auth(username, password, conn)
+    """Authenticate a WebSocket / internal call from a raw Authorization
+    header value (``Basic <b64>`` or ``Bearer <token>``).
+    """
+    creds = _parse_auth_header(auth_info)
+    if creds.username == _UI_TOKEN_SENTINEL:
+        # API-token logins: build a TG connection directly with the
+        # token; ``get_db_connection_pwd_manual`` only handles
+        # username/password.
+        conn = TigerGraphConnection(
+            host=db_config["hostname"],
+            graphname=graphname or "",
+            apiToken=creds.password,
+            restppPort=db_config.get("restppPort", "9000"),
+            gsPort=db_config.get("gsPort", "14240"),
+        )
+    else:
+        conn = get_db_connection_pwd_manual(
+            graphname, creds.username, creds.password
+        )
+    return auth(creds.username, creds.password, conn)
+
+
+def ui_creds(
+    authorization: Annotated[str | None, Header()] = None,
+) -> HTTPBasicCredentials:
+    """Parse ``Authorization`` (Basic or Bearer) into
+    ``HTTPBasicCredentials`` without contacting TigerGraph. Used by
+    endpoints that only need the caller's identity.
+    """
+    return _parse_auth_header(authorization)
 
 
 def ui_basic_auth(
-    creds: Annotated[HTTPBasicCredentials, Depends(security)],
-) -> list[str]:
+    creds: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
+) -> tuple[list[str], HTTPBasicCredentials]:
     """
     1) Try authenticating with DB.
     2) Get list of graphs user has access to
@@ -399,17 +562,23 @@ def ui_basic_auth(
 def login(auth: Annotated[list[str], Depends(ui_basic_auth)]):
     graphs = auth[0]
     creds = auth[1]
-    # Fetch roles at login so frontend doesn't need separate /roles calls
+    # Fetch roles + resolved username at login so the frontend doesn't
+    # need separate /roles or /whoami calls. ``resolved`` differs from
+    # ``creds.username`` only when the caller logged in via a sentinel
+    # (e.g. ``__GSQL__secret``), in which case ``resolved`` is the
+    # user the secret belongs to.
     try:
-        global_roles, graph_roles = _get_user_role_details(creds.username, creds.password)
+        global_roles, graph_roles, resolved = _get_user_role_details(
+            creds.username, creds.password
+        )
     except Exception as e:
         logger.warning(f"Failed to fetch roles at login: {e}")
-        global_roles, graph_roles = [], {}
+        global_roles, graph_roles, resolved = [], {}, creds.username
     return {
         "graphs": graphs,
         "roles": global_roles,
         "graph_roles": graph_roles,
-        "username": creds.username,
+        "username": resolved or creds.username,
     }
 
 
@@ -538,12 +707,11 @@ def add_feedback(
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
     creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
     try:
         res = httpx.post(
             f"{graphrag_config['chat_history_api']}/conversation",
             json=message.model_dump(),
-            headers={"Authorization": f"Basic {auth}"},
+            headers={"Authorization": _chat_history_auth_header(creds)},
         )
         res.raise_for_status()
     except Exception as e:
@@ -588,11 +756,17 @@ def get_trace_log(
     # Per-user segregation. Legacy files (saved before this fix) have no
     # "username" field and therefore can't pass this check — they will 404
     # for everyone and age out via the existing 30-day cleanup.
+    # Compare against the TG-resolved username so sentinel logins (e.g.
+    # ``__GSQL__secret``) can still read their own traces.
     owner = data.get("username")
-    if owner != creds[1].username:
+    try:
+        _, _, resolved = _get_user_role_details(creds[1].username, creds[1].password)
+    except Exception:
+        resolved = creds[1].username
+    if owner != (resolved or creds[1].username):
         logger.warning(
-            "User %r attempted to read trace owned by %r (message_id=%s)",
-            creds[1].username, owner, message_id,
+            "User %r (resolved=%r) attempted to read trace owned by %r (message_id=%s)",
+            creds[1].username, resolved, owner, message_id,
         )
         raise HTTPException(status_code=404, detail="Trace log not found")
 
@@ -613,7 +787,9 @@ def create_graph(
     try:
         # Extract credentials from the dependency (same pattern as other endpoints)
         creds = creds[1]
-        auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+        auth = "Basic " + base64.b64encode(
+            f"{creds.username}:{creds.password}".encode()
+        ).decode()
         _, conn = ws_basic_auth(auth, graphname)
 
         # Create the graph using GSQL
@@ -739,7 +915,7 @@ def _build_proposal_from_live_schema(
     return SchemaProposal(vertices=vertices, edges=edges)
 
 
-def _check_init_eligibility(auth_b64: str, graphname: str) -> dict:
+def _check_init_eligibility(auth_header: str, graphname: str) -> dict:
     """Introspect *graphname* and categorize its current schema state.
 
     Returns a dict with key ``state`` set to one of:
@@ -766,7 +942,7 @@ def _check_init_eligibility(auth_b64: str, graphname: str) -> dict:
     structural_e = {t.casefold() for t in GRAPHRAG_STRUCTURAL_EDGE_TYPES}
 
     try:
-        _, conn = ws_basic_auth(auth_b64, graphname)
+        _, conn = ws_basic_auth(auth_header, graphname)
     except Exception:
         # Graph doesn't exist (or auth failed mid-flight); treat as empty
         # so the create_graph + init path handles it.
@@ -829,15 +1005,15 @@ def check_init_eligibility(
         }
     """
     cred_obj = creds[1]
-    auth_b64 = base64.b64encode(
+    auth_header = "Basic " + base64.b64encode(
         f"{cred_obj.username}:{cred_obj.password}".encode()
     ).decode()
-    result = _check_init_eligibility(auth_b64, graphname)
+    result = _check_init_eligibility(auth_header, graphname)
     # Include edge endpoint pairs so the UI can show "FILED_BY (Filing → Company)"
     # alongside each edge name in the description-edit dialog.
     if result.get("state") == "user_types_present" and result.get("user_edge_types"):
         try:
-            _, conn = ws_basic_auth(auth_b64, graphname)
+            _, conn = ws_basic_auth(auth_header, graphname)
             from common.db.schema_utils import read_existing_schema
             existing = read_existing_schema(conn)
             pairs_map: dict[str, list[list[str]]] = {}
@@ -1016,13 +1192,13 @@ def init_graph(
             detail="schema_gsql and use_existing_schema are mutually exclusive.",
         )
     cred_obj = creds[1]
-    auth_b64 = base64.b64encode(
+    auth_header = "Basic " + base64.b64encode(
         f"{cred_obj.username}:{cred_obj.password}".encode()
     ).decode()
 
     # Pre-flight eligibility check: introspect the live schema and
     # decide whether to proceed, reject, or adopt existing types.
-    eligibility = _check_init_eligibility(auth_b64, graphname)
+    eligibility = _check_init_eligibility(auth_header, graphname)
     if eligibility["state"] == "structural_present":
         raise HTTPException(
             status_code=409,
@@ -1078,7 +1254,7 @@ def init_graph(
                 graphname, state="running",
                 message="Initializing structural schema",
             )
-            _, conn = ws_basic_auth(auth_b64, graphname)
+            _, conn = ws_basic_auth(auth_header, graphname)
             LogWriter.info(f"Initializing graph: {graphname}")
             resp = supportai.init_supportai(conn, graphname)
             schema_res, index_res, query_res = resp[0], resp[1], resp[2]
@@ -1451,20 +1627,20 @@ async def forceupdate(
     
     # Extract credentials from the dependency
     creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+    auth_header = _ecc_auth_header(creds)
 
     ecc_base = graphrag_config.get("ecc", "http://graphrag-ecc:8001")
     ecc_update_url = f"{ecc_base}/{graphname}/graphrag/consistency_update"
     ecc_status_url = f"{ecc_base}/{graphname}/graphrag/rebuild_status"
-    
+
     LogWriter.info(f"Sending ECC rebuild request to: {ecc_update_url}")
-    
+
     # Background task to trigger rebuild, monitor completion, and release lock
     async def rebuild_and_monitor():
         try:
             # Step 1: Trigger the ECC rebuild (non-blocking)
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(ecc_update_url, headers={"Authorization": f"Basic {auth}"})
+                response = await client.get(ecc_update_url, headers={"Authorization": auth_header})
                 if response.status_code not in [200, 202]:
                     LogWriter.error(f"ECC rebuild trigger failed for {graphname}: {response.status_code} - {response.text}")
                     return
@@ -1483,8 +1659,8 @@ async def forceupdate(
                 try:
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         status_response = await client.get(
-                            ecc_status_url, 
-                            headers={"Authorization": f"Basic {auth}"}
+                            ecc_status_url,
+                            headers={"Authorization": auth_header}
                         )
                     
                     if status_response.status_code == 200:
@@ -1535,7 +1711,7 @@ def get_rebuild_status(
     """
     # Extract credentials from the dependency
     creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+    auth_header = _ecc_auth_header(creds)
 
     try:
         ecc_status_url = (
@@ -1543,10 +1719,10 @@ def get_rebuild_status(
             + f"/{graphname}/graphrag/rebuild_status"
         )
         LogWriter.info(f"Checking ECC status at: {ecc_status_url}")
-        
+
         response = httpx.get(
             ecc_status_url,
-            headers={"Authorization": f"Basic {auth}"},
+            headers={"Authorization": auth_header},
             timeout=30.0
         )
         
@@ -1608,7 +1784,9 @@ def create_ingest(
     try:
         # Extract credentials from the dependency (same pattern as other endpoints)
         creds = creds[1]
-        auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+        auth = "Basic " + base64.b64encode(
+            f"{creds.username}:{creds.password}".encode()
+        ).decode()
         _, conn = ws_basic_auth(auth, graphname)
 
         # Create the ingest configuration
@@ -1658,7 +1836,9 @@ def ingest(
     try:
         # Extract credentials from the dependency (same pattern as other endpoints)
         creds = creds[1]
-        auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+        auth = "Basic " + base64.b64encode(
+            f"{creds.username}:{creds.password}".encode()
+        ).decode()
         _, conn = ws_basic_auth(auth, graphname)
 
         # Run the ingestion
@@ -1699,7 +1879,9 @@ async def serve_image_from_vertex(
     try:
         # Extract credentials from the dependency (same pattern as graph_query and other endpoints)
         creds = creds[1]
-        auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
+        auth = "Basic " + base64.b64encode(
+            f"{creds.username}:{creds.password}".encode()
+        ).decode()
         _, conn = ws_basic_auth(auth, graphname)
         
         LogWriter.info(f"Serving image {image_id} from graph {graphname}")
@@ -1746,12 +1928,11 @@ async def get_user_conversations(
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
     creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(
                 f"{graphrag_config['chat_history_api']}/user/{user_id}",
-                headers={"Authorization": f"Basic {auth}"},
+                headers={"Authorization": _chat_history_auth_header(creds)},
             )
             res.raise_for_status()
     except Exception as e:
@@ -1766,9 +1947,9 @@ async def get_user_conversations(
 
 @router.get(route_prefix + "/roles")
 async def get_user_roles(
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)]
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)]
 ):
-    roles, graph_roles = _get_user_role_details(
+    roles, graph_roles, _ = _get_user_role_details(
         credentials.username, credentials.password
     )
     return {"roles": roles, "graph_roles": graph_roles}
@@ -1780,12 +1961,11 @@ async def get_conversation_contents(
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
     creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(
                 f"{graphrag_config['chat_history_api']}/conversation/{conversation_id}",
-                headers={"Authorization": f"Basic {auth}"},
+                headers={"Authorization": _chat_history_auth_header(creds)},
             )
             res.raise_for_status()
     except Exception as e:
@@ -1802,12 +1982,11 @@ async def get_conversation_feedback(
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
     creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(
                 f"{graphrag_config['chat_history_api']}/get_feedback",
-                headers={"Authorization": f"Basic {auth}"},
+                headers={"Authorization": _chat_history_auth_header(creds)},
             )
             res.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -1830,12 +2009,11 @@ async def delete_conversation(
 ):
     """Delete a conversation and all its messages."""
     creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
     try:
         async with httpx.AsyncClient() as client:
             res = await client.delete(
                 f"{graphrag_config['chat_history_api']}/conversation/{conversation_id}",
-                headers={"Authorization": f"Basic {auth}"},
+                headers={"Authorization": _chat_history_auth_header(creds)},
             )
             res.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -1934,20 +2112,22 @@ async def run_agent(
     return resp
 
 
-async def load_conversation_history(conversation_id: str, usr_auth: str) -> list[dict[str, str]]:
+async def load_conversation_history(
+    conversation_id: str, usr_creds: HTTPBasicCredentials
+) -> list[dict[str, str]]:
     """
     Load conversation history from the chat history service.
     Returns a list of dicts with 'query', 'response', 'create_ts', and 'update_ts' keys.
     """
     if not conversation_id or conversation_id == "new":
         return []
-    
+
     ch = graphrag_config.get("chat_history_api")
     if ch is None:
         LogWriter.info("chat-history not enabled, returning empty history")
         return []
-    
-    headers = {"Authorization": f"Basic {usr_auth}"}
+
+    headers = {"Authorization": _chat_history_auth_header(usr_creds)}
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(
@@ -1982,10 +2162,12 @@ async def load_conversation_history(conversation_id: str, usr_auth: str) -> list
         return []
 
 
-async def write_message_to_history(message: Message, usr_auth: str):
+async def write_message_to_history(
+    message: Message, usr_creds: HTTPBasicCredentials
+):
     ch = graphrag_config.get("chat_history_api")
     if ch is not None:
-        headers = {"Authorization": f"Basic {usr_auth}"}
+        headers = {"Authorization": _chat_history_auth_header(usr_creds)}
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.post(
@@ -2008,11 +2190,13 @@ async def graph_query(
     conversation_id: str | None = None,
 ):
     creds = creds[1]
-    auth = base64.b64encode(f"{creds.username}:{creds.password}".encode()).decode()
-    _, conn = ws_basic_auth(auth, graphname)
+    auth_header = "Basic " + base64.b64encode(
+        f"{creds.username}:{creds.password}".encode()
+    ).decode()
+    _, conn = ws_basic_auth(auth_header, graphname)
     try:
         # Load conversation history if conversation_id is provided
-        conversation_history = await load_conversation_history(conversation_id, auth) if conversation_id else []
+        conversation_history = await load_conversation_history(conversation_id, creds) if conversation_id else []
 
         # Use provided conversation ID or generate new one
         if not conversation_id or conversation_id == "new":
@@ -2040,7 +2224,7 @@ async def graph_query(
             role=Role.USER,
         )
         # save message
-        await write_message_to_history(message, auth)
+        await write_message_to_history(message, creds)
         prev_id = message.message_id
 
         # generate response and keep track of response time
@@ -2063,7 +2247,7 @@ async def graph_query(
             response_type=resp.response_type,
             query_sources=resp.query_sources,
         )
-        await write_message_to_history(message, auth)
+        await write_message_to_history(message, creds)
         await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, creds.username)
         prev_id = message.message_id
 
@@ -2084,9 +2268,10 @@ async def chat(
 ):
     """
     WebSocket endpoint for chat functionality with conversation history support.
-    
+
     Expected message flow:
-    1. Authentication (base64 encoded username:password)
+    1. Authentication: full Authorization header value, ``Basic <b64>``
+       or ``Bearer <token>``.
     2. RAG pattern (e.g., "hybridsearch", "similaritysearch", etc.)
     3. Conversation ID (or "new" for new conversation)
     4. User messages
@@ -2116,8 +2301,17 @@ async def chat(
         usr_auth = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         logger.info(f"Received authentication data, length: {len(usr_auth)}")
         _, conn = ws_basic_auth(usr_auth, graphname)
-        # Extract the authenticated username for trace-log ownership tracking.
-        ws_username = base64.b64decode(usr_auth.encode()).decode().split(":", 1)[0]
+        # Extract the authenticated username for trace-log ownership
+        # tracking. For sentinel logins (API token / secret) this is
+        # the sentinel itself; we resolve to the real TG identity below.
+        usr_creds = _parse_auth_header(usr_auth)
+        try:
+            _, _, ws_username = _get_user_role_details(
+                usr_creds.username, usr_creds.password
+            )
+        except Exception:
+            ws_username = usr_creds.username
+        ws_username = ws_username or usr_creds.username
         logger.info("Authentication successful")
     except asyncio.TimeoutError:
         logger.error("WebSocket authentication timeout - no credentials received")
@@ -2149,7 +2343,7 @@ async def chat(
     )
     
     # Load conversation history if not a new conversation
-    conversation_history = await load_conversation_history(conversation_id, usr_auth)
+    conversation_history = await load_conversation_history(conversation_id, usr_creds)
     
     # Use provided conversation ID or generate new one
     if conversation_id == "new" or not conversation_id:
@@ -2180,7 +2374,7 @@ async def chat(
                 role=Role.USER,
             )
             # save message
-            await write_message_to_history(message, usr_auth)
+            await write_message_to_history(message, usr_creds)
             prev_id = message.message_id
 
             # generate response and keep track of response time
@@ -2203,7 +2397,7 @@ async def chat(
                 response_type=resp.response_type,
                 query_sources=resp.query_sources,
             )
-            await write_message_to_history(message, usr_auth)
+            await write_message_to_history(message, usr_creds)
             await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, ws_username)
             prev_id = message.message_id
 
@@ -2449,7 +2643,7 @@ async def clear_uploaded_files(
 @router.post(route_prefix + "/{graphname}/cloud/download")
 async def download_from_cloud(
     graphname: ValidGraphName,
-    credentials: Annotated[HTTPBase, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     request_body: dict = Body(...),
 ):
     """
@@ -2678,7 +2872,7 @@ async def download_from_cloud(
 @router.get(route_prefix + "/{graphname}/cloud/list")
 async def list_cloud_downloads(
     graphname: ValidGraphName,
-    credentials: Annotated[HTTPBase, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
 ):
     """
     List downloaded files from cloud storage for a specific graph.
@@ -2725,7 +2919,7 @@ async def list_cloud_downloads(
 @router.delete(route_prefix + "/{graphname}/cloud/delete")
 async def delete_cloud_downloads(
     graphname: ValidGraphName,
-    credentials: Annotated[HTTPBase, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     filename: str = None,
 ):
     """
@@ -2812,7 +3006,7 @@ async def delete_cloud_downloads(
 @router.post(f"{route_prefix}/config/llm")
 async def save_llm_config(
     request: Request,
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     llm_config_data: dict = Body(...)
 ):
     """
@@ -2822,9 +3016,7 @@ async def save_llm_config(
         graphname = llm_config_data.get("graphname")
         llm_access_mode = _resolve_llm_config_access(credentials, graphname)
         graphs = auth(credentials.username, credentials.password)[0]
-        auth_header = "Basic " + base64.b64encode(
-            f"{credentials.username}:{credentials.password}".encode()
-        ).decode()
+        auth_header = _ecc_auth_header(credentials)
         if _ecc_jobs_running(graphs, auth_header):
             raise HTTPException(
                 status_code=409,
@@ -2923,7 +3115,7 @@ async def save_llm_config(
 @router.post(f"{route_prefix}/config/llm/test")
 async def test_llm_config(
     request: Request,
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     llm_test_config: dict = Body(...)
 ):
     """
@@ -3268,7 +3460,7 @@ def _strip_auth(config: dict) -> dict:
 
 @router.get(f"{route_prefix}/config")
 async def get_config(
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     graphname: str | None = None,
     scope: str | None = None,
 ):
@@ -3358,7 +3550,7 @@ async def get_config(
 @router.post(f"{route_prefix}/config/db/test")
 async def test_db_connection(
     request: Request,
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     db_test_config: dict = Body(...)
 ):
     """
@@ -3379,10 +3571,9 @@ async def test_db_connection(
             restppPort=db_test_config["restppPort"],
             graphname="",
         )
-        
-        if db_test_config.get("getToken", False):
-            test_conn.getToken()
 
+        # listGraphs() exercises the credentials; pyTigerGraph mints a
+        # REST++ token on demand if the instance requires one.
         test_conn.listGraphs()
         
         return {
@@ -3403,7 +3594,7 @@ async def test_db_connection(
 @router.post(f"{route_prefix}/config/db")
 async def save_db_config(
     request: Request,
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     db_config_data: dict = Body(...)
 ):
     """
@@ -3412,9 +3603,7 @@ async def save_db_config(
     try:
         _require_roles(credentials, {"superuser"})
         graphs = auth(credentials.username, credentials.password)[0]
-        auth_header = "Basic " + base64.b64encode(
-            f"{credentials.username}:{credentials.password}".encode()
-        ).decode()
+        auth_header = _ecc_auth_header(credentials)
         if _ecc_jobs_running(graphs, auth_header):
             raise HTTPException(
                 status_code=409,
@@ -3448,7 +3637,7 @@ async def save_db_config(
 @router.post(f"{route_prefix}/config/graphrag")
 async def save_graphrag_config(
     request: Request,
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     graphrag_config_data: dict = Body(...)
 ):
     """
@@ -3458,9 +3647,7 @@ async def save_graphrag_config(
     try:
         _require_roles(credentials, {"superuser", "globaldesigner"})
         graphs = auth(credentials.username, credentials.password)[0]
-        auth_header = "Basic " + base64.b64encode(
-            f"{credentials.username}:{credentials.password}".encode()
-        ).decode()
+        auth_header = _ecc_auth_header(credentials)
         if _ecc_jobs_running(graphs, auth_header):
             raise HTTPException(
                 status_code=409,
@@ -3587,7 +3774,7 @@ def split_prompt_template(prompt_content: str, prompt_type: str) -> dict:
 
 @router.get(f"{route_prefix}/prompts")
 async def get_prompts(
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     graphname: str | None = None,
 ):
     """
@@ -3678,7 +3865,7 @@ async def get_prompts(
 
 @router.post(f"{route_prefix}/prompts")
 async def save_prompts(
-    credentials: Annotated[HTTPBasicCredentials, Depends(security)],
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
     prompt_data: dict = Body(...)
 ):
     """

@@ -39,14 +39,14 @@ export const Interactions: FC<Interactions> = ({
   const canViewTrace = isSuperuser || isGlobalDesigner || isGraphAdmin;
 
   const sendFeedback = async (action: Feedback, message: Message) => {
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     setFeedback(action);
     message.feedback = action;
     await fetch(`${GRAPHRAG_URL}/ui/feedback`, {
       method: "POST",
       body: JSON.stringify(message),
       headers: {
-        Authorization: `Basic ${creds}`,
+        Authorization: creds!,
         "Content-Type": "application/json",
       },
     });

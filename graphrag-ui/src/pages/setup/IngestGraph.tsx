@@ -95,9 +95,9 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     if (!ingestGraphName) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(`/ui/${ingestGraphName}/uploads/list`, {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const data = await response.json();
       setUploadedFiles(data.files || []);
@@ -153,7 +153,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     setIngestMessage("");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const formData = new FormData();
       filesArray.forEach((file) => formData.append("files", file));
 
@@ -161,7 +161,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         `/ui/${ingestGraphName}/uploads?overwrite=true`,
         {
           method: "POST",
-          headers: { Authorization: `Basic ${creds}` },
+          headers: { Authorization: creds! },
           body: formData,
         }
       );
@@ -205,7 +205,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     setIngestMessage("");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       let uploadedCount = 0;
       let failedCount = 0;
       const totalFiles = filesArray.length;
@@ -229,7 +229,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             `/ui/${ingestGraphName}/uploads?overwrite=true`,
             {
               method: "POST",
-              headers: { Authorization: `Basic ${creds}` },
+              headers: { Authorization: creds! },
               body: formData,
             }
           );
@@ -283,12 +283,12 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     if (!ingestGraphName) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(
         `/ui/${ingestGraphName}/uploads?filename=${encodeURIComponent(filename)}`,
         {
           method: "DELETE",
-          headers: { Authorization: `Basic ${creds}` },
+          headers: { Authorization: creds! },
         }
       );
       const data = await response.json();
@@ -309,10 +309,10 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     if (!shouldDelete) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(`/ui/${ingestGraphName}/uploads`, {
         method: "DELETE",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const data = await response.json();
       setUploadMessage(`✅ ${data.message}`);
@@ -327,9 +327,9 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     if (!ingestGraphName) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(`/ui/${ingestGraphName}/cloud/list`, {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const data = await response.json();
       setDownloadedFiles(data.files || []);
@@ -349,7 +349,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     setDownloadMessage("Downloading files from cloud storage...");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
 
       // Prepare request body based on provider
       let requestBody: any = { provider: cloudProvider };
@@ -400,7 +400,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(requestBody),
       });
@@ -440,14 +440,14 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     if (!ingestGraphName) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(
         `/ui/${ingestGraphName}/cloud/delete?filename=${encodeURIComponent(
           filename
         )}`,
         {
           method: "DELETE",
-          headers: { Authorization: `Basic ${creds}` },
+          headers: { Authorization: creds! },
         }
       );
       const data = await response.json();
@@ -468,10 +468,10 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     if (!shouldDelete) return;
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch(`/ui/${ingestGraphName}/cloud/delete`, {
         method: "DELETE",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const data = await response.json();
       setDownloadMessage(`✅ ${data.message}`);
@@ -489,7 +489,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     setIsIngesting(true);
     setIngestMessage("Ingesting documents into knowledge graph...");
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const folderPath = sourceType === "uploaded" ? `uploads/${ingestGraphName}` : `downloaded_files_cloud/${ingestGraphName}`;
 
       // If no cached job from a prior create_ingest, run it now. The
@@ -506,7 +506,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Basic ${creds}`,
+              Authorization: creds!,
             },
             body: JSON.stringify({
               data_source: "server",
@@ -536,7 +536,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify({
           load_job_id: jobData.load_job_id,
@@ -578,7 +578,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     setIngestMessage("Step 1/2: Creating ingest job...");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
 
       const createIngestConfig = {
         data_source: "server",
@@ -591,7 +591,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(createIngestConfig),
       });
@@ -626,7 +626,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Basic ${creds}`,
+            Authorization: creds!,
           },
           body: JSON.stringify(loadingInfo),
         });
@@ -666,7 +666,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     console.log("fileCount:", fileCount);
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
 
       const createIngestConfig = {
         data_source: "server",
@@ -681,7 +681,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(createIngestConfig),
       });
@@ -772,7 +772,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     setIsIngesting(true);
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       let loadingInfo: any = {};
 
       if (skipBDAProcessing) {
@@ -832,7 +832,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Basic ${creds}`,
+              Authorization: creds!,
             },
             body: JSON.stringify(createIngestConfig),
           }
@@ -867,7 +867,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(loadingInfo),
       });
@@ -915,10 +915,10 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         setIngestGraphName(store.graphs[0]);
       }
     }
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     if (!creds) return;
     fetch("/ui/list_graphs", {
-      headers: { Authorization: `Basic ${creds}` },
+      headers: { Authorization: creds! },
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {

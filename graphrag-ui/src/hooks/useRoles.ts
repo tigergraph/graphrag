@@ -34,7 +34,7 @@ export function useRoles(refreshKey?: unknown): RolesState {
   );
 
   const loadRoles = useCallback(async () => {
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     if (!creds) {
       setUserRoles([]);
       setGraphRoles({});
@@ -58,7 +58,7 @@ export function useRoles(refreshKey?: unknown): RolesState {
     // Fallback: fetch from backend (for sessions created before login returned roles)
     try {
       const response = await fetch("/ui/roles", {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       if (!response.ok) {
         setUserRoles([]);

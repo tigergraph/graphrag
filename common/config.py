@@ -532,6 +532,9 @@ def _build_embedding_store(graphname: str = "") -> TigerGraphEmbeddingStore:
     ``embedding_service`` for the model) so the result reflects the
     current config.
     """
+    # A static apiToken stays a service-side credential here; otherwise
+    # pyTigerGraph mints a REST++ token from the service username/password
+    # on demand, so no explicit getToken() is needed.
     conn = TigerGraphConnection(
         host=db_config.get("hostname", "http://tigergraph"),
         username=db_config.get("username", "tigergraph"),
@@ -541,8 +544,6 @@ def _build_embedding_store(graphname: str = "") -> TigerGraphEmbeddingStore:
         graphname=graphname or db_config.get("graphname", ""),
         apiToken=db_config.get("apiToken", ""),
     )
-    if not db_config.get("apiToken") and db_config.get("getToken"):
-        conn.getToken()
 
     store = TigerGraphEmbeddingStore(
         conn,

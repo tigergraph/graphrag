@@ -736,7 +736,7 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
       setLoading(false);
       return;
     }
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     // Skip the API call when there are no creds — sending ``Basic null``
     // makes FastAPI's HTTPBasic challenge with ``WWW-Authenticate: Basic``
     // which triggers the browser's native auth popup. Better to show
@@ -748,7 +748,7 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
     }
     setLoading(true);
     fetch(`/ui/trace/${messageId}`, {
-      headers: { Authorization: `Basic ${creds}` },
+      headers: { Authorization: creds! },
     })
       .then((res) => {
         if (!res.ok) throw new Error("Not found");

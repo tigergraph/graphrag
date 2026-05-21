@@ -68,13 +68,13 @@ const CustomizePrompts = () => {
     setSaveMessageType("");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const query = selectedGraph ? `?graphname=${encodeURIComponent(selectedGraph)}` : "";
       const response = await fetch(`/ui/prompts${query}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify({
           prompt_type: promptId,
@@ -110,10 +110,10 @@ const CustomizePrompts = () => {
     setIsLoading(true);
     const effectiveGraph = graphname ?? selectedGraph;
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const query = effectiveGraph ? `?graphname=${encodeURIComponent(effectiveGraph)}` : "";
       const response = await fetch(`/ui/prompts${query}`, {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (!response.ok) {

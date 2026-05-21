@@ -14,7 +14,7 @@ export function useIdleTimeout(timeoutMs: number = DEFAULT_TIMEOUT_MS) {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleTimeout = useCallback(() => {
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     if (!creds) return; // Not logged in, nothing to do
 
     sessionStorage.clear();
@@ -27,7 +27,7 @@ export function useIdleTimeout(timeoutMs: number = DEFAULT_TIMEOUT_MS) {
       clearTimeout(timerRef.current);
     }
     // Only set timer if user is logged in
-    if (sessionStorage.getItem("creds")) {
+    if (sessionStorage.getItem("auth")) {
       timerRef.current = setTimeout(handleTimeout, timeoutMs);
     }
   }, [handleTimeout, timeoutMs]);

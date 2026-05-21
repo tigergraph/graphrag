@@ -120,94 +120,31 @@ def get_db_connection_pwd_manual(
     return conn
 
 def elevate_db_connection_to_token(host, username, password, graphname, async_conn: bool = False) -> TigerGraphConnectionProxy:
-    # If a pre-existing apiToken is provided in config, use it directly
-    # and skip the getToken() call to avoid conflicts.
-    static_token = db_config.get("apiToken", "")
+    # pyTigerGraph determines on its own whether a REST++ token is needed
+    # and mints one from the username/password when so; we just build the
+    # connection with the caller's credentials.
+    if async_conn:
+        conn = AsyncTigerGraphConnection(
+            host=host,
+            username=username,
+            password=password,
+            graphname=graphname,
+            restppPort=db_config.get("restppPort", "9000"),
+            gsPort=db_config.get("gsPort", "14240")
+        )
 
-    if static_token:
-        LogWriter.info("Using pre-configured apiToken from db_config")
-        if async_conn:
-            conn = AsyncTigerGraphConnection(
-                host=host,
-                username=username,
-                password=password,
-                graphname=graphname,
-                apiToken=static_token,
-                restppPort=db_config.get("restppPort", "9000"),
-                gsPort=db_config.get("gsPort", "14240"),
-            )
-        else:
-            conn = TigerGraphConnection(
-                host=host,
-                username=username,
-                password=password,
-                graphname=graphname,
-                apiToken=static_token,
-                restppPort=db_config.get("restppPort", "9000"),
-                gsPort=db_config.get("gsPort", "14240"),
-            )
-        return conn
-
-    conn = TigerGraphConnection(
-        host=host,
-        username=username,
-        password=password,
-        graphname=graphname,
-        restppPort=db_config.get("restppPort", "9000"),
-        gsPort=db_config.get("gsPort", "14240")
-    )
-    
-    if db_config.get("getToken"):
-        try:
-            apiToken = conn.getToken()[0]
-        except HTTPError:
-            LogWriter.error("Failed to get token")
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect username or password",
-                headers={"WWW-Authenticate": "Basic"},
-            )
-        except TigerGraphException as e:
-            LogWriter.error(f"Failed to get token: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Failed to get token - is the database running?"
-            )
-
-        if async_conn:
-            conn = AsyncTigerGraphConnection(
-                host=host,
-                username=username,
-                password=password,
-                graphname=graphname,
-                apiToken=apiToken,
-                restppPort=db_config.get("restppPort", "9000"),
-                gsPort=db_config.get("gsPort", "14240")
-            )
-        else:
-            conn = TigerGraphConnection(
-                host=db_config["hostname"],
-                username=username,
-                password=password,
-                graphname=graphname,
-                apiToken=apiToken,
-                restppPort=db_config.get("restppPort", "9000"),
-                gsPort=db_config.get("gsPort", "14240")
-            )
+        # temp fix for path
+        if conn.restppPort == conn.gsPort and "/restpp" not in conn.restppUrl:
+            conn.restppUrl = conn.restppUrl+"/restpp"
     else:
-        if async_conn:
-            conn = AsyncTigerGraphConnection(
-                host=host,
-                username=username,
-                password=password,
-                graphname=graphname,
-                restppPort=db_config.get("restppPort", "9000"),
-                gsPort=db_config.get("gsPort", "14240")
-            )
-
-            # temp fix for path
-            if conn.restppPort == conn.gsPort and "/restpp" not in conn.restppUrl:
-                conn.restppUrl = conn.restppUrl+"/restpp"
+        conn = TigerGraphConnection(
+            host=host,
+            username=username,
+            password=password,
+            graphname=graphname,
+            restppPort=db_config.get("restppPort", "9000"),
+            gsPort=db_config.get("gsPort", "14240")
+        )
 
     return conn
 

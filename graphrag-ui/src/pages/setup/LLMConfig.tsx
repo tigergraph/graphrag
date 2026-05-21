@@ -175,13 +175,13 @@ const LLMConfig = () => {
     const effectiveScope = scope ?? configScope;
     const effectiveGraph = graphname ?? selectedGraph;
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const params = new URLSearchParams();
       if (effectiveGraph) params.set("graphname", effectiveGraph);
       if (effectiveScope === "graph") params.set("scope", "graph");
       const queryString = params.toString() ? `?${params.toString()}` : "";
       const response = await fetch(`/ui/config${queryString}`, {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (!response.ok) {
@@ -480,7 +480,7 @@ const LLMConfig = () => {
     setMessageType("");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       let llmConfigData: any;
 
       // Graph admin saving chatbot config
@@ -503,7 +503,7 @@ const LLMConfig = () => {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Basic ${creds}`,
+            Authorization: creds!,
           },
           body: JSON.stringify(llmConfigData),
         });
@@ -527,7 +527,7 @@ const LLMConfig = () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(llmConfigData),
       });
@@ -614,14 +614,14 @@ const LLMConfig = () => {
         if (useCustomChatbot && !chatbotModelName.trim()) { failValidation("Chatbot Model is required when not inheriting from completion"); return; }
       }
       
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const llmConfigData = buildLLMConfigPayload();
 
       const response = await fetch("/ui/config/llm/test", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(llmConfigData),
       });

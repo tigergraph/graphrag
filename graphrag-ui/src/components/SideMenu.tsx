@@ -95,7 +95,7 @@ const SideMenu = ({
 
   const fetchHistory2 = useCallback(async () => {
     setConversationId([]);
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     const username = sessionStorage.getItem("username");
 
     if (!username) {
@@ -109,7 +109,7 @@ const SideMenu = ({
     const settings = {
       method: 'GET',
       headers: {
-        Authorization: `Basic ${creds}`,
+        Authorization: creds!,
         "Content-Type": "application/json",
       }
     }
@@ -209,7 +209,7 @@ const SideMenu = ({
       setExpandedConversations(prev => new Set([...prev, id]));
 
       // Store conversation data for the chat component
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       if (!creds) {
         return;
       }
@@ -217,7 +217,7 @@ const SideMenu = ({
       const settings = {
         method: 'GET',
         headers: {
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
           "Content-Type": "application/json",
         }
       }

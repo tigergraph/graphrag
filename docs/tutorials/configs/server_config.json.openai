@@ -3,7 +3,6 @@
     "hostname": "http://tigergraph",
     "restppPort": "14240",
     "gsPort": "14240",
-    "getToken": false,
     "default_timeout": 300,
     "default_mem_threshold": 5000,
     "default_thread_limit": 8

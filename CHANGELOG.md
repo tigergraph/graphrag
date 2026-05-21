@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.1]
+
+### Added
+- **Token login** — the sign-in page adds a "Use token login" option with a choice of API Token or Secret, alongside the default username / password. The signed-in username and roles are resolved from TigerGraph after login so the UI shows the real user.
+
+### Changed
+- **Every request authenticates as the signed-in user**, end to end — graph operations, chat history, traces, and knowledge-graph rebuilds all run under the caller's identity (username / password, secret, or API token).
+- **TigerGraph token handling is automatic** — an api token is obtained from the caller's credentials only when the database requires one, unless a static api token is configured. The `getToken` config option is no longer needed and is now ignored.
+
+### Removed
+- **A configured static `apiToken` no longer overrides per-user credentials.** It is used only for the service's background operations; interactive requests always authenticate as the signed-in user.
+
 ## [1.4.0]
 
 ### Added

@@ -89,7 +89,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
   const { sendMessage, lastMessage, readyState } = useWebSocket(WS_URL, {
     onOpen: () => {
       // Send authentication credentials
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       console.log("Sending credentials, length:", creds ? creds.length : 0);
       queryGraphragWs2(creds!);
 

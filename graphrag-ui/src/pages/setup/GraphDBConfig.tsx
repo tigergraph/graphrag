@@ -49,9 +49,9 @@ const GraphDBConfig = () => {
   const fetchConfig = async () => {
     setIsLoading(true);
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch("/ui/config", {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (!response.ok) {
@@ -99,7 +99,7 @@ const GraphDBConfig = () => {
     setConnectionTested(false);
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const testConfig: any = {
         hostname: effective(hostname, "hostname"),
         restppPort: effective(restppPort, "restppPort"),
@@ -116,7 +116,7 @@ const GraphDBConfig = () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(testConfig),
       });
@@ -150,7 +150,7 @@ const GraphDBConfig = () => {
     setMessageType("");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const effectiveHostname = effective(hostname, "hostname");
       const effectiveUsername = effective(username, "username");
       const dbConfigData: any = {
@@ -172,7 +172,7 @@ const GraphDBConfig = () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(dbConfigData),
       });
@@ -196,7 +196,7 @@ const GraphDBConfig = () => {
           
           setTimeout(() => {
             // Clear sessionStorage and redirect to login
-            sessionStorage.removeItem("creds");
+            sessionStorage.removeItem("auth");
             alert(reason);
             window.location.href = "/"; // Redirect to root (login page)
           }, 2000); // Give user 2 seconds to see the success message

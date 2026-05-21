@@ -423,7 +423,7 @@ For examples of how to ingest documents through the backend API, refer to the **
 ## More Detailed Configurations
 
 ### DB configuration
-Copy the below into `configs/server_config.json` and edit the `hostname` and `getToken` fields to match your database's configuration. If token authentication is enabled in TigerGraph, set `getToken` to `true`. Set the timeout, memory threshold, and thread limit parameters as desired to control how much of the database's resources are consumed when answering a question.
+Copy the below into `configs/server_config.json` and edit the `hostname` to match your database's configuration. Token authentication is handled automatically — an api token is obtained from the username/password when the database requires one, unless a static api token is configured. Set the timeout, memory threshold, and thread limit parameters as desired to control how much of the database's resources are consumed when answering a question.
 
 ```json
 {
@@ -433,7 +433,6 @@ Copy the below into `configs/server_config.json` and edit the `hostname` and `ge
         "gsPort": "14240",
         "username": "tigergraph",
         "password": "tigergraph",
-        "getToken": false,
         "default_timeout": 300,
         "default_mem_threshold": 5000,
         "default_thread_limit": 8
@@ -448,9 +447,8 @@ Copy the below into `configs/server_config.json` and edit the `hostname` and `ge
 | `gsPort` | string | `"14240"` | GSQL port for TigerGraph admin operations. |
 | `username` | string | `"tigergraph"` | TigerGraph database username. |
 | `password` | string | `"tigergraph"` | TigerGraph database password. |
-| `getToken` | bool | `false` | Set to `true` if token authentication is enabled on TigerGraph. |
 | `graphname` | string | `""` | Default graph name. Usually left empty (selected at runtime). |
-| `apiToken` | string | `""` | Pre-generated API token. If set, token-based auth is used instead of username/password. |
+| `apiToken` | string | `""` | Optional pre-generated token for the service's background operations. Interactive requests always authenticate as the signed-in user. |
 | `default_timeout` | int | `300` | Default query timeout in seconds. |
 | `default_mem_threshold` | int | `5000` | Memory threshold (MB) for query execution. |
 | `default_thread_limit` | int | `8` | Max threads for query execution. |
