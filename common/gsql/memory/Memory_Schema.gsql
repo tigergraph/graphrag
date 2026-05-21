@@ -1,0 +1,31 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ *
+ * Chat memory on the same GraphRAG graph (Explore Graph: vertex types "conversation", "message").
+ * - conversation: one vertex per thread.
+ * - message: one vertex per Q&A (user_content + system_content on the same row).
+ * - epoch_*: UTC epoch SECONDS (UINT), same style as SupportAI DocumentChunk.
+ */
+
+CREATE SCHEMA_CHANGE JOB add_graphrag_chat_memory {
+    ADD VERTEX conversation(
+        PRIMARY_ID conversation_id STRING,
+        user_id STRING,
+        epoch_added UINT,
+        epoch_processed UINT
+    ) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+
+    ADD VERTEX message(
+        PRIMARY_ID message_id STRING,
+        conversation_id STRING,
+        user_content STRING,
+        system_content STRING,
+        epoch_added UINT,
+        tracelog STRING
+    ) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+
+    ADD DIRECTED EDGE has_message(FROM conversation, TO message) WITH REVERSE_EDGE="reverse_has_message";
+}

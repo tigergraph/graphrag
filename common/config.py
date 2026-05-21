@@ -434,6 +434,8 @@ if "chunker" not in graphrag_config:
     graphrag_config["chunker"] = "semantic"
 if "extractor" not in graphrag_config:
     graphrag_config["extractor"] = "llm"
+if "tg_memory_schema_on_startup" not in graphrag_config:
+    graphrag_config["tg_memory_schema_on_startup"] = True
 # ``retrieval_include_entity`` is resolved at install time
 # (see ``common.db.retriever_render.resolve_include_entity``).
 

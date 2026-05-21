@@ -176,6 +176,63 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   const [showTableVis, setShowTableVis] = useState<boolean>(false);
   const [traceMessageId, setTraceMessageId] = useState<string | null>(null);
   const [alert, alertDialog] = useAlert();
+  const [confirmDelete, setConfirmDelete] = useState<boolean>(false);
+  const [isDeleted, setIsDeleted] = useState<boolean>(false);
+
+  const handleDeleteMessage = async (msgId: string) => {
+    const creds = sessionStorage.getItem("creds");
+    const graphname = sessionStorage.getItem("selectedGraph");
+    if (!creds || !graphname || !msgId) return;
+    try {
+      const res = await fetch(
+        `/ui/message/${encodeURIComponent(msgId)}?graphname=${encodeURIComponent(graphname)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Basic ${creds}` },
+        }
+      );
+      if (res.ok) {
+        setIsDeleted(true);
+        window.dispatchEvent(
+          new CustomEvent("graphrag:messageDeleted", { detail: { msgId } })
+        );
+        const convDataRaw = sessionStorage.getItem("selectedConversationData");
+        if (convDataRaw) {
+          try {
+            const convData = JSON.parse(convDataRaw);
+            let messages: any[] = [];
+            let wrap: (f: any[]) => any = (f) => f;
+            if (Array.isArray(convData)) {
+              messages = convData;
+            } else if (Array.isArray(convData.messages)) {
+              messages = convData.messages;
+              wrap = (f) => ({ ...convData, messages: f });
+            } else if (Array.isArray(convData.content)) {
+              messages = convData.content;
+              wrap = (f) => ({ ...convData, content: f });
+            }
+            const sysIdx = messages.findIndex((m: any) => m.message_id === msgId);
+            if (sysIdx !== -1) {
+              const toRemove = new Set([sysIdx]);
+              if (sysIdx > 0 && messages[sysIdx - 1]?.role === "user") {
+                toRemove.add(sysIdx - 1);
+              }
+              const filtered = messages.filter((_: any, i: number) => !toRemove.has(i));
+              sessionStorage.setItem("selectedConversationData", JSON.stringify(wrap(filtered)));
+            }
+          } catch { /* ignore */ }
+        }
+      } else {
+        const errText = await res.text().catch(() => "");
+        console.error(`Delete message failed (${res.status}):`, errText);
+        await alert(`Failed to delete message: ${res.status} ${errText}`);
+      }
+    } catch (err) {
+      console.error("Delete message error:", err);
+    }
+  };
+
+  if (isDeleted) return null;
 
   // Error handling functions
   const handleShowExplain = () => {
@@ -222,6 +279,30 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
   return (
     <>
       {alertDialog}
+      {/* Confirm delete message dialog */}
+      <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+        <DialogContent>
+          <p>Delete this message and its question? This cannot be undone.</p>
+          <div className="flex gap-2 justify-end mt-4">
+            <button
+              className="px-3 py-1 rounded border"
+              onClick={() => setConfirmDelete(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="px-3 py-1 rounded bg-red-600 text-white"
+              onClick={() => {
+                setConfirmDelete(false);
+                const msgId = message.messageId || message.message_id || "";
+                if (msgId) handleDeleteMessage(msgId);
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
       {traceMessageId && (
         <TraceLogs
           messageIdProp={traceMessageId}
@@ -248,25 +329,18 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
               showExplain={handleShowExplain}
               showTable={handleShowTable}
               showGraph={handleShowGraph}
+              onDelete={message.messageId || message.message_id ? () => setConfirmDelete(true) : undefined}
               onViewTrace={async () => {
                 const messageId = message.messageId || message.message_id || "";
                 if (!messageId) {
                   await alert("Trace log unavailable: this message has no trace ID.");
                   return;
                 }
-                // Guard against a missing/invalid creds value. If we send
-                // ``Basic null`` (or other unparsable base64), FastAPI's
-                // HTTPBasic returns 401 + ``WWW-Authenticate: Basic`` and
-                // the browser pops up its native auth dialog. Better to
-                // tell the user to sign in again than to flash that popup.
                 const creds = sessionStorage.getItem("creds");
                 if (!creds) {
                   await alert("Your session has expired. Please log in again.");
                   return;
                 }
-                // Trace JSON lives under /code/trace_logs inside the
-                // graphrag container and is wiped on container recreate.
-                // Probe first so we never open an empty dialog when the file is gone.
                 try {
                   const probe = await fetch(`/ui/trace/${messageId}`, {
                     method: "GET",

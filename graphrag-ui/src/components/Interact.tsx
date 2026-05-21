@@ -11,6 +11,7 @@ import { Feedback, Message } from "@/actions/ActionProvider";
 import { PiGraph } from "react-icons/pi";
 import { FaTable } from "react-icons/fa";
 import { LuInfo, LuActivity } from "react-icons/lu";
+import { RiDeleteBin6Line } from "react-icons/ri";
 import { useRoles } from "@/hooks/useRoles";
 const GRAPHRAG_URL = "";
 
@@ -20,6 +21,7 @@ interface Interactions {
   showTable: () => boolean;
   showGraph: () => boolean;
   onViewTrace?: () => void;
+  onDelete?: () => void;
 }
 
 export const Interactions: FC<Interactions> = ({
@@ -28,6 +30,7 @@ export const Interactions: FC<Interactions> = ({
   showTable,
   showGraph,
   onViewTrace,
+  onDelete,
 }: Interactions) => {
   // Seed from the persisted feedback when re-rendering a history
   // message so the up/down state matches what the user already
@@ -166,6 +169,16 @@ export const Interactions: FC<Interactions> = ({
           >
             <FaTable className="text-[15px]" />
           </div>
+
+          {onDelete && (
+            <div
+              className="w-[28px] h-[28px] bg-shadeA flex items-center justify-center rounded-sm mr-1 cursor-pointer hover:bg-red-100 dark:hover:bg-red-900/40 text-red-500 ml-2"
+              title="Delete this message"
+              onClick={() => onDelete()}
+            >
+              <RiDeleteBin6Line className="text-[15px]" />
+            </div>
+          )}
 
         </>
       ) : null}

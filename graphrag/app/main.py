@@ -14,9 +14,11 @@
 
 import json
 import logging
+import threading
 import time
 import uuid
 from base64 import b64decode
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 import routers
@@ -32,12 +34,36 @@ from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
 
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _tg_memory_schema_lifespan(app: FastAPI):
+    def _run_schema_install():
+        try:
+            from common.memory import tg_memory
+
+            tg_memory.install_memory_schema_for_all_graphs_at_startup()
+        except Exception:
+            logger.exception(
+                "TG memory schema startup install failed; types may appear only after "
+                "initialize_graph or when TigerGraph is reachable."
+            )
+
+    threading.Thread(target=_run_schema_install, daemon=True).start()
+    yield
+
+
 if PRODUCTION:
     app = FastAPI(
-        title="TigerGraph GraphRAG", docs_url=None, redoc_url=None, openapi_url=None
+        title="TigerGraph GraphRAG",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+        lifespan=_tg_memory_schema_lifespan,
     )
 else:
-    app = FastAPI(title="TigerGraph GraphRAG")
+    app = FastAPI(title="TigerGraph GraphRAG", lifespan=_tg_memory_schema_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,8 +81,6 @@ app.include_router(routers.ui_router, prefix=PATH_PREFIX)
 
 
 excluded_metrics_paths = ("/docs", "/openapi.json", "/metrics")
-
-logger = logging.getLogger(__name__)
 
 logger.info("In main.py")
 

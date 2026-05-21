@@ -1,0 +1,20 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ *
+ * Returns up to n "message" vertices for a conversation_id, highest epoch_added first.
+ */
+
+CREATE OR REPLACE DISTRIBUTED QUERY get_last_n_memory_exchanges(STRING conv_id, UINT n=4) SYNTAX V2 {
+  TYPEDEF TUPLE<VERTEX m, UINT ep> MsgRow;
+  HeapAccum<MsgRow>(n, ep DESC) @@heap;
+
+  seeds = {message.*};
+  res = SELECT m FROM seeds:m
+        WHERE m.conversation_id == conv_id
+        ACCUM @@heap += MsgRow(m, m.epoch_added);
+
+  PRINT @@heap AS rows;
+}

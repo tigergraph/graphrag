@@ -407,6 +407,15 @@ You are an expert in TigerGraph GSQL. Generate the GSQL query that retrieves the
 
 Route the user question to one of: `functions`, `vectorstore`, or `history`.
 
+## CRITICAL — Route to `history` FIRST when:
+The conversation history is non-empty AND the question is about this conversation itself:
+- What questions or messages were exchanged ("what did I ask", "previous questions", "earlier questions")
+- What was said, discussed, or answered previously in this session
+- Recalling, summarising, or listing prior exchanges in this chat
+- Anything referencing "previous", "earlier", "before", "last time", "you said", "I asked", "we discussed", "prior" in the context of THIS conversation
+
+If the conversation history is EMPTY, do NOT route to `history` — fall through to vectorstore or functions instead.
+
 ## Routing
 - **`history`**: questions similar to previous ones, or that reference earlier answers / responses, or that refer to the same entities mentioned in a previous answer.
 - **`vectorstore`**: questions best answered by text documents.
