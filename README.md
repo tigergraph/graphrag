@@ -1022,6 +1022,12 @@ First, make sure that all your LLM service provider configuration files are work
 docker compose up -d --build
 ```
 
+> **Windows developers:** the repo's top-level `configs/nginx.conf` and `configs/server_config.json` are symlinks intended for POSIX shells and don't resolve on Windows. Before running `docker compose up -d` from the repo root, overwrite them with the tutorial copies:
+> ```sh
+> cp docs/tutorials/configs/nginx.conf configs/nginx.conf
+> cp docs/tutorials/configs/server_config.json configs/server_config.json
+> ```
+
 If you want to use Weights And Biases for logging the test results, your WandB API key needs to be set in an environment variable on the host machine.
 
 ```sh
