@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 _graph_locks: Dict[str, threading.Lock] = {}
 _locks_dict_lock = threading.Lock()
 
+# Records the operation currently holding each graph's lock so the UI can
+# reflect long-running work when a dialog remounts.
+_current_operations: Dict[str, str] = {}
+
 # Global rebuild lock (only one rebuild at a time across all graphs)
 # Use asyncio.Lock for async operations
 _rebuild_lock: Optional[asyncio.Lock] = None
@@ -41,34 +45,47 @@ def get_graph_lock(graphname: str) -> threading.Lock:
 def acquire_graph_lock(graphname: str, operation: str = "operation") -> bool:
     """
     Try to acquire lock for a graph. Returns True if acquired, False if already locked.
-    
+
     Args:
         graphname: Name of the graph to lock
-        operation: Description of the operation (for logging)
+        operation: Description of the operation (for logging and status reporting)
     """
     lock = get_graph_lock(graphname)
     acquired = lock.acquire(blocking=False)
-    
+
     if acquired:
+        _current_operations[graphname] = operation
         logger.info(f"Lock acquired for graph '{graphname}' - {operation}")
     else:
         logger.warning(f"Lock already held for graph '{graphname}' - {operation} blocked")
-    
+
     return acquired
 
 
 def release_graph_lock(graphname: str, operation: str = "operation"):
     """
     Release the lock for a graph.
-    
+
     Args:
         graphname: Name of the graph to unlock
         operation: Description of the operation (for logging)
     """
     lock = get_graph_lock(graphname)
     if lock.locked():
+        _current_operations.pop(graphname, None)
         lock.release()
         logger.info(f"Lock released for graph '{graphname}' - {operation} completed")
+
+
+def get_current_operation(graphname: str) -> Optional[str]:
+    """Return the operation name currently holding ``graphname``'s lock,
+    or ``None`` if the lock is free. Used by status endpoints so the UI
+    can reflect long-running work that's still in flight on the server.
+    """
+    lock = _graph_locks.get(graphname)
+    if lock is None or not lock.locked():
+        return None
+    return _current_operations.get(graphname)
 
 
 def raise_if_locked(graphname: str, operation: str = "operation"):

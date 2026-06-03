@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { useConfirm } from "@/hooks/useConfirm";
 import { safeJson } from "@/utils/safeJson";
+import { resolveUploadConflicts } from "@/utils/uploadConflicts";
 
 const DEFAULT_MAX_UPLOAD_SIZE_MB = 100;
 const envUploadLimit = Number(import.meta.env.VITE_MAX_UPLOAD_SIZE_MB);
@@ -153,10 +154,21 @@ const [activeTab, setActiveTab] = useState("upload");
 
     try {
       const creds = sessionStorage.getItem("auth");
+      const queryString = await resolveUploadConflicts(
+        ingestGraphName,
+        filesArray.map((f) => f.name),
+        creds!,
+        confirm
+      );
+      if (queryString === null) {
+        setUploadMessage("Upload cancelled.");
+        setIsUploading(false);
+        return;
+      }
       const formData = new FormData();
       filesArray.forEach((file) => formData.append("files", file));
 
-      const response = await fetch(`/ui/${ingestGraphName}/uploads?overwrite=true`, {
+      const response = await fetch(`/ui/${ingestGraphName}/uploads${queryString}`, {
         method: "POST",
         headers: { Authorization: creds! },
         body: formData,
@@ -202,6 +214,19 @@ const [activeTab, setActiveTab] = useState("upload");
 
     try {
       const creds = sessionStorage.getItem("auth");
+      // Pre-flight the whole batch once so the user only sees a single
+      // conflict prompt covering every collision in the upload set.
+      const queryString = await resolveUploadConflicts(
+        ingestGraphName,
+        filesArray.map((f) => f.name),
+        creds!,
+        confirm
+      );
+      if (queryString === null) {
+        setUploadMessage("Upload cancelled.");
+        setIsUploading(false);
+        return;
+      }
       let uploadedCount = 0;
       let failedCount = 0;
       const totalFiles = filesArray.length;
@@ -210,14 +235,14 @@ const [activeTab, setActiveTab] = useState("upload");
       for (let i = 0; i < filesArray.length; i++) {
         const file = filesArray[i];
         const fileNumber = i + 1;
-        
+
         setUploadMessage(`Uploading file ${fileNumber}/${totalFiles}: ${file.name} (${formatBytes(file.size)})...`);
-        
+
         const formData = new FormData();
         formData.append("files", file);
 
         try {
-          const response = await fetch(`/ui/${ingestGraphName}/uploads?overwrite=true`, {
+          const response = await fetch(`/ui/${ingestGraphName}/uploads${queryString}`, {
             method: "POST",
             headers: { Authorization: creds! },
             body: formData,

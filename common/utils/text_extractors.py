@@ -258,7 +258,9 @@ class TextExtractor:
         def safe_walk(path):
             try:
                 for item in path.iterdir():
-                    if item.name.startswith(('.', '~', '$')) or 'BROMIUM' in item.name.upper():
+                    # ``_schema_*`` subdirs hold sample-doc staging
+                    # and must not be re-ingested as regular documents.
+                    if item.name.startswith(('.', '~', '$', '_schema_')) or 'BROMIUM' in item.name.upper():
                         continue
                     if item.is_file():
                         yield item

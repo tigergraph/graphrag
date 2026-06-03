@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { useConfirm } from "@/hooks/useConfirm";
 import { useAlert } from "@/hooks/useAlert";
+import { resolveUploadConflicts } from "@/utils/uploadConflicts";
 import { useNavigate } from "react-router-dom";
 import IngestGraph from "./IngestGraph";
 
@@ -477,12 +478,25 @@ const KGAdmin = () => {
       const creds = sessionStorage.getItem("auth");
       if (!creds) throw new Error("Not authenticated. Please login first.");
 
-      // Step 1/2: upload + convert. Returns the saved filenames so we
-      // know exactly which JSONLs to feed to the LLM in step 2.
+      // Step 1/2: upload + convert. Pre-flight the planned upload so
+      // the user only sees a conflict prompt for filenames that already
+      // live on the server. Returns the saved filenames so we know
+      // exactly which JSONLs to feed to the LLM in step 2.
+      const queryString = await resolveUploadConflicts(
+        graphName,
+        sampleFiles.map((f) => f.name),
+        creds!,
+        confirm
+      );
+      if (queryString === null) {
+        setStatusMessage("Schema extraction cancelled.");
+        setStatusType("");
+        return;
+      }
       const form = new FormData();
       sampleFiles.forEach((f) => form.append("files", f));
       const convertResp = await fetch(
-        `/ui/${graphName}/convert_sample_files`,
+        `/ui/${graphName}/convert_sample_files${queryString}`,
         {
           method: "POST",
           headers: { Authorization: creds! },
@@ -493,6 +507,14 @@ const KGAdmin = () => {
       if (!convertResp.ok) {
         throw new Error(
           convertData.detail || `Conversion failed: ${convertResp.statusText}`
+        );
+      }
+      if (convertData.status === "conflict") {
+        // Defensive: surface the server's conflict message instead of
+        // continuing into the LLM step with no converted samples.
+        throw new Error(
+          convertData.message ||
+            "Some sample filenames already exist on the server."
         );
       }
 
@@ -508,7 +530,6 @@ const KGAdmin = () => {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            request_id: convertData.request_id || "",
             filenames: convertData.saved_files || [],
             vertex_hints: vertexHints,
             edge_hints: edgeHints,
@@ -2191,7 +2212,6 @@ const KGAdmin = () => {
                   <Button
                     variant="outline"
                     onClick={() => handleInitializeDialogChange(false)}
-                    disabled={isInitializing}
                     className="dark:border-[#3D3D3D]"
                   >
                     Close
@@ -2361,7 +2381,7 @@ const KGAdmin = () => {
           }}
         >
           <DialogContent
-            className="sm:max-w-[700px] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] max-h-[80vh] overflow-y-auto"
+            className="sm:max-w-[760px] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] max-h-[80vh] overflow-y-auto"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>

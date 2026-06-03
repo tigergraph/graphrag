@@ -60,7 +60,7 @@ from common.utils.text_extractors import TextExtractor
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
-from common.utils.graph_locks import acquire_graph_lock, release_graph_lock, acquire_rebuild_lock, release_rebuild_lock, get_rebuilding_graph
+from common.utils.graph_locks import acquire_graph_lock, release_graph_lock, acquire_rebuild_lock, release_rebuild_lock, get_rebuilding_graph, get_current_operation
 from supportai import supportai
 from common.py_schemas.schemas import (
     AgentProgess,
@@ -1372,24 +1372,61 @@ def get_initialize_status(
     return _get_init_state(graphname)
 
 
+def _sweep_legacy_schema_subdirs(graphname: str) -> None:
+    """Remove any ``_schema_<id>/`` staging subdirectories under the
+    graph's uploads tree. Idempotent — safe to call on every
+    sample-upload request.
+    """
+    for parent in (
+        os.path.join("uploads", graphname),
+        os.path.join("uploads", "ingestion_temp", graphname),
+    ):
+        if not os.path.isdir(parent):
+            continue
+        for name in os.listdir(parent):
+            if name.startswith("_schema_"):
+                stale = os.path.join(parent, name)
+                if os.path.isdir(stale):
+                    try:
+                        shutil.rmtree(stale)
+                    except OSError as exc:
+                        logger.warning(
+                            f"Could not remove legacy schema subdir {stale}: {exc}"
+                        )
+
+
 @router.post(route_prefix + "/{graphname}/convert_sample_files")
 async def convert_sample_files(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     files: Annotated[list[UploadFile], File(description="Sample documents (≤5)")],
+    overwrite: bool = False,
+    skip: str | None = None,
 ):
     """
     Step 1/2 of the sample-doc schema extraction flow:
 
-    Save uploaded sample files into a fresh per-request subdirectory
-    under ``uploads/<graphname>/_schema_<request_id>/`` and convert
-    each to JSONL under
-    ``uploads/ingestion_temp/<graphname>/_schema_<request_id>/``.
-    Returns the list of saved filenames and the ``request_id`` so the
-    caller can pass both to ``POST /ui/<graph>/extract_schema_from_jsonl``.
+    Save uploaded sample files to ``uploads/<graphname>/`` and convert
+    each to JSONL under ``uploads/ingestion_temp/<graphname>/``. Files
+    are persisted so the Ingest Document dialog can reuse them, and
+    the JSONL cache means a subsequent Ingest run won't re-convert.
 
-    Each sample-upload request is isolated so stale files from prior
-    sessions can't be re-converted or pollute the resulting schema.
+    Returns the list of saved filenames so the caller can pass them
+    to ``POST /ui/<graph>/extract_schema_from_jsonl``.
+
+    Collision handling mirrors ``POST /uploads``:
+      * ``overwrite=false`` (default) and any filename already exists →
+        ``{"status": "conflict", "existing_files": [...]}`` is returned
+        and nothing is written. Pre-flight via ``POST /uploads/check``
+        before sending bytes to avoid re-uploading on conflict.
+      * ``overwrite=true`` replaces the existing file (and its cached
+        JSONL) before re-converting.
+      * ``skip`` is a comma-separated list of filenames to drop from the
+        incoming set silently — useful when the user chose "skip" on a
+        conflict prompt for a subset of files.
+
+    Concurrent schema-extraction requests against the same graph are
+    rejected with 409 — only one runs at a time.
 
     No LLM call. Caps come from ``graphrag_config``:
       * ``schema_max_sample_files`` (default 5) — file count
@@ -1402,69 +1439,121 @@ async def convert_sample_files(
     max_total_mb = int(graphrag_config.get("schema_max_total_mb", 50))
     max_total_bytes = max_total_mb * 1024 * 1024
 
-    if len(files) > max_files:
+    skip_set: set[str] = set()
+    if skip:
+        skip_set = {os.path.basename(s.strip()) for s in skip.split(",") if s.strip()}
+
+    accepted = [f for f in files if os.path.basename(f.filename or "") not in skip_set]
+    if len(accepted) > max_files:
         raise HTTPException(
             status_code=400,
-            detail=f"Too many files: got {len(files)}, max is {max_files}.",
+            detail=f"Too many files: got {len(accepted)}, max is {max_files}.",
         )
-    if not files:
+    if not accepted:
         raise HTTPException(status_code=400, detail="No files supplied.")
 
-    request_id = uuid.uuid4().hex[:12]
-    request_subdir = f"_schema_{request_id}"
-    upload_dir = os.path.join("uploads", graphname, request_subdir)
-    os.makedirs(upload_dir, exist_ok=True)
-    temp_folder = os.path.join("uploads", "ingestion_temp", graphname, request_subdir)
-    os.makedirs(temp_folder, exist_ok=True)
-
-    saved_basenames: list[str] = []
-    total_bytes = 0
-    for f in files:
-        data = await f.read()
-        total_bytes += len(data)
-        if total_bytes > max_total_bytes:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Total upload exceeds {max_total_mb} MB cap."
-                ),
-            )
-        safe_name = os.path.basename(f.filename or "sample")
-        if safe_name in saved_basenames:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Duplicate filename '{safe_name}' in upload set. "
-                    "Rename one of the files and try again."
-                ),
-            )
-        target = os.path.join(upload_dir, safe_name)
-        with open(target, "wb") as out:
-            out.write(data)
-        saved_basenames.append(safe_name)
-
-    extractor = TextExtractor()
-    try:
-        result = await extractor._process_folder_async(
-            upload_dir, graphname, temp_folder
-        )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Text extraction failed: {exc}",
-        )
-
-    LogWriter.info(
-        f"Converted sample files for {graphname} (request {request_id}): "
-        f"{len(files)} uploaded, {result.get('num_documents', 0)} docs in JSONL"
+    acquired = await asyncio.to_thread(
+        acquire_graph_lock, graphname, "schema_extraction"
     )
-    return {
-        "status": "success",
-        "graphname": graphname,
-        "request_id": request_id,
-        "saved_files": list(saved_basenames),
-        "num_documents": result.get("num_documents", 0),
-    }
+    if not acquired:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Graph '{graphname}' is already running schema extraction "
+                "or another ingest operation. Please wait and try again."
+            ),
+        )
+
+    try:
+        _sweep_legacy_schema_subdirs(graphname)
+
+        upload_dir = os.path.join("uploads", graphname)
+        os.makedirs(upload_dir, exist_ok=True)
+        temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+        os.makedirs(temp_folder, exist_ok=True)
+
+        if not overwrite:
+            existing = [
+                os.path.basename(f.filename or "")
+                for f in accepted
+                if os.path.exists(
+                    os.path.join(upload_dir, os.path.basename(f.filename or ""))
+                )
+            ]
+            if existing:
+                return {
+                    "status": "conflict",
+                    "message": (
+                        "Some files already exist. Resend with overwrite=true "
+                        "to replace them, or with skip=<filename,...> to drop "
+                        "specific files from the upload set."
+                    ),
+                    "existing_files": existing,
+                }
+
+        saved_basenames: list[str] = []
+        total_bytes = 0
+        for f in accepted:
+            data = await f.read()
+            total_bytes += len(data)
+            if total_bytes > max_total_bytes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Total upload exceeds {max_total_mb} MB cap.",
+                )
+            safe_name = os.path.basename(f.filename or "sample")
+            if safe_name in saved_basenames:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Duplicate filename '{safe_name}' in upload set. "
+                        "Rename one of the files and try again."
+                    ),
+                )
+
+            # On overwrite, drop the cached JSONL so the new bytes
+            # are re-converted instead of silently reusing the stale
+            # extract.
+            if overwrite:
+                stem = os.path.splitext(safe_name)[0]
+                cached_jsonl = os.path.join(temp_folder, f"{stem}.jsonl")
+                if os.path.exists(cached_jsonl):
+                    try:
+                        os.remove(cached_jsonl)
+                    except OSError as exc:
+                        logger.warning(
+                            f"Could not remove cached jsonl {cached_jsonl}: {exc}"
+                        )
+
+            target = os.path.join(upload_dir, safe_name)
+            with open(target, "wb") as out:
+                out.write(data)
+            saved_basenames.append(safe_name)
+
+        extractor = TextExtractor()
+        try:
+            result = await extractor._process_folder_async(
+                upload_dir, graphname, temp_folder
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Text extraction failed: {exc}",
+            )
+
+        LogWriter.info(
+            f"Converted sample files for {graphname}: "
+            f"{len(accepted)} uploaded, {result.get('num_documents', 0)} docs in JSONL"
+        )
+        return {
+            "status": "success",
+            "graphname": graphname,
+            "saved_files": list(saved_basenames),
+            "skipped_files": sorted(skip_set),
+            "num_documents": result.get("num_documents", 0),
+        }
+    finally:
+        await asyncio.to_thread(release_graph_lock, graphname, "schema_extraction")
 
 
 @router.post(route_prefix + "/{graphname}/extract_schema_from_jsonl")
@@ -1482,39 +1571,49 @@ def extract_schema_from_jsonl(
     form-mode editor.
 
     Body:
-        ``{"request_id": "<id>", "filenames": ["report1.pdf", "report2.docx"]}``
-    ``request_id`` (returned by ``convert_sample_files``) selects the
-    per-request subdirectory under
-    ``uploads/ingestion_temp/<graphname>/_schema_<request_id>/`` so
-    only the JSONLs belonging to this sample-upload session feed the
-    LLM. If ``request_id`` is absent, the endpoint falls back to the
-    legacy per-graph temp folder for backward compatibility.
-    """
-    request_id = ""
-    if isinstance(payload, dict):
-        request_id = str(payload.get("request_id") or "")
-    if request_id and not re.fullmatch(r"[A-Za-z0-9_-]+", request_id):
-        raise HTTPException(status_code=400, detail="Invalid request_id")
-    if request_id:
-        temp_folder = os.path.join(
-            "uploads", "ingestion_temp", graphname, f"_schema_{request_id}"
-        )
-    else:
-        temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
-    if not os.path.isdir(temp_folder):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"No converted JSONLs found for graph {graphname}. "
-                "Run convert_sample_files first."
-            ),
-        )
+        ``{"filenames": ["report1.pdf", "report2.docx"]}``
+    The endpoint reads ``uploads/ingestion_temp/<graphname>/<stem>.jsonl``
+    for each listed name. ``filenames`` is required and must be a
+    non-empty list — every sample file the caller wants fed to the
+    schema-extraction LLM must be named explicitly.
 
+    Concurrent schema-extraction requests against the same graph are
+    rejected with 409 — only one runs at a time.
+    """
     requested = []
     if isinstance(payload, dict):
         requested = payload.get("filenames") or []
+    if not requested:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No sample files specified. Pass 'filenames' as a non-empty "
+                "list naming each previously-converted sample to feed the "
+                "schema-extraction LLM."
+            ),
+        )
 
-    if requested:
+    acquired = acquire_graph_lock(graphname, "schema_extraction")
+    if not acquired:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Graph '{graphname}' is already running schema extraction "
+                "or another ingest operation. Please wait and try again."
+            ),
+        )
+
+    try:
+        temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+        if not os.path.isdir(temp_folder):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"No converted JSONLs found for graph {graphname}. "
+                    "Run convert_sample_files first."
+                ),
+            )
+
         jsonl_paths = []
         missing_jsonls = []
         for name in requested:
@@ -1533,62 +1632,58 @@ def extract_schema_from_jsonl(
                     + ". Run convert_sample_files first for those files."
                 ),
             )
-    else:
-        jsonl_paths = [
-            os.path.join(temp_folder, fn)
-            for fn in os.listdir(temp_folder)
-            if fn.endswith(".jsonl")
-        ]
 
-    samples: list[dict] = []
-    for jp in jsonl_paths:
-        with open(jp, "r", encoding="utf-8") as jf:
-            for line in jf:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    samples.append(json.loads(line))
-                except json.JSONDecodeError:
-                    pass
+        samples: list[dict] = []
+        for jp in jsonl_paths:
+            with open(jp, "r", encoding="utf-8") as jf:
+                for line in jf:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        samples.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
 
-    if not samples:
-        raise HTTPException(
-            status_code=400,
-            detail="No extractable text in the converted files.",
+        if not samples:
+            raise HTTPException(
+                status_code=400,
+                detail="No extractable text in the converted files.",
+            )
+
+        # Optional structured hints from the UI (TagInput chips). Each
+        # hint is ``{"name": str, "description": str}``. Backend ignores
+        # malformed entries silently — names are validated client-side.
+        vertex_hints = (payload or {}).get("vertex_hints") if isinstance(payload, dict) else None
+        edge_hints = (payload or {}).get("edge_hints") if isinstance(payload, dict) else None
+
+        LogWriter.info(
+            f"Running schema extraction LLM for {graphname} "
+            f"({len(jsonl_paths)} JSONLs, {len(samples)} doc parts, "
+            f"{len(vertex_hints or [])} vertex hints, {len(edge_hints or [])} edge hints)"
         )
-
-    # Optional structured hints from the UI (TagInput chips). Each
-    # hint is ``{"name": str, "description": str}``. Backend ignores
-    # malformed entries silently — names are validated client-side.
-    vertex_hints = (payload or {}).get("vertex_hints") if isinstance(payload, dict) else None
-    edge_hints = (payload or {}).get("edge_hints") if isinstance(payload, dict) else None
-
-    LogWriter.info(
-        f"Running schema extraction LLM for {graphname} "
-        f"({len(jsonl_paths)} JSONLs, {len(samples)} doc parts, "
-        f"{len(vertex_hints or [])} vertex hints, {len(edge_hints or [])} edge hints)"
-    )
-    llm_service = get_llm_service(get_completion_config(graphname))
-    gsql_text, rendered_prompt = schema_extraction_mod.extract_schema_gsql(
-        llm_service, samples,
-        vertex_hints=vertex_hints, edge_hints=edge_hints,
-    )
-    proposal = schema_utils_mod.parse_gsql_schema(gsql_text)
-    proposal.drop_dangling_pairs()
-    return {
-        "status": "success",
-        "graphname": graphname,
-        "schema_gsql": gsql_text,
-        "preview_gsql": schema_utils_mod.emit_preview_gsql(proposal),
-        "proposal": proposal.to_dict(),
-        "summary": schema_utils_mod.summarize(proposal),
-        # The fully-rendered prompt (default + suggested-types block).
-        # The UI saves this verbatim as the per-graph override after a
-        # successful initialize_graph so the addendum survives the
-        # session.
-        "rendered_prompt": rendered_prompt,
-    }
+        llm_service = get_llm_service(get_completion_config(graphname))
+        gsql_text, rendered_prompt = schema_extraction_mod.extract_schema_gsql(
+            llm_service, samples,
+            vertex_hints=vertex_hints, edge_hints=edge_hints,
+        )
+        proposal = schema_utils_mod.parse_gsql_schema(gsql_text)
+        proposal.drop_dangling_pairs()
+        return {
+            "status": "success",
+            "graphname": graphname,
+            "schema_gsql": gsql_text,
+            "preview_gsql": schema_utils_mod.emit_preview_gsql(proposal),
+            "proposal": proposal.to_dict(),
+            "summary": schema_utils_mod.summarize(proposal),
+            # The fully-rendered prompt (default + suggested-types block).
+            # The UI saves this verbatim as the per-graph override after a
+            # successful initialize_graph so the addendum survives the
+            # session.
+            "rendered_prompt": rendered_prompt,
+        }
+    finally:
+        release_graph_lock(graphname, "schema_extraction")
 
 
 @router.post(route_prefix + "/{graphname}/rebuild_graph")
@@ -2426,6 +2521,37 @@ async def chat(
 # File Upload Functionality for Server +Multi
 # =====================================================
 
+@router.get(route_prefix + "/{graphname}/upload_status")
+async def get_upload_status(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Report whether a long-running upload/ingest operation is currently
+    holding the graph's lock. The Document Ingestion dialog polls this
+    on mount and during its lifetime so the Ingest button reflects
+    server-side state even after the dialog is closed and reopened.
+
+    Response::
+
+        {
+          "graphname": str,
+          "processing": bool,
+          "operation": "create_ingest" | "ingest" | "upload_files" |
+                       "schema_extraction" | "rebuild" | null
+        }
+    """
+    op = get_current_operation(graphname)
+    # The rebuild lock is a separate (global) lock — surface it under the
+    # same flag so the UI doesn't need a second endpoint.
+    if op is None and get_rebuilding_graph() == graphname:
+        op = "rebuild"
+    return {
+        "graphname": graphname,
+        "processing": op is not None,
+        "operation": op,
+    }
+
+
 @router.get(route_prefix + "/{graphname}/uploads/list")
 async def list_uploaded_files(
     graphname: ValidGraphName,
@@ -2467,21 +2593,70 @@ async def list_uploaded_files(
         raise HTTPException(status_code=500, detail=f"Error listing files: {str(e)}")
 
 
+@router.post(route_prefix + "/{graphname}/uploads/check")
+async def check_upload_conflicts(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict, Body(...)],
+):
+    """
+    Pre-flight a planned upload: given a list of filenames, return which
+    ones already exist for ``graphname``. The client can then prompt the
+    user once and resend the actual bytes with ``overwrite=true`` or
+    ``skip=<filename,...>`` — so a conflict response doesn't waste the
+    upload bandwidth.
+
+    Body:
+        ``{"filenames": ["report.pdf", "transactions.csv", ...]}``
+    Response:
+        ``{"conflicts": ["report.pdf"]}``
+    """
+    requested = payload.get("filenames") or []
+    if not isinstance(requested, list):
+        raise HTTPException(
+            status_code=400, detail="'filenames' must be a list of strings.",
+        )
+
+    upload_dir = os.path.join("uploads", graphname)
+    if not os.path.isdir(upload_dir):
+        return {"graphname": graphname, "conflicts": []}
+
+    conflicts = []
+    for name in requested:
+        if not isinstance(name, str) or not name:
+            continue
+        safe_name = os.path.basename(name)
+        if os.path.exists(os.path.join(upload_dir, safe_name)):
+            conflicts.append(safe_name)
+    return {"graphname": graphname, "conflicts": conflicts}
+
+
 @router.post(route_prefix + "/{graphname}/uploads")
 async def upload_files(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     files: list[UploadFile] = File(...),
     overwrite: bool = False,
+    skip: str | None = None,
 ):
     """
     Upload one or multiple files for a specific graphname.
     Files are stored in uploads/{graphname}/ directory.
-    
+
     Parameters:
     - graphname: The graph name to associate files with
     - files: List of files to upload
-    - overwrite: If False (default), will reject if files already exist
+    - overwrite: If False (default), will reject if any non-skipped file
+      already exists (all-or-nothing conflict response). If True, replace
+      existing files and drop their cached JSONLs so the next ingest
+      re-converts the new bytes.
+    - skip: Optional comma-separated list of filenames to silently drop
+      from the upload set. Used after the client prompts the user on a
+      pre-flight conflict and the user chose "skip" for a subset of
+      files.
+
+    Pre-flight via ``POST /uploads/check`` to avoid re-uploading bytes
+    when a collision is hit.
     """
     # Acquire graph lock
     acquired = await asyncio.to_thread(acquire_graph_lock, graphname, "upload_files")
@@ -2490,56 +2665,89 @@ async def upload_files(
             status_code=409,
             detail=f"Graph '{graphname}' is currently being processed by another operation. Please wait and try again."
         )
-    
+
     try:
         upload_dir = os.path.join("uploads", graphname)
         os.makedirs(upload_dir, exist_ok=True)
-        
+        temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+
+        skip_set: set[str] = set()
+        if skip:
+            skip_set = {
+                os.path.basename(s.strip()) for s in skip.split(",") if s.strip()
+            }
+        accepted = [
+            f for f in files
+            if os.path.basename(f.filename or "") not in skip_set
+        ]
+
         # Check for existing files if overwrite is False
         if not overwrite:
             existing_files = []
-            for file in files:
-                file_path = os.path.join(upload_dir, file.filename)
+            for file in accepted:
+                file_path = os.path.join(
+                    upload_dir, os.path.basename(file.filename or "")
+                )
                 if os.path.exists(file_path):
-                    existing_files.append(file.filename)
-            
+                    existing_files.append(os.path.basename(file.filename or ""))
+
             if existing_files:
                 return {
                     "status": "conflict",
-                    "message": "Some files already exist. Set overwrite=true to replace them.",
+                    "message": (
+                        "Some files already exist. Resend with overwrite=true "
+                        "to replace them, or with skip=<filename,...> to drop "
+                        "specific files from the upload set."
+                    ),
                     "existing_files": existing_files,
                 }
-        
+
         # Save uploaded files
         uploaded_files = []
         total_size = 0
-        
-        for file in files:
-            file_path = os.path.join(upload_dir, file.filename)
-            
+
+        for file in accepted:
+            safe_name = os.path.basename(file.filename or "")
+            file_path = os.path.join(upload_dir, safe_name)
+
+            # On overwrite, drop the cached JSONL so the next ingest
+            # re-converts the new bytes instead of silently reusing the
+            # stale extract.
+            if overwrite and os.path.isdir(temp_folder):
+                stem = os.path.splitext(safe_name)[0]
+                cached_jsonl = os.path.join(temp_folder, f"{stem}.jsonl")
+                if os.path.exists(cached_jsonl):
+                    try:
+                        os.remove(cached_jsonl)
+                    except OSError as exc:
+                        logger.warning(
+                            f"Could not remove cached jsonl {cached_jsonl}: {exc}"
+                        )
+
             # Write file to disk
             with open(file_path, "wb") as f:
                 content = await file.read()
                 f.write(content)
                 file_size = len(content)
                 total_size += file_size
-            
+
             uploaded_files.append({
-                "filename": file.filename,
+                "filename": safe_name,
                 "size": file_size,
                 "path": file_path,
             })
-            
-            logger.info(f"Uploaded file {file.filename} ({file_size} bytes) for graph {graphname}")
-        
+
+            logger.info(f"Uploaded file {safe_name} ({file_size} bytes) for graph {graphname}")
+
         return {
             "status": "success",
             "message": f"Successfully uploaded {len(uploaded_files)} file(s)",
             "graphname": graphname,
             "uploaded_files": uploaded_files,
+            "skipped_files": sorted(skip_set),
             "total_size": total_size,
         }
-    
+
     except HTTPException:
         raise
     except Exception as e:

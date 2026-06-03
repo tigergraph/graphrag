@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import { useConfirm } from "@/hooks/useConfirm";
 import { pingIdleTimer } from "@/hooks/useIdleTimeout";
+import { resolveUploadConflicts } from "@/utils/uploadConflicts";
 
 interface IngestGraphProps {
   isModal?: boolean;
@@ -154,11 +155,22 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
 
     try {
       const creds = sessionStorage.getItem("auth");
+      const queryString = await resolveUploadConflicts(
+        ingestGraphName,
+        filesArray.map((f) => f.name),
+        creds!,
+        confirm
+      );
+      if (queryString === null) {
+        setUploadMessage("Upload cancelled.");
+        setIsUploading(false);
+        return;
+      }
       const formData = new FormData();
       filesArray.forEach((file) => formData.append("files", file));
 
       const response = await fetch(
-        `/ui/${ingestGraphName}/uploads?overwrite=true`,
+        `/ui/${ingestGraphName}/uploads${queryString}`,
         {
           method: "POST",
           headers: { Authorization: creds! },
@@ -206,6 +218,19 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
 
     try {
       const creds = sessionStorage.getItem("auth");
+      // Pre-flight the whole batch once so the user only sees a single
+      // conflict prompt covering every collision in the upload set.
+      const queryString = await resolveUploadConflicts(
+        ingestGraphName,
+        filesArray.map((f) => f.name),
+        creds!,
+        confirm
+      );
+      if (queryString === null) {
+        setUploadMessage("Upload cancelled.");
+        setIsUploading(false);
+        return;
+      }
       let uploadedCount = 0;
       let failedCount = 0;
       const totalFiles = filesArray.length;
@@ -226,7 +251,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
 
         try {
           const response = await fetch(
-            `/ui/${ingestGraphName}/uploads?overwrite=true`,
+            `/ui/${ingestGraphName}/uploads${queryString}`,
             {
               method: "POST",
               headers: { Authorization: creds! },
@@ -957,6 +982,52 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     }
   }, [ingestGraphName]);
 
+  // Sync upload / ingest in-flight state from the server. The Radix
+  // Dialog unmounts this component when closed, so all local state
+  // (isUploading / isProcessingFiles / isIngesting / uploadedFiles)
+  // is lost across open/close cycles. On mount, ask the backend which
+  // operation — if any — currently holds the graph lock, and adopt
+  // that. While an operation is in flight, poll every 5s and clear
+  // local state + refresh the file list once the server is idle.
+  const lastServerOpRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!ingestGraphName) return;
+    let cancelled = false;
+    lastServerOpRef.current = null;
+
+    const sync = async () => {
+      try {
+        const creds = sessionStorage.getItem("auth");
+        if (!creds) return;
+        const r = await fetch(`/ui/${ingestGraphName}/upload_status`, {
+          headers: { Authorization: creds },
+        });
+        if (!r.ok || cancelled) return;
+        const d = await r.json();
+        if (cancelled) return;
+        const op: string | null = d?.operation || null;
+        setIsProcessingFiles(
+          op === "create_ingest" || op === "upload_files"
+        );
+        setIsIngesting(op === "ingest");
+        if (lastServerOpRef.current && !op) {
+          // Server-side work just finished — refresh the file list.
+          fetchUploadedFiles();
+        }
+        lastServerOpRef.current = op;
+      } catch {
+        /* leave local state alone on transient errors */
+      }
+    };
+
+    sync();
+    const id = setInterval(sync, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [ingestGraphName]);
+
   return (
     <div className={isModal ? "" : "p-8"}>
       <div className={isModal ? "" : "max-w-5xl mx-auto"}>
@@ -1152,7 +1223,10 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                           key={index}
                           className="flex items-center justify-between p-2 bg-gray-50 dark:bg-shadeA rounded"
                         >
-                          <span className="text-sm text-black dark:text-white truncate flex-1">
+                          <span
+                            className="text-sm text-black dark:text-white truncate flex-1 min-w-0"
+                            title={file.filename}
+                          >
                             {file.filename}
                           </span>
                           <Button
@@ -1486,7 +1560,10 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                           key={index}
                           className="flex justify-between items-center p-2 bg-gray-50 dark:bg-shadeA rounded text-sm"
                         >
-                          <span className="text-black dark:text-white truncate flex-1">
+                          <span
+                            className="text-black dark:text-white truncate flex-1 min-w-0"
+                            title={file.name}
+                          >
                             {file.name}
                           </span>
                           <Button
