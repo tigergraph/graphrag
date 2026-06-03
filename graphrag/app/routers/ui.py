@@ -661,6 +661,37 @@ def get_version():
     }
 
 
+@router.get(f"{route_prefix}/admin/embedding_store_status")
+def embedding_store_status(
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Return the current vector-store status without re-running init.
+    Used by the Graph Database Config page to poll status; only routed
+    through nginx's ``/ui/`` path so the UI can reach it.
+    """
+    _require_roles(creds[1], {"superuser", "globaldesigner"})
+    return service_status["embedding_store"]
+
+
+@router.post(f"{route_prefix}/admin/retry_embedding_store")
+def retry_embedding_store_now(
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Re-run the embedding-store init right now. Use after fixing the
+    underlying issue (e.g. TigerGraph just came back up) instead of
+    waiting for the background retry loop to wake.
+
+    Restricted to superuser / globaldesigner — the call holds the
+    request thread while the init runs (typically <1s when TG is
+    reachable, longer if it isn't).
+    """
+    _require_roles(creds[1], {"superuser", "globaldesigner"})
+    from common.config import _init_embedding_store, _embedding_store_ready
+    _embedding_store_ready.clear()
+    _init_embedding_store()
+    return service_status["embedding_store"]
+
+
 @router.get(f"{route_prefix}/list_graphs")
 def list_graphs(auth: Annotated[list[str], Depends(ui_basic_auth)]):
     """Return the live list of graphs the authenticated user has access
@@ -2374,21 +2405,29 @@ async def chat(
     # Embedding store unavailable: WebSocket routes can't return an
     # HTTPException — ASGI requires the handshake to be sent (or the
     # connection explicitly closed) before the callable returns.
-    # Accept, surface the error to the client, then close with a
-    # well-defined status code (1013 = Try Again Later).
-    if service_status["embedding_store"]["error"]:
+    await websocket.accept()
+
+    # If the embedding store is currently unavailable, advise the
+    # client up-front. The chat still proceeds: agent paths that rely
+    # on graph traversal (generate_function / generate_cypher /
+    # entity-relationship retrieval) work without vector search, and
+    # the auto-mode selector skips vector retrievers downstream. Only
+    # questions that genuinely require a vector lookup return a
+    # graceful per-question error through the synthesizer.
+    if service_status["embedding_store"]["status"] != "ok":
         try:
-            await websocket.accept()
             await websocket.send_json({
+                "notice": "vector_search_unavailable",
+                "status": service_status["embedding_store"]["status"],
                 "error": service_status["embedding_store"]["error"],
-                "code": "embedding_store_unavailable",
+                "message": (
+                    "Vector search is currently unavailable; graph "
+                    "traversal questions still work and the service "
+                    "will recover automatically."
+                ),
             })
-            await websocket.close(code=1013, reason="Embedding store unavailable")
         except Exception:
             pass
-        return
-
-    await websocket.accept()
 
     # AUTH with proper error handling and timeout
     try:
@@ -3763,6 +3802,11 @@ async def test_db_connection(
 ):
     """
     Test database connection with provided credentials from UI.
+
+    Also probes vector-search capability (TigerGraph version and whether
+    the ``gds.vector`` package is installed) so the operator knows
+    upfront whether saving this configuration will yield a working
+    vector store, not just a reachable database.
     """
     try:
         _require_roles(credentials, {"superuser"})
@@ -3783,12 +3827,51 @@ async def test_db_connection(
         # listGraphs() exercises the credentials; pyTigerGraph mints a
         # REST++ token on demand if the instance requires one.
         test_conn.listGraphs()
-        
+
+        # Vector capability probe — separate from the auth/reachability
+        # check so version / GDS results report independently.
+        # Hard requirement is TG version >= 4.2; the GDS package is
+        # installed automatically by the embedding-store init on first
+        # use if missing, so its absence is informational, not a
+        # failure.
+        tg_version = ""
+        vector_supported = False
+        vector_details = ""
+        try:
+            tg_version = str(test_conn.getVer())
+            ver_parts = tg_version.split(".")
+            major = int(ver_parts[0]) if ver_parts and ver_parts[0].isdigit() else 0
+            minor = int(ver_parts[1]) if len(ver_parts) > 1 and ver_parts[1].isdigit() else 0
+            if major < 4 or (major == 4 and minor < 2):
+                vector_supported = False
+                vector_details = (
+                    f"TigerGraph {tg_version} does not support vector search "
+                    "(4.2 or later required)."
+                )
+            else:
+                vector_supported = True
+                try:
+                    sub_packages = test_conn.gsql("SHOW PACKAGE gds")
+                except Exception:
+                    sub_packages = ""
+                if "- vector" in str(sub_packages):
+                    vector_details = "GDS installed."
+                else:
+                    vector_details = (
+                        "GDS will be installed automatically on first init "
+                        "(may take a few minutes)."
+                    )
+        except Exception as vec_err:
+            vector_details = f"Vector capability probe failed: {vec_err}"
+
         return {
             "status": "success",
-            "message": "Connection successful"
+            "message": "Connection successful",
+            "tg_version": tg_version,
+            "vector_supported": vector_supported,
+            "vector_details": vector_details,
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:

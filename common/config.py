@@ -632,8 +632,43 @@ def reset_embedding_store() -> None:
     threading.Thread(target=_init_embedding_store, daemon=True).start()
 
 
+def _retry_embedding_store_loop():
+    """Daemon target. While the embedding store is in error state,
+    retry the build every so often so a transient TigerGraph outage
+    self-heals without a container restart. Backs off after each
+    failure (10s → 30s → 60s → 120s → 300s cap).
+    """
+    import time
+    backoff = [10, 30, 60, 120, 300]
+    attempt = 0
+    while True:
+        # Wait for the initial one-shot init to complete (success or
+        # failure) before starting the retry cadence.
+        _embedding_store_ready.wait()
+        if service_status["embedding_store"]["status"] != "error":
+            attempt = 0
+            time.sleep(backoff[-1])
+            continue
+        delay = backoff[min(attempt, len(backoff) - 1)]
+        attempt += 1
+        time.sleep(delay)
+        if service_status["embedding_store"]["status"] != "error":
+            attempt = 0
+            continue
+        logger.info(
+            f"Retrying embedding store init (attempt {attempt}, "
+            f"next backoff {backoff[min(attempt, len(backoff)-1)]}s)…"
+        )
+        _embedding_store_ready.clear()
+        _init_embedding_store()
+        if service_status["embedding_store"]["status"] == "ok":
+            logger.info("Embedding store init recovered.")
+            attempt = 0
+
+
 if os.getenv("INIT_EMBED_STORE", "true") == "true":
     threading.Thread(target=_init_embedding_store, daemon=True).start()
+    threading.Thread(target=_retry_embedding_store_loop, daemon=True).start()
 
 
 def reload_llm_config(new_llm_config: dict = None):
