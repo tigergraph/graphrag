@@ -142,6 +142,26 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
     )
     logger.info(f"Done installing supportai query all with status {query_res}")
 
+    # Pre-install the per-graph utility vector queries (get_topk_similar,
+    # get_topk_closest, etc.) so the first chat request doesn't pay the
+    # install cost. ``TigerGraphEmbeddingStore.__init__`` runs the
+    # install when bound to a graph whose schema has ``Dimension=``;
+    # the embedding-store wrapper itself is idempotent and the install
+    # is a no-op when the queries already exist.
+    try:
+        from common.config import get_embedding_store
+        get_embedding_store(graphname)
+        logger.info(
+            f"Per-graph vector utility queries ready for {graphname}"
+        )
+    except Exception as exc:
+        # Non-fatal — the chat path will install them on first use as
+        # before; just log so the operator sees the slip.
+        logger.warning(
+            f"Could not pre-install vector utility queries for "
+            f"{graphname}: {exc}"
+        )
+
     return schema_res, index_res, query_res
 
 
