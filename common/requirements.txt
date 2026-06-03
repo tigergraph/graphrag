@@ -140,7 +140,7 @@ python-multipart==0.0.20
 python-iso639==2025.2.18
 python-magic==0.4.27
 pyTigerDriver==1.0.15
-pyTigerGraph>=2.0.3
+pyTigerGraph>=2.0.4
 pytz==2025.2
 PyYAML==6.0.2
 rapidfuzz==3.13.0
