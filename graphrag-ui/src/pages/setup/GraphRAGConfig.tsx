@@ -39,6 +39,8 @@ const GraphRAGConfig = () => {
   const [loadBatchSize, setLoadBatchSize] = useState("500");
   const [upsertDelay, setUpsertDelay] = useState("0");
   const [maxConcurrency, setMaxConcurrency] = useState("10");
+  const [extractImages, setExtractImages] = useState(true);
+  const [minImageDimPx, setMinImageDimPx] = useState("100");
 
   // Schema-aware initialization (Phase 1 sample-doc path)
   const [schemaMaxSampleFiles, setSchemaMaxSampleFiles] = useState("5");
@@ -91,6 +93,8 @@ const GraphRAGConfig = () => {
     setLoadBatchSize(String(graphragConfig.load_batch_size ?? 500));
     setUpsertDelay(String(graphragConfig.upsert_delay ?? 0));
     setMaxConcurrency(String(graphragConfig.default_concurrency ?? 10));
+    setExtractImages(graphragConfig.extract_images ?? true);
+    setMinImageDimPx(String(graphragConfig.min_image_dim_px ?? 100));
     setSchemaMaxSampleFiles(String(graphragConfig.schema_max_sample_files ?? 5));
     setSchemaMaxTotalMb(String(graphragConfig.schema_max_total_mb ?? 50));
     setStrictMode(graphragConfig.strict_mode ?? false);
@@ -215,6 +219,8 @@ const GraphRAGConfig = () => {
         load_batch_size: parseInt(loadBatchSize),
         upsert_delay: parseInt(upsertDelay),
         default_concurrency: parseInt(maxConcurrency),
+        extract_images: extractImages,
+        min_image_dim_px: parseInt(minImageDimPx),
         schema_max_sample_files: parseInt(schemaMaxSampleFiles),
         schema_max_total_mb: parseInt(schemaMaxTotalMb),
         strict_mode: strictMode,
@@ -242,6 +248,8 @@ const GraphRAGConfig = () => {
         load_batch_size: 500,
         upsert_delay: 0,
         default_concurrency: 10,
+        extract_images: true,
+        min_image_dim_px: 100,
         schema_max_sample_files: 5,
         schema_max_total_mb: 50,
         strict_mode: false,
@@ -789,9 +797,45 @@ const GraphRAGConfig = () => {
                       onChange={(e) => setMaxConcurrency(e.target.value)}
                     />
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Max concurrent workers for graph queries, LLM, and embedding calls
+                      Maximum LLM, embedding, and graph database requests running at the same time.
                     </p>
                   </div>
+                </div>
+
+                <div className="mt-6">
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="extractImages"
+                      className="rounded border-gray-300 dark:border-[#3D3D3D]"
+                      checked={extractImages}
+                      onChange={(e) => setExtractImages(e.target.checked)}
+                    />
+                    <label htmlFor="extractImages" className="text-sm font-medium text-black dark:text-white">
+                      Generate image descriptions during PDF ingestion
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 ml-6">
+                    Sends each extracted image to the multimodal LLM for alt-text. Disable to skip image content entirely.
+                  </p>
+                </div>
+
+                <div className="mt-4 max-w-sm">
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Min Image Dimension
+                  </label>
+                  <Input
+                    type="number"
+                    min="0"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
+                    placeholder="100"
+                    value={minImageDimPx}
+                    onChange={(e) => setMinImageDimPx(e.target.value)}
+                    disabled={!extractImages}
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Smallest side (in px) an image must have to be described.
+                  </p>
                 </div>
               </div>
             )}

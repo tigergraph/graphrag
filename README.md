@@ -498,6 +498,8 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `doc_process_switch` | bool | `true` | Enable/disable document processing during knowledge graph build. |
 | `entity_extraction_switch` | bool | same as `doc_process_switch` | Enable/disable entity extraction during knowledge graph build. |
 | `community_detection_switch` | bool | same as `entity_extraction_switch` | Enable/disable community detection during knowledge graph build. |
+| `extract_images` | bool | `true` | Run the multimodal LLM on images extracted from documents to generate alt-text. Set to `false` to skip the image-description pass entirely — much faster, at the cost of losing image content from retrieval. Configurable per graph. |
+| `min_image_dim_px` | int | `100` | Smallest side (in px) an image must have to be sent to the multimodal LLM. Smaller images are tagged "decorative image" without an LLM call. Configurable per graph. |
 | `load_batch_size` | int | `500` | Batch size for document loading. |
 | `upsert_delay` | int | `0` | Delay in seconds between loading batches. |
 | `default_concurrency` | int | `10` | Base concurrency level for parallel processing. Configurable per graph. |
@@ -771,11 +773,18 @@ In addition to the `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `azure_d
             "model_kwargs": {
                 "temperature": 0,
             },
+            "boto3_config": {
+                "max_pool_connections": 50,
+                "read_timeout": 300,
+                "retries": 5
+            },
             "prompt_path": "./common/prompts/aws_bedrock_claude3haiku/"
         }
     }
 }
 ```
+
+`boto3_config` is optional (the defaults shown above are also the built-in defaults). Raise `max_pool_connections` if `PDF_IMAGE_CONCURRENCY` is set above `50`. The same block can be set on `embedding_service` when using Bedrock embeddings.
 
 #### Ollama
 
@@ -983,6 +992,11 @@ When customizing:
 - **`reuse_embedding: true`** skips re-embedding identical text — major saving on re-ingest of unchanged documents.
 - **Choose `llm_model` thoughtfully** — entity / relationship extraction tolerates cheaper / faster models (Haiku, Nova-lite, Flash); response synthesis benefits from stronger ones (Sonnet, GPT-4-class). The `multimodal_service` is independent — set it to a vision-capable model only when you actually ingest images.
 - **`load_batch_size`** and **`upsert_delay`** control ingestion pressure on TigerGraph. Defaults are fine for most loads; lower the batch size if you see write timeouts.
+- **Image-description speed.** On image-heavy documents, every image is sent to the multimodal LLM, which dominates ingest time. Tune via `graphrag_config` (global or per graph) — both knobs are also editable from the *GraphRAG Configuration* page in the UI:
+    - `extract_images` (default `true`) — set to `false` to skip image description entirely.
+    - `min_image_dim_px` (default `100`) — smaller images are tagged "decorative image" without an LLM call.
+    - Multimodal calls share the same `default_concurrency` semaphore as the rest of the pipeline — raise it to parallelize more describe calls; lower it if the multimodal provider's rate limit is hit.
+    - AWS Bedrock users can further tune connection pool sizing via `boto3_config` in `llm_config`.
 
 ### 7. A working tuning loop
 

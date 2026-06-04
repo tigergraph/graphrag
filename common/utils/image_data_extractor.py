@@ -1,6 +1,7 @@
 import base64
 import io
 import logging
+import os
 from langchain_core.messages import HumanMessage, SystemMessage
 from common.config import get_llm_service, get_multimodal_config
 
@@ -8,6 +9,54 @@ logger = logging.getLogger(__name__)
 
 _multimodal_client = None
 _multimodal_provider = None
+
+
+def _graphrag_cfg(graphname=None) -> dict:
+    try:
+        from common.config import get_graphrag_config
+        return get_graphrag_config(graphname) or {}
+    except Exception:
+        return {}
+
+
+def should_extract_images(graphname=None) -> bool:
+    """Whether to run the multimodal LLM on extracted images. Resolved from
+    per-graph or global ``graphrag_config.extract_images``; defaults to True."""
+    cfg = _graphrag_cfg(graphname)
+    if "extract_images" in cfg:
+        return bool(cfg["extract_images"])
+    return True
+
+
+def min_image_dim_px(graphname=None) -> int:
+    """Smallest side (in px) an image must have to be sent to the LLM.
+    Resolved from per-graph or global ``graphrag_config.min_image_dim_px``;
+    defaults to 100."""
+    cfg = _graphrag_cfg(graphname)
+    try:
+        return int(cfg.get("min_image_dim_px", 100))
+    except (TypeError, ValueError):
+        return 100
+
+
+def image_describe_workers(graphname=None) -> int:
+    """Per-PDF thread-pool size for the multimodal describe pass.
+    Reuses ``graphrag_config.default_concurrency`` (defaults to 10) so
+    deployments only tune one concurrency knob."""
+    cfg = _graphrag_cfg(graphname)
+    try:
+        return max(1, int(cfg.get("default_concurrency", 10)))
+    except (TypeError, ValueError):
+        return 10
+
+
+def is_decorative(description: str) -> bool:
+    """True when the multimodal LLM signalled the image carries no
+    retrieval-worthy content. Robust to trailing punctuation / case."""
+    if not description:
+        return False
+    cleaned = description.strip().lower().rstrip(".").strip()
+    return cleaned == "decorative image"
 
 def _get_client():
     global _multimodal_client, _multimodal_provider
@@ -38,7 +87,6 @@ def describe_image_with_llm(file_path):
     """
     try:
         from PIL import Image as PILImage
-        import os
         import time
 
         client = _get_client()
@@ -72,10 +120,15 @@ def describe_image_with_llm(file_path):
                             "or branding mark, identified by name. Do NOT describe "
                             "layout, background color, decorative styling, slide "
                             "templates, or generic visual impressions — those add "
-                            "no retrieval value. If the image is purely decorative "
-                            "(no text, no data, no diagram), reply with just "
-                            "\"decorative image\" and nothing else. Respond as a "
-                            "SINGLE plain-text paragraph — no markdown headings, no "
+                            "no retrieval value. Write the description in the same "
+                            "language as the text inside the image; if the image "
+                            "has no text, infer the document's language from any "
+                            "visible labels, captions, or branding and match that. "
+                            "Default to English only if no language signal is "
+                            "present. If the image is purely decorative (no text, "
+                            "no data, no diagram), reply with just \"decorative "
+                            "image\" and nothing else. Respond as a SINGLE "
+                            "plain-text paragraph — no markdown headings, no "
                             "bullet lists, no blank lines. The reply is used "
                             "verbatim as the alt-text inside `![alt](url)`."
                         ),

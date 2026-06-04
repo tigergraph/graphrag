@@ -453,7 +453,15 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
     try:
         import pymupdf4llm
         from PIL import Image as PILImage
-        from common.utils.image_data_extractor import describe_image_with_llm
+        from common.utils.image_data_extractor import (
+            describe_image_with_llm,
+            image_describe_workers,
+            is_decorative,
+            min_image_dim_px,
+            should_extract_images,
+        )
+
+        _is_decorative = is_decorative
 
         # Ensure clean slate - remove folder if it exists from failed previous run
         if image_output_folder.exists():
@@ -537,19 +545,30 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
         # mutate the same shared string and must run in deterministic
         # order. Concurrency cap is intentionally small to stay below
         # Bedrock's per-account throttle.
-        image_workers = int(os.environ.get("PDF_IMAGE_CONCURRENCY", "8"))
+        image_workers = image_describe_workers(graphname)
+        extract_images_enabled = should_extract_images(graphname)
+        min_dim = min_image_dim_px(graphname)
 
         def _describe_and_encode(img_ref: dict) -> dict:
             """Run on a worker thread. Returns one of:
               * ``{"ok": True, "img_ref", "description", "image_base64",
                   "width", "height"}``
+              * ``{"ok": True, "img_ref", "skip": True}`` for decorative
+                or too-small images that should be dropped from the JSONL
               * ``{"ok": False, "img_ref", "error"}``
             Never raises.
             """
             try:
                 img_path = Path(img_ref["path"])
-                description = describe_image_with_llm(str(img_path))
                 pil_image = PILImage.open(img_path)
+                too_small = (
+                    pil_image.width < min_dim or pil_image.height < min_dim
+                )
+                if not extract_images_enabled or too_small:
+                    return {"ok": True, "skip": True, "img_ref": img_ref}
+                description = describe_image_with_llm(str(img_path))
+                if _is_decorative(description):
+                    return {"ok": True, "skip": True, "img_ref": img_ref}
                 if pil_image.mode != "RGB":
                     pil_image = pil_image.convert("RGB")
                 buffer = io.BytesIO()
@@ -590,6 +609,16 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
                 if failed_path:
                     markdown_content = re.sub(
                         r'!\[.*?\]\(' + re.escape(failed_path) + r'\)',
+                        "",
+                        markdown_content,
+                    )
+                continue
+
+            if d.get("skip"):
+                skipped_path = img_ref.get("path", "")
+                if skipped_path:
+                    markdown_content = re.sub(
+                        r'!\[.*?\]\(' + re.escape(skipped_path) + r'\)',
                         "",
                         markdown_content,
                     )
@@ -660,12 +689,29 @@ def _extract_standalone_image_as_doc(file_path, base_doc_id, graphname=None):
     """
     try:
         from PIL import Image as PILImage
-        from common.utils.image_data_extractor import describe_image_with_llm
+        from common.utils.image_data_extractor import (
+            describe_image_with_llm,
+            is_decorative,
+            min_image_dim_px,
+            should_extract_images,
+        )
 
         pil_image = PILImage.open(file_path)
-        if pil_image.width < 100 or pil_image.height < 100:
-            pass
+        min_dim = min_image_dim_px(graphname)
+        if not should_extract_images(graphname) or (
+            pil_image.width < min_dim or pil_image.height < min_dim
+        ):
+            logger.info(
+                f"Skipping standalone image {file_path}: decorative or below "
+                f"min dimension ({min_dim}px)"
+            )
+            return []
         description = describe_image_with_llm(str(Path(file_path).absolute()))
+        if is_decorative(description):
+            logger.info(
+                f"Skipping standalone image {file_path}: LLM marked as decorative"
+            )
+            return []
         buffer = io.BytesIO()
         if pil_image.mode != 'RGB':
             pil_image = pil_image.convert('RGB')
