@@ -4029,6 +4029,10 @@ _TEMPLATE_VAR_MARKERS = {
         r'(?ms)^#######\s*-Data-.*$',
     ],
     "query_generation": [
+        # ``{query_guidance}`` is a runtime-supplied partial — the user
+        # must not be able to delete it from the editable body, so the
+        # template-variables block starts at that placeholder line.
+        r'(?m)^\{query_guidance\}\s*$',
         r'(?ms)^##\s*Inputs\b.*$',
         r'(?ms)^\{format_instructions\}.*$',
     ],
