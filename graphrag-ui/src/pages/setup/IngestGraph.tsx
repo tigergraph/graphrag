@@ -193,6 +193,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         setIsUploading(false);
 
         console.log("Calling handleCreateIngestAfterUpload from main upload...");
+        recentProcessClickRef.current = Date.now();
         setIsProcessingFiles(true);
         handleCreateIngestAfterUpload("uploaded", uploadedCount).catch((err) => {
           console.error("Error in background processing:", err);
@@ -288,6 +289,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       await fetchUploadedFiles();
 
       console.log("Calling handleCreateIngestAfterUpload...");
+      recentProcessClickRef.current = Date.now();
       setIsProcessingFiles(true);
       try {
         await handleCreateIngestAfterUpload("uploaded", uploadedCount);
@@ -440,6 +442,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         setDownloadMessage("✅ Successfully downloaded the files. Processing...");
         await fetchDownloadedFiles();
         setIsDownloading(false);
+        recentProcessClickRef.current = Date.now();
         setIsProcessingFiles(true);
         handleCreateIngestAfterUpload("downloaded", downloadCount).catch((err) => {
           console.error("Error in background processing:", err);
@@ -511,6 +514,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       setIngestMessage("❌ Please select a graph");
       return;
     }
+    recentIngestClickRef.current = Date.now();
     setIsIngesting(true);
     setIngestMessage("Ingesting documents into knowledge graph...");
     try {
@@ -599,6 +603,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     const folderPath = sourceType === "uploaded" ? `uploads/${ingestGraphName}` : `downloaded_files_cloud/${ingestGraphName}`;
     const fileCount = sourceType === "uploaded" ? uploadedFiles.length : downloadedFiles.length;
 
+    recentIngestClickRef.current = Date.now();
     setIsIngesting(true);
     setIngestMessage("Step 1/2: Creating ingest job...");
 
@@ -794,6 +799,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       return;
     }
 
+    recentIngestClickRef.current = Date.now();
     setIsIngesting(true);
 
     try {
@@ -990,6 +996,15 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   // that. While an operation is in flight, poll every 5s and clear
   // local state + refresh the file list once the server is idle.
   const lastServerOpRef = useRef<string | null>(null);
+  // Grace-window timestamps: a click sets local state to true before the
+  // server has registered the operation, so the next poll would otherwise
+  // immediately downgrade local state and re-enable the button — letting a
+  // quick second click double-POST. We hold local "true" until either the
+  // server acknowledges the op (then real completion drives the downgrade)
+  // or the grace window expires.
+  const recentIngestClickRef = useRef<number>(0);
+  const recentProcessClickRef = useRef<number>(0);
+  const POLL_GRACE_MS = 8000;
   useEffect(() => {
     if (!ingestGraphName) return;
     let cancelled = false;
@@ -1006,10 +1021,28 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         const d = await r.json();
         if (cancelled) return;
         const op: string | null = d?.operation || null;
-        setIsProcessingFiles(
-          op === "create_ingest" || op === "upload_files"
+
+        const isIngestingFromServer = op === "ingest";
+        const isProcessingFromServer =
+          op === "create_ingest" || op === "upload_files";
+        const serverEverSawIngest = lastServerOpRef.current === "ingest";
+        const serverEverSawProcess =
+          lastServerOpRef.current === "create_ingest" ||
+          lastServerOpRef.current === "upload_files";
+        const now = Date.now();
+        const ingestClickFresh =
+          now - recentIngestClickRef.current < POLL_GRACE_MS;
+        const processClickFresh =
+          now - recentProcessClickRef.current < POLL_GRACE_MS;
+
+        setIsIngesting(
+          isIngestingFromServer ||
+            (ingestClickFresh && !serverEverSawIngest)
         );
-        setIsIngesting(op === "ingest");
+        setIsProcessingFiles(
+          isProcessingFromServer ||
+            (processClickFresh && !serverEverSawProcess)
+        );
         if (lastServerOpRef.current && !op) {
           // Server-side work just finished — refresh the file list.
           fetchUploadedFiles();

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Server, Save, CheckCircle2, AlertCircle, RefreshCw, Loader2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -72,6 +72,22 @@ const GraphDBConfig = () => {
   // on error).
   useEffect(() => {
     fetchStoreStatus();
+  }, []);
+
+  // Track every setTimeout we schedule so we can cancel them on unmount.
+  // Otherwise a redirect/alert/refresh timer fires after the user navigates
+  // away, possibly wiping auth from a page they're now on.
+  const timeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const scheduleTimeout = (fn: () => void, ms: number) => {
+    const id = setTimeout(fn, ms);
+    timeoutsRef.current.push(id);
+    return id;
+  };
+  useEffect(() => {
+    return () => {
+      timeoutsRef.current.forEach(clearTimeout);
+      timeoutsRef.current = [];
+    };
   }, []);
 
   const handleRetryEmbeddingStore = async () => {
@@ -262,7 +278,7 @@ const GraphDBConfig = () => {
             ? "GraphDB hostname changed. Please relogin with the new credentials to connect to the new instance."
             : "GraphDB username changed. Please relogin with the new credentials.";
           
-          setTimeout(() => {
+          scheduleTimeout(() => {
             // Clear sessionStorage and redirect to login
             sessionStorage.removeItem("auth");
             alert(reason);
@@ -277,8 +293,8 @@ const GraphDBConfig = () => {
           // seconds; poll a second time so the operator sees the real
           // outcome (ok or error) without navigating away.
           fetchStoreStatus();
-          setTimeout(fetchStoreStatus, 3000);
-          setTimeout(fetchStoreStatus, 8000);
+          scheduleTimeout(fetchStoreStatus, 3000);
+          scheduleTimeout(fetchStoreStatus, 8000);
         }
       } else {
         setMessage(result.detail || "Failed to save configuration");

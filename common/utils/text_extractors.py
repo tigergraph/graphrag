@@ -560,28 +560,27 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
             """
             try:
                 img_path = Path(img_ref["path"])
-                pil_image = PILImage.open(img_path)
-                too_small = (
-                    pil_image.width < min_dim or pil_image.height < min_dim
-                )
-                if not extract_images_enabled or too_small:
-                    return {"ok": True, "skip": True, "img_ref": img_ref}
-                description = describe_image_with_llm(str(img_path))
-                if _is_decorative(description):
-                    return {"ok": True, "skip": True, "img_ref": img_ref}
-                if pil_image.mode != "RGB":
-                    pil_image = pil_image.convert("RGB")
-                buffer = io.BytesIO()
-                pil_image.save(buffer, format="JPEG", quality=95)
-                image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
-                return {
-                    "ok": True,
-                    "img_ref": img_ref,
-                    "description": description,
-                    "image_base64": image_base64,
-                    "width": pil_image.width,
-                    "height": pil_image.height,
-                }
+                with PILImage.open(img_path) as pil_image:
+                    too_small = (
+                        pil_image.width < min_dim or pil_image.height < min_dim
+                    )
+                    if not extract_images_enabled or too_small:
+                        return {"ok": True, "skip": True, "img_ref": img_ref}
+                    description = describe_image_with_llm(str(img_path))
+                    if _is_decorative(description):
+                        return {"ok": True, "skip": True, "img_ref": img_ref}
+                    rgb_image = pil_image if pil_image.mode == "RGB" else pil_image.convert("RGB")
+                    buffer = io.BytesIO()
+                    rgb_image.save(buffer, format="JPEG", quality=95)
+                    image_base64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+                    return {
+                        "ok": True,
+                        "img_ref": img_ref,
+                        "description": description,
+                        "image_base64": image_base64,
+                        "width": pil_image.width,
+                        "height": pil_image.height,
+                    }
             except Exception as img_error:  # noqa: BLE001 — keep going
                 return {"ok": False, "img_ref": img_ref, "error": img_error}
 

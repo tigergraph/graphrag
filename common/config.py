@@ -519,6 +519,11 @@ embedding_store = None
 _embedding_store_ready = threading.Event()
 _embedding_stores: dict = {}
 _embedding_stores_lock = threading.Lock()
+# Serializes default-store init across the background retry loop, the manual
+# /ui/admin/retry_embedding_store endpoint, and reset_embedding_store callers
+# (db-config reload). Without it two _init_embedding_store threads could run
+# concurrently and stomp ``embedding_store`` + ``service_status``.
+_embedding_store_init_lock = threading.Lock()
 service_status["embedding_store"] = {
     "status": "initializing",
     "error": "Embedding store is still initializing",
@@ -560,16 +565,21 @@ def _init_embedding_store():
     """Background thread target. Builds the default embedding store
     without blocking module import — TigerGraph may be slow on first
     connect, and we don't want app startup to wait on it.
+
+    Serialized via ``_embedding_store_init_lock`` so concurrent calls
+    (initial startup + background retry loop + manual retry endpoint +
+    db-config reload) cannot stomp the shared globals.
     """
     global embedding_store
-    try:
-        embedding_store = _build_embedding_store()
-        service_status["embedding_store"] = {"status": "ok", "error": None}
-    except Exception as e:
-        service_status["embedding_store"] = {"status": "error", "error": str(e)}
-        logger.error(f"Failed to initialize embedding store: {e}")
-    finally:
-        _embedding_store_ready.set()
+    with _embedding_store_init_lock:
+        try:
+            embedding_store = _build_embedding_store()
+            service_status["embedding_store"] = {"status": "ok", "error": None}
+        except Exception as e:
+            service_status["embedding_store"] = {"status": "error", "error": str(e)}
+            logger.error(f"Failed to initialize embedding store: {e}")
+        finally:
+            _embedding_store_ready.set()
 
 
 def get_embedding_store(graphname: str | None = None, timeout: float = 0):

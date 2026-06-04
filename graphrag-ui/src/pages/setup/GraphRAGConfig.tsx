@@ -60,6 +60,7 @@ const GraphRAGConfig = () => {
 
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<"success" | "error" | "">("");
 
@@ -70,11 +71,18 @@ const GraphRAGConfig = () => {
   // Track configs as loaded from API so we only save what's needed
   const loadedGlobalConfig = useRef<Record<string, any>>({});
   const loadedGraphOverrides = useRef<Record<string, any>>({});
+  // AbortController for in-flight fetchConfig. Toggling scope/graph rapidly
+  // would otherwise let the older request resolve last, leaving the UI
+  // showing the wrong scope's values.
+  const fetchAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const site = JSON.parse(sessionStorage.getItem("site") || "{}");
     setAvailableGraphs(site.graphs || []);
     fetchConfig();
+    return () => {
+      fetchAbortRef.current?.abort();
+    };
   }, []);
 
 
@@ -120,6 +128,12 @@ const GraphRAGConfig = () => {
     const queryString = params.toString() ? `?${params.toString()}` : "";
     const url = `/ui/config${queryString}`;
 
+    // Cancel any prior in-flight fetch; only the latest scope/graph
+    // selection should win.
+    fetchAbortRef.current?.abort();
+    const ac = new AbortController();
+    fetchAbortRef.current = ac;
+
     // Transient backend failures (cold start, brief upstream timeouts via
     // nginx, momentary 502/503/504) are common right after a service
     // restart and produced the intermittent "Failed to fetch configuration"
@@ -139,6 +153,7 @@ const GraphRAGConfig = () => {
       try {
         const response = await fetch(url, {
           headers: { Authorization: creds! },
+          signal: ac.signal,
         });
         lastStatus = response.status;
         if (!response.ok) {
@@ -168,9 +183,13 @@ const GraphRAGConfig = () => {
         // Clear any prior transient error banner on success.
         setMessage("");
         setMessageType("");
+        setLoadFailed(false);
         setIsLoading(false);
         return;
       } catch (error: any) {
+        // Superseded by a newer fetch — bail silently so the loading
+        // banner doesn't flicker an error for a request we cancelled.
+        if (error?.name === "AbortError") return;
         lastErr = error;
         if (attempt < maxAttempts && shouldRetry(lastStatus, error)) {
           await new Promise((r) => setTimeout(r, 500 * attempt));
@@ -185,6 +204,10 @@ const GraphRAGConfig = () => {
       `Failed to load configuration${lastStatus ? ` (HTTP ${lastStatus})` : ""}. Please retry.`
     );
     setMessageType("error");
+    // Block Save: the loaded reference is stale/empty, so diffing against it
+    // can silently strip valid overrides (per-graph mode) or save defaults
+    // over server state (global mode).
+    setLoadFailed(true);
     setIsLoading(false);
   };
 
@@ -1038,7 +1061,7 @@ const GraphRAGConfig = () => {
             </div>
           )}
 
-          <Button onClick={handleSave} disabled={isSaving} className="gradient text-white w-full">
+          <Button onClick={handleSave} disabled={isSaving || isLoading || loadFailed} title={loadFailed ? "Reload the page or click Retry to fetch the current configuration before saving" : undefined} className="gradient text-white w-full">
             {isSaving ? (
               <>
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />

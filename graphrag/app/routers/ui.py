@@ -60,6 +60,7 @@ from common.utils.text_extractors import TextExtractor
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
+from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.utils.graph_locks import acquire_graph_lock, release_graph_lock, acquire_rebuild_lock, release_rebuild_lock, get_rebuilding_graph, get_current_operation
 from supportai import supportai
 from common.py_schemas.schemas import (
@@ -522,14 +523,22 @@ def ws_basic_auth(auth_info: str, graphname=None):
     if creds.username == _UI_TOKEN_SENTINEL:
         # API-token logins: build a TG connection directly with the
         # token; ``get_db_connection_pwd_manual`` only handles
-        # username/password.
-        conn = TigerGraphConnection(
+        # username/password. Mirror the customizeHeader + Proxy wrap
+        # used by the password path so downstream code that depends on
+        # proxy-only attributes (e.g. version checks) works the same
+        # for token logins.
+        raw_conn = TigerGraphConnection(
             host=db_config["hostname"],
             graphname=graphname or "",
             apiToken=creds.password,
             restppPort=db_config.get("restppPort", "9000"),
             gsPort=db_config.get("gsPort", "14240"),
         )
+        raw_conn.customizeHeader(
+            timeout=db_config.get("default_timeout", 60) * 1000,
+            responseSize=5000000,
+        )
+        conn = TigerGraphConnectionProxy(raw_conn, auth_mode="token")
     else:
         conn = get_db_connection_pwd_manual(
             graphname, creds.username, creds.password
@@ -2407,34 +2416,34 @@ async def chat(
     # connection explicitly closed) before the callable returns.
     await websocket.accept()
 
-    # If the embedding store is currently unavailable, advise the
-    # client up-front. The chat still proceeds: agent paths that rely
-    # on graph traversal (generate_function / generate_cypher /
-    # entity-relationship retrieval) work without vector search, and
-    # the auto-mode selector skips vector retrievers downstream. Only
-    # questions that genuinely require a vector lookup return a
-    # graceful per-question error through the synthesizer.
-    if service_status["embedding_store"]["status"] != "ok":
-        try:
-            await websocket.send_json({
-                "notice": "vector_search_unavailable",
-                "status": service_status["embedding_store"]["status"],
-                "error": service_status["embedding_store"]["error"],
-                "message": (
-                    "Vector search is currently unavailable; graph "
-                    "traversal questions still work and the service "
-                    "will recover automatically."
-                ),
-            })
-        except Exception:
-            pass
-
     # AUTH with proper error handling and timeout
     try:
         logger.info(f"WebSocket connected, waiting for authentication for graph: {graphname}")
         usr_auth = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         logger.info(f"Received authentication data, length: {len(usr_auth)}")
         _, conn = ws_basic_auth(usr_auth, graphname)
+
+        # If the embedding store is currently unavailable, advise the
+        # client now that the caller is authenticated. The chat still
+        # proceeds: agent paths that rely on graph traversal
+        # (generate_function / generate_cypher / entity-relationship
+        # retrieval) work without vector search, and the auto-mode
+        # selector skips vector retrievers downstream. Only questions
+        # that genuinely require a vector lookup return a graceful
+        # per-question error through the synthesizer.
+        if service_status["embedding_store"]["status"] != "ok":
+            try:
+                await websocket.send_json({
+                    "notice": "vector_search_unavailable",
+                    "status": service_status["embedding_store"]["status"],
+                    "message": (
+                        "Vector search is currently unavailable; graph "
+                        "traversal questions still work and the service "
+                        "will recover automatically."
+                    ),
+                })
+            except Exception:
+                pass
         # Extract the authenticated username for trace-log ownership
         # tracking. For sentinel logins (API token / secret) this is
         # the sentinel itself; we resolve to the real TG identity below.
