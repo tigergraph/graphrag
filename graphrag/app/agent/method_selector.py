@@ -55,27 +55,26 @@ CHUNK_BASED_METHODS = frozenset({METHOD_SIMILARITY, METHOD_CONTEXTUAL, METHOD_HY
 FALLBACK_METHOD = METHOD_HYBRID
 
 
-# In-lane fallback table: when a chunk-based method returns insufficient context,
-# try this method instead. Subset-aware — never falls back to a method whose
-# results are a strict subset of the failing method's seeds (e.g., similarity is
-# a subset of contextual/hybrid, so we don't fall back to it from those).
+# In-lane fallback table: when a retriever returns insufficient context (or
+# raises), try this method instead. Subset-aware — never falls back to a method
+# whose results are a strict subset of the failing method's seeds (e.g.,
+# similarity is a subset of contextual/hybrid, so we don't fall back to it from
+# those).
 #
-# The table fires once per question. Community is the terminal step from hybrid
-# because its retrieval surface (community summaries) is fundamentally different
-# from chunk retrieval — when chunk-based search finds little, thematic
-# summaries may still cover the question.
+# The table fires once per question. Community falls back to hybrid so that
+# thematic questions that miss (no relevant community summaries) still get a
+# chance at the entity-driven graph-hop retriever before short-circuiting to
+# "couldn't find."
 INLANE_FALLBACK_TABLE = {
     METHOD_SIMILARITY: METHOD_HYBRID,    # point lookup → graph-hop expansion
     METHOD_CONTEXTUAL: METHOD_HYBRID,    # sibling expansion thin → try graph hops
     METHOD_HYBRID: METHOD_COMMUNITY,     # entity-driven thin → try thematic summaries
-    # No fallback FROM community — its top-k semantics differ; the in-lane
-    # trigger doesn't apply, and falling back to a chunk method when community
-    # missed is a different problem (handled by router_fallback / out-of-corpus).
+    METHOD_COMMUNITY: METHOD_HYBRID,     # no relevant communities → try entity-driven graph hops
 }
 
 
 def has_insufficient_context(retrieval_dict, method: str, top_k: int) -> bool:
-    """Decide whether a chunk-based retriever returned fewer items than asked.
+    """Decide whether a retriever returned too little context to answer from.
 
     Args:
         retrieval_dict: the `final_retrieval` dict from the retriever output, or None.
@@ -83,19 +82,22 @@ def has_insufficient_context(retrieval_dict, method: str, top_k: int) -> bool:
         top_k: the requested number of chunks for this retrieval.
 
     Returns:
-        True if the result is "insufficient" — i.e., the method is chunk-based and
-        the retrieved count is strictly below `top_k`. Empty results count as
-        insufficient. Returns False for community search (different semantics) and
-        for any non-dict input.
+        True if the result is "insufficient":
+          * For chunk-based methods: fewer than `top_k` chunks returned.
+          * For community search: zero communities returned (top_k caps
+            community summaries, not chunks, so any non-empty result counts
+            as having some context).
+          * For any unknown method or non-dict input: True if missing / malformed,
+            otherwise False.
 
-    Note: this is the trigger for the in-lane fallback in supportai_search.
-    Community search is excluded because its top_k caps community summaries, not
-    chunks, and a small number of returned summaries doesn't mean "no context."
+    This is the trigger for the in-lane fallback in supportai_search.
     """
-    if method not in CHUNK_BASED_METHODS:
-        return False
     if not isinstance(retrieval_dict, dict):
         return True  # empty / malformed → insufficient
+    if method == METHOD_COMMUNITY:
+        return len(retrieval_dict) == 0
+    if method not in CHUNK_BASED_METHODS:
+        return False
     return len(retrieval_dict) < top_k
 
 

@@ -561,11 +561,12 @@ class TigerGraphAgentGraph:
            auto-selection regardless of configuration — manual users still get
            the best vector method when the structured-data path has exhausted
            its retries.
-        2. **In-lane fallback.** After the first chunk-based retriever runs, if
-           it returned fewer than `top_k` chunks (signal: insufficient context),
-           runs a second method per `INLANE_FALLBACK_TABLE` and uses its context
-           for downstream generation. Single retry only; skipped for manual
-           mode and community search.
+        2. **In-lane fallback.** After the first retriever runs, if it returned
+           insufficient context or raised an exception, runs a second method
+           per `INLANE_FALLBACK_TABLE` and uses its context for downstream
+           generation. Single retry only; skipped for manual mode. Insufficient
+           is defined per method: chunk-based methods need at least `top_k`
+           chunks; community needs at least one community summary.
         3. **Out-of-corpus short-circuit.** If after all retrieval attempts the
            result is still empty, marks the context so `generate_answer`
            returns an honest "couldn't find" message instead of letting the
@@ -604,37 +605,68 @@ class TigerGraphAgentGraph:
         state["chosen_retriever_source"] = chosen_source
         self._record_selection_metric(method, chosen_source)
 
-        # First retrieval attempt
-        result_state = self._dispatch_retriever(method, state)
+        # First retrieval attempt. Catch exceptions so a transient retriever
+        # failure becomes an in-lane fallback rather than a 500 — the user
+        # gets the same outcome as "returned empty," and any method with an
+        # entry in INLANE_FALLBACK_TABLE is eligible.
+        retriever_error: Optional[Exception] = None
+        try:
+            result_state = self._dispatch_retriever(method, state)
+        except Exception as exc:  # noqa: BLE001
+            retriever_error = exc
+            logger.warning(
+                f"Retriever {method} raised: {exc}; "
+                "treating as empty result for fallback consideration"
+            )
+            result_state = dict(state)
+            result_state["context"] = {
+                "function_call": None,
+                "result": {"final_retrieval": {}},
+            }
+            result_state["lookup_source"] = "supportai"
 
-        # In-lane fallback (Feature 2) — chunk-based methods only, single retry,
-        # skipped for manual users so we don't second-guess their pick.
+        # In-lane fallback — a single retry through INLANE_FALLBACK_TABLE.
+        # Skipped for manual users so we don't second-guess their pick.
         ctx = result_state.get("context") if isinstance(result_state.get("context"), dict) else {}
         result = ctx.get("result") if isinstance(ctx.get("result"), dict) else {}
         final_retrieval = result.get("final_retrieval") if isinstance(result, dict) else None
         top_k = self._graphrag_cfg.get("top_k", 5)
         can_inlane_fallback = (
             chosen_source != "manual"
-            and method in CHUNK_BASED_METHODS
+            and method in INLANE_FALLBACK_TABLE
             and not result_state.get("inlane_fallback_attempted")
-            and has_insufficient_context(final_retrieval, method, top_k)
+            and (retriever_error is not None
+                 or has_insufficient_context(final_retrieval, method, top_k))
         )
         if can_inlane_fallback:
             fallback_method = INLANE_FALLBACK_TABLE.get(method)
             if fallback_method:
                 label_old = self._METHOD_DISPLAY_NAMES.get(method, method)
                 label_new = self._METHOD_DISPLAY_NAMES.get(fallback_method, fallback_method)
-                self.emit_progress(
-                    f"Insufficient context from {label_old} search, trying {label_new} search"
-                )
+                if retriever_error is not None:
+                    fallback_reason = f"fallback from {label_old} (search failed)"
+                    progress = (
+                        f"{label_old} search did not complete, trying {label_new} search"
+                    )
+                else:
+                    fallback_reason = (
+                        f"fallback from {label_old} (returned insufficient context)"
+                    )
+                    progress = (
+                        f"Insufficient context from {label_old} search, trying {label_new} search"
+                    )
+                self.emit_progress(progress)
                 result_state["inlane_fallback_attempted"] = True
                 result_state["inlane_fallback_from"] = method
-                # Update the active method/source for the second pass.
                 method = fallback_method
                 chosen_source = "inlane_fallback"
-                chosen_reason = f"fallback from {label_old} (returned fewer than top_k chunks)"
+                chosen_reason = fallback_reason
                 self._record_selection_metric(method, chosen_source)
                 result_state = self._dispatch_retriever(method, result_state)
+        elif retriever_error is not None:
+            # No fallback path available — re-raise so the caller sees the
+            # original failure instead of an empty-result short-circuit.
+            raise retriever_error
 
         # Mirror the (final) choice onto the context dict so it lands on
         # GraphRAGResponse.query_sources without further plumbing.
