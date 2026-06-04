@@ -236,10 +236,16 @@ class TextExtractor:
                 json_line = json.dumps(doc_data, ensure_ascii=False)
                 f.write(json_line + '\n')
 
-    async def _process_folder_async(self, folder_path, graphname, temp_folder, max_concurrent=10):
+    async def _process_folder_async(self, folder_path, graphname, temp_folder, filenames=None, max_concurrent=10):
         """
         Async version of process_folder for parallel file processing.
         Creates one JSONL file per input file.
+
+        When *filenames* is supplied, only files whose basename appears
+        in that list are processed; everything else in the folder is
+        ignored. This lets a caller (e.g. the sample-doc schema-extraction
+        flow) reuse a shared upload directory without re-converting
+        files that belong to a previous request.
         """
         logger.info(f"Processing local folder ASYNC: {folder_path} for graph: {graphname} (max_concurrent={max_concurrent})")
 
@@ -254,6 +260,8 @@ class TextExtractor:
         # Create temp folder for JSONL files
         os.makedirs(temp_folder, exist_ok=True)
         logger.info(f"Saving processed documents to: {temp_folder}")
+
+        allowed_basenames = set(filenames) if filenames is not None else None
 
         def safe_walk(path):
             try:
@@ -275,6 +283,8 @@ class TextExtractor:
         for file_path in safe_walk(folder_path_obj):
             if file_path.is_file():
                 if file_path.name.startswith(('.', '~', '$')) or 'BROMIUM' in file_path.name.upper():
+                    continue
+                if allowed_basenames is not None and file_path.name not in allowed_basenames:
                     continue
                 file_ext = file_path.suffix.lower()
                 if file_ext == '.jsonl':
