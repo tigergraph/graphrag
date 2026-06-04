@@ -784,7 +784,7 @@ In addition to the `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `azure_d
 }
 ```
 
-`boto3_config` is optional (the defaults shown above are also the built-in defaults). Raise `max_pool_connections` if `PDF_IMAGE_CONCURRENCY` is set above `50`. The same block can be set on `embedding_service` when using Bedrock embeddings.
+`boto3_config` is optional (the defaults shown above are also the built-in defaults). The same block can be set on `embedding_service` when using Bedrock embeddings.
 
 #### Ollama
 

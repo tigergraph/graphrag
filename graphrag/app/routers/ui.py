@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 import traceback
@@ -240,7 +241,12 @@ def _get_user_role_details(
     is the secret's owner; for classic user/password logins it matches
     the input.
     """
-    pwd_hash = hashlib.sha256(password.encode()).hexdigest()[:16]
+    # Use the full SHA-256 hex (64 chars). Token logins share the
+    # ``_UI_TOKEN_SENTINEL`` username, so the hash is the only thing
+    # distinguishing one token from another in the cache key — a
+    # truncated hash would let two distinct tokens whose hash prefixes
+    # collide serve each other's cached roles.
+    pwd_hash = hashlib.sha256(password.encode()).hexdigest()
     cache_key = (username, pwd_hash)
     now = time.time()
 
@@ -418,13 +424,23 @@ def _parse_auth_header(authorization: str | None) -> HTTPBasicCredentials:
     if scheme == "basic" and value:
         try:
             decoded = base64.b64decode(value).decode()
-            username, _, password = decoded.partition(":")
         except Exception:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Malformed Basic credentials",
                 headers={"WWW-Authenticate": "Basic"},
             )
+        # RFC 7617: Basic payload MUST be ``user-id ":" password``. Reject
+        # payloads with no colon outright — partition silently produces an
+        # empty password otherwise, which would turn a malformed header
+        # into an empty-password login attempt.
+        if ":" not in decoded:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Malformed Basic credentials",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        username, _, password = decoded.partition(":")
         return HTTPBasicCredentials(username=username, password=password)
     if scheme == "bearer" and value:
         return HTTPBasicCredentials(username=_UI_TOKEN_SENTINEL, password=value)
@@ -1533,53 +1549,66 @@ async def convert_sample_files(
 
         saved_basenames: list[str] = []
         total_bytes = 0
-        for f in accepted:
-            data = await f.read()
-            total_bytes += len(data)
-            if total_bytes > max_total_bytes:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Total upload exceeds {max_total_mb} MB cap.",
-                )
-            safe_name = os.path.basename(f.filename or "sample")
-            if safe_name in saved_basenames:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Duplicate filename '{safe_name}' in upload set. "
-                        "Rename one of the files and try again."
-                    ),
-                )
-
-            # On overwrite, drop the cached JSONL so the new bytes
-            # are re-converted instead of silently reusing the stale
-            # extract.
-            if overwrite:
-                stem = os.path.splitext(safe_name)[0]
-                cached_jsonl = os.path.join(temp_folder, f"{stem}.jsonl")
-                if os.path.exists(cached_jsonl):
-                    try:
-                        os.remove(cached_jsonl)
-                    except OSError as exc:
-                        logger.warning(
-                            f"Could not remove cached jsonl {cached_jsonl}: {exc}"
-                        )
-
-            target = os.path.join(upload_dir, safe_name)
-            with open(target, "wb") as out:
-                out.write(data)
-            saved_basenames.append(safe_name)
-
-        extractor = TextExtractor()
+        # Conversion runs over a request-scoped staging directory so the
+        # schema-extraction step only sees the just-uploaded files — not
+        # whatever else already lives in the per-graph upload directory.
+        staging_dir = tempfile.mkdtemp(prefix=f"sample_convert_{graphname}_")
         try:
-            result = await extractor._process_folder_async(
-                upload_dir, graphname, temp_folder
-            )
-        except Exception as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Text extraction failed: {exc}",
-            )
+            for f in accepted:
+                data = await f.read()
+                total_bytes += len(data)
+                if total_bytes > max_total_bytes:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Total upload exceeds {max_total_mb} MB cap.",
+                    )
+                safe_name = os.path.basename(f.filename or "sample")
+                if safe_name in saved_basenames:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Duplicate filename '{safe_name}' in upload set. "
+                            "Rename one of the files and try again."
+                        ),
+                    )
+
+                # On overwrite, drop the cached JSONL so the new bytes
+                # are re-converted instead of silently reusing the stale
+                # extract.
+                if overwrite:
+                    stem = os.path.splitext(safe_name)[0]
+                    cached_jsonl = os.path.join(temp_folder, f"{stem}.jsonl")
+                    if os.path.exists(cached_jsonl):
+                        try:
+                            os.remove(cached_jsonl)
+                        except OSError as exc:
+                            logger.warning(
+                                f"Could not remove cached jsonl {cached_jsonl}: {exc}"
+                            )
+
+                # Persist the file in the per-graph upload directory so
+                # it's visible in the upload dialog later, and stage a
+                # copy in the request-private staging directory so the
+                # conversion step only walks the current batch.
+                target = os.path.join(upload_dir, safe_name)
+                with open(target, "wb") as out:
+                    out.write(data)
+                with open(os.path.join(staging_dir, safe_name), "wb") as out:
+                    out.write(data)
+                saved_basenames.append(safe_name)
+
+            extractor = TextExtractor()
+            try:
+                result = await extractor._process_folder_async(
+                    staging_dir, graphname, temp_folder
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Text extraction failed: {exc}",
+                )
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
 
         LogWriter.info(
             f"Converted sample files for {graphname}: "

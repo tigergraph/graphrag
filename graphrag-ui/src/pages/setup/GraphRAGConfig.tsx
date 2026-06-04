@@ -212,13 +212,25 @@ const GraphRAGConfig = () => {
   };
 
   const handleSave = async () => {
+    // Hard guards — the button's disabled prop is cosmetic; this is the
+    // runtime check, since handleSave can also be invoked programmatically.
+    if (isLoading || loadFailed) {
+      setMessage("Reload the current configuration before saving.");
+      setMessageType("error");
+      return;
+    }
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) {
+      setMessage("Not signed in. Please sign in again.");
+      setMessageType("error");
+      return;
+    }
+
     setIsSaving(true);
     setMessage("");
     setMessageType("");
 
     try {
-      const creds = sessionStorage.getItem("auth");
-      
       // Build current UI state — only include non-empty fields
       const currentChunkerConfig: any = {};
       if (chunkSize !== "") currentChunkerConfig.chunk_size = parseInt(chunkSize);

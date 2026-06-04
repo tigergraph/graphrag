@@ -537,14 +537,11 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
                 "position": 0
             }]
         # Phase 1 — describe + base64-encode every image in parallel.
-        # Each worker hits Bedrock for the description and reads the
-        # image off disk, so they're I/O-bound; a small thread pool
-        # cuts wall-clock proportionally for image-heavy PDFs.
-        # Markdown mutations stay in phase 2 (next loop) because
-        # insert_description_by_id / replace_path_with_tg_protocol
-        # mutate the same shared string and must run in deterministic
-        # order. Concurrency cap is intentionally small to stay below
-        # Bedrock's per-account throttle.
+        # Each worker is I/O-bound (one multimodal request + a disk read),
+        # so a thread pool cuts wall-clock proportionally for image-heavy
+        # PDFs. Markdown mutations stay in phase 2 because
+        # insert_description_by_id / replace_path_with_tg_protocol mutate
+        # the same shared string and must run in deterministic order.
         image_workers = image_describe_workers(graphname)
         extract_images_enabled = should_extract_images(graphname)
         min_dim = min_image_dim_px(graphname)
