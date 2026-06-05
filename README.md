@@ -923,8 +923,9 @@ A bad answer at step 4 is rarely fixed by editing the response prompt; usually i
 | Answers miss context that's clearly in the source | chunks too small or no overlap | raise `chunk_size`; bump `overlap_size` (default 1/8 of `chunk_size`); lower `threshold` (`semantic`) |
 | Tables / figures get fragmented | wrong chunker for the source | use `markdown` for markdown / docs converted to markdown; use `html` for HTML pages with structure; use `regex` with a custom `pattern` for structured logs |
 | Cross-section reasoning fails | no overlap | increase `overlap_size` to ~25% of `chunk_size` |
+| Long tables get split mid-row and the answer loses column headers | `chunk_size` (default `2048`) is smaller than the table's serialized length | raise `chunker_config.chunk_size` to fit the largest table whole — for table-heavy regulator / industry reports, **`4096`–`8192` is often the right range** |
 
-Default starting point for prose: `chunker: "semantic"`, `threshold: 0.95`, `chunker_config.method: "percentile"`. Move to `markdown` chunker with `chunk_size: 2048` and `overlap_size: 256` if your source is markdown-heavy and table integrity matters.
+Default starting point for prose: `chunker: "semantic"`, `threshold: 0.95`, `chunker_config.method: "percentile"`. Move to `markdown` chunker with `chunk_size: 2048` and `overlap_size: 256` if your source is markdown-heavy and table integrity matters. For corpora dominated by large statistical tables (regulatory reports, fiscal yearbooks, multi-year financial summaries), start with `markdown`/`html` chunker and `chunk_size: 8192` so each table stays in one chunk.
 
 ### 3. Extraction — make the graph clean before tuning retrieval
 
