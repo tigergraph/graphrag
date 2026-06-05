@@ -25,6 +25,16 @@ import { resolveUploadConflicts } from "@/utils/uploadConflicts";
 import { useNavigate } from "react-router-dom";
 import IngestGraph from "./IngestGraph";
 
+// Same trick used in Login.tsx — Chrome / Safari on macOS clip the
+// underscore descender inside ``<input>`` even when CSS says there is
+// room. Disabling the native input rendering with ``appearance: none``
+// and pinning an explicit line-height makes the underscore render.
+const INPUT_CLIP_FIX: React.CSSProperties = {
+  WebkitAppearance: "none",
+  appearance: "none",
+  lineHeight: "1.5",
+};
+
 const KGAdmin = () => {
   const [confirm, confirmDialog, isConfirmDialogOpen] = useConfirm();
   const [showAlert, alertDialog] = useAlert();
@@ -1547,24 +1557,28 @@ const KGAdmin = () => {
                                   >
                                     {collapsedVertices.has(vIdx) ? "▶" : "▼"}
                                   </button>
-                                  <Input
-                                    placeholder="VertexName"
-                                    value={v.name}
-                                    onChange={(e) =>
-                                      setDraftProposal((p) =>
-                                        p
-                                          ? {
-                                              ...p,
-                                              vertices: p.vertices.map((vv, i) =>
-                                                i === vIdx ? { ...vv, name: e.target.value } : vv
-                                              ),
-                                            }
-                                          : p
-                                      )
-                                    }
-                                    disabled={isInitializing || isExtractingSchema}
-                                    className="flex-1 h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
-                                  />
+                                  <div className="flex-1 flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                    <input
+                                      type="text"
+                                      placeholder="VertexName"
+                                      value={v.name}
+                                      onChange={(e) =>
+                                        setDraftProposal((p) =>
+                                          p
+                                            ? {
+                                                ...p,
+                                                vertices: p.vertices.map((vv, i) =>
+                                                  i === vIdx ? { ...vv, name: e.target.value } : vv
+                                                ),
+                                              }
+                                            : p
+                                        )
+                                      }
+                                      disabled={isInitializing || isExtractingSchema}
+                                      className="flex-1 bg-transparent outline-none border-0 p-0 text-sm text-black dark:text-white placeholder:text-muted-foreground disabled:opacity-50"
+                                      style={INPUT_CLIP_FIX}
+                                    />
+                                  </div>
                                   {collapsedVertices.has(vIdx) && (
                                     <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[40%]">
                                       {v.attributes.length} attr{v.attributes.length === 1 ? "" : "s"}
@@ -1589,26 +1603,30 @@ const KGAdmin = () => {
                                   </button>
                                 </div>
                                 {!collapsedVertices.has(vIdx) && (<>
-                                <Input
-                                  placeholder="Description (1 sentence)"
-                                  value={v.description}
-                                  onChange={(e) =>
-                                    setDraftProposal((p) =>
-                                      p
-                                        ? {
-                                            ...p,
-                                            vertices: p.vertices.map((vv, i) =>
-                                              i === vIdx
-                                                ? { ...vv, description: e.target.value }
-                                                : vv
-                                            ),
-                                          }
-                                        : p
-                                    )
-                                  }
-                                  disabled={isInitializing || isExtractingSchema}
-                                  className="h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
-                                />
+                                <div className="flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                  <input
+                                    type="text"
+                                    placeholder="Description (1 sentence)"
+                                    value={v.description}
+                                    onChange={(e) =>
+                                      setDraftProposal((p) =>
+                                        p
+                                          ? {
+                                              ...p,
+                                              vertices: p.vertices.map((vv, i) =>
+                                                i === vIdx
+                                                  ? { ...vv, description: e.target.value }
+                                                  : vv
+                                              ),
+                                            }
+                                          : p
+                                      )
+                                    }
+                                    disabled={isInitializing || isExtractingSchema}
+                                    className="flex-1 bg-transparent outline-none border-0 p-0 text-sm text-black dark:text-white placeholder:text-muted-foreground disabled:opacity-50"
+                                    style={INPUT_CLIP_FIX}
+                                  />
+                                </div>
                                 <div className="text-xs text-gray-500 dark:text-gray-400">
                                   Attributes ({v.attributes.length}); primary key <code>id</code> auto-added
                                   {attributesCollapsed && (
@@ -1823,26 +1841,30 @@ const KGAdmin = () => {
                                   >
                                     {collapsedEdges.has(eIdx) ? "▶" : "▼"}
                                   </button>
-                                  <Input
-                                    placeholder="EDGE_NAME"
-                                    value={e.name}
-                                    onChange={(ev) =>
-                                      setDraftProposal((p) =>
-                                        p
-                                          ? {
-                                              ...p,
-                                              edges: p.edges.map((ee, i) =>
-                                                i === eIdx
-                                                  ? { ...ee, name: ev.target.value }
-                                                  : ee
-                                              ),
-                                            }
-                                          : p
-                                      )
-                                    }
-                                    disabled={isInitializing || isExtractingSchema}
-                                    className="flex-1 h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
-                                  />
+                                  <div className="flex-1 flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                    <input
+                                      type="text"
+                                      placeholder="EDGE_NAME"
+                                      value={e.name}
+                                      onChange={(ev) =>
+                                        setDraftProposal((p) =>
+                                          p
+                                            ? {
+                                                ...p,
+                                                edges: p.edges.map((ee, i) =>
+                                                  i === eIdx
+                                                    ? { ...ee, name: ev.target.value }
+                                                    : ee
+                                                ),
+                                              }
+                                            : p
+                                        )
+                                      }
+                                      disabled={isInitializing || isExtractingSchema}
+                                      className="flex-1 bg-transparent outline-none border-0 p-0 text-sm text-black dark:text-white placeholder:text-muted-foreground disabled:opacity-50"
+                                      style={INPUT_CLIP_FIX}
+                                    />
+                                  </div>
                                   {collapsedEdges.has(eIdx) && (
                                     <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[40%]">
                                       {e.pairs.length} pair{e.pairs.length === 1 ? "" : "s"}, {e.attributes.length} attr
@@ -1868,26 +1890,30 @@ const KGAdmin = () => {
                                   </button>
                                 </div>
                                 {!collapsedEdges.has(eIdx) && (<>
-                                <Input
-                                  placeholder="Description (1 sentence)"
-                                  value={e.description}
-                                  onChange={(ev) =>
-                                    setDraftProposal((p) =>
-                                      p
-                                        ? {
-                                            ...p,
-                                            edges: p.edges.map((ee, i) =>
-                                              i === eIdx
-                                                ? { ...ee, description: ev.target.value }
-                                                : ee
-                                            ),
-                                          }
-                                        : p
-                                    )
-                                  }
-                                  disabled={isInitializing || isExtractingSchema}
-                                  className="h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
-                                />
+                                <div className="flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                  <input
+                                    type="text"
+                                    placeholder="Description (1 sentence)"
+                                    value={e.description}
+                                    onChange={(ev) =>
+                                      setDraftProposal((p) =>
+                                        p
+                                          ? {
+                                              ...p,
+                                              edges: p.edges.map((ee, i) =>
+                                                i === eIdx
+                                                  ? { ...ee, description: ev.target.value }
+                                                  : ee
+                                              ),
+                                            }
+                                          : p
+                                      )
+                                    }
+                                    disabled={isInitializing || isExtractingSchema}
+                                    className="flex-1 bg-transparent outline-none border-0 p-0 text-sm text-black dark:text-white placeholder:text-muted-foreground disabled:opacity-50"
+                                    style={INPUT_CLIP_FIX}
+                                  />
+                                </div>
                                 <div className="text-xs text-gray-500 dark:text-gray-400">
                                   Endpoints (FROM → TO):
                                 </div>
