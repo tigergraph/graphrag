@@ -23,9 +23,9 @@ const SetupLayout = () => {
   // checks. Falls back to empty silently if the endpoint is unreachable.
   const [version, setVersion] = useState<string>("");
   useEffect(() => {
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     if (!creds) return;
-    fetch("/ui/version", { headers: { Authorization: `Basic ${creds}` } })
+    fetch("/ui/version", { headers: { Authorization: creds! } })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const v = data?.graphrag?.version;

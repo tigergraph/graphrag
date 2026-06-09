@@ -20,7 +20,7 @@ import "./components/i18n";
 
 /** Redirect to login if no credentials in session. */
 const RequireAuth = ({ children }: { children: any }) => {
-  if (!sessionStorage.getItem("creds")) {
+  if (!sessionStorage.getItem("auth")) {
     return <Navigate to="/" replace />;
   }
   return children;

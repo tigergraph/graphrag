@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from "react";
-import { Server, Save, CheckCircle2 } from "lucide-react";
+import React, { useState, useEffect, useRef } from "react";
+import { Server, Save, CheckCircle2, AlertCircle, RefreshCw, Loader2 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { safeJson } from "@/utils/safeJson";
 
 const GraphDBConfig = () => {
   // Default values for fields — shown as placeholders, used if user leaves field empty
@@ -41,6 +42,81 @@ const GraphDBConfig = () => {
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<"success" | "error" | "">("");
 
+  // Vector store status — polled from /health so the operator sees
+  // when the background retry loop has recovered the store and can
+  // force an immediate retry after fixing TigerGraph.
+  const [storeStatus, setStoreStatus] = useState<"ok" | "initializing" | "error" | "unknown">("unknown");
+  const [storeError, setStoreError] = useState<string | null>(null);
+  const [isRetryingStore, setIsRetryingStore] = useState(false);
+  const [retryMessage, setRetryMessage] = useState("");
+
+  const fetchStoreStatus = async () => {
+    try {
+      const creds = sessionStorage.getItem("auth");
+      if (!creds) return;
+      const r = await fetch("/ui/admin/embedding_store_status", {
+        headers: { Authorization: creds },
+      });
+      if (!r.ok) return;
+      const data = await safeJson(r);
+      setStoreStatus(data?.status || "unknown");
+      setStoreError(data?.error || null);
+    } catch {
+      // Ignore — leave previous status visible.
+    }
+  };
+
+  // One-shot status check on page entry — vector-store outages are
+  // rare and the background retry loop self-heals; if the operator
+  // needs to force recovery they click Retry Connection (shown only
+  // on error).
+  useEffect(() => {
+    fetchStoreStatus();
+  }, []);
+
+  // Track every setTimeout we schedule so we can cancel them on unmount.
+  // Otherwise a redirect/alert/refresh timer fires after the user navigates
+  // away, possibly wiping auth from a page they're now on.
+  const timeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const scheduleTimeout = (fn: () => void, ms: number) => {
+    const id = setTimeout(fn, ms);
+    timeoutsRef.current.push(id);
+    return id;
+  };
+  useEffect(() => {
+    return () => {
+      timeoutsRef.current.forEach(clearTimeout);
+      timeoutsRef.current = [];
+    };
+  }, []);
+
+  const handleRetryEmbeddingStore = async () => {
+    setIsRetryingStore(true);
+    setRetryMessage("");
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const r = await fetch("/ui/admin/retry_embedding_store", {
+        method: "POST",
+        headers: { Authorization: creds! },
+      });
+      const data = await safeJson(r);
+      if (!r.ok) {
+        throw new Error(data.detail || `Retry failed: ${r.statusText}`);
+      }
+      setStoreStatus(data.status || "unknown");
+      setStoreError(data.error || null);
+      if (data.status === "ok") {
+        setRetryMessage("✅ Vector store reconnected.");
+      } else {
+        setRetryMessage(`⚠️ Retry attempted, store still ${data.status}.`);
+      }
+    } catch (err: any) {
+      setRetryMessage(`❌ ${err.message || "Retry failed."}`);
+    } finally {
+      setIsRetryingStore(false);
+    }
+  };
+
   useEffect(() => {
     fetchConfig();
   }, []);
@@ -49,9 +125,9 @@ const GraphDBConfig = () => {
   const fetchConfig = async () => {
     setIsLoading(true);
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const response = await fetch("/ui/config", {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (!response.ok) {
@@ -99,7 +175,7 @@ const GraphDBConfig = () => {
     setConnectionTested(false);
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const testConfig: any = {
         hostname: effective(hostname, "hostname"),
         restppPort: effective(restppPort, "restppPort"),
@@ -116,7 +192,7 @@ const GraphDBConfig = () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(testConfig),
       });
@@ -125,7 +201,15 @@ const GraphDBConfig = () => {
 
       if (response.ok && result.status === "success") {
         setConnectionTested(true);
-        setMessage("Connection successful! You can now save the configuration.");
+        const versionBit = result.tg_version
+          ? ` (TigerGraph ${result.tg_version})`
+          : "";
+        const vectorBit = result.vector_details
+          ? `\nVector Store: ${result.vector_supported ? "✓" : "⚠️"} ${result.vector_details}`
+          : "";
+        setMessage(
+          `Connection successful${versionBit}. You can now save the configuration.${vectorBit}`
+        );
         setMessageType("success");
       } else {
         setMessage(result.message || "Connection test failed");
@@ -150,7 +234,7 @@ const GraphDBConfig = () => {
     setMessageType("");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const effectiveHostname = effective(hostname, "hostname");
       const effectiveUsername = effective(username, "username");
       const dbConfigData: any = {
@@ -172,7 +256,7 @@ const GraphDBConfig = () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(dbConfigData),
       });
@@ -194,9 +278,9 @@ const GraphDBConfig = () => {
             ? "GraphDB hostname changed. Please relogin with the new credentials to connect to the new instance."
             : "GraphDB username changed. Please relogin with the new credentials.";
           
-          setTimeout(() => {
+          scheduleTimeout(() => {
             // Clear sessionStorage and redirect to login
-            sessionStorage.removeItem("creds");
+            sessionStorage.removeItem("auth");
             alert(reason);
             window.location.href = "/"; // Redirect to root (login page)
           }, 2000); // Give user 2 seconds to see the success message
@@ -204,6 +288,13 @@ const GraphDBConfig = () => {
           // Update originals after successful save (only if no redirect)
           setOriginalHostname(effectiveHostname);
           setOriginalUsername(effectiveUsername);
+          // Reflect the just-triggered embedding-store re-init in the
+          // indicator. Background init typically lands within a few
+          // seconds; poll a second time so the operator sees the real
+          // outcome (ok or error) without navigating away.
+          fetchStoreStatus();
+          scheduleTimeout(fetchStoreStatus, 3000);
+          scheduleTimeout(fetchStoreStatus, 8000);
         }
       } else {
         setMessage(result.detail || "Failed to save configuration");
@@ -459,7 +550,7 @@ const GraphDBConfig = () => {
 
                 {message && (
                   <div
-                    className={`p-4 rounded-lg ${
+                    className={`p-4 rounded-lg whitespace-pre-line ${
                       messageType === "success"
                         ? "bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200"
                         : "bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200"
@@ -493,11 +584,57 @@ const GraphDBConfig = () => {
                       Enter password or API token to test connection
                     </p>
                   )}
+
+                  <div className="ml-auto flex items-center gap-2">
+                    {storeStatus === "error" ? (
+                      <Button
+                        onClick={handleRetryEmbeddingStore}
+                        disabled={isRetryingStore}
+                        variant="outline"
+                        className="dark:border-[#3D3D3D] text-red-700 dark:text-red-300 border-red-300 dark:border-red-900"
+                      >
+                        {isRetryingStore ? (
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-4 w-4 mr-2" />
+                        )}
+                        {isRetryingStore ? "Reconnecting…" : "Reconnect Vector Store"}
+                      </Button>
+                    ) : (
+                      <span
+                        className="text-sm text-gray-700 dark:text-gray-300 inline-flex items-center gap-1.5"
+                        title={
+                          storeStatus === "ok"
+                            ? "Vector store connected"
+                            : storeStatus === "initializing"
+                            ? "Vector store initializing"
+                            : "Vector store status unavailable"
+                        }
+                      >
+                        Vector Store
+                        {storeStatus === "ok" && (
+                          <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+                        )}
+                        {storeStatus === "initializing" && (
+                          <Loader2 className="h-4 w-4 text-blue-600 dark:text-blue-400 animate-spin" />
+                        )}
+                        {storeStatus === "unknown" && (
+                          <AlertCircle className="h-4 w-4 text-gray-400" />
+                        )}
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
             </div>
           </fieldset>
+
+          {storeStatus === "error" && (storeError || retryMessage) && (
+            <div className="mt-4 px-4 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 text-sm break-words">
+              {retryMessage || storeError}
+            </div>
+          )}
         </div>
       </div>
     </div>

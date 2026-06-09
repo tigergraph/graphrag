@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.4.1]
+
+### Added
+- **Token login** — the sign-in page adds a "Use token login" option with a choice of API Token or Secret, alongside the default username / password. The signed-in username and roles are resolved from TigerGraph after login so the UI shows the real user.
+- **Pre-flight upload conflict check** — a new endpoint reports which planned filenames already exist before the bytes are sent. The upload dialog uses it to prompt the user once with the conflicting names and offer Replace or Skip; large files no longer have to cross the wire twice when a collision is hit.
+
+### Changed
+- **Every request authenticates as the signed-in user**, end to end — graph operations, chat history, traces, and knowledge-graph rebuilds all run under the caller's identity (username / password, secret, or API token).
+- **TigerGraph token handling is automatic** — an api token is obtained from the caller's credentials only when the database requires one, unless a static api token is configured. The `getToken` config option is no longer needed and is now ignored.
+- **Sample documents are visible in the upload dialog after schema extraction.** Earlier, files used for schema extraction landed in a hidden per-request subdirectory and disappeared from the dialog. They now live alongside regular uploads, and overwriting one drops the cached extract so the next ingest sees the new bytes.
+- **Schema extraction requires an explicit sample list.** The endpoint no longer treats a missing or empty `filenames` field as "use every JSONL in the temp folder," which silently mixed in stale samples from prior sessions. Callers must name each sample explicitly.
+- **One schema extraction at a time per graph.** Concurrent attempts on the same graph are rejected with 409 instead of racing on the shared sample folder.
+- **Document Ingestion dialog reflects server-side state on reopen.** Closing the dialog mid-conversion and reopening it no longer leaves the *Ingest* button incorrectly enabled. The dialog asks the server which operation, if any, currently holds the graph lock, and polls until that operation completes — so the button stays disabled, the uploaded files list re-populates, and the next upload doesn't collide with the prior conversion.
+- **Conflict prompts use the app's styled dialog** instead of the browser default. Choosing *Cancel* now aborts the upload cleanly — the button and status message reset right away.
+- **The vector store recovers without a container restart.** When the initial connection to TigerGraph fails (e.g. cold start, transient network blip), the service used to stay broken until the operator restarted the container — chat connections were rejected silently with WebSocket close 1013. The vector store now retries automatically in the background (10s → 30s → 60s → 120s → 300s backoff), and a new ``POST /ui/admin/retry_embedding_store`` lets superusers force a retry immediately after fixing the underlying issue.
+- **Chat stays available when vector search is unavailable.** The chat WebSocket no longer closes hard with 1013 on vector-store failures. Instead it accepts the connection, surfaces a notice to the client, and lets graph-traversal questions answer normally — only questions that genuinely require a vector lookup fail, and they fail gracefully through the synthesizer.
+- **PDF ingestion is faster on image-heavy documents.** Image-description workers now run with a larger parallel pool, and tiny decorative images skip the multimodal LLM entirely. On AWS Bedrock deployments the connection pool default is also raised so concurrent describe calls no longer queue behind a 20-connection cap.
+- **Image description is tunable per graph or globally.** Two new `graphrag_config` keys — `extract_images` and `min_image_dim_px` — control whether the multimodal LLM is invoked on extracted images and the smallest image dimension that goes to the LLM (smaller images skip the call). Both are editable from the *GraphRAG Configuration* page in the UI, globally or per graph. Disabling does not alter the Image vertex type or loading job, so re-enabling later requires no schema change. The multimodal describe pass now reuses `default_concurrency` instead of a separate knob, so one setting tunes parallelism across the pipeline.
+- **Community search falls back to hybrid search when it returns nothing or fails.** Auto-selected community queries that miss (no relevant community summaries) or hit a retriever error are now retried once with hybrid graph-hop search before returning a "couldn't find" answer. Manually-picked community search is unchanged.
+
+### Removed
+- **A configured static `apiToken` no longer overrides per-user credentials.** It is used only for the service's background operations; interactive requests always authenticate as the signed-in user.
+
 ## [1.4.0]
 
 ### Added

@@ -329,10 +329,10 @@ class TestInlaneFallbackTable(unittest.TestCase):
         # Different retrieval surface (community summaries vs chunks).
         self.assertEqual(INLANE_FALLBACK_TABLE[METHOD_HYBRID], METHOD_COMMUNITY)
 
-    def test_community_has_no_fallback(self):
-        # Community's top-k semantics differ; the in-lane trigger doesn't fire
-        # for it, so a fallback entry would be unused.
-        self.assertNotIn(METHOD_COMMUNITY, INLANE_FALLBACK_TABLE)
+    def test_community_falls_back_to_hybrid(self):
+        # When community search misses (no relevant summaries) or fails, try
+        # the entity-driven graph-hop retriever before giving up.
+        self.assertEqual(INLANE_FALLBACK_TABLE[METHOD_COMMUNITY], METHOD_HYBRID)
 
     def test_no_self_fallback(self):
         # A method should never fall back to itself.
@@ -365,11 +365,12 @@ class TestHasInsufficientContext(unittest.TestCase):
         above = {f"chunk{i}": "text" for i in range(7)}
         self.assertFalse(has_insufficient_context(above, METHOD_HYBRID, top_k=5))
 
-    def test_community_always_returns_false(self):
-        """Community has different top_k semantics (community summaries, not
-        chunks). It should never trigger the insufficient-context path."""
-        self.assertFalse(has_insufficient_context({}, METHOD_COMMUNITY, top_k=5))
-        self.assertFalse(has_insufficient_context(None, METHOD_COMMUNITY, top_k=5))
+    def test_empty_community_is_insufficient(self):
+        """Community returning zero summaries is treated as insufficient so the
+        in-lane fallback can fire. A non-empty result is sufficient regardless
+        of the top_k cap (community top_k counts summaries, not chunks)."""
+        self.assertTrue(has_insufficient_context({}, METHOD_COMMUNITY, top_k=5))
+        self.assertTrue(has_insufficient_context(None, METHOD_COMMUNITY, top_k=5))
         partial = {f"comm{i}": "summary" for i in range(2)}
         self.assertFalse(has_insufficient_context(partial, METHOD_COMMUNITY, top_k=5))
 

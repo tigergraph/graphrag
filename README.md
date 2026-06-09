@@ -423,7 +423,7 @@ For examples of how to ingest documents through the backend API, refer to the **
 ## More Detailed Configurations
 
 ### DB configuration
-Copy the below into `configs/server_config.json` and edit the `hostname` and `getToken` fields to match your database's configuration. If token authentication is enabled in TigerGraph, set `getToken` to `true`. Set the timeout, memory threshold, and thread limit parameters as desired to control how much of the database's resources are consumed when answering a question.
+Copy the below into `configs/server_config.json` and edit the `hostname` to match your database's configuration. Token authentication is handled automatically — an api token is obtained from the username/password when the database requires one, unless a static api token is configured. Set the timeout, memory threshold, and thread limit parameters as desired to control how much of the database's resources are consumed when answering a question.
 
 ```json
 {
@@ -433,7 +433,6 @@ Copy the below into `configs/server_config.json` and edit the `hostname` and `ge
         "gsPort": "14240",
         "username": "tigergraph",
         "password": "tigergraph",
-        "getToken": false,
         "default_timeout": 300,
         "default_mem_threshold": 5000,
         "default_thread_limit": 8
@@ -448,9 +447,8 @@ Copy the below into `configs/server_config.json` and edit the `hostname` and `ge
 | `gsPort` | string | `"14240"` | GSQL port for TigerGraph admin operations. |
 | `username` | string | `"tigergraph"` | TigerGraph database username. |
 | `password` | string | `"tigergraph"` | TigerGraph database password. |
-| `getToken` | bool | `false` | Set to `true` if token authentication is enabled on TigerGraph. |
 | `graphname` | string | `""` | Default graph name. Usually left empty (selected at runtime). |
-| `apiToken` | string | `""` | Pre-generated API token. If set, token-based auth is used instead of username/password. |
+| `apiToken` | string | `""` | Optional pre-generated token for the service's background operations. Interactive requests always authenticate as the signed-in user. |
 | `default_timeout` | int | `300` | Default query timeout in seconds. |
 | `default_mem_threshold` | int | `5000` | Memory threshold (MB) for query execution. |
 | `default_thread_limit` | int | `8` | Max threads for query execution. |
@@ -500,6 +498,8 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `doc_process_switch` | bool | `true` | Enable/disable document processing during knowledge graph build. |
 | `entity_extraction_switch` | bool | same as `doc_process_switch` | Enable/disable entity extraction during knowledge graph build. |
 | `community_detection_switch` | bool | same as `entity_extraction_switch` | Enable/disable community detection during knowledge graph build. |
+| `extract_images` | bool | `true` | Run the multimodal LLM on images extracted from documents to generate alt-text. Set to `false` to skip the image-description pass entirely — much faster, at the cost of losing image content from retrieval. Configurable per graph. |
+| `min_image_dim_px` | int | `100` | Smallest side (in px) an image must have to be sent to the multimodal LLM. Smaller images are tagged "decorative image" without an LLM call. Configurable per graph. |
 | `load_batch_size` | int | `500` | Batch size for document loading. |
 | `upsert_delay` | int | `0` | Delay in seconds between loading batches. |
 | `default_concurrency` | int | `10` | Base concurrency level for parallel processing. Configurable per graph. |
@@ -773,11 +773,18 @@ In addition to the `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `azure_d
             "model_kwargs": {
                 "temperature": 0,
             },
+            "boto3_config": {
+                "max_pool_connections": 50,
+                "read_timeout": 300,
+                "retries": 5
+            },
             "prompt_path": "./common/prompts/aws_bedrock_claude3haiku/"
         }
     }
 }
 ```
+
+`boto3_config` is optional (the defaults shown above are also the built-in defaults). The same block can be set on `embedding_service` when using Bedrock embeddings.
 
 #### Ollama
 
@@ -916,8 +923,9 @@ A bad answer at step 4 is rarely fixed by editing the response prompt; usually i
 | Answers miss context that's clearly in the source | chunks too small or no overlap | raise `chunk_size`; bump `overlap_size` (default 1/8 of `chunk_size`); lower `threshold` (`semantic`) |
 | Tables / figures get fragmented | wrong chunker for the source | use `markdown` for markdown / docs converted to markdown; use `html` for HTML pages with structure; use `regex` with a custom `pattern` for structured logs |
 | Cross-section reasoning fails | no overlap | increase `overlap_size` to ~25% of `chunk_size` |
+| Long tables get split mid-row and the answer loses column headers | `chunk_size` (default `2048`) is smaller than the table's serialized length | raise `chunker_config.chunk_size` to fit the largest table whole — for table-heavy regulator / industry reports, **`4096`–`8192` is often the right range** |
 
-Default starting point for prose: `chunker: "semantic"`, `threshold: 0.95`, `chunker_config.method: "percentile"`. Move to `markdown` chunker with `chunk_size: 2048` and `overlap_size: 256` if your source is markdown-heavy and table integrity matters.
+Default starting point for prose: `chunker: "semantic"`, `threshold: 0.95`, `chunker_config.method: "percentile"`. Move to `markdown` chunker with `chunk_size: 2048` and `overlap_size: 256` if your source is markdown-heavy and table integrity matters. For corpora dominated by large statistical tables (regulatory reports, fiscal yearbooks, multi-year financial summaries), start with `markdown`/`html` chunker and `chunk_size: 8192` so each table stays in one chunk.
 
 ### 3. Extraction — make the graph clean before tuning retrieval
 
@@ -985,6 +993,11 @@ When customizing:
 - **`reuse_embedding: true`** skips re-embedding identical text — major saving on re-ingest of unchanged documents.
 - **Choose `llm_model` thoughtfully** — entity / relationship extraction tolerates cheaper / faster models (Haiku, Nova-lite, Flash); response synthesis benefits from stronger ones (Sonnet, GPT-4-class). The `multimodal_service` is independent — set it to a vision-capable model only when you actually ingest images.
 - **`load_batch_size`** and **`upsert_delay`** control ingestion pressure on TigerGraph. Defaults are fine for most loads; lower the batch size if you see write timeouts.
+- **Image-description speed.** On image-heavy documents, every image is sent to the multimodal LLM, which dominates ingest time. Tune via `graphrag_config` (global or per graph) — both knobs are also editable from the *GraphRAG Configuration* page in the UI:
+    - `extract_images` (default `true`) — set to `false` to skip image description entirely.
+    - `min_image_dim_px` (default `100`) — smaller images are tagged "decorative image" without an LLM call.
+    - Multimodal calls share the same `default_concurrency` semaphore as the rest of the pipeline — raise it to parallelize more describe calls; lower it if the multimodal provider's rate limit is hit.
+    - AWS Bedrock users can further tune connection pool sizing via `boto3_config` in `llm_config`.
 
 ### 7. A working tuning loop
 
@@ -1023,6 +1036,12 @@ First, make sure that all your LLM service provider configuration files are work
 ```sh
 docker compose up -d --build
 ```
+
+> **Windows developers:** the repo's top-level `configs/nginx.conf` and `configs/server_config.json` are symlinks intended for POSIX shells and don't resolve on Windows. Before running `docker compose up -d` from the repo root, overwrite them with the tutorial copies:
+> ```sh
+> cp docs/tutorials/configs/nginx.conf configs/nginx.conf
+> cp docs/tutorials/configs/server_config.json configs/server_config.json
+> ```
 
 If you want to use Weights And Biases for logging the test results, your WandB API key needs to be set in an environment variable on the host machine.
 

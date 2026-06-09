@@ -519,6 +519,11 @@ embedding_store = None
 _embedding_store_ready = threading.Event()
 _embedding_stores: dict = {}
 _embedding_stores_lock = threading.Lock()
+# Serializes default-store init across the background retry loop, the manual
+# /ui/admin/retry_embedding_store endpoint, and reset_embedding_store callers
+# (db-config reload). Without it two _init_embedding_store threads could run
+# concurrently and stomp ``embedding_store`` + ``service_status``.
+_embedding_store_init_lock = threading.Lock()
 service_status["embedding_store"] = {
     "status": "initializing",
     "error": "Embedding store is still initializing",
@@ -532,6 +537,9 @@ def _build_embedding_store(graphname: str = "") -> TigerGraphEmbeddingStore:
     ``embedding_service`` for the model) so the result reflects the
     current config.
     """
+    # A static apiToken stays a service-side credential here; otherwise
+    # pyTigerGraph mints a REST++ token from the service username/password
+    # on demand, so no explicit getToken() is needed.
     conn = TigerGraphConnection(
         host=db_config.get("hostname", "http://tigergraph"),
         username=db_config.get("username", "tigergraph"),
@@ -541,8 +549,6 @@ def _build_embedding_store(graphname: str = "") -> TigerGraphEmbeddingStore:
         graphname=graphname or db_config.get("graphname", ""),
         apiToken=db_config.get("apiToken", ""),
     )
-    if not db_config.get("apiToken") and db_config.get("getToken"):
-        conn.getToken()
 
     store = TigerGraphEmbeddingStore(
         conn,
@@ -559,16 +565,21 @@ def _init_embedding_store():
     """Background thread target. Builds the default embedding store
     without blocking module import — TigerGraph may be slow on first
     connect, and we don't want app startup to wait on it.
+
+    Serialized via ``_embedding_store_init_lock`` so concurrent calls
+    (initial startup + background retry loop + manual retry endpoint +
+    db-config reload) cannot stomp the shared globals.
     """
     global embedding_store
-    try:
-        embedding_store = _build_embedding_store()
-        service_status["embedding_store"] = {"status": "ok", "error": None}
-    except Exception as e:
-        service_status["embedding_store"] = {"status": "error", "error": str(e)}
-        logger.error(f"Failed to initialize embedding store: {e}")
-    finally:
-        _embedding_store_ready.set()
+    with _embedding_store_init_lock:
+        try:
+            embedding_store = _build_embedding_store()
+            service_status["embedding_store"] = {"status": "ok", "error": None}
+        except Exception as e:
+            service_status["embedding_store"] = {"status": "error", "error": str(e)}
+            logger.error(f"Failed to initialize embedding store: {e}")
+        finally:
+            _embedding_store_ready.set()
 
 
 def get_embedding_store(graphname: str | None = None, timeout: float = 0):
@@ -631,8 +642,43 @@ def reset_embedding_store() -> None:
     threading.Thread(target=_init_embedding_store, daemon=True).start()
 
 
+def _retry_embedding_store_loop():
+    """Daemon target. While the embedding store is in error state,
+    retry the build every so often so a transient TigerGraph outage
+    self-heals without a container restart. Backs off after each
+    failure (10s → 30s → 60s → 120s → 300s cap).
+    """
+    import time
+    backoff = [10, 30, 60, 120, 300]
+    attempt = 0
+    while True:
+        # Wait for the initial one-shot init to complete (success or
+        # failure) before starting the retry cadence.
+        _embedding_store_ready.wait()
+        if service_status["embedding_store"]["status"] != "error":
+            attempt = 0
+            time.sleep(backoff[-1])
+            continue
+        delay = backoff[min(attempt, len(backoff) - 1)]
+        attempt += 1
+        time.sleep(delay)
+        if service_status["embedding_store"]["status"] != "error":
+            attempt = 0
+            continue
+        logger.info(
+            f"Retrying embedding store init (attempt {attempt}, "
+            f"next backoff {backoff[min(attempt, len(backoff)-1)]}s)…"
+        )
+        _embedding_store_ready.clear()
+        _init_embedding_store()
+        if service_status["embedding_store"]["status"] == "ok":
+            logger.info("Embedding store init recovered.")
+            attempt = 0
+
+
 if os.getenv("INIT_EMBED_STORE", "true") == "true":
     threading.Thread(target=_init_embedding_store, daemon=True).start()
+    threading.Thread(target=_retry_embedding_store_loop, daemon=True).start()
 
 
 def reload_llm_config(new_llm_config: dict = None):

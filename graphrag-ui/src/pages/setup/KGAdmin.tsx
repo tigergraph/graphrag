@@ -21,8 +21,19 @@ import {
 } from "@/components/ui/select";
 import { useConfirm } from "@/hooks/useConfirm";
 import { useAlert } from "@/hooks/useAlert";
+import { resolveUploadConflicts } from "@/utils/uploadConflicts";
 import { useNavigate } from "react-router-dom";
 import IngestGraph from "./IngestGraph";
+
+// Same trick used in Login.tsx — Chrome / Safari on macOS clip the
+// underscore descender inside ``<input>`` even when CSS says there is
+// room. Disabling the native input rendering with ``appearance: none``
+// and pinning an explicit line-height makes the underscore render.
+const INPUT_CLIP_FIX: React.CSSProperties = {
+  WebkitAppearance: "none",
+  appearance: "none",
+  lineHeight: "1.5",
+};
 
 const KGAdmin = () => {
   const [confirm, confirmDialog, isConfirmDialogOpen] = useConfirm();
@@ -330,10 +341,10 @@ const KGAdmin = () => {
         setRefreshGraphName(store.graphs[0]);
       }
     }
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     if (!creds) return;
     fetch("/ui/list_graphs", {
-      headers: { Authorization: `Basic ${creds}` },
+      headers: { Authorization: creds! },
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -376,9 +387,9 @@ const KGAdmin = () => {
     if (isExtractingSchema || draftProposal) {
       setSchemaSource("samples");
     }
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     if (!creds) return;
-    fetch(`/ui/config`, { headers: { Authorization: `Basic ${creds}` } })
+    fetch(`/ui/config`, { headers: { Authorization: creds! } })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         const cfg = data?.graphrag_config || {};
@@ -396,7 +407,7 @@ const KGAdmin = () => {
     // downstream parser would still drop reserved/structural names,
     // just without the inline message.
     fetch(`/ui/schema_reserved_names`, {
-      headers: { Authorization: `Basic ${creds}` },
+      headers: { Authorization: creds! },
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
@@ -474,18 +485,31 @@ const KGAdmin = () => {
     // user isn't logged out mid-extraction.
     pauseIdleTimer();
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       if (!creds) throw new Error("Not authenticated. Please login first.");
 
-      // Step 1/2: upload + convert. Returns the saved filenames so we
-      // know exactly which JSONLs to feed to the LLM in step 2.
+      // Step 1/2: upload + convert. Pre-flight the planned upload so
+      // the user only sees a conflict prompt for filenames that already
+      // live on the server. Returns the saved filenames so we know
+      // exactly which JSONLs to feed to the LLM in step 2.
+      const queryString = await resolveUploadConflicts(
+        graphName,
+        sampleFiles.map((f) => f.name),
+        creds!,
+        confirm
+      );
+      if (queryString === null) {
+        setStatusMessage("Schema extraction cancelled.");
+        setStatusType("");
+        return;
+      }
       const form = new FormData();
       sampleFiles.forEach((f) => form.append("files", f));
       const convertResp = await fetch(
-        `/ui/${graphName}/convert_sample_files`,
+        `/ui/${graphName}/convert_sample_files${queryString}`,
         {
           method: "POST",
-          headers: { Authorization: `Basic ${creds}` },
+          headers: { Authorization: creds! },
           body: form,
         }
       );
@@ -493,6 +517,14 @@ const KGAdmin = () => {
       if (!convertResp.ok) {
         throw new Error(
           convertData.detail || `Conversion failed: ${convertResp.statusText}`
+        );
+      }
+      if (convertData.status === "conflict") {
+        // Defensive: surface the server's conflict message instead of
+        // continuing into the LLM step with no converted samples.
+        throw new Error(
+          convertData.message ||
+            "Some sample filenames already exist on the server."
         );
       }
 
@@ -504,11 +536,10 @@ const KGAdmin = () => {
         {
           method: "POST",
           headers: {
-            Authorization: `Basic ${creds}`,
+            Authorization: creds!,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            request_id: convertData.request_id || "",
             filenames: convertData.saved_files || [],
             vertex_hints: vertexHints,
             edge_hints: edgeHints,
@@ -591,9 +622,9 @@ const KGAdmin = () => {
     setPrecheckRunning(true);
     setPrecheckMessage("");
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const eligResp = await fetch(`/ui/${graphName}/check_init_eligibility`, {
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
       const elig = await eligResp.json();
       if (!eligResp.ok) {
@@ -637,7 +668,7 @@ const KGAdmin = () => {
           {
             method: "POST",
             headers: {
-              Authorization: `Basic ${creds}`,
+              Authorization: creds!,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
@@ -695,7 +726,7 @@ const KGAdmin = () => {
     pauseIdleTimer();
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       if (!creds) {
         throw new Error("Not authenticated. Please login first.");
       }
@@ -703,7 +734,7 @@ const KGAdmin = () => {
       setStatusMessage("Step 1/2: Creating graph...");
       const createResponse = await fetch(`/ui/${graphName}/create_graph`, {
         method: "POST",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       const createData = await createResponse.json();
@@ -756,7 +787,7 @@ const KGAdmin = () => {
       const initResponse = await fetch(`/ui/${graphName}/initialize_graph`, {
         method: "POST",
         headers: {
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(initBody),
@@ -810,7 +841,7 @@ const KGAdmin = () => {
         try {
           statusResp = await fetch(
             `/ui/${graphName}/initialize_status`,
-            { headers: { Authorization: `Basic ${creds}` } }
+            { headers: { Authorization: creds! } }
           );
         } catch {
           // Transient network blip — retry on the next tick rather
@@ -863,7 +894,7 @@ const KGAdmin = () => {
           await fetch("/ui/prompts", {
             method: "POST",
             headers: {
-              Authorization: `Basic ${creds}`,
+              Authorization: creds!,
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
@@ -921,10 +952,10 @@ const KGAdmin = () => {
     }
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
       const statusResponse = await fetch(`/ui/${graphName}/rebuild_status`, {
         method: "GET",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (statusResponse.ok) {
@@ -1003,12 +1034,12 @@ const KGAdmin = () => {
     setRefreshMessage("Verifying rebuild status...");
 
     try {
-      const creds = sessionStorage.getItem("creds");
+      const creds = sessionStorage.getItem("auth");
 
       // Final status check to prevent race conditions
       const statusCheckResponse = await fetch(`/ui/${refreshGraphName}/rebuild_status`, {
         method: "GET",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (statusCheckResponse.ok) {
@@ -1026,7 +1057,7 @@ const KGAdmin = () => {
 
       const response = await fetch(`/ui/${refreshGraphName}/rebuild_graph`, {
         method: "POST",
-        headers: { Authorization: `Basic ${creds}` },
+        headers: { Authorization: creds! },
       });
 
       if (!response.ok) {
@@ -1526,24 +1557,28 @@ const KGAdmin = () => {
                                   >
                                     {collapsedVertices.has(vIdx) ? "▶" : "▼"}
                                   </button>
-                                  <Input
-                                    placeholder="VertexName"
-                                    value={v.name}
-                                    onChange={(e) =>
-                                      setDraftProposal((p) =>
-                                        p
-                                          ? {
-                                              ...p,
-                                              vertices: p.vertices.map((vv, i) =>
-                                                i === vIdx ? { ...vv, name: e.target.value } : vv
-                                              ),
-                                            }
-                                          : p
-                                      )
-                                    }
-                                    disabled={isInitializing || isExtractingSchema}
-                                    className="flex-1 h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
-                                  />
+                                  <div className="flex-1 flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                    <input
+                                      type="text"
+                                      placeholder="VertexName"
+                                      value={v.name}
+                                      onChange={(e) =>
+                                        setDraftProposal((p) =>
+                                          p
+                                            ? {
+                                                ...p,
+                                                vertices: p.vertices.map((vv, i) =>
+                                                  i === vIdx ? { ...vv, name: e.target.value } : vv
+                                                ),
+                                              }
+                                            : p
+                                        )
+                                      }
+                                      disabled={isInitializing || isExtractingSchema}
+                                      className="flex-1 bg-transparent outline-none border-0 p-0 text-sm text-black dark:text-white placeholder:text-muted-foreground disabled:opacity-50"
+                                      style={INPUT_CLIP_FIX}
+                                    />
+                                  </div>
                                   {collapsedVertices.has(vIdx) && (
                                     <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[40%]">
                                       {v.attributes.length} attr{v.attributes.length === 1 ? "" : "s"}
@@ -1568,26 +1603,30 @@ const KGAdmin = () => {
                                   </button>
                                 </div>
                                 {!collapsedVertices.has(vIdx) && (<>
-                                <Input
-                                  placeholder="Description (1 sentence)"
-                                  value={v.description}
-                                  onChange={(e) =>
-                                    setDraftProposal((p) =>
-                                      p
-                                        ? {
-                                            ...p,
-                                            vertices: p.vertices.map((vv, i) =>
-                                              i === vIdx
-                                                ? { ...vv, description: e.target.value }
-                                                : vv
-                                            ),
-                                          }
-                                        : p
-                                    )
-                                  }
-                                  disabled={isInitializing || isExtractingSchema}
-                                  className="h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
-                                />
+                                <div className="flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                  <input
+                                    type="text"
+                                    placeholder="Description (1 sentence)"
+                                    value={v.description}
+                                    onChange={(e) =>
+                                      setDraftProposal((p) =>
+                                        p
+                                          ? {
+                                              ...p,
+                                              vertices: p.vertices.map((vv, i) =>
+                                                i === vIdx
+                                                  ? { ...vv, description: e.target.value }
+                                                  : vv
+                                              ),
+                                            }
+                                          : p
+                                      )
+                                    }
+                                    disabled={isInitializing || isExtractingSchema}
+                                    className="flex-1 bg-transparent outline-none border-0 p-0 text-sm text-black dark:text-white placeholder:text-muted-foreground disabled:opacity-50"
+                                    style={INPUT_CLIP_FIX}
+                                  />
+                                </div>
                                 <div className="text-xs text-gray-500 dark:text-gray-400">
                                   Attributes ({v.attributes.length}); primary key <code>id</code> auto-added
                                   {attributesCollapsed && (
@@ -1802,26 +1841,30 @@ const KGAdmin = () => {
                                   >
                                     {collapsedEdges.has(eIdx) ? "▶" : "▼"}
                                   </button>
-                                  <Input
-                                    placeholder="EDGE_NAME"
-                                    value={e.name}
-                                    onChange={(ev) =>
-                                      setDraftProposal((p) =>
-                                        p
-                                          ? {
-                                              ...p,
-                                              edges: p.edges.map((ee, i) =>
-                                                i === eIdx
-                                                  ? { ...ee, name: ev.target.value }
-                                                  : ee
-                                              ),
-                                            }
-                                          : p
-                                      )
-                                    }
-                                    disabled={isInitializing || isExtractingSchema}
-                                    className="flex-1 h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
-                                  />
+                                  <div className="flex-1 flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                    <input
+                                      type="text"
+                                      placeholder="EDGE_NAME"
+                                      value={e.name}
+                                      onChange={(ev) =>
+                                        setDraftProposal((p) =>
+                                          p
+                                            ? {
+                                                ...p,
+                                                edges: p.edges.map((ee, i) =>
+                                                  i === eIdx
+                                                    ? { ...ee, name: ev.target.value }
+                                                    : ee
+                                                ),
+                                              }
+                                            : p
+                                        )
+                                      }
+                                      disabled={isInitializing || isExtractingSchema}
+                                      className="flex-1 bg-transparent outline-none border-0 p-0 text-sm text-black dark:text-white placeholder:text-muted-foreground disabled:opacity-50"
+                                      style={INPUT_CLIP_FIX}
+                                    />
+                                  </div>
                                   {collapsedEdges.has(eIdx) && (
                                     <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[40%]">
                                       {e.pairs.length} pair{e.pairs.length === 1 ? "" : "s"}, {e.attributes.length} attr
@@ -1847,26 +1890,30 @@ const KGAdmin = () => {
                                   </button>
                                 </div>
                                 {!collapsedEdges.has(eIdx) && (<>
-                                <Input
-                                  placeholder="Description (1 sentence)"
-                                  value={e.description}
-                                  onChange={(ev) =>
-                                    setDraftProposal((p) =>
-                                      p
-                                        ? {
-                                            ...p,
-                                            edges: p.edges.map((ee, i) =>
-                                              i === eIdx
-                                                ? { ...ee, description: ev.target.value }
-                                                : ee
-                                            ),
-                                          }
-                                        : p
-                                    )
-                                  }
-                                  disabled={isInitializing || isExtractingSchema}
-                                  className="h-8 text-sm dark:border-[#3D3D3D] dark:bg-shadeA"
-                                />
+                                <div className="flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                  <input
+                                    type="text"
+                                    placeholder="Description (1 sentence)"
+                                    value={e.description}
+                                    onChange={(ev) =>
+                                      setDraftProposal((p) =>
+                                        p
+                                          ? {
+                                              ...p,
+                                              edges: p.edges.map((ee, i) =>
+                                                i === eIdx
+                                                  ? { ...ee, description: ev.target.value }
+                                                  : ee
+                                              ),
+                                            }
+                                          : p
+                                      )
+                                    }
+                                    disabled={isInitializing || isExtractingSchema}
+                                    className="flex-1 bg-transparent outline-none border-0 p-0 text-sm text-black dark:text-white placeholder:text-muted-foreground disabled:opacity-50"
+                                    style={INPUT_CLIP_FIX}
+                                  />
+                                </div>
                                 <div className="text-xs text-gray-500 dark:text-gray-400">
                                   Endpoints (FROM → TO):
                                 </div>
@@ -2191,7 +2238,6 @@ const KGAdmin = () => {
                   <Button
                     variant="outline"
                     onClick={() => handleInitializeDialogChange(false)}
-                    disabled={isInitializing}
                     className="dark:border-[#3D3D3D]"
                   >
                     Close
@@ -2361,7 +2407,7 @@ const KGAdmin = () => {
           }}
         >
           <DialogContent
-            className="sm:max-w-[700px] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] max-h-[80vh] overflow-y-auto"
+            className="sm:max-w-[760px] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] max-h-[80vh] overflow-y-auto"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>

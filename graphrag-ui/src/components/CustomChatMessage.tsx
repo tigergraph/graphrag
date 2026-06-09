@@ -105,7 +105,7 @@ const AuthenticatedImage: FC<{ src: string; alt: string }> = ({ src, alt }) => {
     const fetchImage = async () => {
       try {
         // Get credentials from sessionStorage (same pattern as Interact.tsx and SideMenu.tsx)
-        const creds = sessionStorage.getItem("creds");
+        const creds = sessionStorage.getItem("auth");
         if (!creds) {
           console.error("No credentials found in sessionStorage");
           setError(true);
@@ -119,7 +119,7 @@ const AuthenticatedImage: FC<{ src: string; alt: string }> = ({ src, alt }) => {
         // Fetch image with authentication header
         const response = await fetch(src, {
           headers: {
-            Authorization: `Basic ${creds}`,
+            Authorization: creds!,
           },
           credentials: 'include', // Include credentials in CORS requests
         });
@@ -259,7 +259,7 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
                 // HTTPBasic returns 401 + ``WWW-Authenticate: Basic`` and
                 // the browser pops up its native auth dialog. Better to
                 // tell the user to sign in again than to flash that popup.
-                const creds = sessionStorage.getItem("creds");
+                const creds = sessionStorage.getItem("auth");
                 if (!creds) {
                   await alert("Your session has expired. Please log in again.");
                   return;
@@ -270,7 +270,7 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
                 try {
                   const probe = await fetch(`/ui/trace/${messageId}`, {
                     method: "GET",
-                    headers: { Authorization: `Basic ${creds}` },
+                    headers: { Authorization: creds! },
                   });
                   if (!probe.ok) {
                     await alert("Trace log not found.");

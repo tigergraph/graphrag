@@ -39,6 +39,8 @@ const GraphRAGConfig = () => {
   const [loadBatchSize, setLoadBatchSize] = useState("500");
   const [upsertDelay, setUpsertDelay] = useState("0");
   const [maxConcurrency, setMaxConcurrency] = useState("10");
+  const [extractImages, setExtractImages] = useState(true);
+  const [minImageDimPx, setMinImageDimPx] = useState("100");
 
   // Schema-aware initialization (Phase 1 sample-doc path)
   const [schemaMaxSampleFiles, setSchemaMaxSampleFiles] = useState("5");
@@ -58,6 +60,7 @@ const GraphRAGConfig = () => {
 
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<"success" | "error" | "">("");
 
@@ -68,11 +71,18 @@ const GraphRAGConfig = () => {
   // Track configs as loaded from API so we only save what's needed
   const loadedGlobalConfig = useRef<Record<string, any>>({});
   const loadedGraphOverrides = useRef<Record<string, any>>({});
+  // AbortController for in-flight fetchConfig. Toggling scope/graph rapidly
+  // would otherwise let the older request resolve last, leaving the UI
+  // showing the wrong scope's values.
+  const fetchAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     const site = JSON.parse(sessionStorage.getItem("site") || "{}");
     setAvailableGraphs(site.graphs || []);
     fetchConfig();
+    return () => {
+      fetchAbortRef.current?.abort();
+    };
   }, []);
 
 
@@ -91,6 +101,8 @@ const GraphRAGConfig = () => {
     setLoadBatchSize(String(graphragConfig.load_batch_size ?? 500));
     setUpsertDelay(String(graphragConfig.upsert_delay ?? 0));
     setMaxConcurrency(String(graphragConfig.default_concurrency ?? 10));
+    setExtractImages(graphragConfig.extract_images ?? true);
+    setMinImageDimPx(String(graphragConfig.min_image_dim_px ?? 100));
     setSchemaMaxSampleFiles(String(graphragConfig.schema_max_sample_files ?? 5));
     setSchemaMaxTotalMb(String(graphragConfig.schema_max_total_mb ?? 50));
     setStrictMode(graphragConfig.strict_mode ?? false);
@@ -109,12 +121,18 @@ const GraphRAGConfig = () => {
     setIsLoading(true);
     const effectiveScope = scope ?? configScope;
     const effectiveGraph = graphname ?? selectedGraph;
-    const creds = sessionStorage.getItem("creds");
+    const creds = sessionStorage.getItem("auth");
     const params = new URLSearchParams();
     if (effectiveGraph) params.set("graphname", effectiveGraph);
     if (effectiveScope === "graph") params.set("scope", "graph");
     const queryString = params.toString() ? `?${params.toString()}` : "";
     const url = `/ui/config${queryString}`;
+
+    // Cancel any prior in-flight fetch; only the latest scope/graph
+    // selection should win.
+    fetchAbortRef.current?.abort();
+    const ac = new AbortController();
+    fetchAbortRef.current = ac;
 
     // Transient backend failures (cold start, brief upstream timeouts via
     // nginx, momentary 502/503/504) are common right after a service
@@ -134,7 +152,8 @@ const GraphRAGConfig = () => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const response = await fetch(url, {
-          headers: { Authorization: `Basic ${creds}` },
+          headers: { Authorization: creds! },
+          signal: ac.signal,
         });
         lastStatus = response.status;
         if (!response.ok) {
@@ -164,9 +183,13 @@ const GraphRAGConfig = () => {
         // Clear any prior transient error banner on success.
         setMessage("");
         setMessageType("");
+        setLoadFailed(false);
         setIsLoading(false);
         return;
       } catch (error: any) {
+        // Superseded by a newer fetch — bail silently so the loading
+        // banner doesn't flicker an error for a request we cancelled.
+        if (error?.name === "AbortError") return;
         lastErr = error;
         if (attempt < maxAttempts && shouldRetry(lastStatus, error)) {
           await new Promise((r) => setTimeout(r, 500 * attempt));
@@ -181,17 +204,33 @@ const GraphRAGConfig = () => {
       `Failed to load configuration${lastStatus ? ` (HTTP ${lastStatus})` : ""}. Please retry.`
     );
     setMessageType("error");
+    // Block Save: the loaded reference is stale/empty, so diffing against it
+    // can silently strip valid overrides (per-graph mode) or save defaults
+    // over server state (global mode).
+    setLoadFailed(true);
     setIsLoading(false);
   };
 
   const handleSave = async () => {
+    // Hard guards — the button's disabled prop is cosmetic; this is the
+    // runtime check, since handleSave can also be invoked programmatically.
+    if (isLoading || loadFailed) {
+      setMessage("Reload the current configuration before saving.");
+      setMessageType("error");
+      return;
+    }
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) {
+      setMessage("Not signed in. Please sign in again.");
+      setMessageType("error");
+      return;
+    }
+
     setIsSaving(true);
     setMessage("");
     setMessageType("");
 
     try {
-      const creds = sessionStorage.getItem("creds");
-      
       // Build current UI state — only include non-empty fields
       const currentChunkerConfig: any = {};
       if (chunkSize !== "") currentChunkerConfig.chunk_size = parseInt(chunkSize);
@@ -215,6 +254,8 @@ const GraphRAGConfig = () => {
         load_batch_size: parseInt(loadBatchSize),
         upsert_delay: parseInt(upsertDelay),
         default_concurrency: parseInt(maxConcurrency),
+        extract_images: extractImages,
+        min_image_dim_px: parseInt(minImageDimPx),
         schema_max_sample_files: parseInt(schemaMaxSampleFiles),
         schema_max_total_mb: parseInt(schemaMaxTotalMb),
         strict_mode: strictMode,
@@ -242,6 +283,8 @@ const GraphRAGConfig = () => {
         load_batch_size: 500,
         upsert_delay: 0,
         default_concurrency: 10,
+        extract_images: true,
+        min_image_dim_px: 100,
         schema_max_sample_files: 5,
         schema_max_total_mb: 50,
         strict_mode: false,
@@ -321,7 +364,7 @@ const GraphRAGConfig = () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Basic ${creds}`,
+          Authorization: creds!,
         },
         body: JSON.stringify(graphragConfigData),
       });
@@ -789,9 +832,45 @@ const GraphRAGConfig = () => {
                       onChange={(e) => setMaxConcurrency(e.target.value)}
                     />
                     <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Max concurrent workers for graph queries, LLM, and embedding calls
+                      Maximum LLM, embedding, and graph database requests running at the same time.
                     </p>
                   </div>
+                </div>
+
+                <div className="mt-6">
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="extractImages"
+                      className="rounded border-gray-300 dark:border-[#3D3D3D]"
+                      checked={extractImages}
+                      onChange={(e) => setExtractImages(e.target.checked)}
+                    />
+                    <label htmlFor="extractImages" className="text-sm font-medium text-black dark:text-white">
+                      Generate image descriptions during PDF ingestion
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 ml-6">
+                    Sends each extracted image to the multimodal LLM for alt-text. Disable to skip image content entirely.
+                  </p>
+                </div>
+
+                <div className="mt-4 max-w-sm">
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Min Image Dimension
+                  </label>
+                  <Input
+                    type="number"
+                    min="0"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
+                    placeholder="100"
+                    value={minImageDimPx}
+                    onChange={(e) => setMinImageDimPx(e.target.value)}
+                    disabled={!extractImages}
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Smallest side (in px) an image must have to be described.
+                  </p>
                 </div>
               </div>
             )}
@@ -994,7 +1073,7 @@ const GraphRAGConfig = () => {
             </div>
           )}
 
-          <Button onClick={handleSave} disabled={isSaving} className="gradient text-white w-full">
+          <Button onClick={handleSave} disabled={isSaving || isLoading || loadFailed} title={loadFailed ? "Reload the page or click Retry to fetch the current configuration before saving" : undefined} className="gradient text-white w-full">
             {isSaving ? (
               <>
                 <Loader2 className="h-4 w-4 mr-2 animate-spin" />

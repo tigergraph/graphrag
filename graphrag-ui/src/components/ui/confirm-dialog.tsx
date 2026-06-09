@@ -37,7 +37,7 @@ export function ConfirmDialog({ message, onConfirm, onCancel }: ConfirmDialogPro
         onClick={(e) => e.stopPropagation()}
         style={{ pointerEvents: 'auto' }}
       >
-        <p className="mb-4 text-black dark:text-white text-left">{message}</p>
+        <p className="mb-4 text-black dark:text-white text-left whitespace-pre-line">{message}</p>
         <div className="flex justify-center gap-2">
           <button
             className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-black dark:text-white rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors cursor-pointer"

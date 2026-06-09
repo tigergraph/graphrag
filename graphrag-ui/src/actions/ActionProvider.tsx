@@ -88,13 +88,20 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
   );
   const { sendMessage, lastMessage, readyState } = useWebSocket(WS_URL, {
     onOpen: () => {
-      // Send authentication credentials
-      const creds = sessionStorage.getItem("creds");
-      console.log("Sending credentials, length:", creds ? creds.length : 0);
-      queryGraphragWs2(creds!);
-
-      // Send RAG pattern
-      //sendMessage(selectedRagPattern);
+      // Defensive: the route guard normally ensures ``auth`` is set
+      // before the chat page mounts, but idle-timeout expiry mid-session
+      // or a logout from another tab can clear it before the WebSocket
+      // (re)opens. Without this check we'd send "null" as the auth
+      // header and the server would close the WebSocket with no
+      // user-actionable message.
+      const creds = sessionStorage.getItem("auth");
+      if (!creds) {
+        console.error("No auth credentials available; redirecting to login");
+        alert("Your session has expired. Please log in again.");
+        window.location.href = "/";
+        return;
+      }
+      queryGraphragWs2(creds);
 
       // Send conversation ID (or "new" for new conversation)
       const conversationId = conversationManager.getCurrentConversationId();

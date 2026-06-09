@@ -209,7 +209,7 @@ class AWS_Bedrock_Embedding(EmbeddingModel):
 
         boto3_config = config.get("boto3_config", {})
         client_config = botocore.config.Config(
-            max_pool_connections=boto3_config.get("max_pool_connections", 20),
+            max_pool_connections=boto3_config.get("max_pool_connections", 50),
             read_timeout=boto3_config.get("read_timeout", 300),
             retries={"max_attempts": boto3_config.get("retries", 5)},
         )
