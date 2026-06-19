@@ -528,6 +528,7 @@ def create_ingest(
             res["data_path"] = "in_temp_storage"
             res["data_source_id"] = res_ingest_config
         except Exception as e:
+            logger.error(f"Server folder processing failed for graph '{graphname}', path '{data_path}': {e}", exc_info=True)
             raise Exception(f"Error during server folder processing: {e}")
     elif ingest_config.data_source.lower() == "local":
         res["data_source_id"] = "DocumentContent"

@@ -21,6 +21,7 @@ import {
 import { useConfirm } from "@/hooks/useConfirm";
 import { pingIdleTimer } from "@/hooks/useIdleTimeout";
 import { resolveUploadConflicts } from "@/utils/uploadConflicts";
+import { safeJson } from "@/utils/safeJson";
 
 interface IngestGraphProps {
   isModal?: boolean;
@@ -33,6 +34,10 @@ const MAX_UPLOAD_SIZE_MB =
     ? envUploadLimit
     : DEFAULT_MAX_UPLOAD_SIZE_MB;
 const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
+// Max bytes downloaded from cloud per request (S3/GCS/Azure only — not BDA).
+// Mirrors the upload batching strategy: each batch stays within MAX_UPLOAD_SIZE_BYTES
+// so the server is never overwhelmed by a single huge request.
 
 const formatBytes = (bytes: number) => {
   if (bytes === 0) return "0 Bytes";
@@ -100,7 +105,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       const response = await fetch(`/ui/${ingestGraphName}/uploads/list`, {
         headers: { Authorization: creds! },
       });
-      const data = await response.json();
+      const data = await safeJson(response);
       setUploadedFiles(data.files || []);
     } catch (error) {
       console.error("Error fetching files:", error);
@@ -179,11 +184,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       );
 
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = await safeJson(response);
         throw new Error(errorData.detail || `Upload failed: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const data = await safeJson(response);
       if (data.status === "success") {
         const uploadedCount = selectedFiles?.length || 0;
         setUploadMessage("✅ Successfully uploaded the files. Processing...");
@@ -233,10 +238,10 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         return;
       }
       let uploadedCount = 0;
-      let failedCount = 0;
+      const failedFiles: string[] = [];
       const totalFiles = filesArray.length;
 
-      // Upload files one at a time to avoid 413 errors
+        // Upload files one at a time to avoid 413 errors
       for (let i = 0; i < filesArray.length; i++) {
         const file = filesArray[i];
         const fileNumber = i + 1;
@@ -261,27 +266,35 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           );
 
           if (!response.ok) {
-            throw new Error(`Upload failed with status ${response.status}`);
+            const errData = await safeJson(response);
+            const reason = errData.detail || `HTTP ${response.status}`;
+            console.error(`File "${file.name}" failed: ${reason}`);
+            failedFiles.push(`${file.name} (${reason})`);
+            continue;
           }
 
-          const data = await response.json();
+          const data = await safeJson(response);
           if (data.status === "success") {
             uploadedCount++;
           } else {
-            failedCount++;
-            console.error(`File ${file.name} failed:`, data);
+            const reason = data.message || "unexpected response";
+            console.error(`File "${file.name}" failed:`, data);
+            failedFiles.push(`${file.name} (${reason})`);
           }
-        } catch (err) {
-          console.error(`File ${file.name} error:`, err);
-          failedCount++;
+        } catch (err: any) {
+          console.error(`File "${file.name}" error:`, err);
+          failedFiles.push(`${file.name} (${err.message || "unknown error"})`);
         }
       }
 
       // Show final result
-      if (failedCount === 0) {
+      if (failedFiles.length === 0) {
         setUploadMessage(`✅ Successfully uploaded all ${uploadedCount} files. Processing...`);
       } else {
-        setUploadMessage(`⚠️ Uploaded ${uploadedCount} files successfully, ${failedCount} failed. Processing...`);
+        const failedList = failedFiles.join(", ");
+        setUploadMessage(
+          `⚠️ Uploaded ${uploadedCount}/${totalFiles} files. Failed: ${failedList}`
+        );
       }
 
       setSelectedFiles(null);
@@ -318,7 +331,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           headers: { Authorization: creds! },
         }
       );
-      const data = await response.json();
+      const data = await safeJson(response);
       setUploadMessage(`✅ ${data.message}`);
       await fetchUploadedFiles();
     } catch (error: any) {
@@ -341,7 +354,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         method: "DELETE",
         headers: { Authorization: creds! },
       });
-      const data = await response.json();
+      const data = await safeJson(response);
       setUploadMessage(`✅ ${data.message}`);
       await fetchUploadedFiles();
     } catch (error: any) {
@@ -358,7 +371,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       const response = await fetch(`/ui/${ingestGraphName}/cloud/list`, {
         headers: { Authorization: creds! },
       });
-      const data = await response.json();
+      const data = await safeJson(response);
       setDownloadedFiles(data.files || []);
     } catch (error) {
       console.error("Error fetching downloaded files:", error);
@@ -423,37 +436,77 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         };
       }
 
-      const response = await fetch(`/ui/${ingestGraphName}/cloud/download`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: creds!,
-        },
-        body: JSON.stringify(requestBody),
-      });
+      // BDA processing happens entirely on AWS — no batching needed or possible.
+      // For S3/GCS/Azure, download in size-based batches (same 100 MB limit as
+      // local upload) so the server is never overwhelmed by one huge request.
+      const isBda = (requestBody.provider as string) === "bda";
+      const batchSize = isBda ? 0 : MAX_UPLOAD_SIZE_BYTES; // 0 = no limit for BDA
+      let allDownloadedFiles: string[] = [];
+      let hasMore = true;
+      let batchNum = 0;
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.detail || `Download failed: ${response.statusText}`);
+      while (hasMore) {
+        batchNum++;
+        const batchBody = batchSize > 0
+          ? { ...requestBody, max_bytes: batchSize }
+          : requestBody;
+
+        if (batchSize > 0 && batchNum > 1) {
+          setDownloadMessage(`Batch ${batchNum}: downloading next batch (up to ${MAX_UPLOAD_SIZE_MB} MB)...`);
+        }
+
+        const response = await fetch(`/ui/${ingestGraphName}/cloud/download`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: creds!,
+          },
+          body: JSON.stringify(batchBody),
+        });
+
+        if (!response.ok) {
+          const errorData = await safeJson(response);
+          throw new Error(errorData.detail || `Download failed: ${response.statusText}`);
+        }
+
+        const data = await safeJson(response);
+
+        if (data.status === "warning") {
+          // No (more) files found — stop looping
+          if (allDownloadedFiles.length === 0) {
+            setDownloadMessage(`⚠️ ${data.message}`);
+            setIsDownloading(false);
+            return;
+          }
+          hasMore = false;
+        } else if (data.status === "success") {
+          allDownloadedFiles = allDownloadedFiles.concat(data.downloaded_files || []);
+          hasMore = batchSize > 0 && (data.has_more === true);
+          if (hasMore) {
+            setDownloadMessage(
+              `Batch ${batchNum} complete — ${allDownloadedFiles.length} file(s) downloaded so far (≤${MAX_UPLOAD_SIZE_MB} MB per batch). Fetching more...`
+            );
+          }
+        } else {
+          throw new Error(data.message || "Download failed");
+        }
       }
-      const data = await response.json();
-      if (data.status === "success") {
-        const downloadCount = data.downloaded_files?.length || downloadedFiles.length;
-        setDownloadMessage("✅ Successfully downloaded the files. Processing...");
-        await fetchDownloadedFiles();
-        setIsDownloading(false);
+
+      const downloadCount = allDownloadedFiles.length;
+      setDownloadMessage(
+        downloadCount > 0
+          ? `✅ Successfully downloaded ${downloadCount} file(s). Processing...`
+          : "⚠️ No new files to download."
+      );
+      await fetchDownloadedFiles();
+      setIsDownloading(false);
+      if (downloadCount > 0) {
         recentProcessClickRef.current = Date.now();
         setIsProcessingFiles(true);
         handleCreateIngestAfterUpload("downloaded", downloadCount).catch((err) => {
           console.error("Error in background processing:", err);
           setDownloadMessage(`❌ Processing error: ${err.message}`);
         }).finally(() => setIsProcessingFiles(false));
-      } else if (data.status === "warning") {
-        setDownloadMessage(`⚠️ ${data.message}`);
-        setIsDownloading(false);
-      } else {
-        setDownloadMessage(`❌ ${data.message || "Download failed"}`);
-        setIsDownloading(false);
       }
     } catch (error: any) {
       const isLockConflict = error.message?.includes("currently being processed");
@@ -546,12 +599,12 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           }
         );
         if (!createResp.ok) {
-          const err = await createResp.json();
+          const err = await safeJson(createResp);
           throw new Error(
             err.detail || `Failed to create ingest job: ${createResp.statusText}`
           );
         }
-        const createData = await createResp.json();
+        const createData = await safeJson(createResp);
         jobData = {
           load_job_id: createData.load_job_id,
           data_source_id: createData.data_source_id,
@@ -575,11 +628,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       });
 
       if (!ingestResponse.ok) {
-        const errorData = await ingestResponse.json();
+        const errorData = await safeJson(ingestResponse);
         throw new Error(errorData.detail || `Failed to ingest: ${ingestResponse.statusText}`);
       }
 
-      const ingestData = await ingestResponse.json();
+      const ingestData = await safeJson(ingestResponse);
       console.log("Ingest response:", ingestData);
 
       setIngestMessage(`✅ Ingestion completed successfully!`);
@@ -627,11 +680,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       });
 
       if (!createResponse.ok) {
-        const errorData = await createResponse.json();
+        const errorData = await safeJson(createResponse);
         throw new Error(errorData.detail || `Failed to create ingest job: ${createResponse.statusText}`);
       }
 
-      const createData = await createResponse.json();
+      const createData = await safeJson(createResponse);
       console.log("Create ingest response:", createData);
 
       // Store ingest job data for later use
@@ -662,11 +715,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         });
 
         if (!ingestResponse.ok) {
-          const errorData = await ingestResponse.json();
+          const errorData = await safeJson(ingestResponse);
           throw new Error(errorData.detail || `Failed to run ingest: ${ingestResponse.statusText}`);
         }
 
-        const ingestData = await ingestResponse.json();
+        const ingestData = await safeJson(ingestResponse);
         console.log("Ingest response:", ingestData);
 
         setIngestMessage(`✅ Data ingested successfully! Processed documents from ${folderPath}/`);

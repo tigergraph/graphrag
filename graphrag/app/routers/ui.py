@@ -2956,9 +2956,18 @@ async def download_from_cloud(
         
         download_dir = os.path.join("downloaded_files_cloud", graphname)
         os.makedirs(download_dir, exist_ok=True)
-        
-        downloaded_files = []
-        
+
+        # max_bytes=0 means no limit (legacy behaviour).
+        # When >0 the endpoint downloads files until the cumulative size of
+        # this batch would exceed max_bytes, then stops and sets has_more=True.
+        # Callers re-invoke with the same params until has_more=False; already-
+        # downloaded files are skipped so each call makes forward progress.
+        max_bytes = int(request_body.get("max_bytes", 0))
+
+        downloaded_files: list = []
+        downloaded_bytes: int = 0
+        has_more = False
+
         if provider == "s3":
             # Import boto3 for S3
             try:
@@ -2988,26 +2997,34 @@ async def download_from_cloud(
             try:
                 paginator = s3_client.get_paginator('list_objects_v2')
                 pages = paginator.paginate(Bucket=bucket, Prefix=prefix or "")
-                
+
                 for page in pages:
+                    if has_more:
+                        break
                     if 'Contents' not in page:
                         continue
-                    
+
                     for obj in page['Contents']:
                         key = obj['Key']
-                        # Skip directories
                         if key.endswith('/'):
                             continue
-                        
-                        # Get filename
+
                         filename = os.path.basename(key)
                         local_path = os.path.join(download_dir, filename)
-                        
-                        # Download file
+
+                        if os.path.exists(local_path):
+                            continue  # already downloaded in a previous batch
+
+                        file_size = obj.get('Size', 0)
+                        if max_bytes > 0 and downloaded_bytes + file_size > max_bytes:
+                            has_more = True
+                            break
+
                         s3_client.download_file(bucket, key, local_path)
                         downloaded_files.append(filename)
-                        logger.info(f"Downloaded {key} to {local_path}")
-                
+                        downloaded_bytes += file_size
+                        logger.info(f"Downloaded {key} ({file_size} bytes) to {local_path}")
+
             except ClientError as e:
                 logger.error(f"S3 download error: {e}")
                 raise HTTPException(status_code=500, detail=f"S3 error: {str(e)}")
@@ -3040,21 +3057,27 @@ async def download_from_cloud(
                 
                 # List and download blobs
                 blobs = bucket_obj.list_blobs(prefix=prefix or "")
-                
+
                 for blob in blobs:
-                    # Skip directories
                     if blob.name.endswith('/'):
                         continue
-                    
-                    # Get filename
+
                     filename = os.path.basename(blob.name)
                     local_path = os.path.join(download_dir, filename)
-                    
-                    # Download blob
+
+                    if os.path.exists(local_path):
+                        continue  # already downloaded in a previous batch
+
+                    file_size = blob.size or 0
+                    if max_bytes > 0 and downloaded_bytes + file_size > max_bytes:
+                        has_more = True
+                        break
+
                     blob.download_to_filename(local_path)
                     downloaded_files.append(filename)
-                    logger.info(f"Downloaded {blob.name} to {local_path}")
-                    
+                    downloaded_bytes += file_size
+                    logger.info(f"Downloaded {blob.name} ({file_size} bytes) to {local_path}")
+
             except json.JSONDecodeError:
                 raise HTTPException(status_code=400, detail="Invalid GCS credentials JSON")
             except Exception as e:
@@ -3085,24 +3108,30 @@ async def download_from_cloud(
                 
                 # List and download blobs
                 blobs = container_client.list_blobs(name_starts_with=prefix or "")
-                
+
                 for blob in blobs:
-                    # Skip directories
                     if blob.name.endswith('/'):
                         continue
-                    
-                    # Get filename
+
                     filename = os.path.basename(blob.name)
                     local_path = os.path.join(download_dir, filename)
-                    
-                    # Download blob
+
+                    if os.path.exists(local_path):
+                        continue  # already downloaded in a previous batch
+
+                    file_size = blob.size or 0
+                    if max_bytes > 0 and downloaded_bytes + file_size > max_bytes:
+                        has_more = True
+                        break
+
                     blob_client = container_client.get_blob_client(blob.name)
                     with open(local_path, "wb") as download_file:
                         download_file.write(blob_client.download_blob().readall())
-                    
+
                     downloaded_files.append(filename)
-                    logger.info(f"Downloaded {blob.name} to {local_path}")
-                    
+                    downloaded_bytes += file_size
+                    logger.info(f"Downloaded {blob.name} ({file_size} bytes) to {local_path}")
+
             except Exception as e:
                 logger.error(f"Azure download error: {e}")
                 raise HTTPException(status_code=500, detail=f"Azure error: {str(e)}")
@@ -3120,16 +3149,18 @@ async def download_from_cloud(
                 "graphname": graphname,
                 "provider": provider,
                 "downloaded_files": [],
+                "has_more": False,
             }
-        
-        logger.info(f"Downloaded {len(downloaded_files)} file(s) from {provider} for graph {graphname}")
-        
+
+        logger.info(f"Downloaded {len(downloaded_files)} file(s) from {provider} for graph {graphname} (has_more={has_more})")
+
         return {
             "status": "success",
             "message": f"Successfully downloaded {len(downloaded_files)} file(s) from {provider}",
             "graphname": graphname,
             "provider": provider,
             "downloaded_files": downloaded_files,
+            "has_more": has_more,
             "local_path": download_dir,
         }
     

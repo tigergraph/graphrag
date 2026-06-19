@@ -5,9 +5,12 @@ from common.storage.s3_blob_store import S3BlobStore
 from common.py_schemas import BatchDocumentIngest, Document, DocumentChunk, KnowledgeGraph
 from typing import List, Union
 import json
+import logging
 from datetime import datetime
 from common.status import Status, IngestionProgress
 from common.extractors import LLMEntityRelationshipExtractor
+
+logger = logging.getLogger(__name__)
 
 from langchain.prompts import ChatPromptTemplate
 from langchain.output_parsers import PydanticOutputParser
@@ -124,6 +127,7 @@ class BaseIngestion:
                     doc_id + "_chunk_" + str(int(chunk_id.split("_")[-1]) - 1),
                 )
         except Exception as e:
+            logger.error(f"Failed to upsert chunk '{chunk_id}' (doc '{doc_id}'): {e}", exc_info=True)
             self.status.progress.chunk_failures[chunk_id].append(e)
 
         if chunk.entities != []:
@@ -148,6 +152,7 @@ class BaseIngestion:
                     [(chunk_id, x["id"], {}) for x in chunk.entities],
                 )
             except Exception as e:
+                logger.error(f"Failed to upsert entities for chunk '{chunk_id}': {e}", exc_info=True)
                 self.status.progress.chunk_failures[chunk_id].append(e)
 
         if chunk.relationships != []:
@@ -186,6 +191,7 @@ class BaseIngestion:
                     ],
                 )
             except Exception as e:
+                logger.error(f"Failed to upsert relationships for chunk '{chunk_id}': {e}", exc_info=True)
                 self.status.progress.chunk_failures[chunk_id].append(e)
 
     def upsert_document(self, document: Document):
@@ -207,6 +213,7 @@ class BaseIngestion:
             )
             self.conn.upsertEdge("Document", doc_id, "HAS_CONTENT", "Content", doc_id)
         except Exception as e:
+            logger.error(f"Failed to upsert document '{doc_id}': {e}", exc_info=True)
             self.status.progress.doc_failures[doc_id].append(e)
 
         if document.entities != []:
@@ -231,6 +238,7 @@ class BaseIngestion:
                     [(doc_id, x["id"], {}) for x in document.entities],
                 )
             except Exception as e:
+                logger.error(f"Failed to upsert entities for document '{doc_id}': {e}", exc_info=True)
                 self.status.progress.doc_failures[doc_id].append(e)
 
         if document.relationships != []:
@@ -264,6 +272,7 @@ class BaseIngestion:
                     ],
                 )
             except Exception as e:
+                logger.error(f"Failed to upsert relationships for document '{doc_id}': {e}", exc_info=True)
                 self.status.progress.doc_failures[doc_id].append(e)
 
 

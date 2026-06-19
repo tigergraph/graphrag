@@ -35,6 +35,28 @@ const INPUT_CLIP_FIX: React.CSSProperties = {
   lineHeight: "1.5",
 };
 
+/**
+ * Returns a human-readable error string when a graph name violates naming rules,
+ * or null when the name is valid.
+ * Rules: must start with a letter or underscore; remaining chars must be
+ * letters, digits, or underscores (hyphens and other special characters are not allowed).
+ */
+function getGraphNameError(name: string): string | null {
+  const firstChar = name[0];
+  if (/[0-9]/.test(firstChar)) {
+    return `Invalid graph name — cannot start with a number ('${firstChar}'). Use a letter or underscore as the first character.`;
+  }
+  if (!/^[A-Za-z_]/.test(name)) {
+    return `Invalid graph name — cannot start with '${firstChar}'. Use a letter or underscore as the first character.`;
+  }
+  const invalidChars = [...new Set(name.slice(1).replace(/[A-Za-z0-9_]/g, "").split(""))].filter(Boolean);
+  if (invalidChars.length > 0) {
+    const listed = invalidChars.map((c) => `'${c}'`).join(", ");
+    return `Invalid graph name — ${listed} ${invalidChars.length === 1 ? "is" : "are"} not allowed. Only letters, numbers, and underscores are permitted.`;
+  }
+  return null;
+}
+
 const KGAdmin = () => {
   const [confirm, confirmDialog, isConfirmDialogOpen] = useConfirm();
   const [showAlert, alertDialog] = useAlert();
@@ -615,8 +637,9 @@ const KGAdmin = () => {
       setPrecheckMessage("Please enter a graph name first.");
       return;
     }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(graphName)) {
-      setPrecheckMessage("Invalid graph name — must start with a letter or underscore.");
+    const nameError = getGraphNameError(graphName);
+    if (nameError) {
+      setPrecheckMessage(nameError);
       return;
     }
     setPrecheckRunning(true);
@@ -712,8 +735,9 @@ const KGAdmin = () => {
       return;
     }
 
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(graphName)) {
-      setStatusMessage("Invalid graph name. Must start with a letter or underscore, followed by letters, digits, or underscores.");
+    const nameError = getGraphNameError(graphName);
+    if (nameError) {
+      setStatusMessage(nameError);
       setStatusType("error");
       return;
     }
