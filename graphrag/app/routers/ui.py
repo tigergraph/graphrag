@@ -493,15 +493,25 @@ def auth(usr: str, password: str, conn=None) -> tuple[list[str], TigerGraphConne
         #   * ``__GSQL__secret:<secret>`` → TigerGraph's native secret
         #     convention; pyTigerGraph already understands it when sent
         #     as plain username/password, so no special handling here.
+        connection_kwargs = {
+            "host": db_config["hostname"],
+            "graphname": "",
+        }
+        if db_config.get("gsPort") is not None:
+            connection_kwargs["gsPort"] = db_config["gsPort"]
+        if db_config.get("restppPort") is not None:
+            connection_kwargs["restppPort"] = db_config["restppPort"]
+
         if usr == _UI_TOKEN_SENTINEL:
             conn = TigerGraphConnection(
-                host=db_config["hostname"], graphname="",
+                **connection_kwargs,
                 apiToken=password,
             )
         else:
             conn = TigerGraphConnection(
-                host=db_config["hostname"], graphname="",
-                username=usr, password=password,
+                **connection_kwargs,
+                username=usr,
+                password=password,
             )
 
     try:
