@@ -81,9 +81,12 @@ async def install_queries(
     requried_queries: list[str],
     conn: AsyncTigerGraphConnection,
 ):
+    from common.db.migrate import query_needs_update_async
+
     installed_queries = [q.split("/")[-1] for q in await conn.getEndpoints(dynamic=True) if f"/{conn.graphname}/" in q]
 
     required_names = set()
+    drift_detected = False
     for q in requried_queries:
         q_name = q.split("/")[-1]
         required_names.add(q_name)
@@ -92,8 +95,18 @@ async def install_queries(
             if res["error"]:
                 raise Exception(res["message"])
             logger.info(f"Successfully created query '{q_name}'.")
+            continue
+        # Already installed — check whether the shipped body has drifted
+        # from what's on TG. If so, re-create so the new body actually
+        # takes effect after a graphrag version upgrade.
+        if await query_needs_update_async(conn, f"{q}.gsql"):
+            res = await workers.install_query(conn, q, False)
+            if res["error"]:
+                raise Exception(res["message"])
+            logger.info(f"Re-installed '{q_name}' (body drift detected).")
+            drift_detected = True
 
-    if required_names.issubset(set(installed_queries)):
+    if not drift_detected and required_names.issubset(set(installed_queries)):
         logger.info("All required queries already installed, skipping INSTALL QUERY ALL.")
         return
 
@@ -239,7 +252,7 @@ def process_id(v_id: str):
     has_func = re.compile(r"(.*)\(").findall(v_id)
     if len(has_func) > 0:
         v_id = has_func[0]
-    v_id = v_id.replace(" ", "-").lower().replace("/", "_").replace("(", "").replace(")", "")
+    v_id = v_id.replace(" ", "_").lower().replace("/", "_").replace("(", "").replace(")", "")
     if v_id == "''" or v_id == '""':
         return ""
 
@@ -259,7 +272,7 @@ def normalize_type_name(name: str) -> str:
 
     Applies in order:
 
-    1. ``process_id`` (lowercase, whitespace → ``-``, strip parens).
+    1. ``process_id`` (lowercase, whitespace → ``_``, strip parens).
     2. Strip a single trailing semantic-suffix from
        :data:`_TYPE_SUFFIXES` (e.g. ``company_type`` → ``company``).
     3. Singularize trailing ``ies`` → ``y`` (``companies`` →
@@ -295,6 +308,32 @@ def normalize_type_name(name: str) -> str:
     return base
 
 
+async def upsert_group(
+    conn: AsyncTigerGraphConnection,
+    vertices: list,
+    edges: list,
+):
+    """Enqueue a bundle of related vertices + edges as a single load_q
+    item, so the flusher batches them together and cancellation between
+    individual upserts cannot leave half-applied state.
+
+    ``vertices``: list of ``(vertex_type, vertex_id, attributes_dict)``
+    ``edges``:    list of ``(src_v_type, src_v_id, edge_type, tgt_v_type,
+                              tgt_v_id, attributes_dict)``
+
+    A single ``load_q.put`` is one suspension point — either the whole
+    bundle lands in the queue or nothing does.
+    """
+    packed_vertices = [
+        (vt, str(v_id), map_attrs(attrs)) for vt, v_id, attrs in vertices
+    ]
+    packed_edges = [
+        (s_t, str(s_id), e_t, t_t, str(t_id), map_attrs(attrs) if attrs else {})
+        for (s_t, s_id, e_t, t_t, t_id, attrs) in edges
+    ]
+    await load_q.put(("group", {"vertices": packed_vertices, "edges": packed_edges}))
+
+
 async def upsert_vertex(
     conn: AsyncTigerGraphConnection,
     vertex_type: str,
@@ -302,7 +341,6 @@ async def upsert_vertex(
     attributes: dict,
 ):
     logger.debug(f"Upsert vertex: {vertex_id} as {vertex_type}")
-    vertex_id = vertex_id.replace(" ", "_")
     attrs = map_attrs(attributes)
     await load_q.put(("vertices", (vertex_type, vertex_id, attrs)))
 
@@ -460,14 +498,84 @@ def _coerce_value(value, tg_type: str):
         return None
 
 
-async def upsert_batch(conn: AsyncTigerGraphConnection, data: str):
+async def upsert_batch(
+    conn: AsyncTigerGraphConnection,
+    data: str,
+    expected_vertices: int | None = None,
+    expected_edges: int | None = None,
+    batch_seq: int | None = None,
+):
+    """Send a batched JSON upsert to TG and log the response.
+
+    ``expected_vertices`` / ``expected_edges`` are the pre-send batch
+    counts, logged alongside the TG response so an "expected != accepted
+    + skipped" gap is visible.
+
+    ``batch_seq`` is the per-batch counter from the flusher; echoed on
+    every log line this function emits.
+    """
+    seq_tag = f"#{batch_seq}" if batch_seq is not None else ""
     async with tg_sem:
         try:
             res = await conn.upsertData(data)
-            logger.info(f"Upsert res: {res}")
+            acc_v = (res or {}).get("accepted_vertices", 0) if isinstance(res, dict) else 0
+            sk_v  = (res or {}).get("skipped_vertices", 0) if isinstance(res, dict) else 0
+            acc_e = (res or {}).get("accepted_edges", 0) if isinstance(res, dict) else 0
+            sk_e  = (res or {}).get("skipped_edges", 0) if isinstance(res, dict) else 0
+            ev = expected_vertices if expected_vertices is not None else "?"
+            ee = expected_edges if expected_edges is not None else "?"
+            untracked_v = (expected_vertices - acc_v - sk_v) if expected_vertices is not None else None
+            untracked_e = (expected_edges - acc_e - sk_e) if expected_edges is not None else None
+            vfit = ("OK" if untracked_v == 0 else f"GAP={untracked_v}") if untracked_v is not None else ""
+            efit = ("OK" if untracked_e == 0 else f"GAP={untracked_e}") if untracked_e is not None else ""
+            logger.info(
+                f"Upsert res {seq_tag}: vertices sent={ev} accepted={acc_v} skipped={sk_v} {vfit} | "
+                f"edges sent={ee} accepted={acc_e} skipped={sk_e} {efit}"
+            )
+            # Diagnostic: TG can silently skip vertices/edges (schema
+            # mismatch, primary-id conflict, etc.) and only surface a
+            # count. When that happens, log the type/id breakdown of what
+            # was in the batch so the missing ones can be identified, and
+            # verify which vertex IDs actually landed in TG.
+            if sk_v or sk_e:
+                try:
+                    payload = json.loads(data)
+                except Exception:
+                    payload = {}
+                v_section = payload.get("vertices", {}) or {}
+                logger.warning(
+                    f"[SKIP-DIAG {seq_tag}] batch had skipped_vertices={sk_v} "
+                    f"skipped_edges={sk_e}; sent vertex types: "
+                    f"{ {vt: len(vids) for vt, vids in v_section.items()} }"
+                )
+                from urllib.parse import quote
+                for vt, vids in v_section.items():
+                    sent = list(vids.keys())[:200]
+                    missing = []
+                    for vid in sent:
+                        try:
+                            url = (
+                                conn.restppUrl + "/graph/" + conn.graphname
+                                + "/vertices/" + vt + "/" + quote(vid, safe="")
+                            )
+                            r = await conn._req("GET", url)
+                            body = r if isinstance(r, dict) else {}
+                            if not (body.get("results") or []):
+                                missing.append(vid)
+                        except Exception:
+                            missing.append(vid)
+                    if missing:
+                        logger.warning(
+                            f"[SKIP-DIAG {seq_tag}] type={vt}: {len(missing)}/{len(sent)} "
+                            f"missing after upsert"
+                        )
+                        logger.debug(
+                            f"[SKIP-DIAG {seq_tag}] type={vt} first 10 missing ids: {missing[:10]}"
+                        )
         except Exception as e:
             err = traceback.format_exc()
-            logger.error(f"Upsert err with {data}:\n{err}")
+            logger.error(f"Upsert err {seq_tag}:\n{err}")
+            logger.debug(f"Upsert err {seq_tag} payload: {data}")
             return {"error": True, "message": str(e)}
 
 
@@ -502,8 +610,6 @@ async def upsert_edge(
     else:
         attrs = map_attrs(attributes)
     logger.debug(f"Upsert edge: {src_v_id} -[{edge_type}]-> {tgt_v_id}")
-    src_v_id = src_v_id.replace(" ", "_")
-    tgt_v_id = tgt_v_id.replace(" ", "_")
     await load_q.put(
         (
             "edges",

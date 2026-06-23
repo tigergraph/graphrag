@@ -92,11 +92,7 @@ async def chunk_doc(
         else:
             chunker_type = ""
         
-        v_id = util.process_id(doc["v_id"])
-        if v_id != doc["v_id"]:
-            # v_id is a sanitized form of a user document ID — DEBUG.
-            logger.debug(f"""Cloning doc/content {doc["v_id"]} -> {v_id}""")
-            await upsert_chan.put((upsert_doc, (conn, v_id, chunker_type, doc["attributes"]["text"])))
+        v_id = doc["v_id"].lower()
 
         # Use get_chunker for all types (including images)
         # For images, get_chunker returns SingleChunker which preserves markdown image references
@@ -107,7 +103,7 @@ async def chunk_doc(
         # v_id / chunk_id derive from user document content.
         logger.debug(f"Chunking {v_id} into {len(chunks)} chunk(s)")
         for i, chunk in enumerate(chunks):
-            chunk_id = f"{v_id}_chunk_{i}"
+            chunk_id = util.process_id(f"{v_id}_chunk_{i}")
             logger.debug(f"Processing chunk {chunk_id}")
 
             # send chunks to be upserted (func, args)
@@ -146,33 +142,30 @@ async def upsert_doc(conn: AsyncTigerGraphConnection, doc_id, ctype, content_tex
 async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk):
     logger.debug(f"Upserting chunk {chunk_id}")
     date_added = int(time.time())
-    await util.upsert_vertex(
-        conn,
-        "DocumentChunk",
-        chunk_id,
-        attributes={"epoch_added": date_added, "epoch_processed": date_added, "idx": int(chunk_id.split("_")[-1])},
-    )
-    await util.upsert_vertex(
-        conn,
-        "Content",
-        chunk_id,
-        attributes={"text": chunk, "epoch_added": date_added},
-    )
-    await util.upsert_edge(
-        conn, "DocumentChunk", chunk_id, "HAS_CONTENT", "Content", chunk_id
-    )
-    await util.upsert_edge(
-        conn, "Document", doc_id, "HAS_CHILD", "DocumentChunk", chunk_id
-    )
-    if int(chunk_id.split("_")[-1]) > 0:
-        await util.upsert_edge(
-            conn,
-            "DocumentChunk",
-            chunk_id,
-            "IS_AFTER",
-            "DocumentChunk",
-            doc_id + "_chunk_" + str(int(chunk_id.split("_")[-1]) - 1),
-        )
+    # Build the chunk's full vertex + edge bundle and enqueue atomically.
+    # Three separate ``await util.upsert_vertex/edge`` calls would let
+    # asyncio cancellation split DocumentChunk from its sibling Content,
+    # producing the "chunk exists but Content missing" pattern that
+    # surfaces as repeated "No content row for chunk" warnings.
+    vertices = [
+        ("DocumentChunk", chunk_id, {
+            "epoch_added": date_added,
+            "epoch_processed": date_added,
+            "idx": int(chunk_id.split("_")[-1]),
+        }),
+        ("Content", chunk_id, {"text": chunk, "epoch_added": date_added}),
+    ]
+    edges = [
+        ("DocumentChunk", chunk_id, "HAS_CONTENT", "Content", chunk_id, None),
+        ("Document", doc_id, "HAS_CHILD", "DocumentChunk", chunk_id, None),
+    ]
+    idx = int(chunk_id.split("_")[-1])
+    if idx > 0:
+        edges.append((
+            "DocumentChunk", chunk_id, "IS_AFTER",
+            "DocumentChunk", util.process_id(f"{doc_id}_chunk_{idx - 1}"), None,
+        ))
+    await util.upsert_group(conn, vertices, edges)
 
 
 embed_sem = asyncio.Semaphore(util._worker_concurrency)
@@ -757,7 +750,8 @@ async def process_community(
         await util.loading_event.wait()
 
     async with comm_sem:
-        logger.info(f"Processing Community: {comm_id}")
+        logger.info(f"Processing community at layer {i}")
+        logger.debug(f"Processing Community: {comm_id}")
         # get the children of the community
         children = await util.get_commuinty_children(conn, i, comm_id)
         comm_id = util.process_id(comm_id)

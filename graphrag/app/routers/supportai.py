@@ -91,8 +91,13 @@ def create_ingest(
     credentials: Annotated[HTTPBase, Depends(security)],
 ):
     conn = conn.state.conn
-
-    return supportai.create_ingest(graphname, cfg, conn)
+    try:
+        return supportai.create_ingest(graphname, cfg, conn)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"create_ingest failed for graph '{graphname}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ingest preparation failed: {str(e)}")
 
 
 @router.post("/{graphname}/graphrag/ingest")
@@ -104,8 +109,13 @@ def ingest(
     credentials: Annotated[HTTPBase, Depends(security)],
 ):
     conn = conn.state.conn
-
-    return supportai.ingest(graphname, loader_info, conn)
+    try:
+        return supportai.ingest(graphname, loader_info, conn)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"ingest failed for graph '{graphname}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
 
 
 @router.post("/{graphname}/graphrag/search")

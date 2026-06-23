@@ -185,7 +185,7 @@ def process_id(v_id: str):
     has_func = re.compile(r"(.*)\(").findall(v_id)
     if len(has_func) > 0:
         v_id = has_func[0]
-    v_id = v_id.replace(" ", "-").lower().replace("/", "_").replace("(", "").replace(")", "")
+    v_id = v_id.replace(" ", "_").lower().replace("/", "_").replace("(", "").replace(")", "")
     if v_id == "''" or v_id == '""':
         return ""
 
@@ -199,7 +199,6 @@ async def upsert_vertex(
     attributes: dict,
 ):
     logger.info(f"Upsert vertex: {vertex_type} {vertex_id}")
-    vertex_id = vertex_id.replace(" ", "_")
     attrs = map_attrs(attributes)
     data = json.dumps({"vertices": {vertex_type: {vertex_id: attrs}}})
     headers = make_headers(conn)
@@ -244,8 +243,6 @@ async def upsert_edge(
         attrs = {}
     else:
         attrs = map_attrs(attributes)
-    src_v_id = src_v_id.replace(" ", "_")
-    tgt_v_id = tgt_v_id.replace(" ", "_")
     data = json.dumps(
         {
             "edges": {
