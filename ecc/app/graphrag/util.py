@@ -534,9 +534,9 @@ async def upsert_batch(
             )
             # Diagnostic: TG can silently skip vertices/edges (schema
             # mismatch, primary-id conflict, etc.) and only surface a
-            # count. When that happens, log the type/id breakdown of what
-            # was in the batch so the missing ones can be identified, and
-            # verify which vertex IDs actually landed in TG.
+            # count. When that happens, check which of the sent vertex
+            # ids actually landed in TG so the missing ones can be
+            # identified.
             if sk_v or sk_e:
                 try:
                     payload = json.loads(data)
@@ -548,19 +548,13 @@ async def upsert_batch(
                     f"skipped_edges={sk_e}; sent vertex types: "
                     f"{ {vt: len(vids) for vt, vids in v_section.items()} }"
                 )
-                from urllib.parse import quote
                 for vt, vids in v_section.items():
                     sent = list(vids.keys())[:200]
                     missing = []
                     for vid in sent:
                         try:
-                            url = (
-                                conn.restppUrl + "/graph/" + conn.graphname
-                                + "/vertices/" + vt + "/" + quote(vid, safe="")
-                            )
-                            r = await conn._req("GET", url)
-                            body = r if isinstance(r, dict) else {}
-                            if not (body.get("results") or []):
+                            found = await conn.getVerticesById(vt, vid)
+                            if not found:
                                 missing.append(vid)
                         except Exception:
                             missing.append(vid)
@@ -582,10 +576,7 @@ async def upsert_batch(
 async def check_vertex_exists(conn, v_id: str):
     async with tg_sem:
         try:
-            from urllib.parse import quote
-            url = (conn.restppUrl + "/graph/" + conn.graphname
-                   + "/vertices/Entity/" + quote(v_id, safe=""))
-            res = await conn._req("GET", url, params={"select": "description"})
+            res = await conn.getVerticesById("Entity", v_id, select="description")
 
         except Exception as e:
             if "is not a valid vertex id" not in str(e):

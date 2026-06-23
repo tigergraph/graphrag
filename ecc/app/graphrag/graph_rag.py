@@ -54,48 +54,34 @@ async def stream_docs(
     progress=None,
 ):
     """
-    Stream unprocessed Documents (epoch_processed == 0) into docs_chan.
-
-    Single-probe scan: call StreamIds with ttl_batches=1 to fetch ALL
-    unprocessed Document ids in one round-trip. Same rationale as
-    stream_chunks — partitioning iterated the vertex space even when
-    nothing was to do; on this TG build that's not the bottleneck.
-
-    ``ttl_batches`` is preserved for caller-compatibility but ignored.
+    Streams the document contents into the docs_chan, over ``ttl_batches``
+    partitions (each StreamIds call claims and returns one partition).
 
     *progress* (optional) is a callable invoked once when document
     streaming completes — runtime hands the rebuild status forward
     from "Chunking documents" to "Extracting entities and
     relationships" at that boundary.
     """
-    _ = ttl_batches  # intentionally unused — see docstring
-    logger.info("streaming docs (single-probe scan)")
-    probe = await stream_ids(conn, "Document", 0, 1)
+    logger.info(f"streaming docs ({ttl_batches} batches)")
     n_docs = 0
-    if probe.get("error"):
-        logger.warning("stream_docs: StreamIds probe failed; nothing to stream")
-    else:
-        doc_ids_all = probe.get("ids") or []
-        if not doc_ids_all:
-            logger.info("stream_docs: no unprocessed Documents (epoch_processed == 0)")
-        else:
-            logger.info(
-                f"stream_docs: {len(doc_ids_all)} unprocessed Document(s) to stream"
-            )
-            for d in doc_ids_all:
-                try:
-                    async with tg_sem:
-                        res = await conn.runInstalledQuery(
-                            "StreamDocContent",
-                            params={"doc": (d,)},
-                        )
-                    logger.debug(f"stream_docs writes {d} to docs")
-                    await docs_chan.put(res[0]["DocContent"][0])
-                    n_docs += 1
-                except Exception as e:
-                    exc = traceback.format_exc()
-                    logger.error(f"Error retrieving doc: {d} --> {e}\n{exc}")
-                    continue
+    for i in range(ttl_batches):
+        doc_ids = await stream_ids(conn, "Document", i, ttl_batches)
+        if doc_ids["error"]:
+            continue
+        for d in doc_ids["ids"]:
+            try:
+                async with tg_sem:
+                    res = await conn.runInstalledQuery(
+                        "StreamDocContent",
+                        params={"doc": (d,)},
+                    )
+                logger.debug(f"stream_docs writes {d} to docs")
+                await docs_chan.put(res[0]["DocContent"][0])
+                n_docs += 1
+            except Exception as e:
+                exc = traceback.format_exc()
+                logger.error(f"Error retrieving doc: {d} --> {e}\n{exc}")
+                continue
 
     logger.info(f"stream_docs done: {n_docs} document(s) streamed")
     # close the docs chan -- this function is the only sender
@@ -114,74 +100,54 @@ async def stream_chunks(
     ttl_batches: int = 10,
 ):
     """
-    Stream residual unprocessed DocumentChunks into extract_chan + embed_chan.
-
-    Single-probe scan: call StreamIds with ttl_batches=1 (no partitioning)
-    to get the full set of unprocessed DocumentChunk ids in one round-trip.
-    StreamIds' POST-ACCUM atomically claims and marks the chunks in the same
-    query. The original 100-batch loop iterated the partition space even
-    when there was nothing to do — this collapses to one query, which is
-    the common case under the post-back-port ordering where stream_chunks
-    runs first and only sees residual orphans from prior crashed ECC runs.
-
-    ``ttl_batches`` is preserved for caller-compatibility but ignored; the
-    partitioning was a hedge against scanning huge vertex sets in one
-    query and that's not the bottleneck on this TG build.
+    Stream residual unprocessed DocumentChunks into extract_chan + embed_chan,
+    over ``ttl_batches`` partitions (each StreamIds call claims and returns one
+    partition via ``getvid % ttl_batches``). Under the current ordering
+    stream_chunks runs before chunk_docs writes new chunks, so it normally only
+    sees residual orphans from a prior crashed ECC run.
     """
-    _ = ttl_batches  # intentionally unused — see docstring
-    logger.info("streaming chunks (single-probe scan)")
-    probe = await stream_ids(conn, "DocumentChunk", 0, 1)
-    if probe.get("error"):
-        logger.warning("stream_chunks: StreamIds probe failed; nothing to process")
-        logger.info("stream_chunks done: 0 chunk(s) streamed")
-        await extract_chan.put(None)
-        return
-    chunk_ids_all = probe.get("ids") or []
-    if not chunk_ids_all:
-        logger.info("stream_chunks: no residual chunks (epoch_processed == 0)")
-        logger.info("stream_chunks done: 0 chunk(s) streamed")
-        await extract_chan.put(None)
-        return
-    logger.info(
-        f"stream_chunks: {len(chunk_ids_all)} residual chunk(s) to process"
-    )
+    logger.info(f"streaming chunks ({ttl_batches} batches)")
     n_chunks = 0
-    for c in chunk_ids_all:
-        try:
-            # stream_chunks runs before chunk_docs writes new chunks, so an
-            # empty ChunkContent here means a genuine orphan from a crashed
-            # prior run (DocumentChunk exists but no Content). Retry briefly
-            # in case of a transient read.
-            chunk_rows = []
-            for attempt in range(3):
-                async with tg_sem:
-                    res = await conn.runInstalledQuery(
-                        "StreamChunkContent",
-                        params={"chunk": (c,)},
-                    )
-                chunk_rows = (res[0] if res else {}).get("ChunkContent") or []
-                if chunk_rows:
-                    break
-                await asyncio.sleep(2 * (attempt + 1))
-            if not chunk_rows:
-                logger.warning(
-                    f"No content row for chunk {c} after retries; skipping"
-                )
-                continue
-            content = chunk_rows[0]["attributes"]["text"].encode(
-                'raw_unicode_escape'
-            ).decode('unicode_escape')
-            logger.debug("chunk writes to extract_chan")
-            await extract_chan.put((content, c))
-            logger.debug("chunk writes to embed_chan")
-            await embed_chan.put((c, content, "DocumentChunk"))
-            n_chunks += 1
-            if n_chunks % 100 == 0:
-                logger.info(f"streaming chunks: {n_chunks} streamed")
-        except Exception as e:
-            exc = traceback.format_exc()
-            logger.error(f"Error retrieving chunk: {c} --> {e}\n{exc}")
+    for i in range(ttl_batches):
+        chunk_ids = await stream_ids(conn, "DocumentChunk", i, ttl_batches)
+        if chunk_ids["error"]:
             continue
+        for c in chunk_ids["ids"]:
+            try:
+                # stream_chunks runs before chunk_docs writes new chunks, so an
+                # empty ChunkContent here means a genuine orphan from a crashed
+                # prior run (DocumentChunk exists but no Content). Retry briefly
+                # in case of a transient read.
+                chunk_rows = []
+                for attempt in range(3):
+                    async with tg_sem:
+                        res = await conn.runInstalledQuery(
+                            "StreamChunkContent",
+                            params={"chunk": (c,)},
+                        )
+                    chunk_rows = (res[0] if res else {}).get("ChunkContent") or []
+                    if chunk_rows:
+                        break
+                    await asyncio.sleep(2 * (attempt + 1))
+                if not chunk_rows:
+                    logger.warning(
+                        f"No content row for chunk {c} after retries; skipping"
+                    )
+                    continue
+                content = chunk_rows[0]["attributes"]["text"].encode(
+                    'raw_unicode_escape'
+                ).decode('unicode_escape')
+                logger.debug("chunk writes to extract_chan")
+                await extract_chan.put((content, c))
+                logger.debug("chunk writes to embed_chan")
+                await embed_chan.put((c, content, "DocumentChunk"))
+                n_chunks += 1
+                if n_chunks % 100 == 0:
+                    logger.info(f"streaming chunks: {n_chunks} streamed")
+            except Exception as e:
+                exc = traceback.format_exc()
+                logger.error(f"Error retrieving chunk: {c} --> {e}\n{exc}")
+                continue
 
     logger.info(f"stream_chunks done: {n_chunks} chunk(s) streamed")
     logger.info("closing extract_chan")

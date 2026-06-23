@@ -102,11 +102,13 @@ class BaseIngestion:
         for doc in documents:
             self.upsert_document(doc)
 
-    def upsert_chunk(self, chunk: DocumentChunk):
+    def upsert_chunk(self, chunk: DocumentChunk, doc_id: str):
         now = datetime.now()
         date_added = now.strftime("%Y-%m-%d %H:%M:%S")
         chunk_id = chunk.document_chunk_id
-        doc_id = chunk_id.rsplit("_chunk_", 1)[0]
+        # ``doc_id`` is the caller's already-lowercased Document id
+        # (lowercase-only, no normalization); chunk ids stay process_id-
+        # normalized. Use it for the Document endpoints, not the chunk prefix.
         self.status.progress.chunk_failures[chunk_id] = []
         try:
             self.conn.upsertVertex(
@@ -209,7 +211,7 @@ class BaseIngestion:
     def upsert_document(self, document: Document):
         now = datetime.now()
         date_added = now.strftime("%Y-%m-%d %H:%M:%S")
-        doc_id = _process_id(document.document_id)
+        doc_id = document.document_id.lower()
         doc_collection = document.document_collection
         self.status.progress.doc_failures[doc_id] = []
         try:
@@ -309,6 +311,8 @@ class BatchIngestion(BaseIngestion):
             doc.document_id: len(doc.document_chunks) for doc in documents
         }
         for doc in documents:
+            # Document id is lowercase-only; compute once per document.
+            doc_id = doc.document_id.lower()
             res = self.document_er_extraction(doc)
             doc.entities = res["nodes"]
             doc.relationships = res["rels"]
@@ -320,7 +324,7 @@ class BatchIngestion(BaseIngestion):
                     res = self.document_er_extraction(chunk)
                     chunk.entities = res["nodes"]
                     chunk.relationships = res["rels"]
-                    self.upsert_chunk(chunk)
+                    self.upsert_chunk(chunk, doc_id)
             self.upsert_document(doc)
             self.status.progress.num_docs_ingested += 1
         self.status.status = "complete"
