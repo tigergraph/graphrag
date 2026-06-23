@@ -259,22 +259,25 @@ def _get_user_role_details(
     # (``__GSQL__secret``) and classic user/password both go through
     # the username/password slots (pyTigerGraph routes the secret
     # case natively).
+    connection_kwargs = {
+        "host": db_config.get("hostname"),
+        "graphname": "",
+    }
+    if db_config.get("gsPort") is not None:
+        connection_kwargs["gsPort"] = db_config["gsPort"]
+    if db_config.get("restppPort") is not None:
+        connection_kwargs["restppPort"] = db_config["restppPort"]
+
     if username == _UI_TOKEN_SENTINEL:
         conn = TigerGraphConnection(
-            host=db_config.get("hostname"),
-            gsPort=db_config.get("gsPort"),
-            restppPort=db_config.get("restppPort"),
-            graphname="",
+            **connection_kwargs,
             apiToken=password,
         )
     else:
         conn = TigerGraphConnection(
-            host=db_config.get("hostname"),
+            **connection_kwargs,
             username=username,
             password=password,
-            gsPort=db_config.get("gsPort"),
-            restppPort=db_config.get("restppPort"),
-            graphname="",
         )
 
     # Transient GSQL hiccups when the role-cache TTL expires were
