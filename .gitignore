@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.coverage
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/e2e/
+/e2e/.auth/state.json
+/playwright.config.ts
+
+# Node
+/node_modules/
+/package.json
+/package-lock.json
+
+# Release docs
+/RELEASE_NOTES.md

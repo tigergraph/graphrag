@@ -259,22 +259,25 @@ def _get_user_role_details(
     # (``__GSQL__secret``) and classic user/password both go through
     # the username/password slots (pyTigerGraph routes the secret
     # case natively).
+    connection_kwargs = {
+        "host": db_config.get("hostname"),
+        "graphname": "",
+    }
+    if db_config.get("gsPort") is not None:
+        connection_kwargs["gsPort"] = db_config["gsPort"]
+    if db_config.get("restppPort") is not None:
+        connection_kwargs["restppPort"] = db_config["restppPort"]
+
     if username == _UI_TOKEN_SENTINEL:
         conn = TigerGraphConnection(
-            host=db_config.get("hostname"),
-            gsPort=db_config.get("gsPort"),
-            restppPort=db_config.get("restppPort"),
-            graphname="",
+            **connection_kwargs,
             apiToken=password,
         )
     else:
         conn = TigerGraphConnection(
-            host=db_config.get("hostname"),
+            **connection_kwargs,
             username=username,
             password=password,
-            gsPort=db_config.get("gsPort"),
-            restppPort=db_config.get("restppPort"),
-            graphname="",
         )
 
     # Transient GSQL hiccups when the role-cache TTL expires were
@@ -493,15 +496,25 @@ def auth(usr: str, password: str, conn=None) -> tuple[list[str], TigerGraphConne
         #   * ``__GSQL__secret:<secret>`` → TigerGraph's native secret
         #     convention; pyTigerGraph already understands it when sent
         #     as plain username/password, so no special handling here.
+        connection_kwargs = {
+            "host": db_config["hostname"],
+            "graphname": "",
+        }
+        if db_config.get("gsPort") is not None:
+            connection_kwargs["gsPort"] = db_config["gsPort"]
+        if db_config.get("restppPort") is not None:
+            connection_kwargs["restppPort"] = db_config["restppPort"]
+
         if usr == _UI_TOKEN_SENTINEL:
             conn = TigerGraphConnection(
-                host=db_config["hostname"], graphname="",
+                **connection_kwargs,
                 apiToken=password,
             )
         else:
             conn = TigerGraphConnection(
-                host=db_config["hostname"], graphname="",
-                username=usr, password=password,
+                **connection_kwargs,
+                username=usr,
+                password=password,
             )
 
     try:
@@ -1183,6 +1196,356 @@ def suggest_type_descriptions(
     }
 
 
+def _get_domain_schema_for_render(conn, graphname: str):
+    """Snapshot the live domain schema for templated-retriever rendering.
+
+    Returns ``(domain_vts, domain_edges, include_entity)`` sorted for
+    deterministic rendering. Returns empty lists on any failure — the
+    caller falls back to comparing the unrendered template (acceptable
+    for graphs without dynamic schema).
+    """
+    try:
+        from common.db.schema_utils import read_existing_schema, is_structural_type
+        snapshot = read_existing_schema(conn)
+        domain_vts = sorted(
+            v for v in snapshot.vertex_types if not is_structural_type(v)
+        )
+        domain_edges = sorted(
+            e for e in snapshot.edge_pairs.keys()
+            if not is_structural_type(e) and not e.startswith("reverse_")
+        )
+        # Always include Entity in the community-walk start set, matching
+        # what install_retrievers does at init.
+        return domain_vts, domain_edges, True
+    except Exception as e:
+        logger.warning(
+            f"_get_domain_schema_for_render({graphname}) failed: {e}; "
+            f"templated retrievers will be checked against unrendered template"
+        )
+        return [], [], False
+
+
+def _local_query_hash(q_path: str, q_name: str,
+                     domain_vts: list, domain_edges: list, include_entity: bool):
+    """Return the normalized hash for the LOCAL query body.
+
+    For templated retrievers, render the template with the graph's live
+    domain VTs / edges first — otherwise the local template (no domain
+    types injected) won't match the installed body (which has them
+    baked in at install time).
+    """
+    from common.db.migrate import _gsql_hash, _read_local_query
+    from common.db.retriever_render import TEMPLATED_RETRIEVERS, render_retriever_body
+
+    body = _read_local_query(q_path)
+    if body is None:
+        return None
+    if q_name in TEMPLATED_RETRIEVERS:
+        body = render_retriever_body(
+            body,
+            domain_vts=domain_vts,
+            domain_edges=domain_edges,
+            include_entity=include_entity,
+        )
+    return _gsql_hash(body)
+
+
+# DISTRIBUTED QUERY bodies the migration assistant checks for drift,
+# spanning the ECC and supportai namespaces and the shipped retrievers.
+# Loading-job and schema-change .gsql files are excluded — they aren't
+# queries and SHOW QUERY can't introspect them; schema-change tracking
+# lives in ``common.db.migrate.check_and_apply_schema``.
+_MIGRATION_QUERY_PATHS = [
+    # graphrag namespace (ECC REQUIRED_QUERIES)
+    "common/gsql/graphrag/StreamIds.gsql",
+    "common/gsql/graphrag/StreamDocContent.gsql",
+    "common/gsql/graphrag/StreamChunkContent.gsql",
+    "common/gsql/graphrag/SetEpochProcessing.gsql",
+    "common/gsql/graphrag/get_vertices_or_remove.gsql",
+    # graphrag namespace (COMMUNITY_QUERIES)
+    "common/gsql/graphrag/get_community_children.gsql",
+    "common/gsql/graphrag/communities_have_desc.gsql",
+    "common/gsql/graphrag/graphrag_delete_all_communities.gsql",
+    "common/gsql/graphrag/graphrag_stream_entity_community_pairs.gsql",
+    "common/gsql/graphrag/graphrag_stream_all_ids.gsql",
+    "common/gsql/graphrag/louvain/graphrag_louvain_init.gsql",
+    "common/gsql/graphrag/louvain/graphrag_louvain_communities.gsql",
+    "common/gsql/graphrag/louvain/modularity.gsql",
+    "common/gsql/graphrag/louvain/stream_community.gsql",
+    # supportai (ECC checker + init_supportai)
+    "common/gsql/supportai/Scan_For_Updates.gsql",
+    "common/gsql/supportai/Update_Vertices_Processing_Status.gsql",
+    "common/gsql/supportai/Selected_Set_Display.gsql",
+    "common/gsql/supportai/ECC_Status.gsql",
+    "common/gsql/supportai/Check_Nonexistent_Vertices.gsql",
+    # supportai retrievers — only the vector variants and Display queries
+    # init_supportai actually installs on vector-enabled graphs. The legacy
+    # non-vector retrievers are excluded so they aren't flagged as missing.
+    "common/gsql/supportai/retrievers/Chunk_Sibling_Vector_Search.gsql",
+    "common/gsql/supportai/retrievers/Content_Similarity_Vector_Search.gsql",
+    "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display.gsql",
+    "common/gsql/supportai/retrievers/GraphRAG_Community_Vector_Search.gsql",
+    "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display.gsql",
+    "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Vector_Search.gsql",
+]
+
+
+@router.get(route_prefix + "/{graphname}/migration/status")
+def migration_status(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Compatibility check for an existing graph. Reports each shipped
+    GSQL query as ``up_to_date``, ``outdated`` (installed but body
+    drifted from local), or ``not_installed`` (query expected by the
+    current release but absent on TG).
+
+    Read-only — does NOT modify the graph. Pair with
+    ``POST /migration/apply`` to actually repair.
+
+    Schema-attribute drift is reported as ``{}`` for now; the detection
+    is stubbed in ``common.db.migrate.check_and_apply_schema``.
+    """
+    from common.db.migrate import _gsql_hash, _extract_query_body
+
+    import os.path
+
+    cred_obj = creds[1]
+    conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
+
+    # Read live domain schema once for templated-retriever rendering.
+    domain_vts, domain_edges, include_entity = _get_domain_schema_for_render(conn, graphname)
+
+    outdated: list[str] = []
+    up_to_date: list[str] = []
+    not_installed: list[str] = []
+    missing_files: list[str] = []
+
+    # Use SHOW QUERY as the single source of truth: a query that
+    # doesn't exist on TG returns output with no extractable CREATE
+    # block (or an explicit error string). Avoids the extra
+    # ``getEndpoints`` round-trip and its token-auth requirement.
+    for q_path in _MIGRATION_QUERY_PATHS:
+        if not os.path.exists(q_path):
+            missing_files.append(q_path)
+            continue
+        q_name = os.path.splitext(os.path.basename(q_path))[0]
+        local_hash = _local_query_hash(
+            q_path, q_name, domain_vts, domain_edges, include_entity
+        )
+        if local_hash is None:
+            missing_files.append(q_path)
+            continue
+        try:
+            show_out = conn.gsql(f"USE GRAPH {graphname}\nSHOW QUERY {q_name}")
+        except Exception as e:
+            logger.warning(f"migration_status: SHOW QUERY {q_name} failed: {e}")
+            not_installed.append(q_name)
+            continue
+        s = str(show_out)
+        installed_body = _extract_query_body(s)
+        if not installed_body:
+            not_installed.append(q_name)
+            continue
+        if _gsql_hash(installed_body) != local_hash:
+            outdated.append(q_name)
+        else:
+            up_to_date.append(q_name)
+
+    return {
+        "graphname": graphname,
+        "queries": {
+            "outdated": outdated,
+            "up_to_date": up_to_date,
+            "not_installed": not_installed,
+            "missing_files": missing_files,
+        },
+        "schema": {
+            # Populated from common.db.migrate.check_and_apply_schema once
+            # attribute additions are tracked; empty until then.
+            "missing_attributes": {},
+            "schema_change_required": False,
+        },
+        "needs_repair": bool(outdated) or bool(not_installed),
+    }
+
+
+@router.post(route_prefix + "/{graphname}/migration/apply")
+def migration_apply(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict | None, Body()] = None,
+):
+    """Apply repairs reported by ``GET /migration/status``.
+
+    Request body (all optional):
+
+        {
+          "apply_outdated": true,       # re-create installed queries whose body has drifted
+          "apply_not_installed": false, # install expected queries that are missing on TG
+          "apply_schema": false         # stubbed — no-op until check_and_apply_schema is implemented
+        }
+
+    Default behavior: repair only drifted queries. The operator must
+    opt in to installing missing queries — some are conditional on
+    vector schema and may be missing intentionally.
+
+    Acquires the per-graph lock for the duration of the repair so that
+    a concurrent ingest / rebuild / schema-extraction on the same graph
+    cannot race against the CREATE OR REPLACE + INSTALL QUERY ALL
+    sequence. Also rejects upfront if any rebuild is in flight
+    (rebuilds hold their own catalog locks on TG and would deadlock).
+    """
+    from common.db.migrate import _gsql_hash, _extract_query_body, _read_local_query, check_and_apply_schema
+
+    import os.path
+
+    body = payload or {}
+    apply_outdated = bool(body.get("apply_outdated", True))
+    apply_not_installed = bool(body.get("apply_not_installed", False))
+    apply_schema = bool(body.get("apply_schema", False))
+
+    # Pre-flight: reject if any rebuild is in flight. The rebuild's
+    # INSTALL QUERY ALL holds TG catalog locks that would cause our
+    # CREATE OR REPLACE calls to time-out, leaving the graph half-
+    # migrated.
+    currently_rebuilding = get_rebuilding_graph()
+    if currently_rebuilding:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{currently_rebuilding}' is currently being rebuilt. "
+                   f"Migration repair cannot run while a rebuild is in flight."
+        )
+
+    # Acquire the per-graph lock so concurrent create_ingest / ingest /
+    # schema_extraction can't race against our query reinstalls. They
+    # all use the same lock and will 409 until we release.
+    if not acquire_graph_lock(graphname, "migration"):
+        current = get_current_operation(graphname) or "another operation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is currently busy with '{current}'. "
+                   f"Wait for it to finish before running migration repair."
+        )
+
+    try:
+        cred_obj = creds[1]
+        conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
+        return _migration_apply_inner(
+            graphname, conn,
+            apply_outdated=apply_outdated,
+            apply_not_installed=apply_not_installed,
+            apply_schema=apply_schema,
+        )
+    finally:
+        release_graph_lock(graphname, "migration")
+
+
+def _migration_apply_inner(
+    graphname: str,
+    conn,
+    apply_outdated: bool,
+    apply_not_installed: bool,
+    apply_schema: bool,
+):
+    """Body of migration_apply, separated so the outer wrapper handles
+    the graph-lock acquire/release boilerplate.
+    """
+    from common.db.migrate import _gsql_hash, _extract_query_body, check_and_apply_schema
+    import os.path
+
+    # Read live domain schema for templated-retriever rendering.
+    domain_vts, domain_edges, include_entity = _get_domain_schema_for_render(conn, graphname)
+
+    reinstalled: list[str] = []
+    installed_new: list[str] = []
+    errors: list[dict] = []
+
+    # SHOW QUERY is the single source of truth: empty / missing body
+    # means the query isn't installed; non-empty body that differs from
+    # local (after rendering for templated retrievers) means drift.
+    paths_to_create: list[tuple[str, bool]] = []  # (path, was_installed)
+    for q_path in _MIGRATION_QUERY_PATHS:
+        if not os.path.exists(q_path):
+            continue
+        q_name = os.path.splitext(os.path.basename(q_path))[0]
+        local_hash = _local_query_hash(
+            q_path, q_name, domain_vts, domain_edges, include_entity
+        )
+        if local_hash is None:
+            continue
+        try:
+            show_out = conn.gsql(f"USE GRAPH {graphname}\nSHOW QUERY {q_name}")
+        except Exception as e:
+            errors.append({"query": q_name, "phase": "detect", "error": str(e)})
+            continue
+        installed_body = _extract_query_body(str(show_out))
+        if not installed_body:
+            if apply_not_installed:
+                paths_to_create.append((q_path, False))
+            continue
+        if not apply_outdated:
+            continue
+        if _gsql_hash(installed_body) != local_hash:
+            paths_to_create.append((q_path, True))
+
+    # Pass 1: re-create each drifted/missing query body (CREATE OR REPLACE).
+    # Templated retrievers get rendered with the live domain schema before
+    # being sent — same as install_retrievers does at init time. Otherwise
+    # we'd push the un-templated body and the next rebuild's hybrid/
+    # community walks wouldn't traverse domain edges.
+    from common.db.retriever_render import TEMPLATED_RETRIEVERS, render_retriever_body
+    for q_path, was_installed in paths_to_create:
+        q_name = os.path.splitext(os.path.basename(q_path))[0]
+        try:
+            with open(q_path, "r") as f:
+                q_body = f.read()
+            if q_name in TEMPLATED_RETRIEVERS:
+                q_body = render_retriever_body(
+                    q_body,
+                    domain_vts=domain_vts,
+                    domain_edges=domain_edges,
+                    include_entity=include_entity,
+                )
+            res = conn.gsql(
+                f"USE GRAPH {graphname}\nBEGIN\n{q_body}\nEND\n"
+            )
+            logger.info(f"Migration: created/updated '{q_name}' ({str(res)[:120]})")
+            if was_installed:
+                reinstalled.append(q_name)
+            else:
+                installed_new.append(q_name)
+        except Exception as e:
+            logger.error(f"Migration: failed to create '{q_name}': {e}", exc_info=True)
+            errors.append({"query": q_name, "phase": "create", "error": str(e)})
+
+    # Pass 2: a single INSTALL QUERY ALL covers everything just re-created.
+    if reinstalled or installed_new:
+        try:
+            install_res = conn.gsql(f"USE GRAPH {graphname}\nINSTALL QUERY ALL\n")
+            logger.info(f"Migration: INSTALL QUERY ALL returned {str(install_res)[:200]}")
+        except Exception as e:
+            logger.error(f"Migration: INSTALL QUERY ALL failed: {e}", exc_info=True)
+            errors.append({"query": "*", "phase": "install", "error": str(e)})
+
+    schema_result = {"applied": [], "skipped_reason": "skipped by request"}
+    if apply_schema:
+        try:
+            schema_result = check_and_apply_schema(conn, graphname)
+        except Exception as e:
+            logger.error(f"Migration: schema repair failed: {e}", exc_info=True)
+            errors.append({"query": "*", "phase": "schema", "error": str(e)})
+
+    return {
+        "graphname": graphname,
+        "queries_reinstalled": reinstalled,
+        "queries_installed_new": installed_new,
+        "schema_result": schema_result,
+        "errors": errors,
+        "success": not errors,
+    }
+
+
 @router.post(route_prefix + "/{graphname}/initialize_graph")
 def init_graph(
     graphname: ValidGraphName,
@@ -1770,7 +2133,19 @@ async def forceupdate(
             status_code=409,
             detail=f"Graph '{currently_rebuilding}' is currently being rebuilt. Only one rebuild allowed at a time."
         )
-    
+
+    # Reject if a per-graph operation (migration repair, schema
+    # extraction, ingest job creation) is currently holding the graph
+    # lock — running INSTALL QUERY ALL concurrently with a rebuild's
+    # query install would deadlock on TG's catalog lock.
+    current_op = get_current_operation(graphname)
+    if current_op and current_op not in ("rebuild",):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is currently busy with '{current_op}'. "
+                   f"Wait for it to finish before triggering a rebuild."
+        )
+
     # Try to acquire global rebuild lock (async, non-blocking)
     if not await acquire_rebuild_lock(graphname):
         currently_rebuilding = get_rebuilding_graph()

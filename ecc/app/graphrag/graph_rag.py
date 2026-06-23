@@ -17,7 +17,7 @@ import json
 import logging
 import time
 import traceback
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import httpx
 from aiochannel import Channel, ChannelClosed
@@ -54,7 +54,8 @@ async def stream_docs(
     progress=None,
 ):
     """
-    Streams the document contents into the docs_chan.
+    Streams the document contents into the docs_chan, over ``ttl_batches``
+    partitions (each StreamIds call claims and returns one partition).
 
     *progress* (optional) is a callable invoked once when document
     streaming completes — runtime hands the rebuild status forward
@@ -66,27 +67,21 @@ async def stream_docs(
     for i in range(ttl_batches):
         doc_ids = await stream_ids(conn, "Document", i, ttl_batches)
         if doc_ids["error"]:
-            # continue to the next batch.
-            # These docs will not be marked as processed, so the ecc will process it eventually.
             continue
-
         for d in doc_ids["ids"]:
             try:
                 async with tg_sem:
                     res = await conn.runInstalledQuery(
                         "StreamDocContent",
-                        # 1-tuple form for VERTEX<T> params; see
-                        # stream_chunks for the deprecation context.
                         params={"doc": (d,)},
                     )
-                # Demoted from INFO — ``d`` is a user document ID.
                 logger.debug(f"stream_docs writes {d} to docs")
                 await docs_chan.put(res[0]["DocContent"][0])
                 n_docs += 1
             except Exception as e:
                 exc = traceback.format_exc()
                 logger.error(f"Error retrieving doc: {d} --> {e}\n{exc}")
-                continue  # try retrieving the next doc
+                continue
 
     logger.info(f"stream_docs done: {n_docs} document(s) streamed")
     # close the docs chan -- this function is the only sender
@@ -105,7 +100,11 @@ async def stream_chunks(
     ttl_batches: int = 10,
 ):
     """
-    Streams the chunk contents into the extract_chan and embed_chan
+    Stream residual unprocessed DocumentChunks into extract_chan + embed_chan,
+    over ``ttl_batches`` partitions (each StreamIds call claims and returns one
+    partition via ``getvid % ttl_batches``). Under the current ordering
+    stream_chunks runs before chunk_docs writes new chunks, so it normally only
+    sees residual orphans from a prior crashed ECC run.
     """
     logger.info(f"streaming chunks ({ttl_batches} batches)")
     n_chunks = 0
@@ -113,31 +112,22 @@ async def stream_chunks(
         chunk_ids = await stream_ids(conn, "DocumentChunk", i, ttl_batches)
         if chunk_ids["error"]:
             continue
-
         for c in chunk_ids["ids"]:
             try:
-                # Retry briefly when ChunkContent is empty — that
-                # happens when stream_ids surfaced a DocumentChunk
-                # vertex but its HAS_CONTENT edge upsert hasn't
-                # flushed yet (the loader runs in batches). Without
-                # the retry the chunk gets silently dropped and
-                # extracted only on the next ECC sweep.
+                # stream_chunks runs before chunk_docs writes new chunks, so an
+                # empty ChunkContent here means a genuine orphan from a crashed
+                # prior run (DocumentChunk exists but no Content). Retry briefly
+                # in case of a transient read.
                 chunk_rows = []
                 for attempt in range(3):
                     async with tg_sem:
                         res = await conn.runInstalledQuery(
                             "StreamChunkContent",
-                            # 1-tuple form is the supported shape for
-                            # VERTEX<T> params in current pyTigerGraph;
-                            # the plain-value form raises a deprecation
-                            # warning and falls back to a slower GET.
                             params={"chunk": (c,)},
                         )
                     chunk_rows = (res[0] if res else {}).get("ChunkContent") or []
                     if chunk_rows:
                         break
-                    # Back off and try again — the loader's batch
-                    # interval is a few seconds.
                     await asyncio.sleep(2 * (attempt + 1))
                 if not chunk_rows:
                     logger.warning(
@@ -149,8 +139,6 @@ async def stream_chunks(
                 ).decode('unicode_escape')
                 logger.debug("chunk writes to extract_chan")
                 await extract_chan.put((content, c))
-
-                # send chunks to be embedded
                 logger.debug("chunk writes to embed_chan")
                 await embed_chan.put((c, content, "DocumentChunk"))
                 n_chunks += 1
@@ -159,7 +147,7 @@ async def stream_chunks(
             except Exception as e:
                 exc = traceback.format_exc()
                 logger.error(f"Error retrieving chunk: {c} --> {e}\n{exc}")
-                continue  # try retrieving the next doc
+                continue
 
     logger.info(f"stream_chunks done: {n_chunks} chunk(s) streamed")
     logger.info("closing extract_chan")
@@ -241,6 +229,7 @@ async def load(conn: AsyncTigerGraphConnection):
     graph_cfg = get_graphrag_config(conn.graphname)
     batch_size = graph_cfg.get("load_batch_size", 500)
     upsert_delay = graph_cfg.get("upsert_delay", 0)
+    batch_seq = 0
     # while the load q is still open or has contents
     while not load_q.closed() or not load_q.empty():
         if load_q.closed():
@@ -256,6 +245,8 @@ async def load(conn: AsyncTigerGraphConnection):
             }
             n_verts = 0
             n_edges = 0
+            vt_counts: Counter = Counter()
+            et_counts: Counter = Counter()
             size = (
                 load_q.qsize()
                 if load_q.closed() or load_q.should_flush()
@@ -270,30 +261,59 @@ async def load(conn: AsyncTigerGraphConnection):
                 match t:
                     case "vertices":
                         vt, v_id, attr = elem
-                        batch[t][vt][v_id] = attr
+                        batch["vertices"][vt][v_id] = attr
                         n_verts += 1
+                        vt_counts[vt] += 1
                     case "edges":
                         src_v_type, src_v_id, edge_type, tgt_v_type, tgt_v_id, attrs = (
                             elem
                         )
-                        batch[t][src_v_type][src_v_id][edge_type][tgt_v_type][
+                        batch["edges"][src_v_type][src_v_id][edge_type][tgt_v_type][
                             tgt_v_id
                         ] = attrs
                         n_edges += 1
+                        et_counts[edge_type] += 1
+                    case "group":
+                        # Atomic multi-vertex + multi-edge bundle from
+                        # ``upsert_group``. Producers enqueue all related
+                        # ops as one item so cancellation can't split
+                        # them; unpack each into the same batch dict so
+                        # they reach TG in one upsertData call.
+                        for vt, v_id, attr in elem.get("vertices", []):
+                            batch["vertices"][vt][v_id] = attr
+                            n_verts += 1
+                            vt_counts[vt] += 1
+                        for (src_v_type, src_v_id, edge_type, tgt_v_type, tgt_v_id, attrs) in elem.get("edges", []):
+                            batch["edges"][src_v_type][src_v_id][edge_type][tgt_v_type][tgt_v_id] = attrs
+                            n_edges += 1
+                            et_counts[edge_type] += 1
                     case _:
                         logger.debug(f"Unexpected data {t} -> {elem} in load_q")
 
-            data = json.dumps(batch)
-            logger.info(
-                f"Upserting batch size of {size}. ({n_verts} verts | {n_edges} edges. {len(data.encode())/1000:,} kb)"
-            )
-
+            batch_seq += 1
             if n_verts > 0 or n_edges > 0:
+                data = json.dumps(batch)
+                vt_brief = ", ".join(f"{k}={n}" for k, n in vt_counts.most_common()) or "-"
+                et_brief = ", ".join(f"{k}={n}" for k, n in et_counts.most_common()) or "-"
+                logger.info(
+                    f"Upserting batch #{batch_seq}: size {size}. "
+                    f"({n_verts} verts [{vt_brief}] | {n_edges} edges [{et_brief}]. "
+                    f"{len(data.encode())/1000:,} kb)"
+                )
                 loading_event.clear()
-                await upsert_batch(conn, data)
+                await upsert_batch(
+                    conn, data,
+                    expected_vertices=n_verts, expected_edges=n_edges,
+                    batch_seq=batch_seq,
+                )
                 loading_event.set()
                 if upsert_delay > 0:
                     await asyncio.sleep(upsert_delay)
+            else:
+                logger.info(
+                    f"Skipping empty batch #{batch_seq}: size {size} "
+                    f"(no vertices or edges to send)"
+                )
         else:
             await asyncio.sleep(1)
 
@@ -575,21 +595,37 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
         num_chunk_senders = 2
 
         async with asyncio.TaskGroup() as grp:
-            # get docs
-            grp.create_task(stream_docs(conn, docs_chan, 100, progress=progress))
-            # process docs
-            grp.create_task(
-                chunk_docs(conn, docs_chan, embed_chan, upsert_chan, extract_chan)
-            )
-            # process existing chunks
-            grp.create_task(stream_chunks(conn, extract_chan, embed_chan, 100))
+            # PHASE 1 — residual chunk sweep
+            # stream_chunks is the gatekeeper for chunks that exist in TG
+            # but weren't fully processed (e.g. crashed prior ECC run, or
+            # DocumentChunk/Content vertices loaded by external means).
+            # It MUST complete before stream_docs/chunk_docs run, otherwise
+            # the concurrent upsertData visibility window (vertex visible
+            # in StreamIds query before its HAS_CONTENT edge commits) makes
+            # stream_chunks claim freshly-being-written chunks and emit
+            # spurious "No content row for chunk" warnings.
+            sc_task = grp.create_task(stream_chunks(conn, extract_chan, embed_chan, 100))
 
-            # upsert chunks
+            # PHASE 2 — new-doc pipeline (stream_docs + chunk_docs)
+            # Deferred behind stream_chunks completion. chunk_docs feeds
+            # extract_chan with chunk text directly from Python memory, so
+            # the extract worker doesn't need any TG round-trip for new
+            # chunks. With the residual sweep already done, there's no
+            # remaining producer racing chunk_docs' load_q writes.
+            async def new_doc_pipeline():
+                await sc_task
+                async with asyncio.TaskGroup() as inner:
+                    inner.create_task(
+                        stream_docs(conn, docs_chan, 100, progress=progress)
+                    )
+                    inner.create_task(
+                        chunk_docs(conn, docs_chan, embed_chan, upsert_chan, extract_chan)
+                    )
+            grp.create_task(new_doc_pipeline())
+
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
-            # embed
             grp.create_task(embed(embed_chan, embedding_store, graphname))
-            # extract entities
             grp.create_task(
                 extract(extract_chan, upsert_chan, embed_chan, extractor, conn, num_chunk_senders)
             )

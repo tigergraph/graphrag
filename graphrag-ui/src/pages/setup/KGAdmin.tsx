@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TagInput, TypeHint } from "@/components/ui/tag-input";
-import { Database, Loader2, RefreshCw, Upload } from "lucide-react";
+import { Database, Loader2, RefreshCw, Upload, Wrench } from "lucide-react";
 import { pauseIdleTimer, resumeIdleTimer, pingIdleTimer } from "@/hooks/useIdleTimeout";
 import {
   Dialog,
@@ -35,6 +35,28 @@ const INPUT_CLIP_FIX: React.CSSProperties = {
   lineHeight: "1.5",
 };
 
+/**
+ * Returns a human-readable error string when a graph name violates naming rules,
+ * or null when the name is valid.
+ * Rules: must start with a letter or underscore; remaining chars must be
+ * letters, digits, or underscores (hyphens and other special characters are not allowed).
+ */
+function getGraphNameError(name: string): string | null {
+  const firstChar = name[0];
+  if (/[0-9]/.test(firstChar)) {
+    return `Invalid graph name — cannot start with a number ('${firstChar}'). Use a letter or underscore as the first character.`;
+  }
+  if (!/^[A-Za-z_]/.test(name)) {
+    return `Invalid graph name — cannot start with '${firstChar}'. Use a letter or underscore as the first character.`;
+  }
+  const invalidChars = [...new Set(name.slice(1).replace(/[A-Za-z0-9_]/g, "").split(""))].filter(Boolean);
+  if (invalidChars.length > 0) {
+    const listed = invalidChars.map((c) => `'${c}'`).join(", ");
+    return `Invalid graph name — ${listed} ${invalidChars.length === 1 ? "is" : "are"} not allowed. Only letters, numbers, and underscores are permitted.`;
+  }
+  return null;
+}
+
 const KGAdmin = () => {
   const [confirm, confirmDialog, isConfirmDialogOpen] = useConfirm();
   const [showAlert, alertDialog] = useAlert();
@@ -45,6 +67,23 @@ const KGAdmin = () => {
   const [initializeDialogOpen, setInitializeDialogOpen] = useState(false);
   const [refreshDialogOpen, setRefreshDialogOpen] = useState(false);
   const [ingestDialogOpen, setIngestDialogOpen] = useState(false);
+  const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
+
+  // Migration Assistant state
+  const [migrationGraph, setMigrationGraph] = useState("");
+  const [migrationStatus, setMigrationStatus] = useState<{
+    queries?: {
+      outdated: string[];
+      up_to_date: string[];
+      not_installed: string[];
+      missing_files: string[];
+    };
+    needs_repair?: boolean;
+  } | null>(null);
+  const [migrationChecking, setMigrationChecking] = useState(false);
+  const [migrationApplying, setMigrationApplying] = useState(false);
+  const [migrationMessage, setMigrationMessage] = useState("");
+  const [migrationApplyNotInstalled, setMigrationApplyNotInstalled] = useState(false);
   // Reset states when dialogs close
   const handleInitializeDialogChange = (open: boolean) => {
     if (!open && isConfirmDialogOpen) {
@@ -80,6 +119,96 @@ const KGAdmin = () => {
     setPrecheckMessage("");
     setCollectedVertexDescs({});
     setCollectedEdgeDescs({});
+  };
+
+  const runMigrationCheck = async (graph: string) => {
+    if (!graph.trim()) {
+      setMigrationMessage("Pick a graph to check.");
+      return;
+    }
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) {
+      setMigrationMessage("Not authenticated.");
+      return;
+    }
+    setMigrationChecking(true);
+    setMigrationMessage("");
+    setMigrationStatus(null);
+    try {
+      const resp = await fetch(`/ui/${graph}/migration/status`, {
+        headers: { Authorization: creds },
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setMigrationMessage(
+          data?.detail || `Check failed: ${resp.statusText}`
+        );
+        return;
+      }
+      setMigrationStatus(data);
+      if (!data.needs_repair) {
+        setMigrationMessage("✅ Graph is up to date — no repairs needed.");
+      } else {
+        const out = data.queries?.outdated?.length || 0;
+        const miss = data.queries?.not_installed?.length || 0;
+        setMigrationMessage(
+          `Found ${out} outdated query(s) and ${miss} not installed.`
+        );
+      }
+    } catch (err: any) {
+      setMigrationMessage(`Check failed: ${err.message || err}`);
+    } finally {
+      setMigrationChecking(false);
+    }
+  };
+
+  const runMigrationApply = async () => {
+    if (!migrationGraph) return;
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) {
+      setMigrationMessage("Not authenticated.");
+      return;
+    }
+    setMigrationApplying(true);
+    setMigrationMessage("Applying repairs…");
+    try {
+      const resp = await fetch(`/ui/${migrationGraph}/migration/apply`, {
+        method: "POST",
+        headers: {
+          Authorization: creds,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          apply_outdated: true,
+          apply_not_installed: migrationApplyNotInstalled,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setMigrationMessage(
+          data?.detail || `Apply failed: ${resp.statusText}`
+        );
+        return;
+      }
+      const reinst = data.queries_reinstalled?.length || 0;
+      const newInst = data.queries_installed_new?.length || 0;
+      const errs = data.errors?.length || 0;
+      if (errs > 0) {
+        setMigrationMessage(
+          `⚠️ Repaired ${reinst} outdated, installed ${newInst} new — ${errs} error(s).`
+        );
+      } else {
+        setMigrationMessage(
+          `✅ Repaired ${reinst} outdated; installed ${newInst} new query(s).`
+        );
+      }
+      // Re-run the check so the user sees the updated state.
+      await runMigrationCheck(migrationGraph);
+    } catch (err: any) {
+      setMigrationMessage(`Apply failed: ${err.message || err}`);
+    } finally {
+      setMigrationApplying(false);
+    }
   };
 
   const handleRefreshDialogChange = (open: boolean) => {
@@ -615,8 +744,9 @@ const KGAdmin = () => {
       setPrecheckMessage("Please enter a graph name first.");
       return;
     }
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(graphName)) {
-      setPrecheckMessage("Invalid graph name — must start with a letter or underscore.");
+    const nameError = getGraphNameError(graphName);
+    if (nameError) {
+      setPrecheckMessage(nameError);
       return;
     }
     setPrecheckRunning(true);
@@ -712,8 +842,9 @@ const KGAdmin = () => {
       return;
     }
 
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(graphName)) {
-      setStatusMessage("Invalid graph name. Must start with a letter or underscore, followed by letters, digits, or underscores.");
+    const nameError = getGraphNameError(graphName);
+    if (nameError) {
+      setStatusMessage(nameError);
       setStatusType("error");
       return;
     }
@@ -1193,6 +1324,34 @@ const KGAdmin = () => {
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Rebuild Graph
+              </Button>
+            </div>
+          </div>
+
+          {/* Compatibility Check Card */}
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+            <div className="mb-4">
+              <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
+                <Wrench className="h-6 w-6 text-tigerOrange" />
+              </div>
+              <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
+                Compatibility Check
+              </h2>
+              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
+                Check an existing graph against the current release and repair any drifted queries.
+              </p>
+            </div>
+            <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
+              <Button
+                onClick={() => {
+                  setMigrationMessage("");
+                  setMigrationStatus(null);
+                  setMigrationDialogOpen(true);
+                }}
+                className="gradient w-full text-white"
+              >
+                <Wrench className="h-4 w-4 mr-2" />
+                Check Compatibility
               </Button>
             </div>
           </div>
@@ -2512,7 +2671,7 @@ const KGAdmin = () => {
               </Button>
               <Button
                 onClick={handleRefreshGraph}
-                disabled={isRefreshing || !refreshGraphName || isRebuildRunning || isCheckingStatus}
+                disabled={isRefreshing || !refreshGraphName || isRebuildRunning || isCheckingStatus || migrationApplying}
                 className="gradient text-white"
               >
                 {isRefreshing ? (
@@ -2530,6 +2689,11 @@ const KGAdmin = () => {
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                     Checking Status...
                   </>
+                ) : migrationApplying ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Migration in Progress...
+                  </>
                 ) : (
                   <>
                     <RefreshCw className="h-4 w-4 mr-2" />
@@ -2537,6 +2701,179 @@ const KGAdmin = () => {
                   </>
                 )}
               </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Compatibility / Migration Dialog */}
+        <Dialog open={migrationDialogOpen} onOpenChange={setMigrationDialogOpen}>
+          <DialogContent
+            className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+            onInteractOutside={(e) => e.preventDefault()}
+          >
+            <DialogHeader>
+              <DialogTitle className="text-black dark:text-white">
+                Compatibility Check
+              </DialogTitle>
+              <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
+                Verify that an existing graph's installed GSQL queries match the current release.
+                Use this after upgrading graphrag to repair any drifted queries without recreating the graph.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="py-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                  Select graph to check
+                </label>
+                <Select
+                  value={migrationGraph}
+                  onValueChange={(v) => {
+                    setMigrationGraph(v);
+                    setMigrationStatus(null);
+                    setMigrationMessage("");
+                  }}
+                  disabled={migrationChecking || migrationApplying || isRebuildRunning}
+                >
+                  <SelectTrigger
+                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    disabled={migrationChecking || migrationApplying || isRebuildRunning}
+                  >
+                    <SelectValue placeholder="Pick a graph" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableGraphs.length > 0 ? (
+                      availableGraphs.map((g) => (
+                        <SelectItem key={g} value={g}>
+                          {g}
+                        </SelectItem>
+                      ))
+                    ) : (
+                      <SelectItem value="no-graphs" disabled>
+                        No graphs available
+                      </SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+                <div className="mt-3">
+                  <Button
+                    onClick={() => runMigrationCheck(migrationGraph)}
+                    disabled={!migrationGraph || migrationChecking || migrationApplying || isRebuildRunning}
+                    className="gradient text-white"
+                  >
+                    {migrationChecking ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Checking…
+                      </>
+                    ) : (
+                      <>
+                        <Wrench className="h-4 w-4 mr-2" />
+                        Check
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+
+              {isRebuildRunning && (
+                <div className="p-3 rounded-lg text-sm bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300">
+                  ⚠️ A rebuild is currently in progress. Migration check and repair are disabled
+                  until the rebuild completes — they would conflict on TG's catalog locks.
+                </div>
+              )}
+
+              {migrationStatus && (
+                <div className="space-y-2 text-sm">
+                  {(migrationStatus.queries?.outdated?.length ?? 0) > 0 && (
+                    <div className="p-3 rounded bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+                      <div className="font-medium text-yellow-800 dark:text-yellow-200">
+                        Outdated ({migrationStatus.queries!.outdated.length}) — body drifted from current release:
+                      </div>
+                      <div className="text-yellow-700 dark:text-yellow-300 mt-1 font-mono text-xs">
+                        {migrationStatus.queries!.outdated.join(", ")}
+                      </div>
+                    </div>
+                  )}
+                  {(migrationStatus.queries?.not_installed?.length ?? 0) > 0 && (
+                    <div className="p-3 rounded bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800">
+                      <div className="font-medium text-blue-800 dark:text-blue-200">
+                        Not installed ({migrationStatus.queries!.not_installed.length}):
+                      </div>
+                      <div className="text-blue-700 dark:text-blue-300 mt-1 font-mono text-xs">
+                        {migrationStatus.queries!.not_installed.join(", ")}
+                      </div>
+                    </div>
+                  )}
+                  {(migrationStatus.queries?.up_to_date?.length ?? 0) > 0 && (
+                    <div className="p-3 rounded bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800">
+                      <div className="font-medium text-green-800 dark:text-green-200">
+                        Up to date ({migrationStatus.queries!.up_to_date.length}).
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {migrationStatus?.needs_repair && (migrationStatus.queries?.not_installed?.length ?? 0) > 0 && (
+                <label className="flex items-center gap-2 text-sm text-black dark:text-white">
+                  <input
+                    type="checkbox"
+                    checked={migrationApplyNotInstalled}
+                    onChange={(e) => setMigrationApplyNotInstalled(e.target.checked)}
+                    disabled={migrationApplying || isRebuildRunning}
+                  />
+                  Also install queries reported as not installed
+                  {" "}
+                  <span className="text-xs text-gray-500">
+                    (some retrievers are lazily installed on first use — only enable if you know they should be present)
+                  </span>
+                </label>
+              )}
+
+              {migrationMessage && (
+                <div
+                  className={`p-3 rounded-lg text-sm ${
+                    migrationMessage.includes("✅")
+                      ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
+                      : migrationMessage.includes("⚠️")
+                      ? "bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300"
+                      : "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
+                  }`}
+                >
+                  {migrationMessage}
+                </div>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button
+                onClick={() => setMigrationDialogOpen(false)}
+                variant="outline"
+                disabled={migrationApplying}
+                className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+              >
+                Close
+              </Button>
+              {migrationStatus?.needs_repair && (
+                <Button
+                  onClick={runMigrationApply}
+                  disabled={migrationApplying || migrationChecking || isRebuildRunning}
+                  className="gradient text-white"
+                >
+                  {migrationApplying ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Repairing…
+                    </>
+                  ) : (
+                    <>
+                      <Wrench className="h-4 w-4 mr-2" />
+                      Repair
+                    </>
+                  )}
+                </Button>
+              )}
             </DialogFooter>
           </DialogContent>
         </Dialog>

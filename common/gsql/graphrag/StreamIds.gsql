@@ -1,16 +1,25 @@
 CREATE OR REPLACE DISTRIBUTED QUERY StreamIds(INT current_batch, INT ttl_batches, STRING v_type) {
     /*
-     * Get the IDs of entitiess that have not already been processed
-     * (one batch at a time)
+     * Return one batch of unprocessed vertex IDs, partitioned by
+     * ``getvid(v) % ttl_batches``. Use ``getvid`` rather than
+     * ``vertex_to_int`` — only ``getvid`` is stable for STRING-primary-id
+     * vertex types.
+     *
+     * POST-ACCUM (not WHERE) gates on ``epoch_processed == 0`` so that
+     * collecting the id and stamping the claim (``epoch_processed = now()``)
+     * happen in one per-vertex step: a vertex can't be claimed without
+     * being returned, or returned without being claimed.
      */
     ListAccum<STRING> @@ids;
     Verts = {v_type};
 
     Verts = SELECT v FROM Verts:v
-           WHERE vertex_to_int(v) % ttl_batches == current_batch
-             AND v.epoch_processed == 0
-           ACCUM @@ids += v.id
-           POST-ACCUM v.epoch_processed = datetime_to_epoch(now()); // set the processing time
+           WHERE getvid(v) % ttl_batches == current_batch
+           POST-ACCUM
+             IF v.epoch_processed == 0 THEN
+               @@ids += v.id,
+               v.epoch_processed = datetime_to_epoch(now())
+             END;
 
     PRINT @@ids;
 }

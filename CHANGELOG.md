@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.4.2]
+
+### Added
+- **Graph compatibility check and repair.** The *Knowledge Graph Admin* page can now scan an existing graph for installed GSQL queries whose body has drifted from the shipped version — or that are missing entirely — and repair them in place, without rebuilding the knowledge graph. This makes it safe to pick up query fixes from a GraphRAG upgrade on graphs that already hold data. Repair runs under the per-graph lock and is refused while a rebuild is in progress. New endpoints: `GET /ui/{graphname}/migration/status` and `POST /ui/{graphname}/migration/apply`.
+
+### Changed
+- **Documents whose filenames contain spaces or mixed case now ingest reliably.** Every ingest path normalizes vertex IDs the same way, so a document is stored under one consistent id instead of diverging between paths — it becomes retrievable and participates in entity extraction instead of being silently skipped or duplicated.
+- **Interrupted knowledge-graph rebuilds recover cleanly on the next run.** Chunks left unfinished by a crashed or cancelled run are reconciled before new documents are processed, and each chunk is written together with its content in one step — so rebuilds no longer leave chunks without content or emit spurious "missing content" warnings.
+- **Shipped query fixes apply automatically on existing graphs.** At initialization, any query whose installed body differs from the shipped version is re-created, so improvements in the bundled queries take effect after an upgrade without a manual reinstall.
+- **The document ingestion dialog reports per-file upload failures.** When some uploads fail, the dialog names the affected files and the reason instead of failing the batch opaquely.
+
 ## [1.4.1]
 
 ### Added

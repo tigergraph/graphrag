@@ -23,6 +23,7 @@ from common.embeddings.base_embedding_store import EmbeddingStore
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.chunkers import BaseChunker
 from common.extractors import BaseExtractor
+from supportai.util import process_id
 
 logger = logging.getLogger(__name__)
 
@@ -112,13 +113,14 @@ class EventualConsistencyChecker:
             "DocumentChunk", chunk_id, "HAS_CONTENT", "Content", chunk_id
         )
         self.conn.upsertEdge("Document", doc_id, "HAS_CHILD", "DocumentChunk", chunk_id)
-        if int(chunk_id.split("_")[-1]) > 0:
+        idx = int(chunk_id.split("_")[-1])
+        if idx > 0:
             self.conn.upsertEdge(
                 "DocumentChunk",
                 chunk_id,
                 "IS_AFTER",
                 "DocumentChunk",
-                doc_id + "_chunk_" + str(int(chunk_id.split("_")[-1]) - 1),
+                process_id(f"{doc_id}_chunk_{idx - 1}"),
             )
 
     # TODO: Change to loading job for all entities in document at once
@@ -127,7 +129,7 @@ class EventualConsistencyChecker:
         self.conn.upsertVertices(
             "Entity",
             [
-                (x["id"], {"definition": x["definition"], "epoch_added": date_added})
+                (process_id(x["id"]), {"definition": x["definition"], "epoch_added": date_added})
                 for x in entities
             ],
         )
@@ -135,7 +137,7 @@ class EventualConsistencyChecker:
             src_type,
             "CONTAINS_ENTITY",
             "Entity",
-            [(src_id, x["id"], {}) for x in entities],
+            [(src_id, process_id(x["id"]), {}) for x in entities],
         )
 
     # TODO: Change to loading job for all relationships in document at once
@@ -145,7 +147,7 @@ class EventualConsistencyChecker:
             "RelationshipType",
             [
                 (
-                    x["source"] + ":" + x["type"] + ":" + x["target"],
+                    process_id(x["source"] + ":" + x["type"] + ":" + x["target"]),
                     {
                         "definition": x["definition"],
                         "short_name": x["type"],
@@ -164,7 +166,7 @@ class EventualConsistencyChecker:
             "MENTIONS_RELATIONSHIP",
             "RelationshipType",
             [
-                (src_id, x["source"] + ":" + x["type"] + ":" + x["target"], {})
+                (src_id, process_id(x["source"] + ":" + x["type"] + ":" + x["target"]), {})
                 for x in relationships
             ],
         )
@@ -219,7 +221,7 @@ class EventualConsistencyChecker:
         LogWriter.info(f"Chunking the content from vertex type: {v_type}")
         chunks = self._chunk_document(content)
         for i, chunk in enumerate(chunks):
-            self._upsert_chunk(vertex_id, f"{vertex_id}_chunk_{i}", chunk)
+            self._upsert_chunk(vertex_id, process_id(f"{vertex_id}_chunk_{i}"), chunk)
 
     def _extract_and_upsert_entities(self, v_type, vertex_id, content):
         LogWriter.info(f"Extracting and upserting entities from the content from vertex type: {v_type}")

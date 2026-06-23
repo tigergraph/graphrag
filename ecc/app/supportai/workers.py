@@ -82,7 +82,7 @@ async def chunk_doc(
     else:
         chunker_type = ""
     
-    v_id = util.process_id(doc["v_id"])
+    v_id = doc["v_id"].lower()
     
     # Use markdown chunker for all documents
     # Image descriptions wrapped in headers will naturally become single chunks
@@ -93,7 +93,7 @@ async def chunk_doc(
     # to DEBUG so the steady-state log doesn't carry data identifiers.
     logger.debug(f"Chunking {v_id} into {len(chunks)} chunk(s)")
     for i, chunk in enumerate(chunks):
-        chunk_id = f"{v_id}_chunk_{i}"
+        chunk_id = util.process_id(f"{v_id}_chunk_{i}")
         # send chunks to be upserted (func, args)
         logger.debug("chunk writes to upsert_chan")
         await upsert_chan.put((upsert_chunk, (conn, v_id, chunk_id, chunk)))
@@ -130,14 +130,15 @@ async def upsert_chunk(conn: TigerGraphConnection, doc_id, chunk_id, chunk):
     await util.upsert_edge(
         conn, "Document", doc_id, "HAS_CHILD", "DocumentChunk", chunk_id
     )
-    if int(chunk_id.split("_")[-1]) > 0:
+    idx = int(chunk_id.split("_")[-1])
+    if idx > 0:
         await util.upsert_edge(
             conn,
             "DocumentChunk",
             chunk_id,
             "IS_AFTER",
             "DocumentChunk",
-            doc_id + "_chunk_" + str(int(chunk_id.split("_")[-1]) - 1),
+            util.process_id(f"{doc_id}_chunk_{idx - 1}"),
         )
         
 
