@@ -497,11 +497,15 @@ def auth(usr: str, password: str, conn=None) -> tuple[list[str], TigerGraphConne
             conn = TigerGraphConnection(
                 host=db_config["hostname"], graphname="",
                 apiToken=password,
+                gsPort=db_config.get("gsPort"),
+                restppPort=db_config.get("restppPort"),
             )
         else:
             conn = TigerGraphConnection(
                 host=db_config["hostname"], graphname="",
                 username=usr, password=password,
+                gsPort=db_config.get("gsPort"),
+                restppPort=db_config.get("restppPort"),
             )
 
     try:
