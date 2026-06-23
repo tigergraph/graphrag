@@ -21,6 +21,7 @@ import {
 import { useConfirm } from "@/hooks/useConfirm";
 import { pingIdleTimer } from "@/hooks/useIdleTimeout";
 import { resolveUploadConflicts } from "@/utils/uploadConflicts";
+import { safeJson } from "@/utils/safeJson";
 
 interface IngestGraphProps {
   isModal?: boolean;
@@ -100,7 +101,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       const response = await fetch(`/ui/${ingestGraphName}/uploads/list`, {
         headers: { Authorization: creds! },
       });
-      const data = await response.json();
+      const data = await safeJson(response);
       setUploadedFiles(data.files || []);
     } catch (error) {
       console.error("Error fetching files:", error);
@@ -179,11 +180,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       );
 
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = await safeJson(response);
         throw new Error(errorData.detail || `Upload failed: ${response.statusText}`);
       }
 
-      const data = await response.json();
+      const data = await safeJson(response);
       if (data.status === "success") {
         const uploadedCount = selectedFiles?.length || 0;
         setUploadMessage("✅ Successfully uploaded the files. Processing...");
@@ -233,7 +234,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         return;
       }
       let uploadedCount = 0;
-      let failedCount = 0;
+      const failedFiles: string[] = [];
       const totalFiles = filesArray.length;
 
       // Upload files one at a time to avoid 413 errors
@@ -261,27 +262,35 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           );
 
           if (!response.ok) {
-            throw new Error(`Upload failed with status ${response.status}`);
+            const errData = await safeJson(response);
+            const reason = errData.detail || `HTTP ${response.status}`;
+            console.error(`File "${file.name}" failed: ${reason}`);
+            failedFiles.push(`${file.name} (${reason})`);
+            continue;
           }
 
-          const data = await response.json();
+          const data = await safeJson(response);
           if (data.status === "success") {
             uploadedCount++;
           } else {
-            failedCount++;
-            console.error(`File ${file.name} failed:`, data);
+            const reason = data.message || "unexpected response";
+            console.error(`File "${file.name}" failed:`, data);
+            failedFiles.push(`${file.name} (${reason})`);
           }
-        } catch (err) {
-          console.error(`File ${file.name} error:`, err);
-          failedCount++;
+        } catch (err: any) {
+          console.error(`File "${file.name}" error:`, err);
+          failedFiles.push(`${file.name} (${err.message || "unknown error"})`);
         }
       }
 
       // Show final result
-      if (failedCount === 0) {
+      if (failedFiles.length === 0) {
         setUploadMessage(`✅ Successfully uploaded all ${uploadedCount} files. Processing...`);
       } else {
-        setUploadMessage(`⚠️ Uploaded ${uploadedCount} files successfully, ${failedCount} failed. Processing...`);
+        const failedList = failedFiles.join(", ");
+        setUploadMessage(
+          `⚠️ Uploaded ${uploadedCount}/${totalFiles} files. Failed: ${failedList}`
+        );
       }
 
       setSelectedFiles(null);
@@ -318,7 +327,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           headers: { Authorization: creds! },
         }
       );
-      const data = await response.json();
+      const data = await safeJson(response);
       setUploadMessage(`✅ ${data.message}`);
       await fetchUploadedFiles();
     } catch (error: any) {
@@ -341,7 +350,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         method: "DELETE",
         headers: { Authorization: creds! },
       });
-      const data = await response.json();
+      const data = await safeJson(response);
       setUploadMessage(`✅ ${data.message}`);
       await fetchUploadedFiles();
     } catch (error: any) {
@@ -358,7 +367,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       const response = await fetch(`/ui/${ingestGraphName}/cloud/list`, {
         headers: { Authorization: creds! },
       });
-      const data = await response.json();
+      const data = await safeJson(response);
       setDownloadedFiles(data.files || []);
     } catch (error) {
       console.error("Error fetching downloaded files:", error);
@@ -433,10 +442,10 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
+        const errorData = await safeJson(response);
         throw new Error(errorData.detail || `Download failed: ${response.statusText}`);
       }
-      const data = await response.json();
+      const data = await safeJson(response);
       if (data.status === "success") {
         const downloadCount = data.downloaded_files?.length || downloadedFiles.length;
         setDownloadMessage("✅ Successfully downloaded the files. Processing...");
@@ -478,7 +487,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           headers: { Authorization: creds! },
         }
       );
-      const data = await response.json();
+      const data = await safeJson(response);
       setDownloadMessage(`✅ ${data.message}`);
       await fetchDownloadedFiles();
     } catch (error: any) {
@@ -501,7 +510,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         method: "DELETE",
         headers: { Authorization: creds! },
       });
-      const data = await response.json();
+      const data = await safeJson(response);
       setDownloadMessage(`✅ ${data.message}`);
       await fetchDownloadedFiles();
     } catch (error: any) {
@@ -546,12 +555,12 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           }
         );
         if (!createResp.ok) {
-          const err = await createResp.json();
+          const err = await safeJson(createResp);
           throw new Error(
             err.detail || `Failed to create ingest job: ${createResp.statusText}`
           );
         }
-        const createData = await createResp.json();
+        const createData = await safeJson(createResp);
         jobData = {
           load_job_id: createData.load_job_id,
           data_source_id: createData.data_source_id,
@@ -575,11 +584,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       });
 
       if (!ingestResponse.ok) {
-        const errorData = await ingestResponse.json();
+        const errorData = await safeJson(ingestResponse);
         throw new Error(errorData.detail || `Failed to ingest: ${ingestResponse.statusText}`);
       }
 
-      const ingestData = await ingestResponse.json();
+      const ingestData = await safeJson(ingestResponse);
       console.log("Ingest response:", ingestData);
 
       setIngestMessage(`✅ Ingestion completed successfully!`);
@@ -627,11 +636,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       });
 
       if (!createResponse.ok) {
-        const errorData = await createResponse.json();
+        const errorData = await safeJson(createResponse);
         throw new Error(errorData.detail || `Failed to create ingest job: ${createResponse.statusText}`);
       }
 
-      const createData = await createResponse.json();
+      const createData = await safeJson(createResponse);
       console.log("Create ingest response:", createData);
 
       // Store ingest job data for later use
@@ -662,11 +671,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         });
 
         if (!ingestResponse.ok) {
-          const errorData = await ingestResponse.json();
+          const errorData = await safeJson(ingestResponse);
           throw new Error(errorData.detail || `Failed to run ingest: ${ingestResponse.statusText}`);
         }
 
-        const ingestData = await ingestResponse.json();
+        const ingestData = await safeJson(ingestResponse);
         console.log("Ingest response:", ingestData);
 
         setIngestMessage(`✅ Data ingested successfully! Processed documents from ${folderPath}/`);
@@ -719,12 +728,12 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       console.log("create_ingest response status:", createResponse.status);
 
       if (!createResponse.ok) {
-        const errorData = await createResponse.json();
+        const errorData = await safeJson(createResponse);
         console.error("create_ingest error:", errorData);
         throw new Error(errorData.detail || `Failed to create ingest job: ${createResponse.statusText}`);
       }
 
-      const createData = await createResponse.json();
+      const createData = await safeJson(createResponse);
       console.log("create_ingest response data:", createData);
 
       setIngestJobData({
@@ -870,14 +879,14 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         );
 
         if (!createResponse.ok) {
-          const errorData = await createResponse.json();
+          const errorData = await safeJson(createResponse);
           throw new Error(
             errorData.detail ||
               `Failed to create ingest job: ${createResponse.statusText}`
           );
         }
 
-        const createData = await createResponse.json();
+        const createData = await safeJson(createResponse);
 
         // Step 2: Run ingest
         loadingInfo = {
@@ -904,13 +913,13 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       });
 
       if (!ingestResponse.ok) {
-        const errorData = await ingestResponse.json();
+        const errorData = await safeJson(ingestResponse);
         throw new Error(
           errorData.detail || `Failed to run ingest: ${ingestResponse.statusText}`
         );
       }
 
-      const ingestData = await ingestResponse.json();
+      const ingestData = await safeJson(ingestResponse);
       const filesIngested = ingestData.summary.map((file: any) => file.file_path);
 
       setIngestMessage(
