@@ -17,7 +17,7 @@ import re
 from common.chunkers.base_chunker import BaseChunker
 from common.chunkers.separators import TEXT_SEPARATORS
 from langchain_text_splitters import HTMLSectionSplitter
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 _DEFAULT_CHUNK_SIZE = 2048

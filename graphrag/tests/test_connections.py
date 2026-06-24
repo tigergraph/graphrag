@@ -20,9 +20,8 @@ for mod_name in [
     "common.llm_services",
     "common.session",
     "common.status",
-    "langchain",
-    "langchain.schema",
-    "langchain.schema.embeddings",
+    "langchain_core",
+    "langchain_core.embeddings",
     "prometheus_client",
 ]:
     if mod_name not in sys.modules:

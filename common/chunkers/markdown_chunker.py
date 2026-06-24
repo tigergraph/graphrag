@@ -15,7 +15,7 @@
 from common.chunkers.base_chunker import BaseChunker
 from common.chunkers.separators import TEXT_SEPARATORS
 from langchain_text_splitters.markdown import ExperimentalMarkdownSyntaxTextSplitter
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # When chunk_size is not configured, cap any heading-section that exceeds this
 # so that form-based PDFs (tables/bold but no # headings) are not left as a

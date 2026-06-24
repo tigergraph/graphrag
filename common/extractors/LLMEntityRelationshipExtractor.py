@@ -408,8 +408,8 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
         return relationships
         
     async def adocument_er_extraction(self, document):
-        from langchain.prompts import ChatPromptTemplate
-        from langchain.output_parsers import PydanticOutputParser
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import PydanticOutputParser
 
     
         parser = PydanticOutputParser(pydantic_object=KnowledgeGraph)
@@ -447,8 +447,8 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
 
 
     def document_er_extraction(self, document):
-        from langchain.prompts import ChatPromptTemplate
-        from langchain.output_parsers import PydanticOutputParser
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import PydanticOutputParser
 
     
         parser = PydanticOutputParser(pydantic_object=KnowledgeGraph)

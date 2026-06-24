@@ -15,9 +15,9 @@
 import logging
 from typing import Iterable
 from langchain_core.output_parsers import StrOutputParser
-from langchain.prompts import PromptTemplate
-from langchain.tools import BaseTool
-from langchain.llms.base import LLM
+from langchain_core.prompts import PromptTemplate
+from langchain_core.tools import BaseTool
+from langchain_core.language_models.llms import LLM
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.db.connections import get_schema_ver
 from common.db.schema_utils import render_schema_rep

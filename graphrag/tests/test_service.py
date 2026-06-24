@@ -2,15 +2,46 @@ import pandas as pd
 import os
 from fastapi.testclient import TestClient
 import json
+import re
 import wandb
-from langchain.evaluation import load_evaluator
-from langchain.chat_models import ChatOpenAI
+from langchain_openai import ChatOpenAI
+from rapidfuzz.distance import JaroWinkler
 import time
 from pygit2 import Repository, Commit
 
 branch_name = os.getenv("PR_NUMBER", Repository(".").head.shorthand)
 
 EPS = 0.001
+
+
+def _string_distance(prediction, reference) -> float:
+    """Normalized Jaro-Winkler distance in [0, 1] (0 = identical).
+
+    Replaces the LangChain ``string_distance`` evaluator, which is no longer
+    available after the move off the top-level ``langchain`` package.
+    """
+    return JaroWinkler.normalized_distance(str(prediction), str(reference))
+
+
+def _labeled_score(llm, prediction, reference, question) -> int:
+    """LLM-graded match of a submitted answer against a reference, 1-10.
+
+    Replaces the LangChain ``labeled_score_string`` evaluator. Returns 0 when
+    no integer rating can be parsed from the model response.
+    """
+    grading_prompt = (
+        "You are grading a submitted answer against a reference answer.\n"
+        f"[Question]: {question}\n"
+        f"[Reference answer]: {reference}\n"
+        f"[Submitted answer]: {prediction}\n\n"
+        "On a scale from 1 to 10, rate how well the submitted answer matches "
+        "the reference answer in correctness and completeness. "
+        "Respond with only the integer rating."
+    )
+    resp = llm.invoke(grading_prompt)
+    text = getattr(resp, "content", resp)
+    match = re.search(r"\d+", str(text))
+    return int(match.group()) if match else 0
 
 
 class CommonTests:
@@ -75,7 +106,6 @@ class CommonTests:
                 )
                 t2 = time.time()
                 self.assertEqual(resp.status_code, 200)
-                evaluator = load_evaluator("string_distance")
                 try:
                     answer = resp.json()["query_sources"]["result"]
                     query_source = resp.json()["query_sources"]["function_call"]
@@ -86,9 +116,7 @@ class CommonTests:
                     question_answered = resp.json()["answered_question"]
                 correct = False
                 if isinstance(answer, str):
-                    string_dist = evaluator.evaluate_strings(
-                        prediction=answer, reference=true_answer
-                    )["score"]
+                    string_dist = _string_distance(answer, true_answer)
                     if string_dist <= 0.2:
                         correct = True
                 elif isinstance(answer, list):
@@ -122,19 +150,18 @@ class CommonTests:
                     fp.close()
                     llm = ChatOpenAI(**test_llm_config)
 
-                    evaluator = load_evaluator("labeled_score_string", llm=llm)
-
-                    eval_result = evaluator.evaluate_strings(
+                    score = _labeled_score(
+                        llm,
                         prediction=str(answer)
                         + " answered by this function call: "
                         + str(query_source),
                         reference=str(true_answer)
                         + " answered by this function call: "
                         + str(function_call),
-                        input=question,
+                        question=question,
                     )
 
-                    if eval_result["score"] >= 7:
+                    if score >= 7:
                         correct = True
 
                 if self.USE_WANDB:

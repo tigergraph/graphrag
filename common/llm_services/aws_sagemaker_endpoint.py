@@ -34,7 +34,7 @@ class ContentHandler(LLMContentHandler):
 class AWS_SageMaker_Endpoint(LLM_Model):
     def __init__(self, config):
         super().__init__(config)
-        from langchain.llms import SagemakerEndpoint
+        from langchain_community.llms import SagemakerEndpoint
 
         client = boto3.client(
             "sagemaker-runtime",
