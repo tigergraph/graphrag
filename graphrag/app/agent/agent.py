@@ -269,22 +269,45 @@ class TigerGraphAgent:
             )
 
 
-def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto") -> TigerGraphAgent:
+def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto", mode=None):
+    """Build the chat agent for a graph.
+
+    Returns the agentic engine (``AgenticAgent``) when ``agent_mode`` resolves
+    to ``"agentic"`` (the default) **and** the configured chat model supports
+    tool-calling; otherwise the classic ``TigerGraphAgent``. Both expose the
+    same ``question_for_agent`` / ``q`` interface, so callers are unchanged.
+    """
+    from common.config import get_agent_mode
+    from common.llm_services.capabilities import model_supports_agentic
+
     llm_provider = get_llm_service(get_chat_config(graphname))
     chat_config = llm_provider.config
 
+    resolved_mode = (mode or get_agent_mode(graphname)).lower()
+    agentic = resolved_mode == "agentic" and model_supports_agentic(chat_config)
+
     logger.info(
         f"[CHATBOT] graph={graphname} model={chat_config['llm_model']} "
-        f"provider={chat_config['llm_service']} prompt_path={chat_config.get('prompt_path', 'unknown')}"
+        f"provider={chat_config['llm_service']} mode={'agentic' if agentic else 'classic'} "
+        f"(requested={resolved_mode}) prompt_path={chat_config.get('prompt_path', 'unknown')}"
     )
 
-    agent = TigerGraphAgent(
+    embedding_service = get_embedding_service()
+    embedding_store = get_embedding_store()
+
+    if agentic:
+        from agent.agentic_agent import AgenticAgent
+        return AgenticAgent(
+            llm_provider, conn, embedding_service, embedding_store,
+            use_cypher=use_cypher, ws=ws, supportai_retriever=supportai_retriever,
+        )
+
+    return TigerGraphAgent(
         llm_provider,
         conn,
-        get_embedding_service(),
-        get_embedding_store(),
+        embedding_service,
+        embedding_store,
         use_cypher=use_cypher,
         ws=ws,
         supportai_retriever=supportai_retriever
     )
-    return agent

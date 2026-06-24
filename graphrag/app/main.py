@@ -52,6 +52,20 @@ app.include_router(routers.inquiryai_router, prefix=PATH_PREFIX)
 app.include_router(routers.supportai_router, prefix=PATH_PREFIX)
 app.include_router(routers.queryai_router, prefix=PATH_PREFIX)
 app.include_router(routers.ui_router, prefix=PATH_PREFIX)
+app.include_router(routers.mcp_servers_router, prefix=PATH_PREFIX)
+
+
+@app.on_event("shutdown")
+async def _shutdown_mcp_addons() -> None:
+    """Close every cached external-MCP client and stop the dedicated event
+    loop on app shutdown so stdio subprocesses don't outlive the worker.
+    """
+    try:
+        from mcp_addons import shutdown_all, stop_loop, run_async
+        await run_async(shutdown_all())
+        stop_loop()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"mcp_addons shutdown failed: {e}")
 
 
 excluded_metrics_paths = ("/docs", "/openapi.json", "/metrics")

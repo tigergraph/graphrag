@@ -144,6 +144,82 @@ class LLM_Model:
                 return parser.parse(json_match.group())
             raise
 
+    def invoke_with_tools(
+        self,
+        messages: list,
+        tools: list,
+        caller_name: str = "unknown",
+        tool_choice=None,
+    ):
+        """Invoke the chat model with tool schemas bound.
+
+        Used by the agentic engine. Returns the raw ``AIMessage`` — read
+        ``resp.tool_calls`` (a list of ``{"name", "args", "id"}``) when the
+        model wants to call tools, or ``resp.content`` for a final message.
+        Usage is tracked the same way ``invoke_with_parser`` does.
+
+        Args:
+            messages: LangChain messages (or ``(role, content)`` tuples).
+            tools: tool definitions accepted by ``bind_tools`` — LangChain
+                tool objects, pydantic classes, or JSON-schema dicts.
+            tool_choice: optional; force a tool, ``"any"``, or ``"auto"``.
+        """
+        if tool_choice is not None:
+            bound = self.llm.bind_tools(tools, tool_choice=tool_choice)
+        else:
+            bound = self.llm.bind_tools(tools)
+
+        usage_data = {}
+        with get_openai_callback() as cb:
+            resp = bound.invoke(messages)
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            logger.info(f"{caller_name} usage: {usage_data}")
+            _record_usage(caller_name, usage_data)
+        return resp
+
+    def invoke_structured(
+        self,
+        messages: list,
+        schema,
+        caller_name: str = "unknown",
+    ):
+        """Invoke the chat model with native structured output.
+
+        Returns an instance of ``schema`` (a pydantic class). Used by the
+        planner to get a typed ``Plan`` back. Falls back to a JSON-extraction
+        parse when the provider's structured-output path returns text.
+        """
+        usage_data = {}
+        with get_openai_callback() as cb:
+            try:
+                structured = self.llm.with_structured_output(schema)
+                result = structured.invoke(messages)
+            except Exception as exc:
+                logger.warning(
+                    f"{caller_name}: structured output failed ({exc}); "
+                    "falling back to parser"
+                )
+                parser = PydanticOutputParser(pydantic_object=schema)
+                raw = self.llm.invoke(messages)
+                raw_text = raw.content if hasattr(raw, "content") else str(raw)
+                try:
+                    result = parser.parse(raw_text)
+                except OutputParserException:
+                    json_match = re.search(r"\{[\s\S]*\}", raw_text)
+                    if not json_match:
+                        raise
+                    result = parser.parse(json_match.group())
+            usage_data["input_tokens"] = cb.prompt_tokens
+            usage_data["output_tokens"] = cb.completion_tokens
+            usage_data["total_tokens"] = cb.total_tokens
+            usage_data["cost"] = cb.total_cost
+            logger.info(f"{caller_name} usage: {usage_data}")
+            _record_usage(caller_name, usage_data)
+        return result
+
     async def ainvoke_with_parser(
         self,
         prompt: BasePromptTemplate,
@@ -301,7 +377,27 @@ You are a top-tier algorithm designed for extracting information in structured f
 - Follow these rules strictly. Non-compliance, including poor formatting, results in termination.
 
 ## No-Relationship Nodes
-- Include nodes that have no relationships. Add the node and leave the relationships section empty."""
+- Include nodes that have no relationships. Add the node and leave the relationships section empty.
+
+## Chunk Summary (Contextual Retrieval)
+In addition to ``nodes`` and ``rels``, populate a ``summary`` object with
+the chunk's metadata. The summary is concatenated with the chunk text
+before embedding to make retrieval match natural-language questions
+more reliably on table-heavy and numeric content.
+
+- ``topic`` — one short noun phrase (≤12 chars) naming what the chunk
+  is primarily about, in the source language.
+- ``section`` — the heading or section title this chunk falls under,
+  copied verbatim from the source when present; empty string otherwise.
+- ``entities`` — list of proper nouns / categories / years explicitly
+  named in the chunk (e.g. company names, prefecture names, regulatory
+  bodies, fiscal years). When the chunk contains a table, also include
+  every column header and row label (e.g. ``"2021年 総預貯金残高"``,
+  ``"2011-21年 預貯金変化率 個人預金"``) — these carry the dimensional
+  vocabulary a query is most likely to match on. Skip generic terms.
+
+Same faithfulness rule applies: only include items explicitly present
+in the text — never infer or guess."""
 
     @property
     def generate_cypher_prompt(self):

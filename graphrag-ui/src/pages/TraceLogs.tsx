@@ -63,6 +63,19 @@ interface TimelineStep {
   durationMs: number;
 }
 
+interface PlanStepInfo {
+  id: string;
+  kind: string;
+  tool: string;
+  rationale?: string;
+  depends_on?: string[];
+}
+
+interface PlanInfo {
+  strategy: string;
+  steps: PlanStepInfo[];
+}
+
 interface TraceData {
   originalQuery: string;
   conversationContext: string[];
@@ -81,6 +94,7 @@ interface TraceData {
   timeline: TimelineStep[];
   tokenUsage: TokenUsage;
   finalResponse: string;
+  plan: PlanInfo | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -243,6 +257,7 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
     timeline,
     tokenUsage,
     finalResponse: message?.content || "",
+    plan: qs.plan && Array.isArray(qs.plan.steps) ? (qs.plan as PlanInfo) : null,
   };
 }
 
@@ -352,6 +367,56 @@ const ExpandableRow: FC<{
 };
 
 // ─── Tab Panels ───────────────────────────────────────────────────────────────
+
+const KIND_COLORS: Record<string, string> = {
+  structural: "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300",
+  unstructured: "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300",
+  schema: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300",
+  answer: "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300",
+};
+
+const PlanPanel: FC<{ trace: TraceData }> = ({ trace }) => {
+  const plan = trace.plan;
+  if (!plan) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        No plan available — this answer used the classic engine (the agentic
+        engine produces a plan).
+      </p>
+    );
+  }
+  return (
+    <div>
+      {plan.strategy && (
+        <div className="mb-4 rounded-lg border border-border bg-muted/40 px-4 py-3">
+          <span className="text-xs font-semibold text-muted-foreground">Strategy</span>
+          <p className="text-sm mt-1 whitespace-pre-wrap">{plan.strategy}</p>
+        </div>
+      )}
+      <ol className="space-y-2">
+        {plan.steps.map((s, i) => (
+          <li key={s.id || i} className="rounded-lg border border-border px-4 py-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-mono text-xs text-muted-foreground">{s.id}</span>
+              <span className={`text-xs px-2 py-0.5 rounded-full ${KIND_COLORS[s.kind] || "bg-muted text-muted-foreground"}`}>
+                {s.kind}
+              </span>
+              {s.tool && <span className="font-mono text-xs">{s.tool}</span>}
+              {s.depends_on && s.depends_on.length > 0 && (
+                <span className="text-xs text-muted-foreground">
+                  ← depends on {s.depends_on.join(", ")}
+                </span>
+              )}
+            </div>
+            {s.rationale && (
+              <p className="text-sm text-muted-foreground mt-1.5">{s.rationale}</p>
+            )}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+};
 
 const LogsPanel: FC<{ trace: TraceData }> = ({ trace }) => {
   const [collapsed, setCollapsed] = useState(false);
@@ -928,8 +993,19 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
         </div>
 
         {/* Tabs */}
-        <Tabs defaultValue="citations" className="w-full">
+        <Tabs defaultValue={trace.plan ? "plan" : "citations"} className="w-full">
           <TabsList className="w-full justify-start bg-transparent border-b border-border rounded-none h-auto p-0 gap-0">
+            {trace.plan && (
+              <TabsTrigger
+                value="plan"
+                className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5"
+              >
+                Plan
+                <span className="ml-1.5 bg-muted text-muted-foreground text-xs px-1.5 py-0.5 rounded-full">
+                  {trace.plan.steps.length}
+                </span>
+              </TabsTrigger>
+            )}
             <TabsTrigger
               value="citations"
               className="rounded-none border-b-2 border-transparent data-[state=active]:border-blue-600 data-[state=active]:bg-transparent data-[state=active]:shadow-none px-4 py-2.5"
@@ -975,6 +1051,11 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
             </TabsTrigger>
           </TabsList>
 
+          {trace.plan && (
+            <TabsContent value="plan" className="pt-4">
+              <PlanPanel trace={trace} />
+            </TabsContent>
+          )}
           <TabsContent value="citations" className="pt-4">
             <CitationsPanel trace={trace} />
           </TabsContent>
