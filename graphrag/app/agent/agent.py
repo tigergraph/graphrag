@@ -103,6 +103,11 @@ class TigerGraphAgent:
         start_time = time.time()
         metrics.llm_inprogress_requests.labels(self.model_name).inc()
 
+        # Steps completed so far; exposed to the caller on failure so the
+        # trace log can show how far execution got before the error (GML-2136).
+        agent_steps = []
+        self._last_agent_steps = None
+
         try:
             LogWriter.info(f"request_id={req_id_cv.get()} ENTRY question_for_agent")
             logger.debug_pii(
@@ -252,6 +257,9 @@ class TigerGraphAgent:
         except Exception as e:
             metrics.llm_query_error_total.labels(self.model_name).inc()
             LogWriter.error(f"request_id={req_id_cv.get()} FAILURE question_for_agent")
+            # Preserve the steps completed before the failure so the caller
+            # can record them in the trace log (GML-2136).
+            self._last_agent_steps = agent_steps
             import traceback
 
             traceback.print_exc()

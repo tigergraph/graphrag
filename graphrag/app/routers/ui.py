@@ -2084,7 +2084,7 @@ def extract_schema_from_jsonl(
             f"({len(jsonl_paths)} JSONLs, {len(samples)} doc parts, "
             f"{len(vertex_hints or [])} vertex hints, {len(edge_hints or [])} edge hints)"
         )
-        llm_service = get_llm_service(get_completion_config(graphname))
+        llm_service = get_llm_service(get_chat_config(graphname))
         gsql_text, rendered_prompt = schema_extraction_mod.extract_schema_gsql(
             llm_service, samples,
             vertex_hints=vertex_hints, edge_hints=edge_hints,
@@ -2576,12 +2576,40 @@ async def emit_progress(agent: TigerGraphAgent, ws: WebSocket):
                 return message.model_dump_json()
 
 
+# When agent execution fails, non-superadmins get a generic message;
+# superadmins additionally see the exception's root cause so they can
+# diagnose backend failures (e.g. an LLM provider quota/auth error)
+# without exposing internals to regular users. The full stack stays out
+# of the chat bubble. See GML-2136.
+# Matches the trace-log read gate (get_trace_log) so error-detail and
+# trace visibility share one definition of "superadmin".
+SUPERADMIN_ROLES = {"superuser"}
+
+
+def _is_superadmin(global_roles: list[str]) -> bool:
+    return any(r in SUPERADMIN_ROLES for r in (global_roles or []))
+
+
+def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
+    error_msg = str(e)
+    if "does not exist" in error_msg or "not found" in error_msg.lower():
+        return f"Error: {error_msg}. Please check the knowledge graph name and try again."
+    generic = (
+        "GraphRAG had an issue answering your question. "
+        "Please try again, or rephrase your prompt."
+    )
+    if is_superadmin and error_msg:
+        return f"{generic}\n\n(Admin detail: {error_msg})"
+    return generic
+
+
 async def run_agent(
     agent: TigerGraphAgent,
     data: str,
     conversation_history: list[dict[str, str]],
     graphname,
     ws: WebSocket,
+    is_superadmin: bool = False,
 ) -> GraphRAGResponse:
     resp = GraphRAGResponse(
         natural_language_response="", answered_question=False, response_type="inquiryai"
@@ -2621,13 +2649,11 @@ async def run_agent(
             f"/{graphname}/ui/chat request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
     except Exception as e:
-        error_msg = str(e)
-        if "does not exist" in error_msg or "not found" in error_msg.lower():
-            resp.natural_language_response = f"Error: {error_msg}. Please check the knowledge graph name and try again."
-        else:
-            resp.natural_language_response = "GraphRAG had an issue answering your question. Please try again, or rephrase your prompt."
-
-        resp.query_sources = {}
+        resp.natural_language_response = _agent_error_text(e, is_superadmin)
+        # Preserve the steps the agent completed before failing so the
+        # (superuser-only) trace log shows how far it got (GML-2136).
+        partial_steps = getattr(agent, "_last_agent_steps", None)
+        resp.query_sources = {"agent_steps": partial_steps} if partial_steps else {}
         resp.answered_question = False
         LogWriter.warning(
             f"/{graphname}/ui/chat request_id={req_id_cv.get()} agent execution failed due to exception: {e}"
@@ -2718,6 +2744,7 @@ async def graph_query(
     rag_pattern: str | None = None,
     conversation_id: str | None = None,
 ):
+    is_superadmin = _is_superadmin(creds[0])
     creds = creds[1]
     auth_header = "Basic " + base64.b64encode(
         f"{creds.username}:{creds.password}".encode()
@@ -2759,7 +2786,8 @@ async def graph_query(
         # generate response and keep track of response time
         start = time.monotonic()
         resp = await run_agent(
-            agent, data, conversation_history, graphname, None
+            agent, data, conversation_history, graphname, None,
+            is_superadmin=is_superadmin,
         )
         elapsed = time.monotonic() - start
 
@@ -2842,10 +2870,12 @@ async def chat(
         # tracking. For sentinel logins (API token / secret) this is
         # the sentinel itself; we resolve to the real TG identity below.
         usr_creds = _parse_auth_header(usr_auth)
+        ws_is_superadmin = False
         try:
-            _, _, ws_username = _get_user_role_details(
+            ws_global_roles, _, ws_username = _get_user_role_details(
                 usr_creds.username, usr_creds.password
             )
+            ws_is_superadmin = _is_superadmin(ws_global_roles)
         except Exception:
             ws_username = usr_creds.username
         ws_username = ws_username or usr_creds.username
@@ -2917,7 +2947,8 @@ async def chat(
             # generate response and keep track of response time
             start = time.monotonic()
             resp = await run_agent(
-                agent, data, conversation_history, graphname, websocket
+                agent, data, conversation_history, graphname, websocket,
+                is_superadmin=ws_is_superadmin,
             )
             elapsed = time.monotonic() - start
 
@@ -4487,15 +4518,15 @@ async def get_prompts(
             chat_cfg["graphname"] = graphname
             completion_cfg["graphname"] = graphname
 
-        # ``chatbot_response`` is consumed by the chat agent and must
-        # resolve through the chat service's ``prompt_path``. Every
-        # other prompt is consumed by completion-side code paths
-        # (entity / relationship extraction, schema extraction,
-        # community summarization, schema mapping) and resolves
-        # through the completion service's ``prompt_path``. When no
-        # ``chat_service`` is configured, ``get_chat_config`` already
-        # falls back to ``completion_service`` so this routing stays
-        # correct for single-service deployments.
+        # ``chatbot_response`` and ``schema_extraction`` are consumed
+        # by the chat agent and the schema-extraction LLM call, both of
+        # which run through the chat service. Every other prompt is
+        # consumed by completion-side code paths (entity / relationship
+        # extraction, community summarization, schema mapping) and
+        # resolves through the completion service's ``prompt_path``.
+        # When no ``chat_service`` is configured, ``get_chat_config``
+        # already falls back to ``completion_service`` so this routing
+        # stays correct for single-service deployments.
         chat_llm = get_llm_service(chat_cfg)
         completion_llm = get_llm_service(completion_cfg)
 
@@ -4514,7 +4545,7 @@ async def get_prompts(
             "query_generation":
                 (completion_llm, "map_question_schema_prompt"),
             "schema_extraction":
-                (completion_llm, "schema_extraction_prompt"),
+                (chat_llm, "schema_extraction_prompt"),
             # Free-form partial injected into the four query-related
             # templates (map_question_to_schema, generate_function,
             # generate_cypher, generate_gsql). Empty by default.

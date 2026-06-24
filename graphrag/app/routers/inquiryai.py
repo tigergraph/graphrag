@@ -25,6 +25,23 @@ router = APIRouter(tags=["InquiryAI"])
 security = HTTPBase(scheme="basic", auto_error=False)
 
 
+def _caller_is_superadmin(credentials) -> bool:
+    """Best-effort: True if the caller has a superadmin role.
+
+    Resolves roles from Basic credentials; returns False for token/secret
+    logins or any lookup failure. Used to decide whether to surface an
+    exception's root cause to the caller (GML-2136).
+    """
+    try:
+        from routers.ui import _parse_auth_header, _get_user_roles, _is_superadmin
+        if not credentials or not getattr(credentials, "credentials", None):
+            return False
+        c = _parse_auth_header(f"Basic {credentials.credentials}")
+        return _is_superadmin(_get_user_roles(c.username, c.password))
+    except Exception:
+        return False
+
+
 def check_embedding_store_status():
     """Validate embedding store is ready, raising 503 if not.
 
@@ -78,11 +95,8 @@ def retrieve_answer(
             f"/{graphname}/query request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
     except Exception as e:
-        error_msg = str(e)
-        if "does not exist" in error_msg or "not found" in error_msg.lower():
-            resp.natural_language_response = f"Error: {error_msg}. Please check the knowledge graph name and try again."
-        else:
-            resp.natural_language_response = "GraphRAG had an issue answering your question. Please try again, or rephrase your prompt."
+        from routers.ui import _agent_error_text
+        resp.natural_language_response = _agent_error_text(e, _caller_is_superadmin(credentials))
         exc = traceback.format_exc()
         resp.query_sources = {"error_traceback": exc}
         resp.answered_question = False
@@ -172,12 +186,8 @@ def retrieve_answer_with_chathistory(
             f"/{graphname}/query_with_history request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
     except Exception as e:
-        error_msg = str(e)
-        if "does not exist" in error_msg or "not found" in error_msg.lower():
-            resp.natural_language_response = f"Error: {error_msg}. Please check the knowledge graph name and try again."
-        else:
-            resp.natural_language_response = "GraphRAG had an issue answering your question. Please try again, or rephrase your prompt."
-
+        from routers.ui import _agent_error_text
+        resp.natural_language_response = _agent_error_text(e, _caller_is_superadmin(credentials))
         resp.query_sources = {}
         resp.answered_question = False
         LogWriter.warning(
