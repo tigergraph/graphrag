@@ -247,11 +247,12 @@ async def load(conn: AsyncTigerGraphConnection):
             n_edges = 0
             vt_counts: Counter = Counter()
             et_counts: Counter = Counter()
-            size = (
-                load_q.qsize()
-                if load_q.closed() or load_q.should_flush()
-                else batch_size
-            )
+            # Cap every batch at batch_size — even on close / flush. Extraction
+            # can flood the queue faster than TG drains it; sending the whole
+            # backlog as one upsert produces a multi-GB request that RESTPP
+            # rejects with 413 (losing the batch). The enclosing loop drains
+            # the remainder in subsequent passes.
+            size = min(load_q.qsize(), batch_size)
             for _ in range(size):
                 t, elem = await load_q.get()
                 if t == "FLUSH":

@@ -181,5 +181,6 @@ wandb==0.20.1
 watchfiles==1.1.0
 websockets==15.0.1
 wrapt==1.17.2
+wsproto==1.2.0
 yarl==1.20.1
 zipp==3.23.0
