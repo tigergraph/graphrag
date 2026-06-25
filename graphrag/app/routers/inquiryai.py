@@ -69,10 +69,8 @@ def retrieve_answer(
         f"/{graphname}/query request_id={req_id_cv.get()} database connection created"
     )
 
-    if query.rag_method:
-        agent = make_agent(graphname, conn, use_cypher, supportai_retriever=query.rag_method)
-    else:
-        agent = make_agent(graphname, conn, use_cypher)
+    from routers.ui import _chat_agent
+    agent = _chat_agent(graphname, conn, use_cypher, query.mode, query.rag_method)
     resp = GraphRAGResponse(
         natural_language_response="", answered_question=False, response_type="inquiryai"
     )
@@ -133,11 +131,8 @@ def retrieve_answer_with_chathistory(
         f"/{graphname}/query_with_history request_id={req_id_cv.get()} database connection created"
     )
 
-    # TODO: This needs to be refactored just to use config.py
-    if query.rag_method:
-        agent = make_agent(graphname, conn, use_cypher, supportai_retriever=query.rag_method)
-    else:
-        agent = make_agent(graphname, conn, use_cypher)
+    from routers.ui import _chat_agent
+    agent = _chat_agent(graphname, conn, use_cypher, query.mode, query.rag_method)
     resp = GraphRAGResponse(
         natural_language_response="", answered_question=False, response_type="inquiryai"
     )

@@ -20,6 +20,10 @@ from pydantic import BaseModel
 
 class NaturalLanguageQuery(BaseModel):
     query: str
+    # Engine: "agentic" | "classic" | None (defer to graph config).
+    mode: Optional[str] = None
+    # Single menu value: agent style ("auto"|"planned"|"reactive") when agentic,
+    # or retriever ("auto"|<name>) when classic.
     rag_method: Optional[str] = None
 
 

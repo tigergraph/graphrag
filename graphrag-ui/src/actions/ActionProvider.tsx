@@ -80,12 +80,17 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
   children,
 }) => {
   const selectedGraph = useContext(SelectedGraphContext);
-  const selectedRagPattern = useContext(RagPatternContext);
+  const { mode: selectedMode, pattern: selectedRagPattern } = useContext(RagPatternContext);
   const lastUserQueryRef = useRef<string>("");
-  const WS_URL = "/ui/" + selectedGraph + "/chat" + "?rag_pattern=" + selectedRagPattern;
+  const WS_URL = selectedGraph
+    ? "/ui/" + selectedGraph + "/chat?rag_pattern=" +
+      encodeURIComponent(selectedRagPattern) + "&mode=" + encodeURIComponent(selectedMode)
+    : null;
   const [messageHistory, setMessageHistory] = useState<MessageEvent<Message>[]>(
     [],
   );
+  // Don't open the socket until a graph is selected — avoids the
+  // ws://…/ui//chat connect/1006/reconnect churn on a fresh login.
   const { sendMessage, lastMessage, readyState } = useWebSocket(WS_URL, {
     onOpen: () => {
       // Defensive: the route guard normally ensures ``auth`` is set
@@ -289,6 +294,17 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
           conversationManager.setCurrentConversationId(messageData.conversation_id);
           // Don't dispatch refresh event here - refresh happens when user sends the question
           return; // Don't create a bot message for conversation ID
+        }
+
+        // One-off engine notice (e.g. Agent mode downgraded to Classic). It
+        // arrives before any user turn, so append it without slicing a loader.
+        if (messageData.system_note) {
+          const noteMessage = createChatBotMessage({
+            content: messageData.system_note,
+            response_type: "system",
+          });
+          setState((prev: any) => ({ ...prev, messages: [...prev.messages, noteMessage] }));
+          return;
         }
 
         // Attach the user query so the trace page can display it

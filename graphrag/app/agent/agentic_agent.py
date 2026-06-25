@@ -43,6 +43,19 @@ from common.metrics.prometheus_metrics import metrics
 logger = logging.getLogger(__name__)
 
 
+def _resolve_style(requested, config_style) -> str:
+    """Resolve the agentic orchestrator to ``"planned"`` or ``"react"``.
+
+    A per-request ``requested`` style wins unless it's ``"auto"``, in which
+    case the graph's ``config_style`` applies. Only ``"planned"`` selects the
+    planner DAG; everything else (``"reactive"`` from the UI, ``"react"`` from
+    config, or any unknown value) is the free tool-calling loop.
+    """
+    requested = (requested or "auto").lower()
+    chosen = config_style if requested == "auto" else requested
+    return "planned" if str(chosen).lower() == "planned" else "react"
+
+
 class AgenticAgent:
     def __init__(
         self,
@@ -53,7 +66,11 @@ class AgenticAgent:
         use_cypher: bool = False,
         ws=None,
         supportai_retriever="auto",   # accepted for API parity; agentic plans dynamically
+        agent_style="auto",           # "auto" (per config) | "planned" | "reactive"
     ):
+        # Per-request orchestrator override. "auto" defers to the graph's
+        # configured agent_style; "planned"/"reactive" force a style.
+        self.agent_style = (agent_style or "auto").lower()
         self.conn = db_connection
         self.llm = llm_provider
         self.model_name = embedding_model.model_name
@@ -138,12 +155,16 @@ class AgenticAgent:
                 mcp_manager=mcp_manager,
                 user=user,
             )
-            # agent_style picks the orchestrator: "react" (default, free
-            # tool-calling loop) vs "planned" (planner -> executor DAG).
-            style = (ctx.graphrag_cfg or {}).get("agent_style", "react").lower()
+            # agent_style picks the orchestrator: "planned" (planner ->
+            # executor DAG) vs the free tool-calling loop ("autonomous",
+            # internally ReAct). A per-request style overrides the graph
+            # config; "auto" defers to the configured default.
+            config_style = (ctx.graphrag_cfg or {}).get("agent_style", "planned")
+            style = _resolve_style(self.agent_style, config_style)
             if style == "planned":
                 answer = run_agentic(ctx, self.llm, question, convo)
             else:
+                # "reactive" (UI) / "react" (config) -> free tool-calling loop
                 answer = run_react(ctx, self.llm, question, convo)
 
             # Aggregate usage across all LLM calls in this run for the UI.
@@ -157,6 +178,9 @@ class AgenticAgent:
             if answer.query_sources is None:
                 answer.query_sources = {}
             answer.query_sources["token_usage"] = total_usage
+            # Tag the orchestrator that ran so the UI can show the Agent style
+            # consistently ("planned" | "react") rather than a retriever method.
+            answer.query_sources["engine"] = style
             # Map plan steps onto the agent_steps shape the Trace UI renders.
             answer.query_sources.setdefault("agent_steps", [
                 {"node": s.get("step_id"), "output": s.get("summary", "")}

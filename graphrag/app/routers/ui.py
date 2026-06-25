@@ -2736,12 +2736,29 @@ async def write_message_to_history(
     else:
         LogWriter.info(f"chat-history not enabled. chat-history url: {ch}")
 
+def _chat_agent(graphname, conn, use_cypher, mode, value, ws=None):
+    """Build the chat agent from one menu selection.
+
+    ``mode`` (``"agentic"`` | ``"classic"`` | ``None`` → graph config) picks the
+    engine; ``value`` is the single menu value — the agent style (``"auto"`` |
+    ``"planned"`` | ``"reactive"``) when agentic, or the retriever (``"auto"`` |
+    a name) when classic. ``make_agent`` reads the side that matches the
+    resolved engine, so passing it to both is safe.
+    """
+    value = value or "auto"
+    return make_agent(
+        graphname, conn, use_cypher, ws=ws, mode=mode,
+        supportai_retriever=value, agent_style=value,
+    )
+
+
 @router.get(route_prefix + "/{graphname}/query")
 async def graph_query(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     q: str | None = None,
     rag_pattern: str | None = None,
+    mode: str | None = None,
     conversation_id: str | None = None,
 ):
     is_superadmin = _is_superadmin(creds[0])
@@ -2762,10 +2779,8 @@ async def graph_query(
             convo_id = conversation_id
             LogWriter.info(f"Continuing conversation with ID: {convo_id}")
 
-        # create agent
-        # get retrieval pattern to use; default "auto" lets RetrieverSelector pick.
-        rag_pattern = rag_pattern or "auto"
-        agent = make_agent(graphname, conn, use_cypher, supportai_retriever=rag_pattern)
+        # create agent from the menu selection (engine + style/retriever)
+        agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern)
 
         prev_id = None
         data = q
@@ -2822,6 +2837,7 @@ async def chat(
     graphname: ValidGraphName,
     websocket: WebSocket,
     rag_pattern: str | None = None,
+    mode: str | None = None,
 ):
     """
     WebSocket endpoint for chat functionality with conversation history support.
@@ -2906,7 +2922,7 @@ async def chat(
         return
     logger.info(
         f"WebSocket conversation_id received: {conversation_id or 'empty'} "
-        f"(graph={graphname}, rag_pattern={rag_pattern})"
+        f"(graph={graphname}, mode={mode or 'config'}, selection={rag_pattern})"
     )
     
     # Load conversation history if not a new conversation
@@ -2923,8 +2939,12 @@ async def chat(
     # Send conversation ID to frontend
     await websocket.send_text(json.dumps({"conversation_id": convo_id}))
 
-    # create agent
-    agent = make_agent(graphname, conn, use_cypher, ws=websocket, supportai_retriever=rag_pattern)
+    # create agent from the menu selection (engine + style/retriever)
+    agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern, ws=websocket)
+    # If Agent mode was requested but the model can't tool-call, make_agent
+    # downgraded to the Classic engine — tell the user once.
+    if getattr(agent, "engine_note", None):
+        await websocket.send_text(json.dumps({"system_note": agent.engine_note}))
 
     prev_id = None
     try:

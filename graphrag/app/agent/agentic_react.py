@@ -22,7 +22,7 @@ when the per-graph iteration cap is hit.
 
 This is the alternative to the planner→executor engine in
 ``agentic_graph.run_agentic``; both are reachable from ``AgenticAgent``
-based on ``graphrag_config.agent_style`` (default ``"react"``).
+based on ``graphrag_config.agent_style`` (default ``"planned"``).
 """
 
 import json

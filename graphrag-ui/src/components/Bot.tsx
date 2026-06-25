@@ -23,7 +23,8 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
   const [store, setStore] = useState<any>();
   const [currentDate, setCurrentDate] = useState('');
   const [selectedGraph, setSelectedGraph] = useState(sessionStorage.getItem("selectedGraph") || '');
-  const [ragPattern, setRagPattern] = useState(sessionStorage.getItem("ragPattern") || '');
+  const [chatMode, setChatMode] = useState(sessionStorage.getItem("chatMode") || 'agentic');
+  const [ragPattern, setRagPattern] = useState(sessionStorage.getItem("ragPattern") || 'auto');
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -52,11 +53,13 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
       }
     }
 
-    // Set default ragPattern if no value in sessionStorage. "Auto" lets the
-    // backend RetrieverSelector pick a method per question.
-    if (!sessionStorage.getItem("ragPattern")) {
-      setRagPattern("Auto");
-      sessionStorage.setItem("ragPattern", "Auto");
+    // Default the chat menu to Agent · Auto when nothing is stored yet
+    // (also resets any stale pre-2.0 retriever-only selection).
+    if (!sessionStorage.getItem("chatMode")) {
+      setChatMode("agentic");
+      sessionStorage.setItem("chatMode", "agentic");
+      setRagPattern("auto");
+      sessionStorage.setItem("ragPattern", "auto");
     }
 
     const date = new Date();
@@ -100,12 +103,18 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
     //window.location.reload();
   };
 
-  const handleSelectRag = (value) => {
+  const handleSelectMode = (mode, value) => {
+    setChatMode(mode);
     setRagPattern(value);
+    sessionStorage.setItem("chatMode", mode);
     sessionStorage.setItem("ragPattern", value);
     navigate("/chat");
-    //window.location.reload();
   };
+
+  const triggerLabel =
+    chatMode === "agentic"
+      ? "Agent · " + ragPattern.charAt(0).toUpperCase() + ragPattern.slice(1)
+      : "Classic · " + ragPattern;
 
   return (
     <div className={layout}>
@@ -121,19 +130,25 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
                   className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-white dark:bg-background z-50 rounded-tr-lg"
                 >
                   <img src="/graph-icon.svg" alt="" className="mr-2" />
-                  {ragPattern} <MdKeyboardArrowDown className="text-2xl" />
+                  {triggerLabel} <MdKeyboardArrowDown className="text-2xl" />
                 </Button>
               </DropdownMenuTrigger>
 
               <DropdownMenuContent className="w-56">
-                <DropdownMenuLabel>Select a GraphRAG Pattern</DropdownMenuLabel>
+                <DropdownMenuLabel>Agent</DropdownMenuLabel>
+                <DropdownMenuGroup>
+                  {[["Auto", "auto"], ["Planned", "planned"], ["Reactive", "reactive"]].map(([label, value]) => (
+                    <DropdownMenuItem key={"agent-" + value} onSelect={() => handleSelectMode("agentic", value)}>
+                      <span>{label}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuGroup>
                 <DropdownMenuSeparator />
+                <DropdownMenuLabel>Classic</DropdownMenuLabel>
                 <DropdownMenuGroup>
                   {["Auto", "Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
-                    <DropdownMenuItem key={i} onSelect={() => handleSelectRag(f)}>
-                      {/* <User className="mr-2 h-4 w-4" /> */}
+                    <DropdownMenuItem key={"classic-" + i} onSelect={() => handleSelectMode("classic", f)}>
                       <span>{f}</span>
-                      {/* <DropdownMenuShortcut>⇧⌘P</DropdownMenuShortcut> */}
                     </DropdownMenuItem>
                   ))}
                 </DropdownMenuGroup>
@@ -174,7 +189,7 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
         </div>
       
       <SelectedGraphContext.Provider value={selectedGraph}>
-        <RagPatternContext.Provider value={ragPattern}>
+        <RagPatternContext.Provider value={{ mode: chatMode, pattern: ragPattern }}>
           <Chatbot
             // eslint-disable-next-line
             // @ts-ignore

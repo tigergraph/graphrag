@@ -277,13 +277,19 @@ class TigerGraphAgent:
             )
 
 
-def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto", mode=None):
+def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto", mode=None, agent_style="auto"):
     """Build the chat agent for a graph.
 
-    Returns the agentic engine (``AgenticAgent``) when ``agent_mode`` resolves
-    to ``"agentic"`` (the default) **and** the configured chat model supports
-    tool-calling; otherwise the classic ``TigerGraphAgent``. Both expose the
-    same ``question_for_agent`` / ``q`` interface, so callers are unchanged.
+    ``mode`` selects the engine: ``"agentic"`` (default) returns the
+    ``AgenticAgent`` when the chat model supports tool-calling, otherwise the
+    classic ``TigerGraphAgent``. ``agent_style`` (``"auto"`` | ``"planned"`` |
+    ``"reactive"``) picks the agentic orchestrator; ``supportai_retriever``
+    (``"auto"`` | a retriever name) picks the classic retrieval method. Both
+    engines expose the same ``question_for_agent`` / ``q`` interface.
+
+    When agentic is requested but the model can't tool-call, the returned
+    (classic) agent carries an ``engine_note`` describing the downgrade so the
+    caller can surface it to the user.
     """
     from common.config import get_agent_mode
     from common.llm_services.capabilities import model_supports_agentic
@@ -292,12 +298,14 @@ def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retr
     chat_config = llm_provider.config
 
     resolved_mode = (mode or get_agent_mode(graphname)).lower()
-    agentic = resolved_mode == "agentic" and model_supports_agentic(chat_config)
+    want_agentic = resolved_mode == "agentic"
+    agentic = want_agentic and model_supports_agentic(chat_config)
 
     logger.info(
         f"[CHATBOT] graph={graphname} model={chat_config['llm_model']} "
         f"provider={chat_config['llm_service']} mode={'agentic' if agentic else 'classic'} "
-        f"(requested={resolved_mode}) prompt_path={chat_config.get('prompt_path', 'unknown')}"
+        f"(requested={resolved_mode}, style={agent_style}, retriever={supportai_retriever}) "
+        f"prompt_path={chat_config.get('prompt_path', 'unknown')}"
     )
 
     embedding_service = get_embedding_service()
@@ -305,17 +313,31 @@ def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retr
 
     if agentic:
         from agent.agentic_agent import AgenticAgent
-        return AgenticAgent(
+        agent = AgenticAgent(
             llm_provider, conn, embedding_service, embedding_store,
-            use_cypher=use_cypher, ws=ws, supportai_retriever=supportai_retriever,
+            use_cypher=use_cypher, ws=ws, agent_style=agent_style,
         )
+        agent.engine_note = None
+        return agent
 
-    return TigerGraphAgent(
+    # Classic engine. If agentic was requested but the model can't tool-call,
+    # the request value was an agent style (not a retriever), so fall back to
+    # the default retriever and flag the downgrade for the caller.
+    note = None
+    if want_agentic:
+        supportai_retriever = "auto"
+        note = (
+            "The selected chat model can't run Agent mode; "
+            "answered with the Classic engine."
+        )
+    agent = TigerGraphAgent(
         llm_provider,
         conn,
         embedding_service,
         embedding_store,
         use_cypher=use_cypher,
         ws=ws,
-        supportai_retriever=supportai_retriever
+        supportai_retriever=supportai_retriever,
     )
+    agent.engine_note = note
+    return agent
