@@ -59,6 +59,9 @@ import { useNavigate } from "react-router-dom";
 // TODO make dynamic
 const WS_HISTORY_URL = "/ui/user";
 const WS_CONVO_URL = "/ui/conversation";
+// How many conversations to load at a time. Only the visible ones have their
+// messages fetched, so a long history can't flood the browser with requests.
+const PAGE_SIZE = 10;
 
 const SideMenu = ({
   height,
@@ -76,6 +79,11 @@ const SideMenu = ({
   const [newSet, setNewSet] = useState<any[]>([]);
   const [expandedConversations, setExpandedConversations] = useState<Set<string>>(new Set());
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  // Full sorted conversation list (ids + timestamps only, no messages) and how
+  // many of them have had their messages loaded so far.
+  const [convList, setConvList] = useState<any[]>([]);
+  const [loadedCount, setLoadedCount] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   // Fade + disable the side menu (conversation list + New Chat) while
   // the chat is streaming an answer, so the user can't unmount Chat by
   // switching conversations mid-response.
@@ -93,97 +101,98 @@ const SideMenu = ({
   const navigate = useNavigate();
 
 
-  const fetchHistory2 = useCallback(async () => {
-    setConversationId([]);
+  function formatDate(dateString: any) {
+    const options = { year: "numeric" as const, month: "long" as const, day: "numeric" as const}
+    return new Date(dateString).toLocaleDateString(undefined, options)
+  }
+
+  // Fetch the conversation LIST only (ids + timestamps); cheap, one request.
+  const fetchConvList = useCallback(async () => {
     const creds = sessionStorage.getItem("auth");
     const username = sessionStorage.getItem("username");
-
-    if (!username) {
-      return;
-    }
-
-    if (!creds) {
-      return;
-    }
-
+    if (!username || !creds) return [];
     const settings = {
-      method: 'GET',
-      headers: {
-        Authorization: creds!,
-        "Content-Type": "application/json",
-      }
-    }
-    try {
-      const response = await fetch(`${WS_HISTORY_URL}/${username}`, settings);
+      method: "GET",
+      headers: { Authorization: creds, "Content-Type": "application/json" },
+    };
+    const response = await fetch(`${WS_HISTORY_URL}/${username}`, settings);
+    if (!response.ok) return [];
+    const data = await safeJson(response);
+    if (!Array.isArray(data) || data.length === 0) return [];
+    // Most recently updated first (falls back to create_ts).
+    return [...data].sort((a: any, b: any) => {
+      const timeA = new Date(a.update_ts || a.create_ts).getTime();
+      const timeB = new Date(b.update_ts || b.create_ts).getTime();
+      return timeB - timeA;
+    });
+  }, []);
 
-      if (!response.ok) {
-        setConversationId([]);
-        return;
-      }
-
-      const data = await safeJson(response);
-
-      if (!Array.isArray(data) || data.length === 0) {
-        setConversationId([]);
-        return;
-      }
-
-      // Sort conversations by update_ts (most recently updated first), fallback to create_ts
-      const sortedData = [...data].sort((a: any, b: any) => {
-        // Use update_ts if available, otherwise use create_ts
-        const timeA = new Date(a.update_ts || a.create_ts).getTime();
-        const timeB = new Date(b.update_ts || b.create_ts).getTime();
-        return timeB - timeA; // Most recently updated first
-      });
-
-      // Wait for all conversation details to be fetched
-      const conversationPromises = sortedData.map(async (item: any) => {
+  // Load message content for a small batch of list items (the only place that
+  // hits /ui/conversation/<id>) — bounded to PAGE_SIZE so it can't flood.
+  const loadDetails = useCallback(async (items: any[]) => {
+    const creds = sessionStorage.getItem("auth");
+    const settings = {
+      method: "GET",
+      headers: { Authorization: creds!, "Content-Type": "application/json" },
+    };
+    const results = await Promise.all(
+      items.map(async (item: any) => {
         try {
-          const response2 = await fetch(`${WS_CONVO_URL}/${item.conversation_id}`, settings);
-          if (!response2.ok) {
-            return null;
-          }
-          const content = await safeJson(response2);
-
-          // Get the most recent message timestamp for sorting
+          const r = await fetch(`${WS_CONVO_URL}/${item.conversation_id}`, settings);
+          if (!r.ok) return null;
+          const content = await safeJson(r);
           let lastUpdateTime = item.update_ts || item.create_ts;
           if (Array.isArray(content) && content.length > 0) {
-            // Find the most recent message timestamp
-            const messageTimes = content
-              .map((msg: any) => msg.create_ts || msg.update_ts)
-              .filter((ts: any) => ts != null)
-              .map((ts: any) => new Date(ts).getTime());
-            if (messageTimes.length > 0) {
-              const latestMessageTime = Math.max(...messageTimes);
-              lastUpdateTime = new Date(latestMessageTime).toISOString();
-            }
+            const times = content
+              .map((m: any) => m.create_ts || m.update_ts)
+              .filter((t: any) => t != null)
+              .map((t: any) => new Date(t).getTime());
+            if (times.length > 0) lastUpdateTime = new Date(Math.max(...times)).toISOString();
           }
-
           return {
             conversation_id: item.conversation_id,
-            content: content,
+            content,
             date: formatDate(item.create_ts),
             create_ts: item.create_ts,
-            update_ts: lastUpdateTime // Use for sorting by most recent activity
+            update_ts: lastUpdateTime,
           };
         } catch (error) {
           return null;
         }
-      });
-
-      const conversations = await Promise.all(conversationPromises);
-      // Filter out any null values from failed requests
-      const validConversations = conversations.filter(conv => conv !== null);
-      setConversationId(validConversations as any);
-    } catch (error) {
-      setConversationId([]);
-    }
+      })
+    );
+    return results.filter((c) => c !== null);
   }, []);
 
-  const formatDate = (dateString) => {
-    const options = { year: "numeric" as const, month: "long" as const, day: "numeric" as const}
-    return new Date(dateString).toLocaleDateString(undefined, options)
-  }
+  // Initial / refresh load: latest PAGE_SIZE conversations only.
+  const fetchHistory2 = useCallback(async () => {
+    try {
+      const list = await fetchConvList();
+      setConvList(list);
+      const firstBatch = list.slice(0, PAGE_SIZE);
+      const details = await loadDetails(firstBatch);
+      setConversationId(details as any);
+      setLoadedCount(firstBatch.length);
+    } catch (error) {
+      setConversationId([]);
+      setConvList([]);
+      setLoadedCount(0);
+    }
+  }, [fetchConvList, loadDetails]);
+
+  // "more…": load the next PAGE_SIZE conversations' messages and append.
+  const loadMore = useCallback(async () => {
+    if (loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const nextBatch = convList.slice(loadedCount, loadedCount + PAGE_SIZE);
+      const details = await loadDetails(nextBatch);
+      setConversationId((prev: any[]) => [...prev, ...(details as any[])]);
+      setLoadedCount((c) => c + nextBatch.length);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [convList, loadedCount, loadingMore, loadDetails]);
 
   const handleNewChat = () => {
     conversationManager.startNewConversation();
@@ -357,6 +366,17 @@ const SideMenu = ({
             </div>
           );
         })}
+        {loadedCount < convList.length && (
+          <div className="px-6 py-4">
+            <button
+              onClick={loadMore}
+              disabled={loadingMore}
+              className="text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
+            >
+              {loadingMore ? "Loading…" : `more… (${convList.length - loadedCount} older)`}
+            </button>
+          </div>
+        )}
       </div>
     )
   }
