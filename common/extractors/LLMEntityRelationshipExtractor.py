@@ -422,10 +422,6 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                 "Use the given format to extract information from the "
                 "following input: {input}",
             ),
-            (
-                "human",
-                "Mandatory: Make sure to answer in the correct format, specified here: {format_instructions}",
-            ),
         ]
         if self.allowed_vertex_types or self.allowed_edge_types:
             prompt.append(
@@ -460,10 +456,6 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                 "not include any explanations. "
                 "Use the given format to extract information from the "
                 "following input: {input}",
-            ),
-            (
-                "human",
-                "Mandatory: Make sure to answer in the correct format, specified here: {format_instructions}",
             ),
         ]
         if self.allowed_vertex_types or self.allowed_edge_types:

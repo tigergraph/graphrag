@@ -38,8 +38,10 @@ class CommunitySummarizer:
 
     async def summarize(self, name: str, text: list[str]) -> dict:
         summary_parser = PydanticOutputParser(pydantic_object=CommunitySummary)
+        # The system prompt owns {format_instructions} (see base_llm A1b);
+        # bind it as a partial — do not append it here.
         prompt = PromptTemplate(
-            template=self.llm_service.community_summarize_prompt + "\n{format_instructions}",
+            template=self.llm_service.community_summarize_prompt,
             input_variables=["entity_name", "description_list"],
             partial_variables={"format_instructions": summary_parser.get_format_instructions()},
         )

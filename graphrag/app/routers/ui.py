@@ -1352,6 +1352,41 @@ def migration_status(
         else:
             up_to_date.append(q_name)
 
+    # Prompt-override compatibility: for each split-prompt override present for
+    # this graph, report (a) a legacy full-prompt override that will be ignored
+    # at runtime, (b) placeholder tokens that get stripped, and (c) an LLM check
+    # for lines that override the fixed system rules. Best-effort, never fatal.
+    prompt_issues: dict = {}
+    try:
+        from common.utils.prompt_validation import find_placeholders
+        from common.llm_services.base_llm import LLM_Model
+
+        review_svc = get_llm_service(get_chat_config(graphname))
+        graph_prompt_dir = os.path.join(
+            "configs", "graph_configs", graphname, "prompts"
+        )
+        for fname in LLM_Model._SPLIT_PROMPT_SPEC:
+            p = os.path.join(graph_prompt_dir, fname)
+            if not os.path.exists(p):
+                continue
+            try:
+                raw = open(p, encoding="utf-8").read()
+            except Exception:
+                continue
+            sys_attr, _ = LLM_Model._SPLIT_PROMPT_SPEC[fname]
+            if review_svc._is_legacy_full_prompt(raw, getattr(review_svc, sys_attr)):
+                prompt_issues[fname] = {"legacy_full_prompt": True}
+                continue
+            placeholders = find_placeholders(raw)
+            review = review_svc.review_user_portion_llm(fname, raw)
+            if placeholders or review.get("has_conflict"):
+                prompt_issues[fname] = {
+                    "removed_placeholders": placeholders,
+                    "conflict": review if review.get("has_conflict") else None,
+                }
+    except Exception as e:
+        logger.warning(f"migration_status prompt check failed: {e}")
+
     return {
         "graphname": graphname,
         "queries": {
@@ -1366,7 +1401,8 @@ def migration_status(
             "missing_attributes": {},
             "schema_change_required": False,
         },
-        "needs_repair": bool(outdated) or bool(not_installed),
+        "prompts": prompt_issues,
+        "needs_repair": bool(outdated) or bool(not_installed) or bool(prompt_issues),
     }
 
 
@@ -4573,8 +4609,30 @@ async def get_prompts(
                 (completion_llm, "query_guidance_prompt"),
         }
 
+        # Split prompts expose ONLY the user portion; the system prompt (rules
+        # + runtime placeholders) is hardcoded in base_llm and never returned.
+        _SPLIT_FILE = {
+            "chatbot_response": "chatbot_response.txt",
+            "entity_relationship": "entity_relationship_extraction.txt",
+            "community_summarization": "community_summarization.txt",
+            "schema_extraction": "schema_extraction.txt",
+        }
+
         def _get_prompt(prompt_type: str) -> dict:
             svc, prop = _PROMPT_SOURCE[prompt_type]
+            if prompt_type in _SPLIT_FILE:
+                try:
+                    return {
+                        "editable_content": svc.get_user_portion(
+                            _SPLIT_FILE[prompt_type]
+                        )
+                    }
+                except Exception as exc:
+                    logger.warning(
+                        f"Falling back to empty user portion for {prompt_type}: {exc}"
+                    )
+                    return {"editable_content": ""}
+            # Non-split (query_generation, query_guidance): legacy full-template.
             try:
                 text = getattr(svc, prop, "") or ""
             except Exception as exc:
@@ -4597,7 +4655,7 @@ async def get_prompts(
 
         # Graph-admin (chatbot_only) only sees chatbot_response
         if access_level == "chatbot_only":
-            prompts = {"chatbot_response": prompts.get("chatbot_response", {"editable_content": "", "template_variables": ""})}
+            prompts = {"chatbot_response": prompts.get("chatbot_response", {"editable_content": ""})}
 
         return {
             "prompts": prompts,
@@ -4620,11 +4678,12 @@ async def save_prompts(
     """
     Save customized prompts.
     Expects: {
-        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation",
+        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation|schema_extraction|query_guidance",
         "editable_content": "...",
-        "template_variables": "...",
         "graphname": "..."  (optional - graph-admin users must supply this)
     }
+    For split prompts ``editable_content`` is the user portion only; the system
+    rules are hardcoded and never accepted here.
     """
     try:
         graphname = prompt_data.get("graphname")
@@ -4635,18 +4694,17 @@ async def save_prompts(
         if access_level == "chatbot_only" and prompt_type != "chatbot_response":
             raise HTTPException(status_code=403, detail="Graph admins can only edit the chatbot response prompt.")
         editable_content = prompt_data.get("editable_content")
-        template_variables = prompt_data.get("template_variables", "")
-
-        if not editable_content:
+        if editable_content is None:
             editable_content = prompt_data.get("content")
 
-        if not prompt_type or not editable_content:
-            raise HTTPException(status_code=400, detail="prompt_type and editable_content are required")
+        if not prompt_type:
+            raise HTTPException(status_code=400, detail="prompt_type is required")
 
-        if template_variables:
-            content = editable_content + "\n\n" + template_variables
-        else:
-            content = editable_content
+        # ``template_variables`` is obsolete under the system/user split — the
+        # saved file is the user portion only. An empty user portion is valid
+        # for split prompts (reverts to the default, no additional instructions);
+        # non-split prompts fail the required-placeholder check below.
+        content = editable_content or ""
 
         if graphname:
             # Per-graph: only write the single customized prompt file to the override dir.
@@ -4722,42 +4780,63 @@ async def save_prompts(
         if prompt_type not in prompt_type_to_file:
             raise HTTPException(status_code=400, detail=f"Invalid prompt_type: {prompt_type}")
 
-        # Hard length cap on Query Guidance specifically. It's a
-        # free-form partial that flows into four templates; runaway
-        # content can push the surrounding prompts past the LLM's
-        # context window. 8000 chars ≈ 2K tokens is plenty for
-        # rules + a half-dozen examples while leaving room for
-        # everything else.
-        QUERY_GUIDANCE_MAX_CHARS = 8000
-        if prompt_type == "query_guidance" and len(content) > QUERY_GUIDANCE_MAX_CHARS:
+        from common.utils.prompt_validation import (
+            validate_and_escape_prompt,
+            sanitize_user_portion,
+            find_placeholders,
+            SPLIT_PROMPT_TYPES,
+        )
+
+        # Hard length cap on user-portion prompts (split prompts + the
+        # free-form Query Guidance partial). Runaway content can push the
+        # surrounding hardcoded prompt past the LLM's context window. 8000
+        # chars ≈ 2K tokens is plenty for instructions + a half-dozen examples.
+        USER_PORTION_MAX_CHARS = 8000
+        if (
+            prompt_type in SPLIT_PROMPT_TYPES or prompt_type == "query_guidance"
+        ) and len(content) > USER_PORTION_MAX_CHARS:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Query Guidance is too long ({len(content)} characters); "
-                    f"keep it under {QUERY_GUIDANCE_MAX_CHARS}."
+                    f"Prompt is too long ({len(content)} characters); "
+                    f"keep it under {USER_PORTION_MAX_CHARS}."
                 ),
             )
 
-        # Gatekeepers — escape stray ``{token}`` occurrences (so user
-        # examples like ``{example}`` don't crash str.format at call
-        # time) and reject saves that miss a required placeholder.
-        from common.utils.prompt_validation import validate_and_escape_prompt
-        content, missing = validate_and_escape_prompt(content, prompt_type)
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Prompt is missing required placeholders: "
-                    + ", ".join("{" + m + "}" for m in missing)
-                    + ". Add them to the prompt before saving."
-                ),
-            )
+        removed_placeholders: list = []
+        if prompt_type in SPLIT_PROMPT_TYPES:
+            # Split prompt: the saved file is the user portion only. Detect any
+            # placeholder-style ``{token}`` first (to report back to the user),
+            # then strip them — the system prompt owns all runtime placeholders.
+            removed_placeholders = find_placeholders(content)
+            content = sanitize_user_portion(content)
+        else:
+            # Non-split (query_generation full template, query_guidance): escape
+            # stray ``{token}`` occurrences and reject missing required placeholders.
+            content, missing = validate_and_escape_prompt(content, prompt_type)
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Prompt is missing required placeholders: "
+                        + ", ".join("{" + m + "}" for m in missing)
+                        + ". Add them to the prompt before saving."
+                    ),
+                )
 
         file_path = os.path.join(prompt_path, prompt_type_to_file[prompt_type])
-        temp_file = f"{file_path}.tmp"
-        with open(temp_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(temp_file, file_path)
+        # For a split prompt, an empty user portion means "revert to the shipped
+        # default" — remove the override file so the built-in default user
+        # portion is served, rather than persisting an empty file that would
+        # shadow it.
+        if prompt_type in SPLIT_PROMPT_TYPES and not content.strip():
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        else:
+            temp_file = f"{file_path}.tmp"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(temp_file, file_path)
 
         messages = {
             "chatbot_response": "Chatbot response prompt saved successfully",
@@ -4767,7 +4846,27 @@ async def save_prompts(
             "schema_extraction": "Schema extraction prompt saved successfully",
             "query_guidance": "Query guidance saved successfully",
         }
-        return {"status": "success", "message": messages.get(prompt_type, "Prompt saved successfully")}
+        resp = {"status": "success", "message": messages.get(prompt_type, "Prompt saved successfully")}
+        # Heads-up (non-blocking) for split prompts: (1) which placeholder tokens
+        # were removed, and (2) an LLM check for lines that try to override the
+        # fixed system rules. The save still succeeds — the rules win at answer
+        # time — so the UI can warn and offer the cleaned text.
+        if prompt_type in SPLIT_PROMPT_TYPES:
+            if removed_placeholders:
+                resp["removed_placeholders"] = removed_placeholders
+            if content.strip():
+                try:
+                    review_svc = get_llm_service(get_chat_config(graphname))
+                    review = await asyncio.to_thread(
+                        review_svc.review_user_portion_llm,
+                        prompt_type_to_file[prompt_type],
+                        content,
+                    )
+                    if review.get("has_conflict"):
+                        resp["review"] = review
+                except Exception as exc:
+                    logger.warning(f"prompt conflict review failed: {exc}")
+        return resp
 
     except HTTPException:
         raise

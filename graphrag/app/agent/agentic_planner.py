@@ -48,7 +48,7 @@ Planning rules:
 Tabular / numeric questions (ask for a specific value, a row, a column total, a ranking, or a year-over-year comparison from a table or chart):
 - Prefer graphrag__contextual_search or graphrag__hybrid_search with top_k>=10. These return atomic table chunks (chunk_kind="table") that preserve the full row/column structure.
 - Avoid graphrag__similarity_search alone for these — it returns isolated vectors and often misses the table when the table's surrounding prose isn't a close vector match to the question.
-- Quote any specific table label, column header, year, or unit from the question so the retriever can match it (e.g. "ROE 2023", "預貯金 残高", "従業員数 男性").
+- Quote any specific table label, column header, year, or unit from the question so the retriever can match it (e.g. "ROE 2023", "revenue by region", "headcount by year").
 - When the question is "compare X across years/regions/categories", set top_k>=15 to ensure all relevant rows come back together rather than scattered across calls.
 
 Return ONLY the structured plan.

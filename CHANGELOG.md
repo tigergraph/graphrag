@@ -4,6 +4,7 @@
 
 ### Changed
 - **Structured documents chunk more faithfully.** Markdown and HTML are split with a structure-aware chunker that keeps each section's heading context inside the chunk, rolls small sections up into their parent up to the size budget, and keeps tables intact — including tables nested inside lists — so retrieval and answers hold together on heading- and table-heavy documents.
+- **Prompt customization is additive instead of a full rewrite.** The *Customize Prompts* page now exposes only an editable instructions-and-examples section; the underlying rules are fixed and no longer user-editable, so a customization can extend behavior without accidentally dropping required rules. Pre-existing full-prompt overrides are ignored until re-saved in the new form.
 
 ## [1.4.2]
 
