@@ -42,6 +42,29 @@ def _caller_is_superadmin(credentials) -> bool:
         return False
 
 
+# Response fields returned only when the caller opts in via include_fields.
+# The answer envelope (natural_language_response, answered_question,
+# response_type) is always returned; query_sources carries the heavier
+# retrieval sources / trace.
+_OPTIONAL_RESPONSE_FIELDS = {"query_sources"}
+
+
+def _apply_field_selection(resp: GraphRAGResponse, include_fields) -> GraphRAGResponse:
+    """Trim optional response fields unless explicitly requested.
+
+    By default (``include_fields`` is None/empty) the response carries the
+    answer envelope only. Pass field names (or ``"all"``) to additionally
+    include heavier fields such as ``query_sources``.
+    """
+    requested = {f.strip().lower() for f in (include_fields or []) if f}
+    if "all" in requested:
+        return resp
+    for field in _OPTIONAL_RESPONSE_FIELDS:
+        if field not in requested:
+            setattr(resp, field, None)
+    return resp
+
+
 def check_embedding_store_status():
     """Validate embedding store is ready, raising 503 if not.
 
@@ -106,7 +129,7 @@ def retrieve_answer(
         )
         pmetrics.llm_query_error_total.labels(get_embedding_service().model_name).inc()
 
-    return resp
+    return _apply_field_selection(resp, query.include_fields)
 
 
 conversation_history = []
@@ -194,7 +217,7 @@ def retrieve_answer_with_chathistory(
         )
         pmetrics.llm_query_error_total.labels(get_embedding_service().model_name).inc()
 
-    return resp
+    return _apply_field_selection(resp, query.include_fields)
 
 
 @router.get("/{graphname}/list_registered_queries")

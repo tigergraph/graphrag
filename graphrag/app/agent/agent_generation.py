@@ -42,12 +42,21 @@ class TigerGraphAgentGenerator:
         """
         LogWriter.info(f"request_id={req_id_cv.get()} ENTRY generate_answer")
 
+        # Serialize dict context BEFORE truncation so the token counter
+        # operates on the same string that ultimately reaches the LLM.
+        # Without this the truncation check inspects the dict's repr and
+        # ``json.dumps`` (often 1.5-3x longer for Japanese due to \uXXXX
+        # escaping) silently overflows the model's input window. Keep
+        # ``ensure_ascii=False`` so non-ASCII content stays compact.
+        if isinstance(context, dict):
+            context = json.dumps(context, ensure_ascii=False)
+
         # Truncate context to fit within token limit
         if not self.token_calculator.is_unlimited_tokens():
             # Reserve tokens for question, query, and format instructions (approximately 1000 tokens)
             max_context_tokens = self.token_calculator.get_max_context_tokens() - 1000
 
-            if len(str(context)) > max_context_tokens:
+            if len(context) > max_context_tokens:
                 context_tokens = self.token_calculator.count_tokens(context)
                 if context_tokens > max_context_tokens:
                     context = self.token_calculator.truncate_to_token_limit(context, max_context_tokens)
@@ -61,9 +70,6 @@ class TigerGraphAgentGenerator:
                 "format_instructions": answer_parser.get_format_instructions()
             }
         )
-
-        if isinstance(context, dict):
-            context = json.dumps(context)
 
         try:
             generation = self.llm.invoke_with_parser(

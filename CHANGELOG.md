@@ -2,6 +2,9 @@
 
 ## [2.0.0]
 
+### Added
+- **Query responses can return just the answer.** The query endpoints return the answer alone by default and accept an option to include the supporting sources and trace when a caller needs them.
+
 ### Changed
 - **Structured documents chunk more faithfully.** Markdown and HTML are split with a structure-aware chunker that keeps each section's heading context inside the chunk, rolls small sections up into their parent up to the size budget, and keeps tables intact — including tables nested inside lists — so retrieval and answers hold together on heading- and table-heavy documents.
 - **Prompt customization is additive instead of a full rewrite.** The *Customize Prompts* page now exposes only an editable instructions-and-examples section; the underlying rules are fixed and no longer user-editable, so a customization can extend behavior without accidentally dropping required rules. Pre-existing full-prompt overrides are ignored until re-saved in the new form.
@@ -14,6 +17,7 @@
 - **Large ingests no longer fail on oversized upsert batches.** Upserts are sized to the pending work so very large flushes are not rejected, and progress counts reflect distinct vertices and edges.
 - **Schema lookups resolve correctly on asynchronous request paths.** The schema-version lookup is now awaited where it was previously used without awaiting.
 - **Ingestion resumes after a transient database disconnect.** Files whose load hits a connection error are retried once the database is reachable again (bounded, so a persistent outage fails out rather than hanging), and any that still fail are named so re-running ingest reloads only those — already-loaded documents upsert idempotently.
+- **Non-ASCII answers no longer break when context is large.** Retrieved context is measured against the model's input limit in the same form that is sent to it, so Japanese and other multi-byte content is no longer mis-sized and truncated incorrectly.
 
 ## [1.4.2]
 

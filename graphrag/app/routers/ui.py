@@ -2788,6 +2788,23 @@ def _chat_agent(graphname, conn, use_cypher, mode, value, ws=None):
     )
 
 
+def _select_message_fields(message: Message, include_fields: str | None) -> Message:
+    """Trim optional fields from the response copy of a chat message.
+
+    By default the response carries the answer envelope only. ``include_fields``
+    is a comma-separated list; pass ``query_sources`` (or ``all``) to include the
+    supporting sources / trace. The persisted message keeps the full set
+    regardless — only the returned payload is trimmed.
+    """
+    requested = {f.strip().lower() for f in (include_fields or "").split(",") if f.strip()}
+    if "all" in requested:
+        return message
+    out = message.model_copy()
+    if "query_sources" not in requested:
+        out.query_sources = None
+    return out
+
+
 @router.get(route_prefix + "/{graphname}/query")
 async def graph_query(
     graphname: ValidGraphName,
@@ -2796,6 +2813,7 @@ async def graph_query(
     rag_pattern: str | None = None,
     mode: str | None = None,
     conversation_id: str | None = None,
+    include_fields: str | None = None,
 ):
     is_superadmin = _is_superadmin(creds[0])
     creds = creds[1]
@@ -2859,8 +2877,8 @@ async def graph_query(
         await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, creds.username)
         prev_id = message.message_id
 
-        # reply
-        return message.model_dump_json()
+        # reply — trim to the answer envelope unless extra fields were requested
+        return _select_message_fields(message, include_fields).model_dump_json()
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(

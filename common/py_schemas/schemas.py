@@ -15,7 +15,7 @@
 import enum
 from typing import Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class NaturalLanguageQuery(BaseModel):
@@ -25,6 +25,10 @@ class NaturalLanguageQuery(BaseModel):
     # Single menu value: agent style ("auto"|"planned"|"reactive") when agentic,
     # or retriever ("auto"|<name>) when classic.
     rag_method: Optional[str] = None
+    # Optional response fields beyond the answer. None/empty -> answer only;
+    # name fields (e.g. "query_sources") or "all" to include the supporting
+    # sources / trace in the response.
+    include_fields: Optional[List[str]] = Field(default=None)
 
 
 class SupportAIQuestion(BaseModel):
