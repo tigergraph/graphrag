@@ -188,13 +188,6 @@ def trigger_bedrock_bda(input_uri, output_uri, region, aws_access_key, aws_secre
     try:
         # there is a bug in AWS bedrock, it does not delete projects properly, so here
         # we generate random project name each time below
-        # Delete existing project if it exists
-        # existing_projects = bda_client.list_data_automation_projects()["projects"]
-        # for project in existing_projects:
-        #     if project["projectName"] == "barclays-preprocessing-project":
-        #         bda_client.delete_data_automation_project(projectArn=project["projectArn"])
-        #         time.sleep(2)
-        #         break
         project_stage = "LIVE"
         if not project_arn:
             # Create BDA project
@@ -719,69 +712,128 @@ def ingest(
                 # Ensure loading job exists — recreate if missing (e.g. after schema drop)
                 _ensure_loading_jobs(conn, graphname, loader_info.load_job_id)
 
-                total_doc_count = 0
-                ingested_files = []
+                # A dropped/aborted connection during a load is transient — the
+                # same file loads on retry — so we run a first pass over all
+                # files, then retry the connection-failed ones after a short
+                # wait, rather than silently dropping those documents.
+                _CONN_ERR_MARKERS = (
+                    "connection aborted", "remote end closed", "connection reset",
+                    "connection refused", "remotedisconnected", "server disconnected",
+                    "timed out", "timeout",
+                )
 
-                # Process each JSONL file separately
-                for jsonl_filename in jsonl_files:
+                def _is_conn_error(err: Exception) -> bool:
+                    s = str(err).lower()
+                    return isinstance(err, ConnectionError) or any(m in s for m in _CONN_ERR_MARKERS)
+
+                def _load_one(jsonl_filename: str) -> dict:
+                    """Run the loading job for one file; return its result dict.
+                    Raises on failure so the caller can classify and retry."""
                     jsonl_file = os.path.join(data_path, jsonl_filename)
-                    logger.info(f"Processing JSONL file: {jsonl_filename}")
+                    load_result = conn.runLoadingJobWithFile(jsonl_file, data_source_id, loader_info.load_job_id)
+                    logger.info(f"Loading job raw result for {jsonl_filename}: {load_result}")
+                    valid_lines = rejected_lines = doc_count = 0
+                    if load_result:
+                        for entry in load_result:
+                            stats = entry.get("statistics", {})
+                            parsing = stats.get("parsingStatistics", stats)
+                            file_level = parsing.get("fileLevel", {})
+                            valid_lines += file_level.get("validLine", stats.get("validLine", 0))
+                            rejected_lines += file_level.get("invalidLine", stats.get("invalidLine", 0))
+                            obj_level = parsing.get("objectLevel", stats)
+                            for v in obj_level.get("vertex", []):
+                                if v.get("typeName") == "Document":
+                                    doc_count += v.get("validObject", 0)
+                    if doc_count == 0:
+                        with open(jsonl_file, 'r', encoding='utf-8') as f:
+                            doc_count = sum(1 for line in f if line.strip())
+                    return {
+                        'jsonl_file': jsonl_filename, 'document_count': doc_count,
+                        'valid_lines': valid_lines, 'rejected_lines': rejected_lines,
+                        'status': 'success',
+                    }
 
+                def _tg_reachable() -> bool:
+                    """Lightweight liveness probe — TG answers a ping."""
                     try:
-                        # Load documents directly from file - more memory efficient
-                        load_result = conn.runLoadingJobWithFile(jsonl_file, data_source_id, loader_info.load_job_id)
-                        logger.info(f"Loading job raw result for {jsonl_filename}: {load_result}")
+                        conn.ping()
+                        return True
+                    except Exception:
+                        return False
 
-                        # Parse loading job statistics
-                        valid_lines = 0
-                        rejected_lines = 0
-                        doc_count = 0
-                        if load_result:
-                            for entry in load_result:
-                                stats = entry.get("statistics", {})
-                                parsing = stats.get("parsingStatistics", stats)
-                                file_level = parsing.get("fileLevel", {})
-                                valid_lines += file_level.get("validLine", stats.get("validLine", 0))
-                                rejected_lines += file_level.get("invalidLine", stats.get("invalidLine", 0))
-                                obj_level = parsing.get("objectLevel", stats)
-                                for v in obj_level.get("vertex", []):
-                                    if v.get("typeName") == "Document":
-                                        doc_count += v.get("validObject", 0)
-                        if doc_count == 0:
-                            # Fallback: count lines in JSONL file
-                            with open(jsonl_file, 'r', encoding='utf-8') as f:
-                                doc_count = sum(1 for line in f if line.strip())
-                        total_doc_count += doc_count
-                        ingested_files.append({
-                            'jsonl_file': jsonl_filename,
-                            'document_count': doc_count,
-                            'valid_lines': valid_lines,
-                            'rejected_lines': rejected_lines,
-                            'status': 'success'
-                        })
-                        logger.info(
-                            f"Successfully ingested {doc_count} documents from {jsonl_filename} "
-                            f"(validLine={valid_lines}, rejectedLine={rejected_lines})"
-                        )
+                results_by_file: dict = {}
+                pending = list(jsonl_files)
+                max_attempts = 3
+                reach_poll_s = 5
+                reach_max_wait_s = 120
+                for attempt in range(1, max_attempts + 1):
+                    retry_queue = []
+                    for jsonl_filename in pending:
+                        logger.info(f"Processing JSONL file: {jsonl_filename} (attempt {attempt}/{max_attempts})")
+                        try:
+                            r = _load_one(jsonl_filename)
+                            results_by_file[jsonl_filename] = r
+                            logger.info(
+                                f"Successfully ingested {r['document_count']} documents from {jsonl_filename} "
+                                f"(validLine={r['valid_lines']}, rejectedLine={r['rejected_lines']})"
+                            )
+                        except Exception as file_error:
+                            if _is_conn_error(file_error) and attempt < max_attempts:
+                                logger.warning(
+                                    f"Connection error ingesting {jsonl_filename} "
+                                    f"(attempt {attempt}/{max_attempts}); will retry: {file_error}"
+                                )
+                                retry_queue.append(jsonl_filename)
+                            else:
+                                logger.error(f"Failed to ingest {jsonl_filename}: {file_error}")
+                                results_by_file[jsonl_filename] = {
+                                    'jsonl_file': jsonl_filename, 'status': 'failed', 'error': str(file_error),
+                                }
+                    if not retry_queue:
+                        break
+                    pending = retry_queue
+                    # Wait for TG to become reachable again before retrying,
+                    # rather than sleeping a fixed interval. Bounded so a
+                    # persistently-down instance fails out (and the caller can
+                    # resume) instead of waiting forever.
+                    logger.info(
+                        f"Retrying {len(pending)} file(s) once TigerGraph is reachable "
+                        f"(up to {reach_max_wait_s}s): {', '.join(pending)}"
+                    )
+                    waited = 0
+                    while not _tg_reachable() and waited < reach_max_wait_s:
+                        time.sleep(reach_poll_s)
+                        waited += reach_poll_s
 
-                    except Exception as file_error:
-                        logger.error(f"Failed to ingest {jsonl_filename}: {file_error}")
-                        ingested_files.append({
-                            'jsonl_file': jsonl_filename,
-                            'status': 'failed',
-                            'error': str(file_error)
-                        })
+                ingested_files = [results_by_file[f] for f in jsonl_files]
+                total_doc_count = sum(
+                    r.get('document_count', 0) for r in ingested_files if r.get('status') == 'success'
+                )
                 # Keep temp files for potential re-ingestion (faster, no need to re-process PDFs/images)
                 # Files will be cleaned up when user deletes source files via delete endpoints
                 logger.info(f"Ingestion complete. Temp files preserved at: {data_path}")
                     
             except Exception as e:
                 raise Exception(f"Error during server markdown extraction and TigerGraph loading: {e}")
+            failed_files = [r["jsonl_file"] for r in ingested_files if r.get("status") != "success"]
+            n_ok = len(jsonl_files) - len(failed_files)
+            if failed_files:
+                # Bounded retry exhausted — surface the shortfall so the caller
+                # knows the graph is incomplete and can resume (re-running ingest
+                # re-loads only these; already-loaded docs upsert idempotently).
+                summary = (
+                    f"Ingested {total_doc_count} document(s) from {n_ok} of {len(jsonl_files)} files; "
+                    f"{len(failed_files)} failed — re-run ingest to resume: {', '.join(failed_files)}"
+                )
+                logger.error(summary)
+            else:
+                summary = f"Successfully ingested {total_doc_count} documents from {len(jsonl_files)} JSONL files"
             return {
                 "job_name": loader_info.load_job_id,
-                "summary": f"Successfully ingested {total_doc_count} documents from {len(jsonl_files)} JSONL files",
+                "summary": summary,
                 "document_count": total_doc_count,
-                "ingested_files": ingested_files
+                "failed_files": failed_files,
+                "ingested_files": ingested_files,
             }
         else:
             raise Exception("Data source and file format combination not implemented")
