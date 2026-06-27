@@ -1328,17 +1328,17 @@ const KGAdmin = () => {
             </div>
           </div>
 
-          {/* Compatibility Check Card */}
+          {/* Migration Assistant Card */}
           <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
             <div className="mb-4">
               <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
                 <Wrench className="h-6 w-6 text-tigerOrange" />
               </div>
               <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
-                Compatibility Check
+                Migration Assistant
               </h2>
               <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
-                Check an existing graph against the current release and repair any drifted queries.
+                Check an existing graph against the current release — repair drifted queries and review prompt-override compatibility.
               </p>
             </div>
             <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
@@ -1351,7 +1351,7 @@ const KGAdmin = () => {
                 className="gradient w-full text-white"
               >
                 <Wrench className="h-4 w-4 mr-2" />
-                Check Compatibility
+                Open Migration Assistant
               </Button>
             </div>
           </div>
@@ -2705,7 +2705,7 @@ const KGAdmin = () => {
           </DialogContent>
         </Dialog>
 
-        {/* Compatibility / Migration Dialog */}
+        {/* Migration Assistant Dialog */}
         <Dialog open={migrationDialogOpen} onOpenChange={setMigrationDialogOpen}>
           <DialogContent
             className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
@@ -2713,11 +2713,11 @@ const KGAdmin = () => {
           >
             <DialogHeader>
               <DialogTitle className="text-black dark:text-white">
-                Compatibility Check
+                Migration Assistant
               </DialogTitle>
               <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
-                Verify that an existing graph's installed GSQL queries match the current release.
-                Use this after upgrading graphrag to repair any drifted queries without recreating the graph.
+                Check an existing graph against the current release after upgrading graphrag:
+                repair drifted GSQL queries and review prompt-override compatibility — without recreating the graph.
               </DialogDescription>
             </DialogHeader>
 

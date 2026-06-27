@@ -134,23 +134,59 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
                 </Button>
               </DropdownMenuTrigger>
 
-              <DropdownMenuContent className="w-56">
-                <DropdownMenuLabel>Agent</DropdownMenuLabel>
+              <DropdownMenuContent className="w-72">
+                <DropdownMenuLabel className="flex items-center gap-2 px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                  <span className="text-sm">🤖</span> Agent
+                </DropdownMenuLabel>
                 <DropdownMenuGroup>
-                  {[["Auto", "auto"], ["Planned", "planned"], ["Reactive", "reactive"]].map(([label, value]) => (
-                    <DropdownMenuItem key={"agent-" + value} onSelect={() => handleSelectMode("agentic", value)}>
-                      <span>{label}</span>
-                    </DropdownMenuItem>
-                  ))}
+                  {[
+                    ["Auto", "auto", "Use the graph's configured strategy"],
+                    ["Planned", "planned", "Plan all steps up front, then retrieve"],
+                    ["Reactive", "reactive", "Decide each step as it goes"],
+                  ].map(([label, value, desc]) => {
+                    const active = chatMode === "agentic" && ragPattern === value;
+                    return (
+                      <DropdownMenuItem
+                        key={"agent-" + value}
+                        onSelect={() => handleSelectMode("agentic", value)}
+                        className="flex flex-col items-start gap-0.5 py-2 pl-4 pr-2"
+                      >
+                        <span className="flex w-full items-center justify-between text-sm">
+                          <span className={active ? "font-semibold" : "font-medium"}>{label}</span>
+                          {active && <span className="text-xs">✓</span>}
+                        </span>
+                        <span className="text-xs text-gray-500 dark:text-gray-400">{desc}</span>
+                      </DropdownMenuItem>
+                    );
+                  })}
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
-                <DropdownMenuLabel>Classic</DropdownMenuLabel>
+                <DropdownMenuLabel className="flex items-center gap-2 px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                  <span className="text-sm">🔍</span> Classic
+                </DropdownMenuLabel>
                 <DropdownMenuGroup>
-                  {["Auto", "Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
-                    <DropdownMenuItem key={"classic-" + i} onSelect={() => handleSelectMode("classic", f)}>
-                      <span>{f}</span>
-                    </DropdownMenuItem>
-                  ))}
+                  {[
+                    ["Auto", "Auto pick a retriever per question"],
+                    ["Similarity Search", "Vector similarity over chunks"],
+                    ["Contextual Search", "Similarity plus surrounding chunks"],
+                    ["Hybrid Search", "Vector search plus graph traversal"],
+                    ["Community Search", "Summaries over graph communities"],
+                  ].map(([f, desc]) => {
+                    const active = chatMode === "classic" && ragPattern === f;
+                    return (
+                      <DropdownMenuItem
+                        key={"classic-" + f}
+                        onSelect={() => handleSelectMode("classic", f)}
+                        className="flex flex-col items-start gap-0.5 py-2 pl-4 pr-2"
+                      >
+                        <span className="flex w-full items-center justify-between text-sm">
+                          <span className={active ? "font-semibold" : "font-medium"}>{f}</span>
+                          {active && <span className="text-xs">✓</span>}
+                        </span>
+                        <span className="text-xs text-gray-500 dark:text-gray-400">{desc}</span>
+                      </DropdownMenuItem>
+                    );
+                  })}
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>

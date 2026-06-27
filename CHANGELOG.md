@@ -12,6 +12,7 @@
 - **Retrieval matches table-heavy and numeric content more reliably.** Each chunk is embedded together with a compact summary of its topic, section, and key entities, so dense vectors carry that context explicitly — improving answers on documents where the raw text alone embeds poorly.
 
 - **Query installation is more reliable on large graphs.** Graph queries install through a non-blocking request with status polling instead of one long call, so initialization no longer fails on a gateway timeout while queries compile.
+- **Chat and admin UI refinements.** The chat engine/style picker is clearer, older conversations can be cleared in bulk, the graph *Compatibility Check* is renamed *Migration Assistant*, and a rendering glitch that clipped the bottoms of letters in text inputs is fixed.
 
 ### Fixed
 - **A single oversized chunk no longer drops embeddings for the rest of a batch.** Embeddings that exceed the provider's input limit are retried at progressively shorter lengths, and a vertex that still doesn't fit is skipped individually instead of aborting the batch; similarity search ignores vertices without an embedding.

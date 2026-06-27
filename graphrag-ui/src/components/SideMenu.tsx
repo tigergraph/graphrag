@@ -54,6 +54,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { FaPaperclip } from "react-icons/fa6";
 import { useCallback } from "react";
 import { conversationManager } from "../actions/ActionProvider";
+import { useConfirm } from "@/hooks/useConfirm";
 import { useNavigate } from "react-router-dom";
 
 // TODO make dynamic
@@ -84,6 +85,8 @@ const SideMenu = ({
   const [convList, setConvList] = useState<any[]>([]);
   const [loadedCount, setLoadedCount] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [confirm, confirmDialog] = useConfirm();
   // Fade + disable the side menu (conversation list + New Chat) while
   // the chat is streaming an answer, so the user can't unmount Chat by
   // switching conversations mid-response.
@@ -193,6 +196,39 @@ const SideMenu = ({
       setLoadingMore(false);
     }
   }, [convList, loadedCount, loadingMore, loadDetails]);
+
+  // Delete the older (not-yet-loaded) conversations. Done in small concurrent
+  // batches so clearing a long history can't itself flood the browser.
+  const clearOlder = useCallback(async () => {
+    const n = convList.length - loadedCount;
+    if (n <= 0) return;
+    const ok = await confirm(
+      `Delete ${n} older conversation${n === 1 ? "" : "s"}?\n\n` +
+        `This permanently removes them and cannot be undone.`
+    );
+    if (!ok) return;
+    setClearing(true);
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const settings = {
+        method: "DELETE",
+        headers: { Authorization: creds!, "Content-Type": "application/json" },
+      };
+      const older = convList.slice(loadedCount);
+      const BATCH = 5;
+      for (let i = 0; i < older.length; i += BATCH) {
+        const chunk = older.slice(i, i + BATCH);
+        await Promise.all(
+          chunk.map((c: any) =>
+            fetch(`${WS_CONVO_URL}/${c.conversation_id}`, settings).catch(() => {})
+          )
+        );
+      }
+      setConvList((prev: any[]) => prev.slice(0, loadedCount));
+    } finally {
+      setClearing(false);
+    }
+  }, [convList, loadedCount, confirm]);
 
   const handleNewChat = () => {
     conversationManager.startNewConversation();
@@ -367,13 +403,20 @@ const SideMenu = ({
           );
         })}
         {loadedCount < convList.length && (
-          <div className="px-6 py-4">
+          <div className="px-6 py-4 flex items-center justify-between gap-3">
             <button
               onClick={loadMore}
-              disabled={loadingMore}
+              disabled={loadingMore || clearing}
               className="text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
             >
               {loadingMore ? "Loading…" : `more… (${convList.length - loadedCount} older)`}
+            </button>
+            <button
+              onClick={clearOlder}
+              disabled={clearing}
+              className="text-sm text-gray-400 hover:text-red-600 dark:text-gray-500 dark:hover:text-red-400 disabled:opacity-50"
+            >
+              {clearing ? "Clearing…" : "Clear older"}
             </button>
           </div>
         )}
@@ -630,6 +673,8 @@ const SideMenu = ({
       </h1>
 
       {renderConvoHistory()}
+
+      {confirmDialog}
 
       {/* <div
         className={`hidden md:block w-[320px] md:max-w-[320px] absolute bg-white dark:bg-background dark:border-[#3D3D3D] rounded-bl-3xl border-t ${height ? "open-dialog-avatar" : "bottom-0"}`}
