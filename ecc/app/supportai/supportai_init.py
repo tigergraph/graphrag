@@ -170,7 +170,7 @@ async def extract(
         async for item in extract_chan:
             if entity_extraction_switch:
                 sp.create_task(
-                    workers.extract(upsert_chan, extractor, conn, *item)
+                    workers.extract(upsert_chan, embed_chan, extractor, conn, *item)
                 )
 
     logger.info(f"extract done")

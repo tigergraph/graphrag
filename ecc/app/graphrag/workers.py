@@ -114,9 +114,13 @@ async def chunk_doc(
             logger.debug("chunk writes to extract_chan")
             await extract_chan.put((chunk, chunk_id))
 
-            # send chunks to be embedded
-            logger.debug("chunk writes to embed_chan")
-            await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
+            # When extraction is enabled the extract worker pushes the
+            # summary-augmented embed message itself (Contextual Retrieval),
+            # so only embed the raw chunk here when extraction is off.
+            from common.config import entity_extraction_switch
+            if not entity_extraction_switch:
+                logger.debug("chunk writes to embed_chan (no extraction)")
+                await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
 
     return v_id
 
@@ -239,6 +243,7 @@ extract_sem = asyncio.Semaphore(util._worker_concurrency)
 
 async def extract(
     upsert_chan: Channel,
+    embed_chan: Channel,
     extractor: BaseExtractor,
     conn: AsyncTigerGraphConnection,
     chunk: str,
@@ -259,6 +264,21 @@ async def extract(
         except Exception as e:
             logger.error(f"Failed to extract chunk {chunk_id}: {e}")
             extracted = []
+
+        # Contextual Retrieval: the extractor's LLM call also produces a
+        # compact ``chunk_summary`` (carried on ``source.metadata`` of the
+        # first GraphDocument). Embed ``summary + raw chunk`` so dense
+        # vectors carry the chunk's topic / entities explicitly — improves
+        # retrieval on table-heavy and numeric content where raw text embeds
+        # poorly. When extraction is enabled the chunk/residual workers skip
+        # their own embed push, so this is the sole embed for the chunk;
+        # an empty summary falls back to embedding the raw chunk.
+        chunk_summary = ""
+        if extracted:
+            md = getattr(extracted[0].source, "metadata", None) or {}
+            chunk_summary = (md.get("chunk_summary") or "").strip()
+        embed_input = (chunk_summary + "\n\n" + str(chunk)) if chunk_summary else str(chunk)
+        await embed_chan.put((chunk_id, embed_input, "DocumentChunk"))
 
         # Schema-aware ingest helpers — derive case-insensitive
         # lookups from the extractor once per chunk so the loops below
