@@ -40,7 +40,7 @@ import logging
 import os
 from typing import Annotated, List, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
 from fastapi.security import HTTPBasicCredentials
 
 from common.config import (
@@ -49,7 +49,7 @@ from common.config import (
     validate_graphname,
     get_mcp_servers,
 )
-from common.mcp_config import McpServerSpec
+from common.mcp_config import McpServerSpec, MCP_LIB_DIR, ensure_libraries_installed
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,7 @@ async def list_global_mcp_servers(
     creds: Annotated[HTTPBasicCredentials, Depends(_ui_creds())],
 ):
     """Global MCP servers (env/headers masked)."""
+    _require_roles(creds, {"superuser"})
     raw = _read_global()
     return {"status": "success", "data": [_redact_spec(s) for s in raw]}
 
@@ -229,6 +230,7 @@ async def list_pergraph_mcp_servers(
     creds: Annotated[HTTPBasicCredentials, Depends(_ui_creds())],
 ):
     """Per-graph MCP-server overrides (env/headers masked)."""
+    _require_roles(creds, {"superuser"})
     raw = _read_pergraph(graphname)
     return {"status": "success", "data": [_redact_spec(s) for s in raw]}
 
@@ -240,7 +242,7 @@ async def replace_pergraph_mcp_servers(
     body: list = Body(...),
 ):
     """Replace the per-graph MCP-server override list for ``graphname``."""
-    _require_roles(creds, {"superuser", "globaldesigner"})
+    _require_roles(creds, {"superuser"})
     stored = {s.get("name"): s for s in _read_pergraph(graphname) if isinstance(s, dict)}
     unmasked = [_unmask_spec(s, stored) for s in body]
     canonical = _validate_specs(unmasked)
@@ -261,6 +263,7 @@ async def resolved_pergraph_mcp_servers(
     with per-graph overrides applied, tombstones removed). Used by the UI
     to show what the agent will actually see.
     """
+    _require_roles(creds, {"superuser"})
     specs = get_mcp_servers(graphname)
     data = [_redact_spec(s.model_dump()) for s in specs]
     return {"status": "success", "data": data}
@@ -279,7 +282,7 @@ async def test_mcp_server(
     saved spec by the same ``name``, so the UI can test an edit without
     re-typing secrets.
     """
-    _require_roles(creds, {"superuser", "globaldesigner"})
+    _require_roles(creds, {"superuser"})
 
     name = body.get("name")
     stored = {s.get("name"): s for s in _read_global() if isinstance(s, dict)}
@@ -288,6 +291,10 @@ async def test_mcp_server(
         spec = McpServerSpec(**unmasked)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"invalid spec: {exc}")
+
+    # Install the server's tarball (if any) before probing, so a just-uploaded
+    # stdio server's console-script command exists when we launch it.
+    ensure_libraries_installed([spec])
 
     from mcp_addons import McpClientManager, run_async
 
@@ -314,3 +321,34 @@ async def test_mcp_server(
 
     result = await run_async(_probe())
     return {"status": "success", "data": result}
+
+
+@router.post(f"{route_prefix}/mcp_servers/library")
+async def upload_mcp_library(
+    creds: Annotated[HTTPBasicCredentials, Depends(_ui_creds())],
+    file: UploadFile = File(...),
+):
+    """Upload a source tarball (.tar.gz / .tgz) for an stdio MCP server into
+    the fixed ``configs/mcp_servers/`` folder. Returns the stored filename to
+    drop into the server's ``path`` field; GraphRAG pip-installs it on start.
+
+    Superuser only — the tarball is executed inside the GraphRAG server.
+    """
+    _require_roles(creds, {"superuser"})
+    filename = os.path.basename(file.filename or "").strip()
+    if not filename:
+        raise HTTPException(status_code=400, detail="missing filename")
+    if not (filename.endswith(".tar.gz") or filename.endswith(".tgz")):
+        raise HTTPException(status_code=400, detail="only .tar.gz / .tgz tarballs are accepted")
+    os.makedirs(MCP_LIB_DIR, exist_ok=True)
+    dest = os.path.join(MCP_LIB_DIR, filename)
+    try:
+        data = await file.read()
+        tmp = f"{dest}.tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, dest)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"upload failed: {exc}")
+    logger.info(f"uploaded MCP server library: {dest}")
+    return {"status": "success", "path": filename}

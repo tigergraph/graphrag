@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { Plus, Save, Loader2, Trash2, Pencil, PlugZap, Server, ChevronDown, ChevronRight } from "lucide-react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
+import { Plus, Save, Loader2, Trash2, Pencil, PlugZap, Server, ChevronDown, ChevronRight, Upload } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,6 +24,7 @@ interface McpServer {
   command: string;
   args: string[];
   env: Record<string, string>;
+  path: string;
   url: string;
   headers: Record<string, string>;
   forward_user: boolean;
@@ -33,13 +34,14 @@ interface McpServer {
 
 const emptyServer = (): McpServer => ({
   name: "",
-  transport: "stdio",
+  transport: "http",
   enabled: true,
   description: "",
   purpose: "",
   command: "",
   args: [],
   env: {},
+  path: "",
   url: "",
   headers: {},
   forward_user: false,
@@ -61,6 +63,25 @@ const isSpecComplete = (s: McpServer): boolean => {
   if (!s.name.trim()) return false;
   if (s.transport === "stdio") return s.command.trim().length > 0;
   return s.url.trim().length > 0;
+};
+
+// Turn raw backend / OS / Pydantic errors into something a user can act on.
+const humanizeMcpError = (raw: string): string => {
+  if (!raw) return "Unknown error.";
+  const notFound = raw.match(/No such file or directory:\s*'([^']+)'/);
+  if (notFound || raw.includes("[Errno 2]")) {
+    return notFound
+      ? `Command not found: "${notFound[1]}". Check the command path or that it's installed.`
+      : "Command not found. Check the command path.";
+  }
+  if (/permission denied/i.test(raw)) return "Permission denied launching the command.";
+  if (/Connection refused|ECONNREFUSED|getaddrinfo|Name or service not known|Failed to establish|timed out|timeout/i.test(raw))
+    return "Couldn't reach the server URL. Check the address and that the server is running.";
+  if (/string_too_short|at least 1 character|[Ff]ield required/.test(raw))
+    return "A required field is empty. Fill in the name and the command or URL.";
+  if (/validation error/i.test(raw)) return "Some fields are invalid. Check the required fields.";
+  // Drop Pydantic's doc-link noise and over-long dumps.
+  return raw.split("For further information")[0].trim().slice(0, 300);
 };
 
 // ---- KvEditor / ListEditor / EditForm — extracted to module scope so
@@ -167,10 +188,40 @@ const ListEditor: React.FC<ListEditorProps> = ({ label, value, onChange, placeho
 interface EditFormProps {
   server: McpServer;
   onPatch: (patch: Partial<McpServer>) => void;
-  onClose: () => void;
+  onSave: () => void;
+  onCancel: () => void;
+  isSaving: boolean;
+  testPassed: boolean;
 }
 
-const EditForm: React.FC<EditFormProps> = ({ server: s, onPatch, onClose }) => {
+const EditForm: React.FC<EditFormProps> = ({ server: s, onPatch, onSave, onCancel, isSaving, testPassed }) => {
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const handleUploadLibrary = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const fd = new FormData();
+      fd.append("file", file);
+      const resp = await fetch("/ui/mcp_servers/library", {
+        method: "POST",
+        headers: { Authorization: creds! },   // let the browser set the multipart boundary
+        body: fd,
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data?.detail || `HTTP ${resp.status}`);
+      onPatch({ path: data.path });            // auto-fill the field with the stored filename
+    } catch (err: any) {
+      alert(`Upload failed: ${err.message}`);
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
+
   return (
     <div className="mt-4 p-4 bg-white dark:bg-shadeA rounded-md border border-gray-300 dark:border-[#3D3D3D] space-y-4">
       <div className="grid grid-cols-2 gap-4">
@@ -191,8 +242,8 @@ const EditForm: React.FC<EditFormProps> = ({ server: s, onPatch, onClose }) => {
           >
             <SelectTrigger className={inputDark}><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="stdio">stdio (subprocess)</SelectItem>
-              <SelectItem value="http">http (streamable)</SelectItem>
+              <SelectItem value="http">http (streamable — recommended)</SelectItem>
+              <SelectItem value="stdio">stdio (subprocess in the container)</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -221,12 +272,56 @@ const EditForm: React.FC<EditFormProps> = ({ server: s, onPatch, onClose }) => {
 
       {s.transport === "stdio" ? (
         <>
+          <div className="flex items-start gap-2 p-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 text-xs text-amber-700 dark:text-amber-300">
+            <span className="mt-0.5 shrink-0">ℹ️</span>
+            <span>
+              stdio runs the server <strong>inside GraphRAG</strong>. Give the path to its source
+              tarball below — GraphRAG installs it so the <strong>Command</strong> (the package's
+              console script) is available. See the MCP server setup guide for more details. To run
+              the server yourself instead, use <strong>HTTP</strong>.
+            </span>
+          </div>
+          <div>
+            <label className={labelClass}>Library tarball</label>
+            <div className="flex gap-2">
+              <Input
+                value={s.path}
+                onChange={(e) => onPatch({ path: e.target.value })}
+                placeholder="my_server-1.0.tar.gz"
+                className={`${inputDark} flex-1`}
+              />
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".tar.gz,.tgz,application/gzip"
+                className="hidden"
+                onChange={handleUploadLibrary}
+              />
+              <Button
+                type="button"
+                size="sm"
+                disabled={uploading}
+                onClick={() => fileRef.current?.click()}
+                className="shrink-0 gradient text-white"
+              >
+                {uploading
+                  ? <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                  : <Upload className="h-4 w-4 mr-1" />}
+                {uploading ? "Uploading…" : "Upload"}
+              </Button>
+            </div>
+            <p className={helpClass}>
+              A <code>.tar.gz</code> GraphRAG installs so the command below exists. Upload one (the
+              field fills in) or enter a filename already in the server's library folder. Leave blank
+              if the command is already installed.
+            </p>
+          </div>
           <div>
             <label className={labelClass}>Command</label>
             <Input
               value={s.command}
               onChange={(e) => onPatch({ command: e.target.value })}
-              placeholder="e.g. npx"
+              placeholder="e.g. tigergraph-mcp (console command the package provides)"
               className={inputDark}
             />
           </div>
@@ -234,7 +329,7 @@ const EditForm: React.FC<EditFormProps> = ({ server: s, onPatch, onClose }) => {
             label="Args (comma-separated)"
             value={s.args}
             onChange={(next) => onPatch({ args: next })}
-            placeholder="-y, @modelcontextprotocol/server-weather"
+            placeholder="e.g. -vv"
           />
           <KvEditor
             label="Env"
@@ -308,8 +403,33 @@ const EditForm: React.FC<EditFormProps> = ({ server: s, onPatch, onClose }) => {
         onChange={(next) => onPatch({ allowed_tools: next.length ? next : ["*"] })}
       />
 
-      <div className="flex justify-end gap-2 pt-2 border-t border-gray-300 dark:border-[#3D3D3D]">
-        <Button variant="outline" onClick={onClose}>Done</Button>
+      <div className="flex items-center justify-end gap-3 pt-2 border-t border-gray-300 dark:border-[#3D3D3D]">
+        {!testPassed && (
+          <span className="mr-auto text-xs text-gray-500 dark:text-gray-400">
+            Run a successful Test before saving.
+          </span>
+        )}
+        <Button variant="outline" onClick={onCancel} className="dark:border-[#3D3D3D]">
+          Cancel
+        </Button>
+        <Button
+          onClick={onSave}
+          disabled={isSaving || !testPassed}
+          title={!testPassed ? "Test the connection successfully before saving" : undefined}
+          className="gradient text-white"
+        >
+          {isSaving ? (
+            <>
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              Saving...
+            </>
+          ) : (
+            <>
+              <Save className="h-4 w-4 mr-2" />
+              Save
+            </>
+          )}
+        </Button>
       </div>
     </div>
   );
@@ -392,6 +512,14 @@ const McpServersConfig: React.FC = () => {
 
   const patchRow = useCallback((idx: number, patch: Partial<McpServer>) => {
     setServers((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
+    // Editing invalidates any prior test result, so the user must re-test
+    // before saving.
+    setTestResults((p) => {
+      if (!(idx in p)) return p;
+      const c = { ...p };
+      delete c[idx];
+      return c;
+    });
   }, []);
 
   const removeRow = useCallback((idx: number) => {
@@ -411,6 +539,22 @@ const McpServersConfig: React.FC = () => {
   // -- save ------------------------------------------------------------------
 
   const handleSave = async () => {
+    // Validate up front so the user gets a clear message instead of a raw
+    // backend validation dump.
+    const incomplete = servers
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => !isSpecComplete(s));
+    if (incomplete.length) {
+      const who = incomplete
+        .map(({ s, i }) => (s.name.trim() ? `"${s.name.trim()}"` : `#${i + 1}`))
+        .join(", ");
+      setMessage(
+        `Please complete the required fields (name, and command or URL) for ` +
+          `${incomplete.length === 1 ? "server" : "servers"}: ${who}`
+      );
+      setMessageType("error");
+      return false;
+    }
     setIsSaving(true);
     setMessage("");
     setMessageType("");
@@ -433,9 +577,11 @@ const McpServersConfig: React.FC = () => {
       setMessageType("success");
       await loadServers(configScope, selectedGraph);
       setTimeout(() => { setMessage(""); setMessageType(""); }, 3000);
+      return true;
     } catch (e: any) {
-      setMessage(`Save failed: ${e.message}`);
+      setMessage(`Save failed: ${humanizeMcpError(e.message)}`);
       setMessageType("error");
+      return false;
     } finally {
       setIsSaving(false);
     }
@@ -457,9 +603,11 @@ const McpServersConfig: React.FC = () => {
         throw new Error(err?.detail || `HTTP ${resp.status}`);
       }
       const data = await resp.json();
-      setTestResults((p) => ({ ...p, [idx]: data?.data || { ok: false, error: "no data" } }));
+      const result = data?.data || { ok: false, error: "no data" };
+      if (!result.ok && result.error) result.error = humanizeMcpError(result.error);
+      setTestResults((p) => ({ ...p, [idx]: result }));
     } catch (e: any) {
-      setTestResults((p) => ({ ...p, [idx]: { ok: false, error: e.message } }));
+      setTestResults((p) => ({ ...p, [idx]: { ok: false, error: humanizeMcpError(e.message) } }));
     } finally {
       setTestingIndex(null);
     }
@@ -507,14 +655,8 @@ const McpServersConfig: React.FC = () => {
                 : `${servers.length} server${servers.length === 1 ? "" : "s"} configured`}
             </div>
             <div className="flex gap-2">
-              <Button variant="outline" onClick={addRow} disabled={isLoading}>
-                <Plus size={16} className="mr-1" /> Add server
-              </Button>
-              <Button onClick={handleSave} disabled={isSaving || isLoading}>
-                {isSaving
-                  ? <Loader2 className="mr-1 animate-spin" size={16} />
-                  : <Save size={16} className="mr-1" />}
-                Save
+              <Button variant="outline" size="sm" onClick={addRow} disabled={isLoading} className="dark:border-[#3D3D3D]">
+                <Plus className="h-4 w-4 mr-2" /> Add server
               </Button>
             </div>
           </div>
@@ -620,7 +762,10 @@ const McpServersConfig: React.FC = () => {
                   <EditForm
                     server={s}
                     onPatch={(patch) => patchRow(idx, patch)}
-                    onClose={() => setEditingIndex(null)}
+                    onSave={async () => { const ok = await handleSave(); if (ok) setEditingIndex(null); }}
+                    onCancel={() => removeRow(idx)}
+                    isSaving={isSaving}
+                    testPassed={!!testResults[idx]?.ok}
                   />
                 )}
               </div>

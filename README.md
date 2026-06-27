@@ -32,6 +32,7 @@
   - [DB configuration](#db-configuration)
   - [GraphRAG configuration](#graphrag-configuration)
   - [Chat History Configuration](#chat-history-configuration)
+  - [MCP servers (agentic tools)](#mcp-servers-agentic-tools)
   - [LLM provider configuration](#llm-provider-configuration)
     - [Supported parameters](#supported-parameters)
     - [Provider examples](#provider-examples)
@@ -525,6 +526,60 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
     }
 }
 ```
+
+[Go back to top](#top)
+
+
+### MCP servers (agentic tools)
+The agentic chat engine can call external [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers as extra tools. Configure them on the **Setup → Server Configuration → MCP Servers** page (**superuser only**). Each server has a **Test** button that connects exactly as the engine will and lists its tools; a server can only be **Saved** after its test passes.
+
+#### Fields
+
+| Field | Applies to | What it is | Example |
+|---|---|---|---|
+| **Name** | both | Unique label; also the planner's tool prefix (`<name>.<tool>`). No dots. | `weather` |
+| **Transport** | both | `http` (recommended) or `stdio`. | `http` |
+| **URL** | http | The server's streamable HTTP endpoint. | `https://mcp.example.com/mcp` |
+| **Headers** | http | Static headers sent on every request (e.g. auth). Stored masked. | `Authorization` = `Bearer abc123` |
+| **Library tarball** | stdio | Filename of a `.tar.gz` in `configs/mcp_servers/` that GraphRAG installs. | `weather_mcp-1.0.tar.gz` |
+| **Command** | stdio | The console script the installed package provides, or `python`. | `weather-mcp` |
+| **Args** | stdio | Arguments passed to the command. | `-vv` |
+| **Env** | stdio | Environment variables for the subprocess. Stored masked. | `WEATHER_API_KEY` = `…` |
+| **Allowed tools** | both | Globs of tool names to expose (default `*`). | `get_*, list_*` |
+| **Enabled** | both | Off hides the server (and, per-graph, suppresses a same-named global one). | `true` |
+| **Forward user** | both | Send the signed-in username to the server (via MCP `_meta`). | `false` |
+
+#### HTTP (recommended)
+The MCP server is an **external resource you run and manage yourself** — GraphRAG only needs its URL.
+
+Example — a hosted server that needs an API key:
+- **Transport**: `http`
+- **URL**: `https://mcp.example.com/mcp`  *(for a server on the same host as GraphRAG, use `http://host.docker.internal:9000/mcp`)*
+- **Headers**: `Authorization` = `Bearer abc123`
+
+Click **Test**, then **Save**. Nothing runs inside the GraphRAG container.
+
+#### stdio (Python server run by GraphRAG)
+Provide the server as a **source tarball** (`.tar.gz`); GraphRAG installs it (with its dependencies) and launches it by the **console script** the package ships.
+
+1. Get the server's `.tar.gz` — build it with `python -m build` (produces `dist/<name>-<ver>.tar.gz`) or download the sdist from PyPI.
+2. In **MCP Servers → Add server**, set **Transport** = `stdio`, then either:
+   - click **Upload** next to *Library tarball* to upload the `.tar.gz` (the field auto-fills with its filename), **or**
+   - copy the `.tar.gz` into `configs/mcp_servers/` on the host and type the filename in the field.
+3. Fill the remaining fields, then **Test** (GraphRAG installs the tarball, launches the command, lists its tools) and **Save**.
+
+Example — a packaged `weather-mcp` server:
+- **Transport**: `stdio`
+- **Library tarball**: `weather_mcp-1.0.tar.gz`
+- **Command**: `weather-mcp`  *(the console script the package registers; if it has none, use **Command** `python` + **Args** `-m, weather_mcp`)*
+- **Args**: `-vv`
+- **Env**: `WEATHER_API_KEY` = `…`
+
+GraphRAG re-installs the configured tarballs on startup (only those referenced by the MCP config), so they persist across restarts. Uploading is **superuser-only**, since the package runs inside the GraphRAG server.
+
+> Only **Python** servers run under stdio (GraphRAG bundles Python + the MCP SDK). For a server needing another runtime — e.g. a Node `npx` server — run it yourself and connect over **HTTP**.
+
+Servers added under a specific graph override global ones with the same name; setting a per-graph entry to *disabled* suppresses a same-named global server.
 
 [Go back to top](#top)
 

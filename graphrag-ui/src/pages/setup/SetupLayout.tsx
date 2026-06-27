@@ -49,7 +49,7 @@ const SetupLayout = () => {
         ...(isSuperuser ? [{ title: "Graph Database Config", path: "/setup/server-config/graphdb" }] : []),
         ...(isSuperuser || isGlobalDesigner ? [{ title: "GraphRAG Config", path: "/setup/server-config/graphrag" }] : []),
         ...(canAccessLlmConfig ? [{ title: "LLM Config", path: "/setup/server-config/llm" }] : []),
-        ...(isSuperuser || isGlobalDesigner ? [{ title: "MCP Servers", path: "/setup/server-config/mcp-servers" }] : []),
+        ...(isSuperuser ? [{ title: "MCP Servers", path: "/setup/server-config/mcp-servers" }] : []),
       ],
     },
     {
@@ -112,7 +112,6 @@ const SetupLayout = () => {
     if (
       rolesLoaded &&
       !isSuperuser &&
-      !isGlobalDesigner &&
       location.pathname.startsWith("/setup/server-config/mcp-servers")
     ) {
       navigate("/setup/server-config/llm", { replace: true });

@@ -55,6 +55,19 @@ app.include_router(routers.ui_router, prefix=PATH_PREFIX)
 app.include_router(routers.mcp_servers_router, prefix=PATH_PREFIX)
 
 
+@app.on_event("startup")
+async def _install_mcp_libraries() -> None:
+    """Install the source tarballs referenced by configured stdio MCP servers
+    (global + per-graph), so their console-script commands are available. Runs
+    each boot, which is what makes them persist across container recreation.
+    """
+    try:
+        from common.mcp_config import install_configured_libraries
+        install_configured_libraries()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"mcp library install failed: {e}")
+
+
 @app.on_event("shutdown")
 async def _shutdown_mcp_addons() -> None:
     """Close every cached external-MCP client and stop the dedicated event

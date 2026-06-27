@@ -118,6 +118,16 @@ class AgenticAgent:
             except Exception:
                 tg_cfg = None
 
+            # Make sure any tarball-backed stdio servers configured for this
+            # graph are installed before we try to launch them (a server saved
+            # since the last restart may not have been installed at startup).
+            try:
+                from common.config import get_mcp_servers
+                from common.mcp_config import ensure_libraries_installed
+                ensure_libraries_installed(get_mcp_servers(self.conn.graphname))
+            except Exception as exc:
+                logger.warning(f"agentic: mcp library ensure-install skipped: {exc}")
+
             # Discover external MCP-addon tools for this graph. One bad
             # server doesn't blank the catalog; an empty config returns {}.
             external_tools: Dict[str, object] = {}

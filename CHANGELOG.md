@@ -3,6 +3,7 @@
 ## [2.0.0]
 
 ### Added
+- **External MCP servers can be configured as agentic tools.** Superusers can register external MCP servers (including installing the Python libraries they need) so the chat agent can call their tools during a conversation.
 - **Query responses can return just the answer.** The query endpoints return the answer alone by default and accept an option to include the supporting sources and trace when a caller needs them.
 
 ### Changed
