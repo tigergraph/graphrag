@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.0]
+
+### Changed
+- **Structured documents chunk more faithfully.** Markdown and HTML are split with a structure-aware chunker that keeps each section's heading context inside the chunk, rolls small sections up into their parent up to the size budget, and keeps tables intact — including tables nested inside lists — so retrieval and answers hold together on heading- and table-heavy documents.
+
 ## [1.4.2]
 
 ### Added

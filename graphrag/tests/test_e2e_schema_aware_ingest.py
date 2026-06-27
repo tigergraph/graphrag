@@ -25,15 +25,13 @@ Walks the full lifecycle a UI user would drive:
        EntityType definitions populated, communities formed)
 
 Requires a running GraphRAG stack against a live TigerGraph instance.
-The default test corpus is the 2 Barclays PDFs at
-``~/Downloads/BarclaysDocs/`` — point ``TEST_FILES`` elsewhere to use
-a different sample.
+The test corpus is supplied by the caller via ``TEST_FILES`` (a
+comma-separated list of local file paths); there is no bundled dataset.
 
 Usage::
 
     GRAPHRAG_URL=http://localhost:80 \\
-    TEST_FILES=$HOME/Downloads/BarclaysDocs/Inspired_ESG-Report_2022.pdf,\\
-$HOME/Downloads/BarclaysDocs/QuarterlyInvestmentReport_uss.pdf \\
+    TEST_FILES=/path/to/doc1.pdf,/path/to/doc2.pdf \\
     pytest graphrag/tests/test_e2e_schema_aware_ingest.py -v -s
 
 Environment variables:
@@ -45,7 +43,7 @@ Environment variables:
                             ``db_config`` block (hostname / username / password).
     TG_USERNAME / TG_PASSWORD  Fallbacks if SERVER_CONFIG is missing or partial.
     TEST_GRAPH              Graph name (default: SchemaAwareE2E_<timestamp>)
-    TEST_FILES              Comma-separated file paths (default: BarclaysDocs PDFs)
+    TEST_FILES              Comma-separated local file paths (required; no bundled default)
     REBUILD_TIMEOUT         Max seconds to wait for rebuild (default: 7200)
     SCHEMA_EXTRACT_TIMEOUT  Max seconds for the LLM extract call (default: 300)
     EXPECTED_MIN_VERTICES   Minimum domain vertex types the LLM must produce (default: 3)
@@ -98,15 +96,10 @@ EXPECTED_MIN_EDGES = int(os.getenv("EXPECTED_MIN_EDGES", "2"))
 AUTH = (USERNAME, PASSWORD)
 GRAPH_NAME = os.getenv("TEST_GRAPH", f"SchemaAwareE2E_{int(time.time())}")
 
-_default_pdfs = [
-    os.path.expanduser("~/Downloads/BarclaysDocs/Inspired_ESG-Report_2022.pdf"),
-    os.path.expanduser("~/Downloads/BarclaysDocs/QuarterlyInvestmentReport_uss.pdf"),
-]
-_raw_files = os.getenv("TEST_FILES")
-if _raw_files:
-    TEST_FILES = [f.strip() for f in _raw_files.split(",") if f.strip()]
-else:
-    TEST_FILES = [p for p in _default_pdfs if os.path.exists(p)]
+# No bundled dataset — the caller supplies the corpus via TEST_FILES
+# (a comma-separated list of local file paths). Without it, the
+# file-driven stages skip rather than fall back to any hardcoded path.
+TEST_FILES = [f.strip() for f in os.getenv("TEST_FILES", "").split(",") if f.strip()]
 
 
 # Shared state across ordered test stages. Each stage records its
@@ -157,8 +150,8 @@ def test_02_convert_sample_files():
     _require_stage("created")
     if not TEST_FILES:
         pytest.skip(
-            "No test files. Set TEST_FILES env var or place the Barclays PDFs at "
-            "~/Downloads/BarclaysDocs/."
+            "No test files. Set the TEST_FILES env var to a comma-separated "
+            "list of local file paths."
         )
     print(f"\n--- Stage 2: Converting {len(TEST_FILES)} sample file(s) ---")
     files = []

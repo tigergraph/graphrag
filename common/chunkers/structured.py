@@ -113,8 +113,9 @@ class Element:
     """
     kind: ElementKind
     text: str
-    heading: Optional[str] = None       # most recent heading text
+    heading: Optional[str] = None       # full breadcrumb path of the section this element is under
     page: Optional[int] = None          # PDF only — present when source has page metadata
+    level: Optional[int] = None         # heading elements only: nesting level (h1=1 … h6=6)
     # For lists too long to keep atomic: pre-split sub-items the packer
     # can re-pack while keeping each subset atomic at ``<li>`` boundaries.
     splittable_items: Optional[List[str]] = field(default=None, repr=False)
@@ -144,6 +145,10 @@ _MD_PAGE_MARKER = re.compile(r"^\s*<!--\s*PAGE\s+(\d+)\s*-->\s*$")
 _MD_PICTURE_OMITTED = re.compile(r"^\s*\*+\s*==>\s*picture\b.*intentionally omitted\s*<==\s*\*+.*$", re.IGNORECASE)
 _MD_PICTURE_TEXT_START = re.compile(r"^\s*\*+\s*-+\s*Start of picture text\s*-+\s*\*+\s*(<br\s*/?>)?\s*$", re.IGNORECASE)
 _MD_PICTURE_TEXT_END = re.compile(r"^\s*\*+\s*-+\s*End of picture text\s*-+\s*\*+\s*(<br\s*/?>)?\s*$", re.IGNORECASE)
+# Inline variant of the End marker: the picture-text body can arrive as a
+# single <br>-joined line with the marker on its tail, so it is not always
+# line-anchored. Searched anywhere in a line to terminate the block.
+_MD_PICTURE_TEXT_END_INLINE = re.compile(r"\*+\s*-+\s*End of picture text\s*-+\s*\*+\s*(?:<br\s*/?>)?", re.IGNORECASE)
 
 
 def _flush_prose(buf: List[str], heading: Optional[str], page: Optional[int], out: List[Element]) -> None:
@@ -157,7 +162,7 @@ def _flush_prose(buf: List[str], heading: Optional[str], page: Optional[int], ou
 
 # A caption is a short single-or-double-line prose block that immediately
 # precedes a table or figure with no blank line between them. We fold it
-# into the atomic element so retrieval of "図表２ 残高表(抜粋)" returns
+# into the atomic element so retrieval of "Table 1: Sample Table" returns
 # the table, not a sibling prose chunk.
 _CAPTION_MAX_CHARS = 200
 _CAPTION_MAX_LINES = 2
@@ -170,7 +175,7 @@ def _take_caption(buf: List[str]) -> Optional[str]:
     Handles the no-blank-line case where the caption sits directly above
     the table in the source:
 
-        図表２　残高表（抜粋）
+        Table 1: Sample Table
         |...|...|
 
     The blank-line case (pymupdf4llm typically emits this shape) is
@@ -191,10 +196,10 @@ def _take_caption_from_out(out: List[Element]) -> Optional[str]:
     """If the most recently emitted element is a short prose block, pop
     and return its text. Handles the blank-line case:
 
-        図表 7-2 都道府県別総預貯金額 ( 兆円 )
-        ← blank line, prose flushed to ``out`` here
+        Table 1: Sample Summary ( unit )
+        <- blank line, prose flushed to ``out`` here
 
-        |都道府県|...
+        |Item|...
 
     A heading or any non-prose immediately preceding the table blocks
     the lookback (returns None), preserving the rule that a caption
@@ -221,6 +226,9 @@ def markdown_to_elements(md: str, page: Optional[int] = None) -> List[Element]:
     """
     out: List[Element] = []
     heading: Optional[str] = None
+    # Stack of (level, title) for ancestor headings, so each element carries
+    # the full breadcrumb path (h1 > h2 > h3 …), not just the nearest heading.
+    heading_stack: List[Tuple[int, str]] = []
     prose_buf: List[str] = []
 
     lines = md.splitlines()
@@ -233,8 +241,13 @@ def markdown_to_elements(md: str, page: Optional[int] = None) -> List[Element]:
         m = _MD_HEADING.match(line)
         if m:
             _flush_prose(prose_buf, heading, page, out)
-            heading = m.group(2).strip()
-            out.append(Element(kind="heading", text=heading, heading=heading, page=page))
+            level = len(m.group(1))
+            title = m.group(2).strip()
+            while heading_stack and heading_stack[-1][0] >= level:
+                heading_stack.pop()
+            heading_stack.append((level, title))
+            heading = " > ".join(t for _, t in heading_stack)
+            out.append(Element(kind="heading", text=title, heading=heading, page=page, level=level))
             i += 1
             continue
 
@@ -267,7 +280,7 @@ def markdown_to_elements(md: str, page: Optional[int] = None) -> List[Element]:
 
         # 4. Markdown table — collect contiguous `|...|` lines, folding any
         #    short prose line immediately before it as the caption (e.g.
-        #    "図表２ 2011年３月末の資金循環統計の残高表（抜粋）" — the
+        #    "Table 1: Sample Summary (excerpt)" — the
         #    caption must travel with the table or retrieval misses it).
         #    The caption may sit directly above the table (in prose_buf)
         #    OR be separated by a blank line (already flushed to ``out``);
@@ -317,11 +330,24 @@ def markdown_to_elements(md: str, page: Optional[int] = None) -> List[Element]:
             _flush_prose(prose_buf, heading, page, out)
             i += 1
             block: List[str] = []
-            while i < len(lines) and not _MD_PICTURE_TEXT_END.match(lines[i]):
+            # The End marker may sit inline at the tail of a <br>-joined body
+            # line rather than on its own line, so search each line for it.
+            # On match, take the text before it as the body and re-queue any
+            # trailing content on that line for normal parsing.
+            while i < len(lines):
+                end_m = _MD_PICTURE_TEXT_END_INLINE.search(lines[i])
+                if end_m:
+                    before = lines[i][:end_m.start()]
+                    if before.strip():
+                        block.append(before)
+                    after = lines[i][end_m.end():]
+                    if after.strip():
+                        lines[i] = after  # reprocess remainder as normal content
+                    else:
+                        i += 1
+                    break
                 block.append(lines[i])
                 i += 1
-            if i < len(lines):
-                i += 1  # skip the End marker
             # Inline <br> tags become line breaks for readability.
             body = "\n".join(block)
             body = re.sub(r"<br\s*/?>", "\n", body, flags=re.IGNORECASE).strip()
@@ -398,8 +424,13 @@ def html_to_elements(html: str) -> List[Element]:
     return out
 
 
-def _walk_html(node, out: List[Element], heading: Optional[str], NavigableString) -> None:
+def _walk_html(node, out: List[Element], heading: Optional[str], NavigableString,
+               heading_stack: Optional[List[Tuple[int, str]]] = None) -> None:
     # Local import-bound NavigableString avoids re-importing in every recursive call.
+    # heading_stack is shared (by reference) across the recursion so a heading
+    # inside a nested container still scopes the content that follows it.
+    if heading_stack is None:
+        heading_stack = []
     for child in getattr(node, "children", []):
         if isinstance(child, NavigableString):
             text = str(child).strip()
@@ -410,14 +441,28 @@ def _walk_html(node, out: List[Element], heading: Optional[str], NavigableString
         if not tag or tag in _HTML_SKIP:
             continue
         if tag in _HTML_HEADS:
-            heading = child.get_text(strip=True)
-            if heading:
-                out.append(Element(kind="heading", text=heading, heading=heading))
+            title = child.get_text(strip=True)
+            if title:
+                level = int(tag[1])
+                while heading_stack and heading_stack[-1][0] >= level:
+                    heading_stack.pop()
+                heading_stack.append((level, title))
+                heading = " > ".join(t for _, t in heading_stack)
+                out.append(Element(kind="heading", text=title, heading=heading, level=level))
             continue
         if tag in _HTML_ATOMIC:
             # Tables / blockquotes / code / figures stay atomic with their HTML preserved.
             # Lists carry splittable_items so the packer can re-pack at <li> when too long.
             if tag in {"ol", "ul", "dl"}:
+                # A list that wraps a block-level atomic (table/figure/code) —
+                # common in converted docs, e.g. a table inside
+                # <ol style="list-style-type:none"> — must NOT be size-split as a
+                # list, or the nested table is shredded and loses its header.
+                # Recurse so the table/figure is emitted as its own atomic element
+                # (table-integrity + header-repeat then apply).
+                if child.find(["table", "figure", "pre"]):
+                    _walk_html(child, out, heading, NavigableString, heading_stack)
+                    continue
                 # Collect every direct block-level child as a splittable unit
                 # (nested <ol>/<ul>/<table>/<p>, not just <li>).
                 items: List[str] = []
@@ -467,7 +512,7 @@ def _walk_html(node, out: List[Element], heading: Optional[str], NavigableString
         # walk-into: <div>, <section>, <article>, <main>, <aside>, <nav>,
         # <header>, <footer>, <li> (when nested directly), custom elements,
         # malformed HTML — recurse.
-        _walk_html(child, out, heading, NavigableString)
+        _walk_html(child, out, heading, NavigableString, heading_stack)
 
 
 # --- packer -----------------------------------------------------------------
@@ -616,6 +661,62 @@ def _split_table_at_rows(
     return pieces or [text]
 
 
+# Markdown GFM separator row: ``|---|:--:|---|`` etc. (dashes/colons/pipes only).
+_MD_TABLE_SEP = re.compile(r"^\s*\|?[\s:|\-]+\|?\s*$")
+
+
+def _split_markdown_table_at_rows(text: str, hard_cap: int) -> List[str]:
+    """Split a markdown (GFM) ``|...|`` table at row boundaries, repeating the
+    caption and header row(s) on every emitted piece.
+
+    Only data rows are partitioned; the caption (any text above the table) and
+    the header — header row, ``|---|`` separator, and any contiguous
+    secondary-header rows (a spanning sub-header has an empty leading cell) —
+    repeat on every piece, so each piece reads as a self-contained sub-table.
+    Falls back to ``[text]`` when no GFM separator is found (caller char-splits).
+    """
+    lines = text.split("\n")
+    first = next((j for j, l in enumerate(lines) if _MD_TABLE_LINE.match(l)), None)
+    if first is None:
+        return [text]
+    caption_lines = [l for l in lines[:first] if l.strip()]
+    table_lines = [l for j, l in enumerate(lines) if j >= first and _MD_TABLE_LINE.match(l)]
+    sep = next((j for j, l in enumerate(table_lines) if _MD_TABLE_SEP.match(l) and "-" in l), None)
+    if sep is None:
+        return [text]
+    header_end = sep + 1
+    while header_end < len(table_lines):
+        cells = table_lines[header_end].split("|")
+        if len(cells) > 2 and cells[1].strip() == "":
+            header_end += 1  # spanning secondary header — keep it with the header
+        else:
+            break
+    header_lines = table_lines[:header_end]
+    data_lines = table_lines[header_end:]
+    if not data_lines:
+        return [text]
+    envelope = "\n".join(caption_lines + header_lines)
+    row_budget = hard_cap - (len(envelope) + 1)
+    if row_budget < 200:
+        return [text]  # caption + header alone eat the budget; let caller char-split
+
+    pieces: List[str] = []
+    buf: List[str] = []
+    buf_len = 0
+    for row in data_lines:
+        rlen = len(row) + 1
+        if buf and buf_len + rlen > row_budget:
+            pieces.append(envelope + "\n" + "\n".join(buf))
+            buf = [row]
+            buf_len = rlen
+        else:
+            buf.append(row)
+            buf_len += rlen
+    if buf:
+        pieces.append(envelope + "\n" + "\n".join(buf))
+    return pieces or [text]
+
+
 def _split_list_at_items(text: str, hard_cap: int) -> List[str]:
     """Split a long <ul>/<ol> at <li> boundaries. Header (the opening
     <ol>/<ul> + everything before the first <li>) is preserved on each
@@ -669,10 +770,10 @@ def _split_atomic_oversized(
     """Split an atomic block that exceeds the embedding cap.
 
     Dispatches by ``kind``:
-      * ``"table"`` — split at ``<tr>`` boundaries via
-        :func:`_split_table_at_rows`, preserving the table envelope and
-        header row on every piece so each piece reads as a valid
-        sub-table for retrieval.
+      * ``"table"`` — split at row boundaries, preserving the caption +
+        header on every piece so each reads as a valid sub-table for
+        retrieval: HTML via :func:`_split_table_at_rows`, markdown via
+        :func:`_split_markdown_table_at_rows`.
       * ``"list"`` — split at ``<li>`` boundaries via
         :func:`_split_list_at_items`, preserving the list wrapper.
       * Other kinds (figure, code, prose) — fall back to the recursive
@@ -684,9 +785,11 @@ def _split_atomic_oversized(
     """
     pieces: List[str]
     if kind == "table":
+        # HTML <table> first; then markdown |...| tables (caption + header
+        # repeated on every piece); finally char-split if neither applies.
         pieces = _split_table_at_rows(text, hard_cap)
-        # If the table can't be row-split (no <tr> boundaries), fall back
-        # to char-split so we still respect the embedding cap.
+        if len(pieces) == 1 and len(pieces[0]) > hard_cap:
+            pieces = _split_markdown_table_at_rows(text, hard_cap)
         if len(pieces) == 1 and len(pieces[0]) > hard_cap:
             pieces = _split_prose(text, min(max_chars, hard_cap), overlap)
     elif kind == "list":
@@ -706,170 +809,192 @@ def _split_atomic_oversized(
     ]
 
 
+@dataclass
+class _Section:
+    """A heading plus the content directly under it and its child sections —
+    i.e. one node of the document's heading tree. Used to roll small subtrees
+    up into a single chunk while preserving their internal structure."""
+    title: Optional[str]
+    crumb: Optional[str]              # full breadcrumb path to this heading
+    level: int                        # 0 = root (pre-heading content)
+    page: Optional[int]
+    own: List[Element] = field(default_factory=list)
+    children: List["_Section"] = field(default_factory=list)
+
+
+def _build_section_tree(elements: List[Element]) -> _Section:
+    """Group a flat element stream into a heading tree by heading level."""
+    root = _Section(title=None, crumb=None, level=0, page=None)
+    stack: List[_Section] = [root]
+    for el in elements:
+        if el.kind == "heading":
+            lvl = el.level or ((el.heading or "").count(" > ") + 1)
+            while len(stack) > 1 and stack[-1].level >= lvl:
+                stack.pop()
+            node = _Section(title=el.text, crumb=el.heading, level=lvl, page=el.page)
+            stack[-1].children.append(node)
+            stack.append(node)
+        else:
+            stack[-1].own.append(el)
+    return root
+
+
+def _own_size(node: _Section) -> int:
+    return len(node.title or "") + sum(len(e.text) for e in node.own)
+
+
+def _subtree_size(node: _Section) -> int:
+    return _own_size(node) + sum(_subtree_size(c) for c in node.children)
+
+
+def _has_big_atomic(node: _Section, cap: int) -> bool:
+    if any(e.kind in ("table", "figure", "code", "list") and len(e.text) > cap for e in node.own):
+        return True
+    return any(_has_big_atomic(c, cap) for c in node.children)
+
+
+def _render_subtree(node: _Section) -> str:
+    """Render a section's own content + descendant sections in document order,
+    each descendant heading shown inline (``## title``) so the raw structure is
+    preserved. The node's own title is omitted — it is the tail of the
+    breadcrumb prepended to the chunk."""
+    parts: List[str] = [e.text for e in node.own]
+    for c in node.children:
+        if c.title:
+            parts.append(f'{"#" * min(c.level or 1, 6)} {c.title}')
+        body = _render_subtree(c)
+        if body:
+            parts.append(body)
+    return "\n\n".join(p for p in parts if p and p.strip())
+
+
+def _emit_own(node: _Section, max_chars: int, overlap: int, out: List[StructuredChunk]) -> None:
+    """Emit a section's OWN content (no descendants) when its subtree was too
+    big to roll up: prose packed up to ``max_chars``; atomic blocks standalone
+    (split via the per-kind splitters only when they exceed the hard cap)."""
+    crumb = node.crumb
+    prose_buf: List[Element] = []
+    prose_len = 0
+
+    def flush_prose():
+        nonlocal prose_buf, prose_len
+        text = "\n\n".join(e.text for e in prose_buf).strip()
+        prose_buf, prose_len = [], 0
+        if text:
+            out.append(StructuredChunk(text, chunk_kind="prose",
+                                       page_no=node.page, under_heading=crumb))
+
+    for e in node.own:
+        if e.kind in ("table", "figure", "code", "list"):
+            flush_prose()
+            kind = "list" if e.kind == "list" else _atomic_kind_for(e)
+            if len(e.text) > _ATOMIC_HARD_MAX_CHARS:
+                out.extend(_split_atomic_oversized(
+                    e.text, kind, e.page, crumb, max_chars, overlap, _ATOMIC_HARD_MAX_CHARS))
+            else:
+                out.append(StructuredChunk(e.text, chunk_kind=kind,
+                                           page_no=e.page, under_heading=crumb))
+            continue
+        elen = len(e.text)
+        if prose_buf and prose_len + elen > max_chars:
+            flush_prose()
+        prose_buf.append(e)
+        prose_len += elen
+    flush_prose()
+
+
+def _pack_node(node: _Section, max_chars: int, overlap: int,
+               out: List[StructuredChunk], is_root: bool) -> None:
+    # Whole subtree fits → one chunk, internal structure preserved inline.
+    if (not is_root and node.crumb
+            and _subtree_size(node) <= max_chars
+            and not _has_big_atomic(node, _ATOMIC_HARD_MAX_CHARS)):
+        out.append(StructuredChunk(_render_subtree(node), chunk_kind="mixed",
+                                   page_no=node.page, under_heading=node.crumb))
+        return
+
+    # Subtree too big: emit own content, then group/recurse the children.
+    _emit_own(node, max_chars, overlap, out)
+
+    group: List[_Section] = []
+    group_size = 0
+
+    def flush_group():
+        nonlocal group, group_size
+        if not group:
+            return
+        parts: List[str] = []
+        for c in group:
+            if c.title:
+                parts.append(f'{"#" * min(c.level or 1, 6)} {c.title}')
+            b = _render_subtree(c)
+            if b:
+                parts.append(b)
+        body = "\n\n".join(p for p in parts if p and p.strip())
+        out.append(StructuredChunk(body, chunk_kind="mixed",
+                                   page_no=group[0].page, under_heading=node.crumb))
+        group, group_size = [], 0
+
+    for child in node.children:
+        csz = _subtree_size(child)
+        fits = csz <= max_chars and not _has_big_atomic(child, _ATOMIC_HARD_MAX_CHARS)
+        if fits:
+            if group and group_size + csz > max_chars:
+                flush_group()
+            group.append(child)
+            group_size += csz
+        else:
+            flush_group()
+            _pack_node(child, max_chars, overlap, out, is_root=False)
+    flush_group()
+
+
 def pack(
     elements: List[Element],
     max_chars: int = _DEFAULT_CHUNK_SIZE,
     overlap: Optional[int] = None,
 ) -> List[StructuredChunk]:
-    """Convert a typed element stream into ``StructuredChunk`` instances.
+    """Pack a typed element stream into chunks via a size-aware roll-up of the
+    heading tree:
 
-    Rules:
-    - Atomic elements (table / figure / code / list) emit standalone chunks
-      with their ``kind`` preserved. A list element longer than ``max_chars``
-      is re-packed at ``<li>`` boundaries via ``splittable_items``.
-    - **Prose paragraphs are also atomic** — a single paragraph is never
-      split mid-sentence regardless of size. Multiple short paragraphs
-      under the same heading get packed together up to ``max_chars``;
-      a paragraph larger than ``max_chars`` becomes one oversized chunk
-      (matches table behaviour). Safety valve: a paragraph larger than
-      ``max_chars * _PROSE_OVERSIZE_RATIO`` falls back to recursive char
-      splitting so we don't exceed the embedding model's context window.
-    - Headings annotate following chunks' ``under_heading`` but do not
-      themselves emit chunks.
-    - ``page`` from the source flows onto each emitted chunk; multi-page
-      atomic blocks (today: none — pymupdf4llm assigns one page per
-      element) get ``continues_from_page`` / ``continues_to_page`` set
-      via the page-tracking pass below.
+    - A whole subtree (heading + its content + sub-sections) that fits in
+      ``max_chars`` becomes one chunk, with sub-headings preserved inline.
+    - A subtree too big emits the heading's own content, then greedily groups
+      consecutive child subtrees up to ``max_chars`` (small siblings merge),
+      recursing into any child that alone exceeds ``max_chars``.
+    - Atomic blocks (table/figure/code/list) over the embedding hard cap are
+      split via the per-kind splitters (caption/header preserved).
+
+    Every chunk carries its section breadcrumb in ``under_heading``; a final
+    pass prepends it to the chunk text so the section context reaches the
+    embedding and the answer prompt.
     """
     if overlap is None:
         overlap = max(0, max_chars // _DEFAULT_OVERLAP_DIV)
-    oversize_threshold = max_chars * _PROSE_OVERSIZE_RATIO
-
+    root = _build_section_tree(elements)
     chunks: List[StructuredChunk] = []
-    # prose_buf packs whole-paragraph Elements until adding the next one
-    # would exceed max_chars, then flushes. No element is ever split.
-    prose_buf: List[Element] = []
-    prose_heading: Optional[str] = None
-    prose_len = 0
-
-    def flush_prose() -> None:
-        nonlocal prose_buf, prose_heading, prose_len
-        if not prose_buf:
-            return
-        text = "\n\n".join(e.text for e in prose_buf).strip()
-        if not text:
-            prose_buf, prose_len = [], 0
-            return
-        pages = [e.page for e in prose_buf if e.page is not None]
-        first_page = pages[0] if pages else None
-        last_page = pages[-1] if pages else None
-        cont_from = first_page if (last_page is not None and first_page != last_page) else None
-        cont_to = last_page if (last_page is not None and first_page != last_page) else None
-        chunks.append(StructuredChunk(
-            text,
-            chunk_kind="prose",
-            page_no=first_page,
-            under_heading=prose_heading,
-            continues_from_page=cont_from,
-            continues_to_page=cont_to,
-        ))
-        prose_buf, prose_len = [], 0
-
-    def emit_oversized_prose(elem: Element) -> None:
-        """Safety valve: pathologically long single paragraph. Char-split
-        as a last resort and emit each piece as its own prose chunk."""
-        for piece in _split_prose(elem.text, max_chars, overlap):
-            chunks.append(StructuredChunk(
-                piece,
-                chunk_kind="prose",
-                page_no=elem.page,
-                under_heading=elem.heading,
-            ))
-
-    for elem in elements:
-        if elem.kind == "heading":
-            flush_prose()
-            prose_heading = elem.heading
-            # The heading itself does not become a chunk; following
-            # elements carry .heading via their Element fields, and
-            # prose_heading is the packer-side memo for chunk metadata.
-            continue
-
-        if elem.kind in ("table", "figure", "code"):
-            flush_prose()
-            kind = _atomic_kind_for(elem)
-            if len(elem.text) > _ATOMIC_HARD_MAX_CHARS:
-                chunks.extend(_split_atomic_oversized(
-                    elem.text, kind, elem.page, elem.heading,
-                    max_chars, overlap, _ATOMIC_HARD_MAX_CHARS,
-                ))
-            else:
-                chunks.append(StructuredChunk(
-                    elem.text,
-                    chunk_kind=kind,
-                    page_no=elem.page,
-                    under_heading=elem.heading,
-                ))
-            continue
-
-        if elem.kind == "list":
-            flush_prose()
-            if len(elem.text) <= max_chars or not elem.splittable_items:
-                if len(elem.text) > _ATOMIC_HARD_MAX_CHARS:
-                    chunks.extend(_split_atomic_oversized(
-                        elem.text, "list", elem.page, elem.heading,
-                        max_chars, overlap, _ATOMIC_HARD_MAX_CHARS,
-                    ))
-                else:
-                    chunks.append(StructuredChunk(
-                        elem.text,
-                        chunk_kind="list",
-                        page_no=elem.page,
-                        under_heading=elem.heading,
-                    ))
-            else:
-                for body in _pack_list_items(elem.splittable_items, max_chars):
-                    if len(body) > _ATOMIC_HARD_MAX_CHARS:
-                        chunks.extend(_split_atomic_oversized(
-                            body, "list", elem.page, elem.heading,
-                            max_chars, overlap, _ATOMIC_HARD_MAX_CHARS,
-                        ))
-                    else:
-                        chunks.append(StructuredChunk(
-                            body,
-                            chunk_kind="list",
-                            page_no=elem.page,
-                            under_heading=elem.heading,
-                        ))
-            continue
-
-        # Prose: atomic paragraph packing.
-        # Different heading context → flush before adopting the new one.
-        if elem.heading != prose_heading and prose_buf:
-            flush_prose()
-        prose_heading = elem.heading
-
-        elem_len = len(elem.text)
-
-        # Pathologically long single paragraph → safety-valve fallback.
-        if elem_len > oversize_threshold:
-            flush_prose()
-            emit_oversized_prose(elem)
-            continue
-
-        # Packing rule: if adding this paragraph would push the buffer
-        # past max_chars and the buffer is non-empty, flush first so each
-        # output chunk fits the target size. A single paragraph that
-        # alone exceeds max_chars is still emitted whole (atomic-prose).
-        if prose_buf and (prose_len + elem_len > max_chars):
-            flush_prose()
-
-        prose_buf.append(elem)
-        prose_len += elem_len
-
-    flush_prose()
-
-    # Merge tiny adjacent chunks so heading-only and section-marker
-    # fragments ("目次", "《留意点》", "＜7-1＞", ...) don't pollute the
-    # embedding index. A chunk smaller than ``_MIN_CHUNK_CHARS`` is
-    # absorbed into a neighbor when:
-    #   * the same ``chunk_kind`` (don't merge a table into prose),
-    #   * the same ``under_heading`` (don't cross section boundaries),
-    #   * the resulting merged chunk stays under ``max_chars``.
-    # Prefers merging tiny chunks into the previous chunk; falls back to
-    # the next chunk when the previous doesn't qualify.
+    _pack_node(root, max_chars, overlap, chunks, is_root=True)
     chunks = _merge_tiny_chunks(chunks, max_chars=max_chars)
+    chunks = _prepend_heading_path(chunks)
     return chunks
+
+
+def _prepend_heading_path(chunks: List[StructuredChunk]) -> List[StructuredChunk]:
+    out: List[StructuredChunk] = []
+    for c in chunks:
+        crumb = getattr(c, "under_heading", None)
+        if crumb and not str(c).startswith(crumb):
+            out.append(StructuredChunk(
+                f"{crumb}\n\n{c}",
+                chunk_kind=c.chunk_kind,
+                page_no=c.page_no,
+                under_heading=crumb,
+                continues_from_page=c.continues_from_page,
+                continues_to_page=c.continues_to_page,
+            ))
+        else:
+            out.append(c)
+    return out
 
 
 _MIN_CHUNK_CHARS_RATIO = 0.5  # min size = max_chars * ratio

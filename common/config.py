@@ -469,7 +469,7 @@ if _mm_config:
 if graphrag_config is None:
     graphrag_config = {"reuse_embedding": True}
 if "chunker" not in graphrag_config:
-    graphrag_config["chunker"] = "semantic"
+    graphrag_config["chunker"] = "auto"
 if "extractor" not in graphrag_config:
     graphrag_config["extractor"] = "llm"
 # ``retrieval_include_entity`` is resolved at install time
@@ -917,7 +917,7 @@ def reload_graphrag_config():
         
         # Set defaults (same as startup logic)
         if "chunker" not in new_graphrag_config:
-            new_graphrag_config["chunker"] = "semantic"
+            new_graphrag_config["chunker"] = "auto"
         if "extractor" not in new_graphrag_config:
             new_graphrag_config["extractor"] = "llm"
         

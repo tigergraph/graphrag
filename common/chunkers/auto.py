@@ -45,7 +45,7 @@ from common.chunkers.base_chunker import BaseChunker
 
 
 # Heuristic thresholds — tuned for typical document corpora.
-_SAMPLE_BYTES = 8 * 1024            # how much of the doc to inspect
+_SAMPLE_BYTES = 2 * 1024            # how much of the doc to inspect (prefix)
 _TABLE_LINE_MIN = 3                 # `|...|` lines to trigger structured
 _FIGURE_LINE_MIN = 3                # `![alt](url)` lines to trigger structured
 _HEADING_LINE_MIN_FOR_MD = 3        # markdown headings to trigger markdown chunker
