@@ -39,30 +39,40 @@ async def install_query(
 ) -> dict[str, httpx.Response | str | None]:
     LogWriter.info(f"Installing query {query_path}")
     with open(f"{query_path}.gsql", "r") as f:
-        query = f.read()
-
+        query_text = f.read()
     query_name = query_path.split("/")[-1]
-    query = f"""\
-USE GRAPH {conn.graphname}
-{query}
-"""
-    if install:
-       query += f"""
-INSTALL QUERY {query_name}
-"""
+
+    def _gsql_failed(res) -> bool:
+        rl = res.lower() if isinstance(res, str) else ""
+        return ("error" in rl) or ("does not exist" in rl) or ("failed" in rl)
+
+    # CREATE/REPLACE the query body. Prefer the REST endpoint
+    # (POST /gsql/v1/queries via createQuery); fall back to a GSQL CREATE
+    # statement only if the REST call errors.
     async with util.tg_sem:
-        res = await conn.gsql(query)
+        try:
+            await conn.createQuery(query_text)
+        except Exception as rest_err:
+            LogWriter.info(f"createQuery REST failed for {query_name}; gsql fallback: {rest_err}")
+            res = await conn.gsql(f"USE GRAPH {conn.graphname}\n{query_text}\n")
+            if _gsql_failed(res):
+                LogWriter.error(res)
+                return {"result": None, "error": True,
+                        "message": f"Failed to create query {query_name}"}
 
-    res_lower = res.lower() if isinstance(res, str) else ""
-    if "error" in res_lower or "does not exist" in res_lower or "failed" in res_lower:
-        LogWriter.error(res)
-        return {
-            "result": None,
-            "error": True,
-            "message": f"Failed to install query {query_name}",
-        }
+    if install:
+        async with util.tg_sem:
+            try:
+                await conn.installQueries([query_name], flag="-force", wait=True)
+            except Exception as inst_err:
+                LogWriter.info(f"installQueries REST failed for {query_name}; gsql fallback: {inst_err}")
+                res = await conn.gsql(f"USE GRAPH {conn.graphname}\nINSTALL QUERY {query_name}\n")
+                if _gsql_failed(res):
+                    LogWriter.error(res)
+                    return {"result": None, "error": True,
+                            "message": f"Failed to install query {query_name}"}
 
-    return {"result": res, "error": False}
+    return {"result": "ok", "error": False}
 
 
 chunk_sem = asyncio.Semaphore(util._worker_concurrency)

@@ -25,6 +25,7 @@ from pyTigerGraph import AsyncTigerGraphConnection
 
 from common.config import (
     graphrag_config,
+    db_config,
     embedding_service,
     get_llm_service,
     get_completion_config,
@@ -81,69 +82,70 @@ async def install_queries(
     requried_queries: list[str],
     conn: AsyncTigerGraphConnection,
 ):
-    from common.db.migrate import query_needs_update_async
-
     installed_queries = [q.split("/")[-1] for q in await conn.getEndpoints(dynamic=True) if f"/{conn.graphname}/" in q]
 
-    required_names = set()
-    drift_detected = False
+    # ECC installs only queries that are MISSING from TG. Drift-based
+    # reinstallation of already-present queries belongs to the Migration
+    # Assistant, not the rebuild — doing it here would reinstall every query on
+    # every warm rebuild (slow, and stresses the install endpoint). For each
+    # missing query we (re)create the body now; the install is batched below.
+    to_install: list[str] = []
     for q in requried_queries:
         q_name = q.split("/")[-1]
-        required_names.add(q_name)
-        if q_name not in installed_queries:
-            res = await workers.install_query(conn, q, False)
-            if res["error"]:
-                raise Exception(res["message"])
-            logger.info(f"Successfully created query '{q_name}'.")
+        if q_name in installed_queries:
             continue
-        # Already installed — check whether the shipped body has drifted
-        # from what's on TG. If so, re-create so the new body actually
-        # takes effect after a graphrag version upgrade.
-        if await query_needs_update_async(conn, f"{q}.gsql"):
-            res = await workers.install_query(conn, q, False)
-            if res["error"]:
-                raise Exception(res["message"])
-            logger.info(f"Re-installed '{q_name}' (body drift detected).")
-            drift_detected = True
+        res = await workers.install_query(conn, q, False)  # create body only
+        if res["error"]:
+            raise Exception(res["message"])
+        to_install.append(q_name)
 
-    if not drift_detected and required_names.issubset(set(installed_queries)):
-        logger.info("All required queries already installed, skipping INSTALL QUERY ALL.")
+    if not to_install:
+        logger.info("All required queries already installed and up to date.")
         return
 
-    logger.info("Submitting INSTALL QUERY ALL ...")
-    query = f"USE GRAPH {conn.graphname}\nINSTALL QUERY ALL\n"
+    # Install ONLY the new/changed queries via the REST install endpoint
+    # (GET /gsql/v1/queries/install), which polls the install job to
+    # completion. Replaces a GSQL `INSTALL QUERY ALL` text command, whose
+    # large/verbose response could be truncated mid-stream under load.
+    # Submit the install with async=true so TG runs it as a background job and
+    # returns a requestId immediately, then poll for completion. A synchronous
+    # install (pyTigerGraph's installQueries omits async=true) blocks the HTTP
+    # request, and TG's gsql gateway drops it at ~390s — so a fresh
+    # community-query set (compiles for >390s) fails with a server disconnect
+    # regardless of the client timeout. The async submit returns in ~0.1s and
+    # the compile time no longer bounds any single request.
+    logger.info(f"Installing {len(to_install)} query(ies): {', '.join(sorted(to_install))}")
+    params = {
+        "graph": conn.graphname,
+        "queries": ",".join(to_install),
+        "flag": "-force",
+        "async": "true",
+    }
     async with tg_sem:
-        res = await conn.gsql(query)
-        logger.info(f"INSTALL QUERY ALL returned: {str(res)[:200]}")
-        err = gsql_output_error(res) if isinstance(res, str) else None
-        if err:
-            raise Exception(res)
+        res = await conn._req(
+            "GET", conn.gsUrl + "/gsql/v1/queries/install",
+            params=params, authMode="pwd", resKey=None,
+        )
+    request_id = res.get("requestId") if isinstance(res, dict) else None
+    if not request_id:
+        raise Exception(f"Query install submit returned no requestId: {res}")
 
-    max_wait = 600  # seconds
-    poll_interval = 10
-    elapsed = 0
-    while elapsed < max_wait:
-        ready = [
-            q.split("/")[-1]
-            for q in await conn.getEndpoints(dynamic=True)
-            if f"/{conn.graphname}/" in q
-        ]
-        missing = required_names - set(ready)
-        if not missing:
+    # Poll until the background install reports SUCCESS/FAILED (each poll is a
+    # short status request, so no single request approaches the gateway limit).
+    deadline_s = 1800
+    waited = 0
+    while waited < deadline_s:
+        await asyncio.sleep(10)
+        waited += 10
+        status = await conn.getQueryInstallationStatus(request_id)
+        msg = (status.get("message", "") if isinstance(status, dict) else str(status)) or ""
+        if "SUCCESS" in msg.upper():
             break
-        logger.info(
-            f"Waiting for query installation to finish "
-            f"({len(missing)} remaining: {', '.join(sorted(missing))})"
-        )
-        await asyncio.sleep(poll_interval)
-        elapsed += poll_interval
+        if "FAIL" in msg.upper():
+            raise Exception(f"Query installation failed: {status}")
     else:
-        raise Exception(
-            f"Query installation timed out after {max_wait}s. "
-            f"Still missing: {', '.join(sorted(missing))}"
-        )
-
-    logger.info("All required queries installed and verified.")
+        raise Exception(f"Query installation timed out after {deadline_s}s (requestId={request_id})")
+    logger.info("Required queries installed and verified.")
 
 
 async def init(

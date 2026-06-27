@@ -7,9 +7,12 @@
 - **Prompt customization is additive instead of a full rewrite.** The *Customize Prompts* page now exposes only an editable instructions-and-examples section; the underlying rules are fixed and no longer user-editable, so a customization can extend behavior without accidentally dropping required rules. Pre-existing full-prompt overrides are ignored until re-saved in the new form.
 - **Retrieval matches table-heavy and numeric content more reliably.** Each chunk is embedded together with a compact summary of its topic, section, and key entities, so dense vectors carry that context explicitly — improving answers on documents where the raw text alone embeds poorly.
 
+- **Query installation is more reliable on large graphs.** Graph queries install through a non-blocking request with status polling instead of one long call, so initialization no longer fails on a gateway timeout while queries compile.
+
 ### Fixed
 - **A single oversized chunk no longer drops embeddings for the rest of a batch.** Embeddings that exceed the provider's input limit are retried at progressively shorter lengths, and a vertex that still doesn't fit is skipped individually instead of aborting the batch; similarity search ignores vertices without an embedding.
 - **Large ingests no longer fail on oversized upsert batches.** Upserts are sized to the pending work so very large flushes are not rejected, and progress counts reflect distinct vertices and edges.
+- **Schema lookups resolve correctly on asynchronous request paths.** The schema-version lookup is now awaited where it was previously used without awaiting.
 
 ## [1.4.2]
 

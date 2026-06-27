@@ -106,12 +106,15 @@ def query_needs_update_sync(conn, graphname: str, query_path: str) -> bool:
     local_hash = _gsql_hash(local_body)
 
     try:
-        installed_text = conn.gsql(f"USE GRAPH {graphname}\nSHOW QUERY {q_name}")
+        gc = conn.getQueryContent(q_name)
     except Exception as e:
-        logger.warning(f"SHOW QUERY {q_name} failed ({e}); will reinstall.")
+        logger.warning(f"getQueryContent {q_name} failed ({e}); will reinstall.")
         return True
 
-    installed_body = _extract_query_body(str(installed_text))
+    # getQueryContent returns the clean installed body in ``queryContent`` —
+    # no ``Using graph`` / ``# installed`` headers, so it normalizes to the same
+    # body as the local .gsql (SHOW QUERY's header wrapping caused false drift).
+    installed_body = gc.get("queryContent", "") if isinstance(gc, dict) and not gc.get("error") else ""
     if not installed_body:
         logger.info(f"Query '{q_name}' not installed yet; will install.")
         return True
@@ -156,14 +159,15 @@ async def query_needs_update_async(conn, query_path: str) -> bool:
     local_hash = _gsql_hash(local_body)
 
     try:
-        installed_text = await conn.gsql(
-            f"USE GRAPH {conn.graphname}\nSHOW QUERY {q_name}"
-        )
+        gc = await conn.getQueryContent(q_name)
     except Exception as e:
-        logger.warning(f"SHOW QUERY {q_name} failed ({e}); will reinstall.")
+        logger.warning(f"getQueryContent {q_name} failed ({e}); will reinstall.")
         return True
 
-    installed_body = _extract_query_body(str(installed_text))
+    # getQueryContent returns the clean installed body in ``queryContent`` —
+    # no header wrapping, so it normalizes to the same body as the local .gsql
+    # (SHOW QUERY's headers caused false drift).
+    installed_body = gc.get("queryContent", "") if isinstance(gc, dict) and not gc.get("error") else ""
     if not installed_body:
         logger.info(f"Query '{q_name}' not installed yet; will install.")
         return True

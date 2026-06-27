@@ -186,3 +186,44 @@ def get_schema_ver(conn: TigerGraphConnectionProxy) -> int:
     except Exception as e:
         logger.error(f"Error getting schema version: {str(e)}")
         raise Exception(f"Failed to get schema version: {str(e)}")
+
+
+async def get_schema_ver_async(conn) -> int:
+    """Async twin of :func:`get_schema_ver` for ``AsyncTigerGraphConnection``.
+
+    On an async connection ``_version_greater_than_4_0`` and ``_post`` are
+    coroutines; calling the sync variant leaves them un-awaited (the result is
+    a coroutine object, so the version branch is always taken and ``ret`` is
+    never a dict). Await them explicitly here.
+
+    Returns:
+        The schema version as an integer.
+    """
+    logger.info("entry: get_schema_ver_async")
+
+    query_text = f'INTERPRET QUERY () FOR GRAPH {conn.graphname} {{ PRINT "OK"; }}'
+
+    try:
+        if await conn._version_greater_than_4_0():
+            ret = await conn._post(conn.gsUrl + "/gsql/v1/queries/interpret",
+                            params={}, data=query_text, authMode="pwd", resKey="version",
+                            headers={'Content-Type': 'text/plain'})
+        else:
+            ret = await conn._post(conn.gsUrl + "/gsqlserver/interpreted_query", data=query_text,
+                            params={}, authMode="pwd", resKey="version")
+
+        schema_version_int = None
+        if isinstance(ret, dict) and "schema" in ret:
+            schema_version = ret["schema"]
+            try:
+                schema_version_int = int(schema_version)
+            except (ValueError, TypeError):
+                logger.warning(f"Schema version '{schema_version}' could not be converted to integer")
+        if schema_version_int is None:
+            logger.warning("Schema version not found in query result")
+        logger.info("exit: get_schema_ver_async")
+        return schema_version_int
+
+    except Exception as e:
+        logger.error(f"Error getting schema version: {str(e)}")
+        raise Exception(f"Failed to get schema version: {str(e)}")
