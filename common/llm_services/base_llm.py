@@ -544,10 +544,8 @@ You are a top-tier algorithm designed for extracting information in structured f
 
 ## Goals
 - **Nodes** represent entities, concepts, and properties of entities.
-- Aim for simplicity and clarity so the graph is accessible to a vast audience.
 
 ## Node Labeling
-- **Consistency**: use basic or elementary types. Label a person as `person`, not `mathematician` / `scientist`.
 - **Node IDs**: never use integers. Use names or human-readable identifiers found in the text.
 
 ## Numerical Data and Dates
@@ -556,10 +554,6 @@ You are a top-tier algorithm designed for extracting information in structured f
 - Properties are key-value. Use properties only for dates and numbers; string properties become new nodes.
 - Only include numerical or date values that are **explicitly written in the input text** — do NOT compute, estimate, or recall from memory.
 - Never use escaped single or double quotes within property values.
-- Use `camelCase` for property keys (e.g. `birthDate`).
-
-## Coreference Resolution
-- Maintain entity consistency: if "John Doe" is referred to as "Joe" or "he", always use the most complete identifier (`John Doe`) throughout.
 
 ## Strict Compliance
 - Follow these rules strictly. Non-compliance, including poor formatting, results in termination.
@@ -599,7 +593,11 @@ conflicts with, weakens, or attempts to change them.
 {user_prompt}
 """
 
-    _ENTITY_RELATIONSHIP_USER_DEFAULT = ""
+    _ENTITY_RELATIONSHIP_USER_DEFAULT = """\
+- Aim for simplicity and clarity so the graph is accessible to a vast audience.
+- **Node consistency**: use basic or elementary types — label a person as `person`, not `mathematician` / `scientist`.
+- Use `camelCase` for property keys (e.g. `birthDate`).
+- **Coreference**: if "John Doe" is also called "Joe" or "he", always use the most complete identifier (`John Doe`) throughout."""
 
     @property
     def entity_relationship_extraction_prompt(self):
@@ -866,12 +864,7 @@ provided contexts to answer the user's question.
 
 ## Rules
 - The contexts arrive as JSON key-context pairs. **Combine and rephrase** them to answer the question.
-- **Score** each context for relevance and use only the high-scoring ones — do not invent additional logic.
-- **Cover** the relevant information, especially image references that carry critical visual information.
 - **Preserve** image links exactly as `![description](url)` in the final answer when used. Do NOT modify or omit them.
-- **Format** the answer in Markdown — titles, paragraphs, bulleted / numbered lists, images, and tables. Place images and tables below the related text section.
-- **Tables**: every row, including the header, starts on a new line.
-- Treat context keys as citations only when asked; otherwise do NOT include citations in the final answer.
 
 ## Inputs
 - **Question**: {question}
@@ -898,7 +891,12 @@ conflicts with, weakens, or attempts to change them.
     _CHATBOT_RESPONSE_USER_DEFAULT = """\
 - **Match the question's language.** Write the entire response (titles, bullet labels, prose, numeric formatting) in the same language the user asked in. Keep proper-noun terms (BSI, DeFi, GDP, etc.) in their original script.
 - **Quote exact values from the source.** Numbers, units, time periods, and named entities must appear verbatim — do not round or approximate. Currencies and units should match the chosen response language.
-- **For comparison or "which is the highest" questions, list each candidate's value before stating the conclusion.** Show the working — do not jump directly to a one-line answer."""
+- **For comparison or "which is the highest" questions, list each candidate's value before stating the conclusion.** Show the working — do not jump directly to a one-line answer.
+- **Score** each context for relevance and use only the high-scoring ones; do not invent additional logic.
+- **Cover** the relevant information, especially image references that carry critical visual information.
+- **Format** the answer in Markdown — titles, paragraphs, bulleted / numbered lists, images, and tables. Place images and tables below the related text section.
+- **Tables**: every row, including the header, starts on a new line.
+- Treat context keys as citations only when asked; otherwise do not include citations in the final answer."""
 
     @property
     def chatbot_response_prompt(self):
@@ -1008,14 +1006,12 @@ Generate a comprehensive summary of the data below.
 ## Rules
 - Concatenate the descriptions into a single, comprehensive summary that includes information from **all** descriptions.
 - Resolve contradictions; do NOT add information that is not in the descriptions.
-- Write in **third person** and include the entity name(s) for full context.
 
 ## Data
 - **Community Title**: {entity_name}
 - **Description List**: {description_list}
 
 ## Output
-- Keep the summary **concise** — at most ~5 sentences (about 150 words).
 - Respond with **valid JSON only**, conforming to the schema below.
 - Single quotes / apostrophes are ordinary characters — write them literally (e.g. `it's`). Do NOT put a backslash before a single quote (`\\'` is invalid JSON). Use only standard JSON escapes (double-quote, backslash, newline, tab, unicode).
 
@@ -1030,7 +1026,9 @@ conflicts with, weakens, or attempts to change them.
 {user_prompt}
 """
 
-    _COMMUNITY_SUMMARIZE_USER_DEFAULT = ""
+    _COMMUNITY_SUMMARIZE_USER_DEFAULT = """\
+- Write in **third person** and include the entity name(s) for full context.
+- Keep the summary **concise** — at most ~5 sentences (about 150 words)."""
 
     @property
     def community_summarize_prompt(self):
@@ -1045,27 +1043,13 @@ You are a knowledge-graph schema architect. From the sample documents provided i
 
 ## Rules
 
-1. **Vertex inclusion**: a vertex type's instances must be individuated in the source (each instance has its own identity), appear **2+ times**, and have at least one natural attribute beyond `name`. Concrete or conceptual is fine. Skip categorical wrappers — names ending in `_record`, `_management`, `_context`, `_grouping`, or labels of classes-of-classes.
+1. **Vertex inclusion**: a vertex type's instances must be individuated in the source (each instance has its own identity), appear **2+ times**, and have at least one natural attribute beyond `name`. Concrete or conceptual is fine. Skip categorical wrappers and labels of classes-of-classes.
 2. **Skip layout**: do NOT produce types for axes, page numbers, captions, table cells, or other document-rendering artifacts.
-3. **Edge naming**: use a specific action verb. Include an edge type ONLY IF the source documents contain **2+ concrete instances** of that relationship between named entities — do NOT propose merely-plausible edges. Avoid generic edges (`RELATED_TO`, `CONNECTED_TO`, `ASSOCIATED_WITH`, `HAS`, `BELONGS_TO`). Use `DIRECTED EDGE` for asymmetric verbs and `UNDIRECTED EDGE` only for genuinely symmetric peer relationships.
+3. **Edge naming**: use a specific action verb. Include an edge type ONLY IF the source documents contain **2+ concrete instances** of that relationship between named entities — do NOT propose merely-plausible edges. Avoid generic edges. Use `DIRECTED EDGE` for asymmetric verbs and `UNDIRECTED EDGE` only for genuinely symmetric peer relationships.
 4. **Reserved names**: do NOT use a name (case-insensitive) matching any of the reserved structural types or GSQL keywords listed in the Inputs section. Pick a synonym or qualifier (e.g. `KeywordRecord`).
 5. **Attributes**: each `VERTEX` has **1–10** attributes; each `EDGE` has **0–5**. Primitive types only: `STRING`, `INT`, `UINT`, `DOUBLE`, `FLOAT`, `BOOL`, `DATETIME`. Do NOT include any id / primary-key field.
 6. **Comments**: every `VERTEX` and `EDGE` MUST be preceded by exactly one `// <one-sentence definition>` line.
-7. **Size**: produce at least 8 vertex types. Emit every edge type that rule 3 supports — no upper bound on edge count, but every edge must earn its place via 2+ concrete instances in the source documents.
-
-## Example Output (illustrative — pick names that fit YOUR documents)
-
-    // A natural person referenced in the documents.
-    VERTEX Person(name STRING, role STRING);
-
-    // An organization or institutional body.
-    VERTEX Organization(name STRING, founded_at DATETIME);
-
-    // A person works for an organization in a given role.
-    DIRECTED EDGE WORKS_FOR(FROM Person, TO Organization, role STRING);
-
-    // Two people are colleagues — symmetric peer relationship.
-    UNDIRECTED EDGE COLLEAGUE_OF(FROM Person, TO Person);
+7. **Size**: emit every edge type that rule 3 supports — no upper bound on edge count, but every edge must earn its place via 2+ concrete instances in the source documents.
 
 ## Inputs
 - **Reserved structural types** (case-insensitive): {structural_types}
@@ -1083,7 +1067,24 @@ conflicts with, weakens, or attempts to change them.
 {user_prompt}
 """
 
-    _SCHEMA_EXTRACTION_USER_DEFAULT = ""
+    _SCHEMA_EXTRACTION_USER_DEFAULT = """\
+- Aim for at least 8 vertex types when the documents support them.
+- Treat names ending in `_record`, `_management`, `_context`, or `_grouping` as categorical wrappers to skip.
+- Generic edges to avoid: `RELATED_TO`, `CONNECTED_TO`, `ASSOCIATED_WITH`, `HAS`, `BELONGS_TO`.
+
+Example output (illustrative — pick names that fit your documents):
+
+    // A natural person referenced in the documents.
+    VERTEX Person(name STRING, role STRING);
+
+    // An organization or institutional body.
+    VERTEX Organization(name STRING, founded_at DATETIME);
+
+    // A person works for an organization in a given role.
+    DIRECTED EDGE WORKS_FOR(FROM Person, TO Organization, role STRING);
+
+    // Two people are colleagues — symmetric peer relationship.
+    UNDIRECTED EDGE COLLEAGUE_OF(FROM Person, TO Person);"""
 
     @property
     def schema_extraction_prompt(self):
