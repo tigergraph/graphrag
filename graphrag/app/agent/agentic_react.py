@@ -51,7 +51,8 @@ In your very first response, BEFORE issuing any tool calls, briefly state your p
 On later iterations, if observations change your strategy, briefly say so in the text portion before issuing new tool calls. Otherwise just act.
 
 How to use the tools:
-- Mix structural (graph queries) and unstructured (vector / community) retrieval as the question needs. Run independent tool calls in parallel within one response; chain dependent calls across iterations.
+- ALWAYS run a vector search (graphrag__hybrid_search or graphrag__contextual_search) UNLESS you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Structural query generation alone is NOT a safe sole source: it can return nothing or the wrong rows when the question doesn't map cleanly to typed data. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures, or anything a person would read from a passage), you MUST include a vector search. When unsure, use vector search — this matches the classic engine, which always retrieves from passages.
+- Mix structural (graph queries) and unstructured (vector / community) retrieval as the question needs. Run independent tool calls in parallel within one response; chain dependent calls across iterations. When you do use a structural query, pair it with a vector search unless the question is a pure structured-data request as defined above.
 - Stop iterating and give a final natural-language answer (no tool calls) once you have enough grounded context.
 - If a retrieval returns thin or empty results, widen its parameters (top_k, num_hops) or switch method instead of repeating identical calls.
 
@@ -95,7 +96,10 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
         f"## Conversation\n{json.dumps(conversation or [])[:2000]}\n\n"
         f"## Graph schema\n{schema_rep[:6000] or '(unavailable)'}"
     )
-    messages = [SystemMessage(content=_SYSTEM), HumanMessage(content=user)]
+    # Customizable system prompt (fixed rules + user "Additional Instructions");
+    # falls back to the local default if the service lacks the property.
+    system_prompt = getattr(llm, "agentic_agent_prompt", None) or _SYSTEM
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user)]
 
     tools = registry.lc_tools_spec(ctx)
 

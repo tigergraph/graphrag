@@ -3,6 +3,7 @@
 ## [2.0.0]
 
 ### Added
+- **The agentic agent's prompt is customizable.** A new *Agentic Agent* entry on the Customize Prompts page lets you append instructions and examples that steer how the agent plans and uses retrieval tools; the underlying rules stay fixed. The same customization applies whether the agent runs in planned or reactive style.
 - **External MCP servers can be configured as agentic tools.** Superusers can register external MCP servers (including installing the Python libraries they need) so the chat agent can call their tools during a conversation.
 - **Query responses can return just the answer.** The query endpoints return the answer alone by default and accept an option to include the supporting sources and trace when a caller needs them.
 
@@ -13,6 +14,7 @@
 
 - **Query installation is more reliable on large graphs.** Graph queries install through a non-blocking request with status polling instead of one long call, so initialization no longer fails on a gateway timeout while queries compile.
 - **Chat and admin UI refinements.** The chat engine/style picker is clearer, older conversations can be cleared in bulk, the graph *Compatibility Check* is renamed *Migration Assistant*, and a rendering glitch that clipped the bottoms of letters in text inputs is fixed.
+- **The agentic agent grounds answers in document text more reliably.** It now always includes a vector search unless a question is confidently a pure structured-data request (an exact count, lookup, relationship, or aggregation), so it no longer answers passage questions from a graph query alone.
 
 ### Fixed
 - **A single oversized chunk no longer drops embeddings for the rest of a batch.** Embeddings that exceed the provider's input limit are retried at progressively shorter lengths, and a vertex that still doesn't fit is skipped individually instead of aborting the batch; similarity search ignores vertices without an embedding.

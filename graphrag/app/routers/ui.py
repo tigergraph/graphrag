@@ -4625,6 +4625,9 @@ async def get_prompts(
             # generate_cypher, generate_gsql). Empty by default.
             "query_guidance":
                 (completion_llm, "query_guidance_prompt"),
+            # Agentic (react) agent system prompt — runs through the chat service.
+            "agentic_agent":
+                (chat_llm, "agentic_agent_prompt"),
         }
 
         # Split prompts expose ONLY the user portion; the system prompt (rules
@@ -4634,6 +4637,7 @@ async def get_prompts(
             "entity_relationship": "entity_relationship_extraction.txt",
             "community_summarization": "community_summarization.txt",
             "schema_extraction": "schema_extraction.txt",
+            "agentic_agent": "agentic_agent.txt",
         }
 
         def _get_prompt(prompt_type: str) -> dict:
@@ -4793,6 +4797,7 @@ async def save_prompts(
             "query_generation": "map_question_to_schema.txt",
             "schema_extraction": "schema_extraction.txt",
             "query_guidance": "query_guidance.txt",
+            "agentic_agent": "agentic_agent.txt",
         }
 
         if prompt_type not in prompt_type_to_file:
