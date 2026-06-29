@@ -14,10 +14,15 @@
  * limitations under the License.
 */
 
-CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Community_Vector_Search(LIST<FLOAT> query_vector, INT community_level=2, INT top_k = 3, BOOL with_chunk = true, BOOL with_doc = false, BOOL verbose = false) { 
+CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Community_Vector_Search(LIST<FLOAT> query_vector, INT community_level=2, INT top_k = 3, UINT max_results = 0, BOOL with_chunk = true, BOOL with_doc = false, BOOL verbose = false) {
   TYPEDEF TUPLE<VERTEX s, VERTEX t> EdgeTypes;
+  // Relevance cap for the chunks pulled in via a community's entities, so a
+  // broad community doesn't dump every linked chunk's text. 0 = no cap.
+  TYPEDEF tuple<Vertex<DocumentChunk> v, Float cos> ChunkScore;
   MapAccum<Vertex, SetAccum<String>> @@final_retrieval;
   MapAccum<STRING, SetAccum<Vertex>> @@verbose_info;
+  HeapAccum<ChunkScore>(max_results, cos DESC) @@top_chunks;
+  SetAccum<VERTEX<DocumentChunk>> @@keep_chunks;
   SetAccum<STRING> @context;
   SetAccum<Vertex> @children;
   SetAccum<Vertex> @@start_set;
@@ -43,12 +48,26 @@ CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Community_Vector_Search(LIST<FLOAT>
       extra_selected_comms = SELECT m FROM start_chunks:dc -(CONTAINS_ENTITY>)- Entity:v -(IN_COMMUNITY>)- Community:m;
       selected_comms = selected_comms UNION extra_selected_comms;
 
+      // Rank the chunks linked to the selected communities by cosine relevance
+      // to the question and keep only the top max_results, so the per-community
+      // context isn't every linked chunk's full text. 0 = no cap.
+      IF max_results > 0 THEN
+          cand = SELECT d FROM DocumentChunk:d -(CONTAINS_ENTITY>)- Entity:v -(IN_COMMUNITY>)- selected_comms:m
+                 WHERE d.embedding.size() > 0
+                 POST-ACCUM @@top_chunks += ChunkScore(d, 1 - gds.vector.distance(query_vector, d.embedding, "COSINE"));
+          FOREACH it IN @@top_chunks DO
+              @@keep_chunks += it.v;
+          END;
+      END;
+
       IF with_doc THEN
           related_chunks = SELECT c FROM Content:c -(<HAS_CONTENT)- Document:d -(HAS_CHILD>)- DocumentChunk:dc -(CONTAINS_ENTITY>)- Entity:v -(IN_COMMUNITY>)- selected_comms:m
+              WHERE max_results == 0 OR dc IN @@keep_chunks
               ACCUM m.@context += c.text, m.@children += d, @@edges += EdgeTypes(m, d)
               POST-ACCUM @@verbose_info += ("related_chunks" -> m.@children);
       ELSE
           related_chunks = SELECT c FROM Content:c -(<HAS_CONTENT)- DocumentChunk:d -(CONTAINS_ENTITY>)- Entity:v -(IN_COMMUNITY>)- selected_comms:m
+              WHERE max_results == 0 OR d IN @@keep_chunks
               ACCUM m.@context += c.text, m.@children += d, @@edges += EdgeTypes(m, d)
               POST-ACCUM @@verbose_info += ("related_chunks" -> m.@children);
       END;

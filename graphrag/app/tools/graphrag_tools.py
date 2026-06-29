@@ -271,6 +271,7 @@ def community_search(
     top_k: Optional[int] = None,
     community_level: Optional[int] = None,
     with_chunk: Optional[bool] = None,
+    max_results: Optional[int] = None,
 ) -> dict:
     """Community-summary search — retrieves thematic community summaries
     (and optionally their chunks). Best for broad / aggregative questions.
@@ -286,6 +287,7 @@ def community_search(
         community_level=guards.clamp_community_level(community_level, cfg.get("community_level", 2)),
         top_k=guards.clamp_top_k(top_k, cfg.get("top_k", 5)),
         with_chunk=cfg.get("with_chunk", True) if with_chunk is None else with_chunk,
+        max_results=max_results or 0,  # 0 -> retriever resolves from config / top_k*2 floor
     )
     return _unstructured_result("GraphRAG_Community_Vector_Search", step)
 

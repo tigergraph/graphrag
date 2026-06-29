@@ -15,7 +15,7 @@ class CommunityRetriever(BaseRetriever):
     ):
         super().__init__(embedding_service, embedding_store, llm_service, connection)
 
-    def search(self, question, community_level: int, top_k: int = 5, similarity_threshold = 0.90, expand: bool = False, with_chunk: bool = True, with_doc: bool = False, verbose: bool = False):
+    def search(self, question, community_level: int, top_k: int = 5, similarity_threshold = 0.90, expand: bool = False, with_chunk: bool = True, with_doc: bool = False, verbose: bool = False, max_results: int = 0):
         if expand:
             questions = self._expand_question(question, top_k, verbose=verbose)
             verbose and self.logger.info(f"Expanded questions to use: {questions}")
@@ -57,6 +57,14 @@ class CommunityRetriever(BaseRetriever):
                 )
                 res[0]["final_retrieval"]["Similarity_Context"] = [resp[0]["final_retrieval"][x] for x in resp[0]["final_retrieval"]]
         else:
+            # Resolve the related-chunk cap with a top_k*2 floor (same as
+            # hybrid): explicit override -> graphrag_config -> top_k*2.
+            if not max_results:
+                from common.config import get_graphrag_config
+                max_results = get_graphrag_config(
+                    self.conn.graphname if self.conn else None
+                ).get("max_results", 0)
+            max_results = max(max_results, top_k * 2)
             query_vector = self._generate_embedding(question)
 
             self._check_query_install("GraphRAG_Community_Vector_Search")
@@ -66,6 +74,7 @@ class CommunityRetriever(BaseRetriever):
                     "query_vector": query_vector,
                     "community_level": community_level,
                     "top_k": top_k,
+                    "max_results": max_results,
                     #"similarity_threshold": similarity_threshold,
                     "with_chunk": with_chunk,
                     "with_doc": with_doc,
@@ -89,8 +98,9 @@ class CommunityRetriever(BaseRetriever):
                         with_chunk: bool = False,
                         with_doc: bool = False,
                         combine: bool = False,
-                        verbose: bool = False):
-        retrieved = self.search(question, community_level, top_k, similarity_threshold, expand, with_chunk, with_doc, verbose)
+                        verbose: bool = False,
+                        max_results: int = 0):
+        retrieved = self.search(question, community_level, top_k, similarity_threshold, expand, with_chunk, with_doc, verbose, max_results)
 
         if combine:
             context = []
