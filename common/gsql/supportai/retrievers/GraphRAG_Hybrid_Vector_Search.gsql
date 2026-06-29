@@ -15,11 +15,15 @@
 */
 
 CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Hybrid_Vector_Search(Set<STRING> v_types,
-  LIST<FLOAT> query_vector, UINT top_k=5, UINT num_hops=3, UINT num_seen_min=1, BOOL chunk_only = False, BOOL doc_only = False, BOOL verbose = False) {
+  LIST<FLOAT> query_vector, UINT top_k=5, UINT num_hops=3, UINT num_seen_min=1, UINT max_results=0, BOOL chunk_only = False, BOOL doc_only = False, BOOL verbose = False) {
   TYPEDEF TUPLE<VERTEX v, STRING t> VertexTypes;
   TYPEDEF TUPLE<VERTEX s, VERTEX t> EdgeTypes;
   TYPEDEF tuple<Vertex v, Float score> Similarity_Results;
+  // Final relevance cap: rank reached chunks by cosine to the question
+  // (degree-independent, unlike path-count) and keep the top max_results.
+  TYPEDEF tuple<Vertex<DocumentChunk> v, Float cos> ChunkScore;
   HeapAccum<Similarity_Results>(top_k, score DESC) @@topk_set;
+  HeapAccum<ChunkScore>(max_results, cos DESC) @@top_chunks;
   SetAccum<VERTEX> @@start_set;
   SetAccum<VertexTypes> @@start_set_type;
   SetAccum<VERTEX> @@tmp_set;
@@ -96,6 +100,20 @@ CREATE OR REPLACE DISTRIBUTED QUERY GraphRAG_Hybrid_Vector_Search(Set<STRING> v_
               END
             END
           END;
+
+  // Cap to the most query-relevant chunks BEFORE the (expensive) content
+  // fetch: score each reached chunk by cosine to the question and keep the
+  // top max_results. Cosine is degree-independent, so it doesn't favor
+  // chunks attached to hub entities the way path-count would. 0 = no cap.
+  IF max_results > 0 THEN
+    cand = {@@to_retrieve_content};
+    cand = SELECT s FROM cand:s WHERE s.embedding.size() > 0
+           POST-ACCUM @@top_chunks += ChunkScore(s, 1 - gds.vector.distance(query_vector, s.embedding, "COSINE"));
+    @@to_retrieve_content.clear();
+    FOREACH it IN @@top_chunks DO
+      @@to_retrieve_content += it.v;
+    END;
+  END;
 
   doc_chunks = {@@to_retrieve_content};
 

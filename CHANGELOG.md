@@ -14,6 +14,7 @@
 - **Retrieval matches table-heavy and numeric content more reliably.** Each chunk is embedded together with a compact summary of its topic, section, and key entities, so dense vectors carry that context explicitly — improving answers on documents where the raw text alone embeds poorly.
 
 - **Query installation is more reliable on large graphs.** Graph queries install through a non-blocking request with status polling instead of one long call, so initialization no longer fails on a gateway timeout while queries compile.
+- **Hybrid search results are bounded by relevance.** Search returns at most a configurable number of chunks (`max_results`, default twice Top K), ranked by similarity to the question, instead of every chunk the graph expansion reaches — reducing the context sent to the model. Tunable on the GraphRAG Configuration page alongside Top K and Number of Hops.
 - **Chat and admin UI refinements.** The chat engine/style picker is clearer, older conversations can be cleared in bulk, the graph *Compatibility Check* is renamed *Migration Assistant*, and a rendering glitch that clipped the bottoms of letters in text inputs is fixed.
 - **The agentic agent grounds answers in document text more reliably.** It now always includes a vector search unless a question is confidently a pure structured-data request (an exact count, lookup, relationship, or aggregation), so it no longer answers passage questions from a graph query alone.
 

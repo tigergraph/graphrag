@@ -26,6 +26,7 @@ const GraphRAGConfig = () => {
   const [numHops, setNumHops] = useState("2");
   const [numSeenMin, setNumSeenMin] = useState("2");
   const [communityLevel, setCommunityLevel] = useState("2");
+  const [maxResults, setMaxResults] = useState("");
   const [docOnly, setDocOnly] = useState(false);
   const [enableRouterFallback, setEnableRouterFallback] = useState(true);
   const [agentMode, setAgentMode] = useState<"agentic" | "classic">("agentic");
@@ -97,6 +98,7 @@ const GraphRAGConfig = () => {
     setNumHops(String(graphragConfig.num_hops ?? 2));
     setNumSeenMin(String(graphragConfig.num_seen_min ?? 2));
     setCommunityLevel(String(graphragConfig.community_level ?? 2));
+    setMaxResults(graphragConfig.max_results != null ? String(graphragConfig.max_results) : "");
     setDocOnly(graphragConfig.doc_only ?? false);
     setEnableRouterFallback(graphragConfig.enable_router_fallback ?? true);
     setAgentMode(graphragConfig.agent_mode === "classic" ? "classic" : "agentic");
@@ -269,6 +271,10 @@ const GraphRAGConfig = () => {
       // applies.
       if (retrievalIncludeEntity !== "auto") {
         currentConfig.retrieval_include_entity = retrievalIncludeEntity === "true";
+      }
+      // Only persist max_results when set; blank means "use the top_k*2 floor".
+      if (maxResults) {
+        currentConfig.max_results = parseInt(maxResults);
       }
 
       // Display defaults — used to avoid saving values the user never changed
@@ -553,6 +559,25 @@ const GraphRAGConfig = () => {
                   />
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     Community hierarchy level used for community search
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Max Results
+                  </label>
+                  <Input
+                    type="number"
+                    min="1"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
+                    placeholder="Defaults to 2 × Top K"
+                    value={maxResults}
+                    onChange={(e) => setMaxResults(e.target.value)}
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Maximum number of result chunks returned by search, ranked by relevance. Leave blank to use the default (twice Top K).
                   </p>
                 </div>
               </div>

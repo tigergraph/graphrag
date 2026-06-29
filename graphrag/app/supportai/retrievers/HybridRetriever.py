@@ -12,7 +12,7 @@ class HybridRetriever(BaseRetriever):
     ):
         super().__init__(embedding_service, embedding_store, llm_service, connection)
 
-    def search(self, question, indices, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand = False, method = "similarity", chunk_only=False, doc_only=False, verbose=False):
+    def search(self, question, indices, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand = False, method = "similarity", chunk_only=False, doc_only=False, verbose=False, max_results: int = 0):
         if expand:
             questions = self._expand_question(question, top_k, verbose)
             verbose and self.logger.info(f"Expanded questions to use: {questions}")
@@ -60,7 +60,20 @@ class HybridRetriever(BaseRetriever):
                 usePost=True
             )  
         else:
-            query_vector = self._generate_embedding(question)        
+            # Resolve the result cap with a top_k*2 floor: an explicit override
+            # or graphrag_config value is honored, but never return fewer than
+            # top_k*2 chunks (all seeds plus a comparable amount of the most
+            # query-relevant expansion). Unset -> top_k*2.
+            from common.config import get_graphrag_config
+            _floor = top_k * 2
+            max_results = max(
+                max_results
+                or get_graphrag_config(
+                    self.conn.graphname if self.conn else None
+                ).get("max_results", 0),
+                _floor,
+            )
+            query_vector = self._generate_embedding(question)
             self._check_query_install("GraphRAG_Hybrid_Vector_Search")
             res = self.conn.runInstalledQuery(
                 "GraphRAG_Hybrid_Vector_Search",
@@ -71,6 +84,7 @@ class HybridRetriever(BaseRetriever):
                     #"similarity_threshold": similarity_threshold,
                     "num_hops": num_hops,
                     "num_seen_min": num_seen_min,
+                    "max_results": max_results,
                     "chunk_only": chunk_only,
                     "doc_only": doc_only,
                     "verbose": verbose,
@@ -85,8 +99,8 @@ class HybridRetriever(BaseRetriever):
                 res[1]["verbose"]["expanded_questions"] = questions
         return res
 
-    def retrieve_answer(self, question, index, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand: bool = False, method: str = "similarity", chunk_only: bool = False, doc_only: bool = False, combine: bool = False, verbose: bool = False):
-        retrieved = self.search(question, index, top_k, similarity_threshold, num_hops, num_seen_min, expand, method, chunk_only, doc_only, verbose)
+    def retrieve_answer(self, question, index, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand: bool = False, method: str = "similarity", chunk_only: bool = False, doc_only: bool = False, combine: bool = False, verbose: bool = False, max_results: int = 0):
+        retrieved = self.search(question, index, top_k, similarity_threshold, num_hops, num_seen_min, expand, method, chunk_only, doc_only, verbose, max_results)
 
         if combine:
             context = []

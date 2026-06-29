@@ -205,6 +205,7 @@ def hybrid_search(
     num_hops: Optional[int] = None,
     chunk_only: Optional[bool] = None,
     similarity_threshold: Optional[float] = None,
+    max_results: Optional[int] = None,
 ) -> dict:
     """Hybrid vector + graph-expansion search over document chunks.
     Good for questions needing supporting passages plus related context.
@@ -223,6 +224,7 @@ def hybrid_search(
         num_hops=guards.clamp_num_hops(num_hops, cfg.get("num_hops", 2)),
         chunk_only=cfg.get("chunk_only", True) if chunk_only is None else chunk_only,
         doc_only=cfg.get("doc_only", False),
+        max_results=max_results or 0,  # 0 -> retriever resolves from graphrag_config
     )
     return _unstructured_result("GraphRAG_Hybrid_Vector_Search", step)
 
