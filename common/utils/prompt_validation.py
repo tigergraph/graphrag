@@ -54,6 +54,7 @@ SPLIT_PROMPT_TYPES: Set[str] = {
     "community_summarization",
     "schema_extraction",
     "agentic_agent",
+    "agentic_planner",
 }
 
 REQUIRED_VARS_BY_PROMPT_TYPE: dict = {
@@ -66,6 +67,8 @@ REQUIRED_VARS_BY_PROMPT_TYPE: dict = {
     # Agentic (react) agent system prompt — split; user portion has no
     # required placeholders (the react loop has none).
     "agentic_agent": set(),
+    # Agentic planner system prompt — split; no required placeholders.
+    "agentic_planner": set(),
     # graphrag/app/tools/map_question_to_schema.py — NOT split; still a full
     # template override, so it keeps its required placeholders.
     "query_generation": {
@@ -96,6 +99,7 @@ ALLOWED_PARTIALS_BY_PROMPT_TYPE: dict = {
     "schema_extraction": set(),
     "query_guidance": set(),
     "agentic_agent": set(),
+    "agentic_planner": set(),
 }
 
 

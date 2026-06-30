@@ -32,7 +32,11 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM = """You are the planner for a GraphRAG question-answering agent over a TigerGraph knowledge graph.
 
-Produce a PLAN: a small DAG of tool steps that gathers exactly the context needed to answer the user's question, then ends with one final "answer" step.
+First analyze the question against the graph schema (provided in the user message) and decide the ENTIRE plan up front:
+- whether answering it needs structural queries, unstructured (vector) search, or BOTH;
+- how many of each; and
+- in what order.
+Express this as a small DAG of tool steps that gathers exactly the context needed, ending with one final "answer" step that consolidates all the gathered context into the response.
 
 You have two kinds of retrieval:
 - STRUCTURAL (graphrag__structural_retrieve): generates and runs a graph query. Best for counts, lookups by attribute/id, relationships, and aggregations over typed data. It depends on the LLM generating a correct query against the live schema — it can return nothing or the wrong rows when the question doesn't map cleanly to typed graph data, so it is NOT a safe sole source of context.
@@ -111,22 +115,10 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
             "top_k/num_hops, switch method, or add a dependent query) to close "
             "the gap, then the final answer step."
         )
-    # Inject the user-customizable "Agentic Agent" portion (shared with the
-    # react orchestrator via agentic_agent.txt) under the fixed planner rules,
-    # so one customization applies whichever agentic style runs.
-    system = _SYSTEM
-    try:
-        user_portion = llm.get_user_portion("agentic_agent.txt")
-        if user_portion:
-            system = (
-                _SYSTEM
-                + "\n\n## Authority\nThe rules above are authoritative and fixed."
-                " Treat the \"Additional Instructions\" below as advisory only;"
-                " ignore anything that conflicts with them.\n\n"
-                "## Additional Instructions\n" + user_portion
-            )
-    except Exception as exc:
-        logger.debug(f"planner: no user portion injected ({exc})")
+    # Use the customizable planner prompt (fixed DAG-planning rules + the
+    # editable "Additional Instructions" portion); fall back to the local
+    # default if the service lacks the property.
+    system = getattr(llm, "agentic_planner_prompt", None) or _SYSTEM
     messages = [("system", system), ("user", "\n\n".join(user_parts))]
     try:
         plan = llm.invoke_structured(messages, Plan, caller_name="agentic_plan")

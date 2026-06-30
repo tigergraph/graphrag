@@ -4628,6 +4628,9 @@ async def get_prompts(
             # Agentic (react) agent system prompt — runs through the chat service.
             "agentic_agent":
                 (chat_llm, "agentic_agent_prompt"),
+            # Agentic planner system prompt — runs through the chat service.
+            "agentic_planner":
+                (chat_llm, "agentic_planner_prompt"),
         }
 
         # Split prompts expose ONLY the user portion; the system prompt (rules
@@ -4638,6 +4641,7 @@ async def get_prompts(
             "community_summarization": "community_summarization.txt",
             "schema_extraction": "schema_extraction.txt",
             "agentic_agent": "agentic_agent.txt",
+            "agentic_planner": "agentic_planner.txt",
         }
 
         def _get_prompt(prompt_type: str) -> dict:
@@ -4798,6 +4802,7 @@ async def save_prompts(
             "schema_extraction": "schema_extraction.txt",
             "query_guidance": "query_guidance.txt",
             "agentic_agent": "agentic_agent.txt",
+            "agentic_planner": "agentic_planner.txt",
         }
 
         if prompt_type not in prompt_type_to_file:

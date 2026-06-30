@@ -25,7 +25,8 @@ const ALL_PROMPT_TYPES = [
   { id: "community_summarization", name: "Community Summarization", description: "Extra instructions/examples for summarizing each community during rebuild. Appended to fixed system rules." },
   { id: "query_guidance", name: "Query Guidance", description: "Free-form domain hints and example mappings — injected into question-to-schema, generate-function, generate-cypher, and generate-gsql prompts. Empty by default. Max 8000 characters." },
   { id: "chatbot_response", name: "Chatbot Responses", description: "Extra instructions/examples for how the chatbot composes the final answer. Appended to fixed system rules." },
-  { id: "agentic_agent", name: "Agentic Agent", description: "Extra instructions/examples for how the agentic agent plans and uses retrieval tools. Appended to fixed system rules." },
+  { id: "agentic_planner", name: "Agentic Planner", description: "Extra instructions/examples for how the agent plans a question up front (which tools, how many, in what order) before retrieving. Appended to fixed system rules." },
+  { id: "agentic_agent", name: "React Agent", description: "Extra instructions/examples for how the React agent reasons and chooses each next action step-by-step. Appended to fixed system rules." },
 ];
 
 const CustomizePrompts = () => {
@@ -46,6 +47,7 @@ const CustomizePrompts = () => {
     schema_extraction: "",
     query_guidance: "",
     agentic_agent: "",
+    agentic_planner: "",
   });
 
   // Template variables that should not be edited (stored separately)
@@ -57,6 +59,7 @@ const CustomizePrompts = () => {
     schema_extraction: "",
     query_guidance: "",
     agentic_agent: "",
+    agentic_planner: "",
   });
 
   // Only render prompt types the backend returned for this user
@@ -156,6 +159,9 @@ const CustomizePrompts = () => {
         agentic_agent: data.prompts.agentic_agent?.editable_content !== undefined
           ? data.prompts.agentic_agent.editable_content
           : (typeof data.prompts.agentic_agent === 'string' ? data.prompts.agentic_agent : ""),
+        agentic_planner: data.prompts.agentic_planner?.editable_content !== undefined
+          ? data.prompts.agentic_planner.editable_content
+          : (typeof data.prompts.agentic_planner === 'string' ? data.prompts.agentic_planner : ""),
       });
 
       // Store template variables separately
@@ -167,6 +173,7 @@ const CustomizePrompts = () => {
         schema_extraction: data.prompts.schema_extraction?.template_variables || "",
         query_guidance: data.prompts.query_guidance?.template_variables || "",
         agentic_agent: data.prompts.agentic_agent?.template_variables || "",
+        agentic_planner: data.prompts.agentic_planner?.template_variables || "",
       });
     } catch (error) {
       console.error("Error loading prompts:", error);
