@@ -52,13 +52,9 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     max_replans = int(_cfg.get("agent_max_replans", MAX_REPLANS))
     max_total_steps = int(_cfg.get("agent_max_total_steps", MAX_TOTAL_STEPS))
 
-    # Schema for planning (cached cheaply by render_schema_rep per version).
+    # The schema is loaded lazily by the query tools at run time, so a question
+    # that needs no graph data does not trigger a schema read.
     emit("Planning an approach")
-    from tools import tool_registry as registry
-    schema_out = registry.run("graphrag__get_schema", {}, ctx)
-    schema_rep = ""
-    if isinstance(schema_out.get("context"), dict):
-        schema_rep = schema_out["context"].get("schema_rep", "")
 
     results: dict = {}
     agent_steps: list = []
@@ -66,7 +62,7 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     # plan (timed + usage-attributed for the trace)
     _u0 = len(get_collected_usage() or [])
     _t0 = time.time()
-    plan = plan_question(llm, question, conversation, schema_rep, ctx=ctx)
+    plan = plan_question(llm, question, conversation, ctx=ctx)
     agent_steps.append({
         "node": "plan", "kind": "plan",
         "duration_s": round(time.time() - _t0, 3),
@@ -96,7 +92,7 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
         ]
         _u0 = len(get_collected_usage() or [])
         _t0 = time.time()
-        plan = plan_question(llm, question, conversation, schema_rep, prior_results=prior, ctx=ctx)
+        plan = plan_question(llm, question, conversation, prior_results=prior, ctx=ctx)
         agent_steps.append({
             "node": f"replan {replans}", "kind": "plan",
             "duration_s": round(time.time() - _t0, 3),

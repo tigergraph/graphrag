@@ -681,8 +681,8 @@ conflicts with, weakens, or attempts to change them.
 
     _ENTITY_RELATIONSHIP_USER_DEFAULT = """\
 - Aim for simplicity and clarity so the graph is accessible to a vast audience.
-- **Node consistency**: use basic or elementary types — label a person as `person`, not `mathematician` / `scientist`.
 - Use `camelCase` for property keys (e.g. `birthDate`).
+- **Node consistency**: use basic or elementary types — label a person as `person`, not `mathematician` / `scientist`.
 - **Coreference**: if "John Doe" is also called "Joe" or "he", always use the most complete identifier (`John Doe`) throughout."""
 
     @property
@@ -881,7 +881,7 @@ conflicts with, weakens, or attempts to change them.
     _AGENTIC_AGENT_SYSTEM = """\
 You are a GraphRAG agent answering questions over a TigerGraph knowledge graph.
 
-You have a set of read-only tools (graph schema, structural query generation, several unstructured retrievers, raw GSQL via tg_run_query, neighbor expansion). The graph schema is provided in the user message.
+You have a set of read-only tools (graph schema via graphrag__get_schema, structural query generation, several unstructured retrievers, raw GSQL via tg_run_query, neighbor expansion). The graph schema is NOT pre-loaded — fetch it with graphrag__get_schema when you need it.
 
 REASON, ACT, OBSERVE — repeat until you can answer.
 
@@ -889,6 +889,8 @@ Start by analyzing the question and reasoning (1-2 sentences) about what it need
 - If it can, stop and give the final answer.
 - If not, decide your NEXT action from what is still missing and what the last result surfaced — fill the gap, follow a lead, or widen/switch method if results were thin.
 Do not commit to a full multi-step plan up front; let each next step be driven by whether you can yet answer.
+
+The graph schema is required for the structural and unstructured query tools: before your first structural query or vector/unstructured retrieval, call graphrag__get_schema once to load the graph's vertex and edge types. Questions answered without graph data (e.g. by an external tool) do not need the schema.
 
 Run independent tool calls in parallel within one response; chain dependent calls across iterations. Cite specific findings from tool results in your final answer.
 
@@ -901,13 +903,12 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
 {user_prompt}
 """
 
-    # Strategy (operator-customizable) — moved out of the fixed rules so it can
-    # be tuned without touching the role / act model / output behavior.
+    # Operator-customizable retrieval strategy for the react agent: the first
+    # action, then each next action driven by what the previous result returned.
     _AGENTIC_AGENT_USER_DEFAULT = """\
-- Prioritize a vector search (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search. When unsure, use vector search.
-- Mix structural (graph queries) and unstructured (vector / community) retrieval as the question needs. When you use a structural query, pair it with a vector search unless the question is a pure structured-data request.
-- If a retrieval returns thin or empty results, widen its parameters (top_k, num_hops) or switch method instead of repeating identical calls.
-- Be efficient: the smallest set of tool calls that answers the question is best."""
+- For most questions, make your FIRST action a vector search (graphrag__hybrid_search or graphrag__contextual_search) — it gives the broadest grounding. Skip it only when you are highly confident the question is a pure structured-data request (an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data) that a generated graph query fully answers on its own.
+- Let each observation drive the next action: if the passages you got back name specific entities or relationships you still need hard facts about, follow up with a structural query; if a result is thin, empty, or off-target, widen its parameters (top_k, num_hops) or switch method rather than repeating the same call.
+- Once the context gathered so far can answer the question, stop and answer. Prefer the fewest steps."""
 
     @property
     def agentic_agent_prompt(self):
@@ -924,11 +925,14 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
     _AGENTIC_PLANNER_SYSTEM = """\
 You are the planner for a GraphRAG question-answering agent over a TigerGraph knowledge graph.
 
-First analyze the question against the graph schema (provided in the user message) and decide the ENTIRE plan up front:
-- whether answering it needs structural queries, unstructured (vector) search, or BOTH;
+First analyze the question and decide the ENTIRE plan up front:
+- whether it needs the graph at all, or can be answered directly (a greeting, a question about the assistant) or by a non-graph tool;
+- whether it needs structural queries, unstructured (vector) search, or BOTH;
 - how many of each; and
 - in what order.
 Express this as a small DAG of tool steps that gathers exactly the context needed, ending with one final "answer" step that consolidates all the gathered context into the response. Express ordering with depends_on and repetition with multiple steps.
+
+The graph schema is NOT provided here — the structural and unstructured query tools load it themselves at run time, so plan retrieval steps directly. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
 
 You have two kinds of retrieval:
 - STRUCTURAL (graphrag__structural_retrieve): generates and runs a graph query. Best for counts, lookups by attribute/id, relationships, and aggregations over typed data. It depends on the LLM generating a correct query against the live schema — it can return nothing or the wrong rows when the question doesn't map cleanly to typed graph data, so it is NOT a safe sole source of context.
