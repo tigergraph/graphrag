@@ -3,7 +3,7 @@
 ## [2.0.0]
 
 ### Added
-- **The agentic agent's prompts are customizable, per style.** The Customize Prompts page has separate *Agentic Planner* and *React Agent* entries: Planner controls how a question is analyzed and the retrieval plan is decided up front (which tools, how many, in what order); React controls how the agent reasons and chooses each next action step by step. You append instructions and examples; the underlying rules stay fixed.
+- **The agentic agent's retrieval strategy is customizable, per style.** The Customize Prompts page has separate *Agentic Planner* and *React Agent* entries, each pre-filled with its default retrieval strategy — which methods to use, when, how many, and in what order — that you can edit. The role, act model (plan-up-front for the planner, reason-act-observe for React), and output format stay fixed.
 - **Customizable prompts open with editable starting guidance.** The Customize Prompts page now pre-fills each prompt's preference-style guidance (answer formatting and language, summary length and voice, schema granularity hints and examples) as an editable default you can adjust or clear; the format, input, and structural rules that keep the feature working stay locked and out of view.
 - **External MCP servers can be configured as agentic tools.** Superusers can register external MCP servers (including installing the Python libraries they need) so the chat agent can call their tools during a conversation.
 - **Query responses can return just the answer.** The query endpoints return the answer alone by default and accept an option to include the supporting sources and trace when a caller needs them.

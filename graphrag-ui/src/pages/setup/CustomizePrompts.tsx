@@ -25,8 +25,8 @@ const ALL_PROMPT_TYPES = [
   { id: "community_summarization", name: "Community Summarization", description: "Extra instructions/examples for summarizing each community during rebuild. Appended to fixed system rules." },
   { id: "query_guidance", name: "Query Guidance", description: "Free-form domain hints and example mappings — injected into question-to-schema, generate-function, generate-cypher, and generate-gsql prompts. Empty by default. Max 8000 characters." },
   { id: "chatbot_response", name: "Chatbot Responses", description: "Extra instructions/examples for how the chatbot composes the final answer. Appended to fixed system rules." },
-  { id: "agentic_planner", name: "Agentic Planner", description: "Extra instructions/examples for how the agent plans a question up front (which tools, how many, in what order) before retrieving. Appended to fixed system rules." },
-  { id: "agentic_agent", name: "React Agent", description: "Extra instructions/examples for how the React agent reasons and chooses each next action step-by-step. Appended to fixed system rules." },
+  { id: "agentic_planner", name: "Agentic Planner", description: "The planner's retrieval strategy — which methods to use, how many, and in what order — pre-filled with the default and fully editable. The role, plan model, and output format stay fixed." },
+  { id: "agentic_agent", name: "React Agent", description: "The React agent's retrieval strategy — which methods to prioritize and when, step by step — pre-filled with the default and fully editable. The role and reason-act-observe model stay fixed." },
 ];
 
 const CustomizePrompts = () => {
