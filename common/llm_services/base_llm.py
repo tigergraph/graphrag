@@ -311,12 +311,76 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             except OutputParserException:
                 return parser.parse(self._repair_json_escapes(candidate))
 
+    @staticmethod
+    def _salvage_answer_output(raw_text: str):
+        """Best-effort recovery of an answer from malformed model JSON.
+
+        When the strict parse + escape-repair both fail, pull whatever is
+        usable out of the broken text rather than surfacing a raw JSON blob:
+          1. the ``generated_answer`` string value (lenient unescape), and
+          2. the ``citation`` list if its array is still intact — else it is
+             dropped (losing the citation list is acceptable; the prose
+             answer is not).
+        Last resort: treat the whole raw text as the answer with no citation.
+        Always returns a valid ``GraphRAGAnswerOutput``; never raises.
+        """
+        from common.py_schemas import GraphRAGAnswerOutput
+
+        text = raw_text or ""
+        answer = None
+        citation: list = []
+
+        # 1. Recover the generated_answer value: capture from the opening quote
+        #    after the key up to the closing quote that precedes the citation
+        #    key or the end of the object.
+        m = re.search(
+            r'"generated_answer"\s*:\s*"(.*?)"\s*(?:,\s*"citation"|}|$)',
+            text, flags=re.DOTALL,
+        )
+        if m:
+            answer = m.group(1)
+            answer = answer.replace('\\n', '\n').replace('\\t', '\t')
+            answer = re.sub(r'\\(["\\/])', r'\1', answer)      # valid escapes
+            answer = re.sub(r'\\(?!["\\/bfnrtu])', '', answer)  # strip stray
+            answer = answer.strip()
+
+        # 2. Recover the citation list if its array survived intact.
+        cm = re.search(r'"citation"\s*:\s*\[(.*?)\]', text, flags=re.DOTALL)
+        if cm:
+            citation = re.findall(r'"((?:[^"\\]|\\.)*)"', cm.group(1))
+
+        if not answer:
+            # The model's raw text is still its answer attempt — far better
+            # than echoing back the retrieved context.
+            answer = text.strip() or "(no answer produced)"
+            citation = []
+
+        return GraphRAGAnswerOutput(generated_answer=answer, citation=citation)
+
+    def parse_answer_output(self, raw_text: str):
+        """Parse a model turn into ``GraphRAGAnswerOutput`` {generated_answer,
+        citation}.
+
+        For engines whose final answer comes back as JSON (the react agent's
+        terminal turn). Runs the shared strict -> extract -> repair fallback,
+        then salvages the prose answer if the JSON is still malformed. Never
+        raises and never returns raw context.
+        """
+        from common.py_schemas import GraphRAGAnswerOutput
+
+        parser = PydanticOutputParser(pydantic_object=GraphRAGAnswerOutput)
+        try:
+            return self._parse_or_repair(parser, raw_text, "parse_answer_output")
+        except Exception:
+            return self._salvage_answer_output(raw_text)
+
     def invoke_with_parser(
         self,
         prompt: BasePromptTemplate,
         parser: BaseOutputParser,
         input_variables: dict,
         caller_name: str = "unknown",
+        on_parse_error=None,
     ):
         """Invoke the LLM with a prompt and parse the output using the given parser.
 
@@ -329,12 +393,16 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             parser: The output parser (PydanticOutputParser, StrOutputParser, etc.).
             input_variables: Dict of variables to pass to the prompt.
             caller_name: Name of the calling function (for logging).
+            on_parse_error: optional callable ``(raw_text) -> fallback`` invoked
+                when parsing fails, so the caller can salvage a result from the
+                raw model output instead of raising.
 
         Returns:
             Parsed Pydantic model instance.
 
         Raises:
-            OutputParserException: If all parsing attempts fail.
+            OutputParserException: If all parsing attempts fail and no
+                ``on_parse_error`` salvage is provided.
         """
 
         chain = prompt | self.llm
@@ -352,7 +420,13 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
 
         raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
 
-        return self._parse_or_repair(parser, raw_text, caller_name)
+        try:
+            return self._parse_or_repair(parser, raw_text, caller_name)
+        except Exception:
+            if on_parse_error is not None:
+                logger.warning(f"{caller_name}: parse failed, salvaging from raw output")
+                return on_parse_error(raw_text)
+            raise
 
     def invoke_with_tools(
         self,
@@ -430,11 +504,13 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         parser: BaseOutputParser,
         input_variables: dict,
         caller_name: str = "unknown",
+        on_parse_error=None,
     ):
         """Async version of invoke_with_parser.
 
         Uses chain.ainvoke() to avoid blocking the event loop,
-        suitable for async callers (e.g., ECC workers).
+        suitable for async callers (e.g., ECC workers). ``on_parse_error`` has
+        the same salvage semantics as the sync version.
         """
 
         chain = prompt | self.llm
@@ -452,7 +528,13 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
 
         raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
 
-        return self._parse_or_repair(parser, raw_text, caller_name)
+        try:
+            return self._parse_or_repair(parser, raw_text, caller_name)
+        except Exception:
+            if on_parse_error is not None:
+                logger.warning(f"{caller_name}: parse failed, salvaging from raw output")
+                return on_parse_error(raw_text)
+            raise
 
     @property
     def map_question_schema_prompt(self):
@@ -940,7 +1022,7 @@ conflicts with, weakens, or attempts to change them.
     # (editable on the Customize Prompts page) rather than locked system rules.
     _CHATBOT_RESPONSE_USER_DEFAULT = """\
 - **Match the question's language.** Write the entire response (titles, bullet labels, prose, numeric formatting) in the same language the user asked in. Keep proper-noun terms (BSI, DeFi, GDP, etc.) in their original script.
-- **Quote exact values from the source.** Numbers, units, time periods, and named entities must appear verbatim — do not round or approximate. Currencies and units should match the chosen response language.
+- **Quote exact values from the source.** Numbers, units, time periods, and named entities must appear verbatim — do not round, approximate, or translate units. Keep units in their original format, script, and language. For example, if the source says `1,234 km`, write `1,234 km`, not `767 miles` or `about 1,200 km`.
 - **For comparison or "which is the highest" questions, list each candidate's value before stating the conclusion.** Show the working — do not jump directly to a one-line answer.
 - **Score** each context for relevance and use only the high-scoring ones; do not invent additional logic.
 - **Cover** the relevant information, especially image references that carry critical visual information.

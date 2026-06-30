@@ -30,35 +30,33 @@ import logging
 import time
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.output_parsers import PydanticOutputParser
 
-from agent.agentic_executor import cap_for_trace, _usage_since
+from agent.agentic_executor import cap_for_trace, retrieved_chunk_ids, _usage_since
 from common.llm_services.base_llm import get_collected_usage
-from common.py_schemas import GraphRAGResponse
+from common.py_schemas import GraphRAGAnswerOutput, GraphRAGResponse
 from tools import tool_registry as registry
 
 logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 30      # default; override per-graph via graphrag_config.agent_max_iterations
 
-_SYSTEM = """You are a GraphRAG agent answering questions over a TigerGraph knowledge graph.
+# User-facing progress labels for tool calls — never surface raw tool names
+# (e.g. "graphrag__hybrid_search") in the chat. Unmapped tools (external / MCP)
+# fall back to a generic phrase.
+_TOOL_LABELS = {
+    "graphrag__get_schema": "Reading the graph schema",
+    "graphrag__structural_retrieve": "Searching the knowledge graph",
+    "graphrag__hybrid_search": "Searching the documents",
+    "graphrag__contextual_search": "Searching the documents",
+    "graphrag__similarity_search": "Searching the documents",
+    "graphrag__community_search": "Searching community summaries",
+    "tg_run_query": "Running a graph query",
+}
 
-You have a set of read-only tools (graph schema, structural query generation, several unstructured retrievers, raw GSQL via tg_run_query, neighbor expansion). The graph schema is provided in the user message.
 
-REASON, ACT, OBSERVE — repeat until you can answer.
-
-Start by analyzing the question and reasoning (1-2 sentences) about what it needs, then take your FIRST action — the initial tool call(s). After each observation, judge whether the context gathered so far can answer the question:
-- If it can, stop and give the final answer.
-- If not, decide your NEXT action from what is still missing and what the last result surfaced — fill the gap, follow a lead, or widen/switch method if results were thin.
-Do not commit to a full multi-step plan up front; let each next step be driven by whether you can yet answer.
-
-How to use the tools:
-- ALWAYS prioritize a vector search (graphrag__hybrid_search or graphrag__contextual_search) UNLESS you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Structural query generation alone is NOT a safe sole source: it can return nothing or the wrong rows when the question doesn't map cleanly to typed data. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures, or anything a person would read from a passage), you MUST include a vector search. When unsure, use vector search — this matches the classic engine, which always retrieves from passages.
-- Mix structural (graph queries) and unstructured (vector / community) retrieval as the question needs. Run independent tool calls in parallel within one response; chain dependent calls across iterations. When you do use a structural query, pair it with a vector search unless the question is a pure structured-data request as defined above.
-- Stop iterating and give a final natural-language answer (no tool calls) once you have enough grounded context.
-- If a retrieval returns thin or empty results, widen its parameters (top_k, num_hops) or switch method instead of repeating identical calls.
-
-Be efficient: the smallest set of tool calls that answers the question is best. Cite specific findings from tool results in your final answer."""
-
+def _tool_label(name: str) -> str:
+    return _TOOL_LABELS.get(name, "Gathering information")
 
 def _gather_for_response(messages):
     """Collect the tool-message observations across the loop, capped, for
@@ -82,41 +80,59 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     _cfg = ctx.graphrag_cfg or {}
     max_iters = int(_cfg.get("agent_max_iterations", MAX_ITERATIONS))
 
-    # Up-front schema read so the model has the graph layout in context.
-    emit("Reading the graph schema")
-    schema_step_usage = len(get_collected_usage() or [])
-    schema_t0 = time.time()
-    schema_out = registry.run("graphrag__get_schema", {}, ctx)
-    schema_dur = round(time.time() - schema_t0, 3)
-    schema_rep = ""
-    if isinstance(schema_out.get("context"), dict):
-        schema_rep = schema_out["context"].get("schema_rep", "")
-
+    # The graph schema is NOT pre-loaded. The model fetches it lazily via the
+    # graphrag__get_schema tool, and only when it intends to use a structural
+    # or unstructured query tool (per the system prompt). Questions answered by
+    # other tools (e.g. external MCP tools) skip the schema read entirely.
     user = (
         f"## Question\n{question}\n\n"
-        f"## Conversation\n{json.dumps(conversation or [])[:2000]}\n\n"
-        f"## Graph schema\n{schema_rep[:6000] or '(unavailable)'}"
+        f"## Conversation\n{json.dumps(conversation or [])[:2000]}"
     )
     # Customizable system prompt (fixed rules + user "Additional Instructions");
-    # falls back to the local default if the service lacks the property.
-    system_prompt = getattr(llm, "agentic_agent_prompt", None) or _SYSTEM
+    # the default lives in base_llm.
+    system_prompt = llm.agentic_agent_prompt
+    # The terminal turn returns a structured {generated_answer, citation}
+    # object, so the trace records the selected citations and the chat gets a
+    # clean answer. Inject the output contract + format instructions here; the
+    # role/tool rules stay in the system prompt above. Also fold in the editable
+    # answer guidance (the chatbot_response user portion) so style/focus stays
+    # consistent — only the guidance text, never a role or JSON wrapper.
+    answer_parser = PydanticOutputParser(pydantic_object=GraphRAGAnswerOutput)
+    try:
+        answer_style = llm.get_user_portion("chatbot_response.txt")
+    except Exception:
+        answer_style = ""
+    final_answer_block = [
+        "\n\n## Final Answer",
+        "When the gathered context can answer the question, STOP calling tools "
+        "and reply with a SINGLE JSON object (and no tool call) of this shape:",
+        answer_parser.get_format_instructions(),
+        "Put the full natural-language answer in `generated_answer`, and in "
+        "`citation` list the keys/ids of the context parts you actually used "
+        "to write it.",
+    ]
+    if answer_style:
+        final_answer_block.append(
+            "Follow these guidelines when writing `generated_answer`:\n" + answer_style
+        )
+    system_prompt += "\n".join(final_answer_block)
     messages = [SystemMessage(content=system_prompt), HumanMessage(content=user)]
 
     tools = registry.lc_tools_spec(ctx)
 
-    agent_steps = [{
-        "node": "schema", "kind": "schema",
-        "duration_s": schema_dur,
-        "input": {},
-        "output": {"summary": schema_out.get("summary", "")},
-        "usage": _usage_since(schema_step_usage),
-    }]
+    agent_steps = []
 
     final_answer = None
-    citations: list = []
+    # Two citation layers for the admin trace, both recorded by the agent from
+    # the tool results it already holds: what it FETCHED (retrieved, the chunk
+    # ids the retrievers returned) vs what it actually SELECTED to write the
+    # answer (selected, from the final-turn citation field).
+    retrieved_citations: list = []
+    _retrieved_seen: set = set()
+    selected_citations: list = []
 
     for i in range(max_iters):
-        emit(f"Thinking (step {i + 1})")
+        emit("Thinking")
         usage_start = len(get_collected_usage() or [])
         t0 = time.time()
         try:
@@ -132,13 +148,17 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
                    "".join(c.get("text", "") for c in (resp.content or []) if isinstance(c, dict)))
 
         if not tool_calls:
-            # Final answer.
-            final_answer = ai_text or "(no answer produced)"
+            # Final turn: the model returns a structured {generated_answer,
+            # citation} object. Parse it, recovering the prose answer if the
+            # JSON is malformed (a plain-text turn recovers to the text itself).
+            parsed = llm.parse_answer_output(ai_text)
+            final_answer = (parsed.generated_answer or "").strip() or "(no answer produced)"
+            selected_citations = list(parsed.citation or [])
             agent_steps.append({
                 "node": f"iter {i + 1}: answer", "kind": "answer",
                 "duration_s": iter_dur,
                 "input": {"messages_so_far": len(messages) - 1},
-                "output": {"answer": final_answer[:4000]},
+                "output": {"answer": final_answer[:4000], "citations": selected_citations},
                 "usage": _usage_since(usage_start),
             })
             break
@@ -149,7 +169,7 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
             name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
             args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", {})
             tc_id = tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
-            emit(f"{name}")
+            emit(_tool_label(name))
             tool_t0 = time.time()
             out = registry.run(name or "", args or {}, ctx)
             tool_dur = round(time.time() - tool_t0, 3)
@@ -166,7 +186,12 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
                 "ok": bool(out.get("ok")), "summary": out.get("summary", ""),
                 "duration_s": tool_dur,
             })
-            citations.extend(out.get("citations") or [])
+            # Record the chunk ids this tool fetched (the agent's bookkeeping,
+            # harvested from the context the tool returned), de-duped in order.
+            for cid in retrieved_chunk_ids(out.get("context")):
+                if cid not in _retrieved_seen:
+                    _retrieved_seen.add(cid)
+                    retrieved_citations.append(cid)
 
         agent_steps.append({
             "node": f"iter {i + 1}: tool calls", "kind": "react",
@@ -195,6 +220,7 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
             "max_iterations": max_iters,
             "hit_iteration_cap": hit_cap,
             "result": _gather_for_response(messages),
-            "citations": citations,
+            "citations": selected_citations,
+            "retrieved_citations": retrieved_citations,
         },
     )

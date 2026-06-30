@@ -17,6 +17,9 @@
 - **Hybrid and community search results are bounded by relevance.** Search returns at most a configurable number of chunks (`max_results`, default twice Top K), ranked by similarity to the question, instead of every chunk the graph expansion or community membership reaches — reducing the context sent to the model. Tunable on the GraphRAG Configuration page alongside Top K and Number of Hops.
 - **Chat and admin UI refinements.** The chat engine/style picker is clearer, older conversations can be cleared in bulk, the graph *Compatibility Check* is renamed *Migration Assistant*, and a rendering glitch that clipped the bottoms of letters in text inputs is fixed.
 - **The agentic agent grounds answers in document text more reliably.** It now always includes a vector search unless a question is confidently a pure structured-data request (an exact count, lookup, relationship, or aggregation), so it no longer answers passage questions from a graph query alone.
+- **The React agent reports which sources it used.** Its answers now cite the chunks and queries the agent actually selected — visible in the admin trace alongside the planned and classic engines — and follow the same answer formatting and language guidance as the other engines.
+- **Questions that don't need the graph skip graph lookups.** The agent loads the graph schema only when a question actually requires structured or document retrieval, so greetings and questions answered by a connected tool return without unnecessary database work.
+- **A streaming answer can be stopped.** While the agent is responding, the chat's send button becomes a stop control that ends the current response and re-enables the input, so the next question can be asked without waiting.
 
 ### Fixed
 - **A single oversized chunk no longer drops embeddings for the rest of a batch.** Embeddings that exceed the provider's input limit are retried at progressively shorter lengths, and a vertex that still doesn't fit is skipped individually instead of aborting the batch; similarity search ignores vertices without an embedding.
@@ -24,6 +27,7 @@
 - **Schema lookups resolve correctly on asynchronous request paths.** The schema-version lookup is now awaited where it was previously used without awaiting.
 - **Ingestion resumes after a transient database disconnect.** Files whose load hits a connection error are retried once the database is reachable again (bounded, so a persistent outage fails out rather than hanging), and any that still fail are named so re-running ingest reloads only those — already-loaded documents upsert idempotently.
 - **Non-ASCII answers no longer break when context is large.** Retrieved context is measured against the model's input limit in the same form that is sent to it, so Japanese and other multi-byte content is no longer mis-sized and truncated incorrectly.
+- **A malformed answer no longer surfaces raw context to the user.** When the model returns slightly broken JSON, the readable answer (and its citations, when intact) is recovered from the response instead of falling back to dumping the retrieved context as the "answer."
 
 ## [1.4.2]
 

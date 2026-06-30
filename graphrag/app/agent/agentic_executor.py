@@ -49,6 +49,24 @@ def cap_for_trace(obj, limit: int = _TRACE_FIELD_CAP):
     return {"_truncated": True, "chars": len(s), "preview": s[:limit]}
 
 
+def retrieved_chunk_ids(context) -> list:
+    """Chunk ids the agent FETCHED from a retrieval tool/step context.
+
+    The retrieval tools return their chunks (keyed by id, with text) under
+    ``context['result']['final_retrieval']``. Recording *what was fetched* is
+    the agent's job, not the tool's — so the agent harvests those keys here for
+    the trace. Synthetic non-chunk keys (e.g. community ``Similarity_Context``)
+    are dropped.
+    """
+    if not isinstance(context, dict):
+        return []
+    inner = context.get("result")
+    fr = inner.get("final_retrieval") if isinstance(inner, dict) else None
+    if not isinstance(fr, dict):
+        return []
+    return [k for k in fr.keys() if k != "Similarity_Context"]
+
+
 def _usage_since(start_idx: int) -> dict:
     """Aggregate LLM usage recorded since ``start_idx`` in the collector."""
     bucket = get_collected_usage() or []

@@ -76,10 +76,16 @@ class TigerGraphAgentGenerator:
                 prompt, answer_parser,
                 {"question": question, "context": context, "query": query},
                 caller_name="generate_answer",
+                # On malformed JSON, recover the answer (and citation if intact)
+                # from the raw model output.
+                on_parse_error=self.llm._salvage_answer_output,
             )
         except Exception:
-            logger.warning("generate_answer: all parsing failed, using raw context as answer")
-            generation = GraphRAGAnswerOutput(generated_answer=str(context).strip(), citation=[])
+            logger.warning("generate_answer: generation failed")
+            generation = GraphRAGAnswerOutput(
+                generated_answer="I wasn't able to generate an answer for this question.",
+                citation=[],
+            )
 
         LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_answer")
 

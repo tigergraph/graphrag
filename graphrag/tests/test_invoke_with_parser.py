@@ -270,5 +270,61 @@ class TestParseJsonOutput(unittest.TestCase):
         self.assertEqual(result["nodes"][0]["id"], "B")
 
 
+class TestSalvageAnswerOutput(unittest.TestCase):
+    """Tests for LLM_Model._salvage_answer_output — recovering a usable answer
+    from malformed model JSON instead of dumping raw context or a blob."""
+
+    def test_recovers_answer_with_bad_escape(self):
+        """An illegal \\' escape that defeats strict parsing still yields the
+        prose answer (and an intact citation list)."""
+        raw = '{"generated_answer": "The team\\\'s revenue rose 12%.", "citation": ["chunk_1", "chunk_2"]}'
+        out = LLM_Model._salvage_answer_output(raw)
+        self.assertIn("revenue rose 12%", out.generated_answer)
+        self.assertEqual(out.citation, ["chunk_1", "chunk_2"])
+
+    def test_recovers_answer_drops_broken_citation(self):
+        """When the citation array is unrecoverable, keep the answer, lose the
+        list (acceptable per requirement)."""
+        raw = '{"generated_answer": "Plain answer text.", "citation": [oops broken'
+        out = LLM_Model._salvage_answer_output(raw)
+        self.assertEqual(out.generated_answer, "Plain answer text.")
+        self.assertEqual(out.citation, [])
+
+    def test_raw_text_is_last_resort_answer(self):
+        """With no recognizable JSON, the raw model text becomes the answer —
+        never the retrieved context, never a blank."""
+        raw = "Here is the answer in plain prose, no JSON at all."
+        out = LLM_Model._salvage_answer_output(raw)
+        self.assertEqual(out.generated_answer, raw)
+        self.assertEqual(out.citation, [])
+
+    def test_empty_input_safe(self):
+        out = LLM_Model._salvage_answer_output("   ")
+        self.assertEqual(out.generated_answer, "(no answer produced)")
+        self.assertEqual(out.citation, [])
+
+
+class TestOnParseErrorHook(unittest.TestCase):
+    """invoke_with_parser salvages via on_parse_error instead of raising."""
+
+    @patch("common.llm_services.base_llm.get_openai_callback")
+    def test_on_parse_error_salvages(self, mock_cb_ctx):
+        model = _make_llm_model()
+        prompt = _make_prompt()
+        parser = PydanticOutputParser(pydantic_object=SampleResponse)
+
+        # Unparseable for SampleResponse; the hook returns a sentinel object.
+        mock_chain = _setup_chain_mock(model, "totally not json", mock_cb_ctx)
+        sentinel = object()
+
+        with patch.object(type(prompt), "__or__", return_value=mock_chain):
+            result = model.invoke_with_parser(
+                prompt, parser, {"question": "test"},
+                caller_name="test_salvage",
+                on_parse_error=lambda raw: sentinel,
+            )
+        self.assertIs(result, sentinel)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@ the out-of-corpus honesty match classic mode.
 import logging
 
 from agent.agent_generation import TigerGraphAgentGenerator
+from agent.agentic_executor import retrieved_chunk_ids
 from common.py_schemas import GraphRAGResponse
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,16 @@ def synthesize(llm, question, results: dict, plan=None, conversation=None) -> Gr
     citations = getattr(answer, "citation", []) or []
     answered = bool(combined["structural"] or combined["unstructured"])
 
+    # Chunk ids the plan FETCHED (across all unstructured steps), de-duped in
+    # order — the agent's record of what was retrieved, distinct from the
+    # SELECTED citations the answer cites.
+    retrieved_citations, _seen = [], set()
+    for ctx in combined["unstructured"]:
+        for cid in retrieved_chunk_ids(ctx):
+            if cid not in _seen:
+                _seen.add(cid)
+                retrieved_citations.append(cid)
+
     query_sources = {
         "plan": plan.model_dump() if plan is not None else None,
         "steps": [
@@ -66,6 +77,7 @@ def synthesize(llm, question, results: dict, plan=None, conversation=None) -> Gr
         ],
         "result": combined,
         "citations": citations,
+        "retrieved_citations": retrieved_citations,
         "reasoning": plan.strategy if plan is not None else "",
     }
     return GraphRAGResponse(
