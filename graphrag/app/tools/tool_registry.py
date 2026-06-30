@@ -25,6 +25,7 @@ the agent's tool surface is read-only by construction.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Type
 
@@ -246,13 +247,25 @@ def catalog(ctx=None) -> list[dict]:
     return out
 
 
+def _safe_tool_name(name: str) -> str:
+    """Tool name accepted by chat-model function-calling APIs, which require
+    ``^[a-zA-Z0-9_-]+$``. Built-in names (``graphrag__*``) already comply and
+    pass through unchanged; external MCP tools use a ``<server>.<tool>``
+    namespace whose ``.`` is illegal, so any run of invalid chars collapses to
+    ``__``. ``run()`` resolves the safe name back to the real spec on dispatch.
+    """
+    return re.sub(r"[^a-zA-Z0-9_-]+", "__", name)
+
+
 def lc_tools_spec(ctx=None) -> list:
     """LangChain ``StructuredTool`` list for ``bind_tools(...)``.
 
-    Names match the registry, so the model's emitted ``tool_calls`` look up
-    directly in ``run(name, ...)``. The wrapped functions are placeholders —
-    the react loop intercepts tool_calls and dispatches through ``run`` so
-    the per-user ``ctx`` is available; LangChain never actually invokes them.
+    Tool names are sanitized to the chat-model name pattern (see
+    ``_safe_tool_name``); the model's emitted ``tool_calls`` carry the safe
+    name, which ``run(name, ...)`` resolves back to the real spec. The wrapped
+    functions are placeholders — the react loop intercepts tool_calls and
+    dispatches through ``run`` so the per-user ``ctx`` is available; LangChain
+    never actually invokes them.
     """
     from langchain_core.tools import StructuredTool
 
@@ -271,7 +284,7 @@ def lc_tools_spec(ctx=None) -> list:
         out.append(
             StructuredTool.from_function(
                 func=_noop,
-                name=spec.name,
+                name=_safe_tool_name(spec.name),
                 description=spec.description,
                 args_schema=args_schema,
             )
@@ -286,7 +299,15 @@ def run(name: str, args: dict, ctx: GraphRAGToolContext) -> dict:
     error dict for an unknown tool / invalid args (never raises to the
     executor, so one bad step can't abort the plan).
     """
-    spec = _merged_specs(ctx).get(name)
+    specs = _merged_specs(ctx)
+    spec = specs.get(name)
+    if spec is None:
+        # The react path binds sanitized names (no '.'); resolve back to the
+        # real spec. Exact match above keeps the planner path (real names) fast.
+        for s in specs.values():
+            if _safe_tool_name(s.name) == name:
+                spec, name = s, s.name
+                break
     if spec is None:
         logger.warning(f"unknown tool requested: {name!r}")
         return {"ok": False, "summary": f"unknown tool {name!r}", "context": None, "citations": []}

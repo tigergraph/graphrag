@@ -30,42 +30,46 @@ from tools import tool_registry as registry
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM = """You are the planner for a GraphRAG question-answering agent over a TigerGraph knowledge graph.
-
-First analyze the question against the graph schema (provided in the user message) and decide the ENTIRE plan up front:
-- whether answering it needs structural queries, unstructured (vector) search, or BOTH;
-- how many of each; and
-- in what order.
-Express this as a small DAG of tool steps that gathers exactly the context needed, ending with one final "answer" step that consolidates all the gathered context into the response.
-
-You have two kinds of retrieval:
-- STRUCTURAL (graphrag__structural_retrieve): generates and runs a graph query. Best for counts, lookups by attribute/id, relationships, and aggregations over typed data. It depends on the LLM generating a correct query against the live schema — it can return nothing or the wrong rows when the question doesn't map cleanly to typed graph data, so it is NOT a safe sole source of context.
-- UNSTRUCTURED (graphrag__hybrid_search / similarity_search / contextual_search / community_search): vector search over document text. Best for "what/why/how/describe/summarize" questions answered from passages. community_search suits broad/overall questions.
-
-Planning rules:
-- ALWAYS include at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) UNLESS you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. A STRUCTURAL-only plan is the rare exception, not the default. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures, or anything a person would read from a passage), you MUST include a vector search step. When unsure, include vector search. This mirrors the classic engine, which always runs vector retrieval.
-- Use BOTH kinds when a question needs facts from the graph AND supporting text. They are not limited to one each — you may run several structural and/or several unstructured steps, in any order. When you do use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request as defined above.
-- A later step may depend on an earlier one: set depends_on and use arg_bindings to pull a value from a prior step's result, e.g. {"question": "S1.context.result"}.
-- Prefer the smallest plan that will work. Trivial/greeting questions need only the final answer step (no retrieval).
-- Retrieval params (top_k, num_hops, community_level) are optional; omit them to use defaults, or set higher values when you expect a broad answer.
-- The final step MUST have kind="answer" and tool="" (the orchestrator synthesizes the answer from gathered context); it should depend_on all retrieval steps.
-
-Tabular / numeric questions (ask for a specific value, a row, a column total, a ranking, or a year-over-year comparison from a table or chart):
-- Prefer graphrag__contextual_search or graphrag__hybrid_search with top_k>=10. These return atomic table chunks (chunk_kind="table") that preserve the full row/column structure.
-- Avoid graphrag__similarity_search alone for these — it returns isolated vectors and often misses the table when the table's surrounding prose isn't a close vector match to the question.
-- Quote any specific table label, column header, year, or unit from the question so the retriever can match it (e.g. "ROE 2023", "revenue by region", "headcount by year").
-- When the question is "compare X across years/regions/categories", set top_k>=15 to ensure all relevant rows come back together rather than scattered across calls.
-
-Return ONLY the structured plan.
-"""
+def _param_type(pinfo: dict) -> str:
+    """Render a JSON-schema property's type for the catalog. Falls back through
+    enum / anyOf (common in external MCP tool schemas) to ``any``."""
+    if not isinstance(pinfo, dict):
+        return "any"
+    t = pinfo.get("type")
+    if t:
+        return t if isinstance(t, str) else "/".join(str(x) for x in t)
+    if pinfo.get("enum"):
+        return "enum"
+    if pinfo.get("anyOf"):
+        types = [a.get("type") for a in pinfo["anyOf"] if isinstance(a, dict) and a.get("type")]
+        return "/".join(types) or "any"
+    return "any"
 
 
 def _catalog_text(ctx=None) -> str:
+    """Render the tool catalog for the planner: each tool's name, description,
+    and a typed parameter list (name: type, required/optional, per-arg
+    description). Built-ins have simple args, but external MCP tools can carry
+    richer schemas, so surface types/required/descriptions — not bare parameter
+    names — so the planner binds their arguments correctly.
+    """
     lines = []
     for t in registry.catalog(ctx):
-        props = (t["args_schema"].get("properties") or {})
-        params = ", ".join(props.keys()) or "(none)"
-        lines.append(f"- {t['name']}({params}): {t['description']}")
+        schema = t.get("args_schema") or {}
+        props = schema.get("properties") or {}
+        required = set(schema.get("required") or [])
+        lines.append(f"- {t['name']}: {t['description']}")
+        if not props:
+            lines.append("    params: (none)")
+            continue
+        for pname, pinfo in props.items():
+            pinfo = pinfo if isinstance(pinfo, dict) else {}
+            flag = "required" if pname in required else "optional"
+            seg = f"    - {pname} ({_param_type(pinfo)}, {flag})"
+            desc = pinfo.get("description")
+            if desc:
+                seg += f": {desc}"
+            lines.append(seg)
     return "\n".join(lines)
 
 
@@ -101,9 +105,12 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
     user_parts = [
         f"## Question\n{question}",
         f"## Conversation\n{json.dumps(conversation or [])[:2000]}",
-        f"## Graph schema\n{schema_rep[:6000] or '(unavailable)'}",
-        f"## Tools\n{catalog}",
     ]
+    # Schema is normally not pre-loaded (the query tools load it themselves);
+    # include it only if a caller explicitly supplied one.
+    if schema_rep:
+        user_parts.append(f"## Graph schema\n{schema_rep[:6000]}")
+    user_parts.append(f"## Tools\n{catalog}")
     if prior_results:
         summary = "\n".join(
             f"- {r.get('step_id')}: ok={r.get('ok')} — {r.get('summary')}"
@@ -116,10 +123,8 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
             "the gap, then the final answer step."
         )
     # Use the customizable planner prompt (fixed DAG-planning rules + the
-    # editable "Additional Instructions" portion); fall back to the local
-    # default if the service lacks the property.
-    system = getattr(llm, "agentic_planner_prompt", None) or _SYSTEM
-    messages = [("system", system), ("user", "\n\n".join(user_parts))]
+    # editable "Additional Instructions" portion); the default lives in base_llm.
+    messages = [("system", llm.agentic_planner_prompt), ("user", "\n\n".join(user_parts))]
     try:
         plan = llm.invoke_structured(messages, Plan, caller_name="agentic_plan")
     except Exception as exc:
