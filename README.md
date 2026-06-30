@@ -1027,12 +1027,14 @@ Each tweak should be made **alone** — moving `top_k` and `num_hops` together m
 
 ### 5. Prompts — last resort, biggest leverage when the rest is right
 
-Customize prompts via the UI: *Settings → Customize Prompts*. The four customizable prompt groups (UI labels and underlying ids):
+Customize prompts via the UI: *Settings → Customize Prompts*. The customizable prompt groups (UI labels and underlying ids):
 
 - **Entity Relationships** (`entity_relationship`) — combined entity- and relationship-extraction prompt; controls what becomes a vertex / edge. Tune for noise suppression, domain specificity, and verb-form edge names (e.g. `PUBLISHES`, `OWNS`, `MANAGES` instead of nominal phrases). See §3.
 - **Schema Instructions** (`query_generation`) — instructions used when generating GSQL / Cypher and when filtering the schema for a structured query. Tune if your domain has unusual type names that aren't matching user phrasing, or if generated queries miss obvious joins.
 - **Community Summarization** (`community_summarization`) — how community summaries are produced during knowledge-graph build. Tune for length / tone and to bias summaries toward domain-specific framing.
 - **Chatbot Responses** (`chatbot_response`) — the final answer template. Keep it short; the LLM responds best to clear constraints (*"answer in ≤3 sentences, cite the doc id"*).
+- **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — the retrieval strategy for each agentic engine: which methods to use, when, and in what order. The role and act model stay fixed.
+- **Agent Routing** (`agentic_triage`) — the policy that decides whether a message is answered directly (greetings, questions about the assistant) or sent to the agent to retrieve / use a tool.
 
 When customizing:
 
