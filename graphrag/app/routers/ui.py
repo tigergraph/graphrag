@@ -2627,6 +2627,11 @@ def _is_superadmin(global_roles: list[str]) -> bool:
 
 
 def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
+    # asyncio.TaskGroup wraps a failing sub-task in an ExceptionGroup whose
+    # message is only "unhandled errors in a TaskGroup (N sub-exception(s))".
+    # Unwrap to the underlying cause so the admin detail shows the real error.
+    while isinstance(e, BaseExceptionGroup) and e.exceptions:
+        e = e.exceptions[0]
     error_msg = str(e)
     if "does not exist" in error_msg or "not found" in error_msg.lower():
         return f"Error: {error_msg}. Please check the knowledge graph name and try again."

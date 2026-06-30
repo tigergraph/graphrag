@@ -1,5 +1,6 @@
 import "react-chatbot-kit/build/main.css";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useLocation } from "react-router-dom";
 import Chatbot from "react-chatbot-kit";
 import ActionProvider from "../actions/ActionProvider.js";
@@ -25,8 +26,43 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
   const [selectedGraph, setSelectedGraph] = useState(sessionStorage.getItem("selectedGraph") || '');
   const [chatMode, setChatMode] = useState(sessionStorage.getItem("chatMode") || 'agentic');
   const [ragPattern, setRagPattern] = useState(sessionStorage.getItem("ragPattern") || 'auto');
+  const [streaming, setStreaming] = useState(false);
+  const [sendBtn, setSendBtn] = useState<HTMLElement | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
+
+  // While a response streams, replace the send icon with a red Stop icon IN
+  // PLACE: grab the send button node so we can portal the stop icon into it
+  // (the CSS hides the native paper-plane). Mirrors the same window events the
+  // side menu / mode toggle listen to.
+  useEffect(() => {
+    const onStart = () => {
+      setStreaming(true);
+      setSendBtn(
+        document.querySelector(".react-chatbot-kit-chat-btn-send") as HTMLElement | null
+      );
+    };
+    const onEnd = () => setStreaming(false);
+    window.addEventListener("chat:streaming-start", onStart);
+    window.addEventListener("chat:streaming-end", onEnd);
+    return () => {
+      window.removeEventListener("chat:streaming-start", onStart);
+      window.removeEventListener("chat:streaming-end", onEnd);
+    };
+  }, []);
+
+  // While streaming, intercept the send button's click (capture phase, before
+  // react-chatbot-kit's send handler) and turn it into a Stop.
+  useEffect(() => {
+    if (!streaming || !sendBtn) return;
+    const onClick = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      window.dispatchEvent(new Event("chat:stop"));
+    };
+    sendBtn.addEventListener("click", onClick, true);
+    return () => sendBtn.removeEventListener("click", onClick, true);
+  }, [streaming, sendBtn]);
 
   useEffect(() => {
     // Function to load store from sessionStorage
@@ -237,6 +273,17 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
           />
         </RagPatternContext.Provider>
       </SelectedGraphContext.Provider>
+
+      {streaming && sendBtn && createPortal(
+        <svg
+          className="graphrag-stop-icon"
+          viewBox="0 0 24 24"
+          aria-label="Stop"
+        >
+          <rect x="5" y="5" width="14" height="14" rx="2" />
+        </svg>,
+        sendBtn
+      )}
     </div>
   );
 };
