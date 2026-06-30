@@ -27,6 +27,7 @@ const ALL_PROMPT_TYPES = [
   { id: "chatbot_response", name: "Chatbot Responses", description: "Extra instructions/examples for how the chatbot composes the final answer. Appended to fixed system rules." },
   { id: "agentic_planner", name: "Agentic Planner", description: "The planner's retrieval strategy — which methods to use, how many, and in what order — pre-filled with the default and fully editable. The role, plan model, and output format stay fixed." },
   { id: "agentic_agent", name: "React Agent", description: "The React agent's retrieval strategy — which methods to prioritize and when, step by step — pre-filled with the default and fully editable. The role and reason-act-observe model stay fixed." },
+  { id: "agentic_triage", name: "Agent Routing", description: "The routing policy that decides whether a question is answered directly (greetings, about the assistant) or sent to the agent to retrieve/use a tool — pre-filled with the default and fully editable. The output contract stays fixed." },
 ];
 
 const CustomizePrompts = () => {
@@ -48,6 +49,7 @@ const CustomizePrompts = () => {
     query_guidance: "",
     agentic_agent: "",
     agentic_planner: "",
+    agentic_triage: "",
   });
 
   // Template variables that should not be edited (stored separately)
@@ -60,6 +62,7 @@ const CustomizePrompts = () => {
     query_guidance: "",
     agentic_agent: "",
     agentic_planner: "",
+    agentic_triage: "",
   });
 
   // Only render prompt types the backend returned for this user
@@ -162,6 +165,9 @@ const CustomizePrompts = () => {
         agentic_planner: data.prompts.agentic_planner?.editable_content !== undefined
           ? data.prompts.agentic_planner.editable_content
           : (typeof data.prompts.agentic_planner === 'string' ? data.prompts.agentic_planner : ""),
+        agentic_triage: data.prompts.agentic_triage?.editable_content !== undefined
+          ? data.prompts.agentic_triage.editable_content
+          : (typeof data.prompts.agentic_triage === 'string' ? data.prompts.agentic_triage : ""),
       });
 
       // Store template variables separately
@@ -174,6 +180,7 @@ const CustomizePrompts = () => {
         query_guidance: data.prompts.query_guidance?.template_variables || "",
         agentic_agent: data.prompts.agentic_agent?.template_variables || "",
         agentic_planner: data.prompts.agentic_planner?.template_variables || "",
+        agentic_triage: data.prompts.agentic_triage?.template_variables || "",
       });
     } catch (error) {
       console.error("Error loading prompts:", error);

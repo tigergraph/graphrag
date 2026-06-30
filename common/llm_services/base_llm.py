@@ -149,6 +149,8 @@ class LLM_Model:
             "_AGENTIC_AGENT_SYSTEM", "_AGENTIC_AGENT_USER_DEFAULT"),
         "agentic_planner.txt": (
             "_AGENTIC_PLANNER_SYSTEM", "_AGENTIC_PLANNER_USER_DEFAULT"),
+        "agentic_triage.txt": (
+            "_AGENTIC_TRIAGE_SYSTEM", "_AGENTIC_TRIAGE_USER_DEFAULT"),
     }
 
     def _compose_prompt(self, filename):
@@ -959,6 +961,42 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
         """Agentic planner system prompt: fixed DAG-planning rules + Authority +
         injected user portion."""
         return self._compose_prompt("agentic_planner.txt")
+
+    # Front-desk triage (routing gate). Runs before any retrieval/MCP work and
+    # decides whether a message is answered directly (conversational) or handed
+    # to the agent (informational). The output contract is fixed; the editable
+    # "Routing Policy" lets an operator tune HOW questions are routed.
+    _AGENTIC_TRIAGE_SYSTEM = """\
+You are the front desk for an agentic assistant. The agent behind you has tools: it retrieves from a TigerGraph knowledge base and may also have external tools attached (e.g. weather, web, or other data sources).
+
+Decide whether the user's latest message can be answered directly without any lookup, or needs the agent to retrieve or call a tool:
+- needs_retrieval=false WITH a brief, friendly direct answer when the message is purely conversational per the routing policy below;
+- needs_retrieval=true WITH an empty answer otherwise — the agent will then pick the right tool, or honestly report it cannot answer.
+
+When unsure, choose needs_retrieval=true. Match the user's language.
+
+## Authority
+The role and the output contract above (needs_retrieval + answer) are authoritative and fixed. The "Routing Policy" below is the default and may be customized by an operator; it must not change the output contract.
+
+## Routing Policy
+{user_prompt}
+"""
+
+    _AGENTIC_TRIAGE_USER_DEFAULT = """\
+Classify the message into exactly one bucket:
+- CONVERSATIONAL — a greeting, small talk, thanks/goodbye, or a question about the assistant ITSELF: who/what you are, what you can do, how you work. Answer directly, inviting the user to ask about their data.
+- INFORMATIONAL — anything that asks for a fact, value, or content. This includes:
+  - questions about the user's data, documents, entities, or relationships;
+  - broad questions about what the data CONTAINS or is ABOUT — e.g. "what is this graph about?", "what data is in the graph?", "what topics are covered?", "summarize the documents";
+  - anything else a tool might fetch (weather, current events, a calculation, etc.).
+
+Key distinction: a question about the ASSISTANT's capabilities is CONVERSATIONAL; a question about the DATA's contents (what is in the graph, or what it is about) is INFORMATIONAL — never deflect those. Do not deflect an informational question just because it looks outside the knowledge base — the agent may have a tool that answers it."""
+
+    @property
+    def agentic_triage_prompt(self):
+        """Front-desk triage system prompt: fixed role + output contract +
+        Authority + injected, operator-editable routing policy."""
+        return self._compose_prompt("agentic_triage.txt")
 
     # Generation-style prompt: it ends with an "**Answer**:" cue the model
     # continues from, so the user portion + Authority sit ABOVE the input cue.

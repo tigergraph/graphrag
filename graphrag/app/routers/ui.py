@@ -4631,6 +4631,9 @@ async def get_prompts(
             # Agentic planner system prompt — runs through the chat service.
             "agentic_planner":
                 (chat_llm, "agentic_planner_prompt"),
+            # Front-desk triage / routing gate — runs through the chat service.
+            "agentic_triage":
+                (chat_llm, "agentic_triage_prompt"),
         }
 
         # Split prompts expose ONLY the user portion; the system prompt (rules
@@ -4642,6 +4645,7 @@ async def get_prompts(
             "schema_extraction": "schema_extraction.txt",
             "agentic_agent": "agentic_agent.txt",
             "agentic_planner": "agentic_planner.txt",
+            "agentic_triage": "agentic_triage.txt",
         }
 
         def _get_prompt(prompt_type: str) -> dict:
@@ -4803,6 +4807,7 @@ async def save_prompts(
             "query_guidance": "query_guidance.txt",
             "agentic_agent": "agentic_agent.txt",
             "agentic_planner": "agentic_planner.txt",
+            "agentic_triage": "agentic_triage.txt",
         }
 
         if prompt_type not in prompt_type_to_file:

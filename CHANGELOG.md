@@ -7,6 +7,7 @@
 - **Customizable prompts open with editable starting guidance.** The Customize Prompts page now pre-fills each prompt's preference-style guidance (answer formatting and language, summary length and voice, schema granularity hints and examples) as an editable default you can adjust or clear; the format, input, and structural rules that keep the feature working stay locked and out of view.
 - **External MCP servers can be configured as agentic tools.** Superusers can register external MCP servers (including installing the Python libraries they need) so the chat agent can call their tools during a conversation.
 - **Query responses can return just the answer.** The query endpoints return the answer alone by default and accept an option to include the supporting sources and trace when a caller needs them.
+- **The agent answers greetings and questions about itself directly.** Hellos, thanks, and "who are you / what can you do" are answered immediately without searching the knowledge base, so trivial messages return faster and no longer surface unrelated data. How messages are routed — answered directly versus sent to retrieval — is editable on the *Customize Prompts* page.
 
 ### Changed
 - **Structured documents chunk more faithfully.** Markdown and HTML are split with a structure-aware chunker that keeps each section's heading context inside the chunk, rolls small sections up into their parent up to the size budget, and keeps tables intact — including tables nested inside lists — so retrieval and answers hold together on heading- and table-heavy documents.

@@ -23,8 +23,11 @@ GraphRAG tool layer instead of the fixed classic LangGraph.
 """
 
 import logging
+import json
 import time
 from typing import Dict, List
+
+from pydantic import BaseModel, Field
 
 from agent.Q import Q, DONE
 from agent.agentic_graph import run_agentic
@@ -39,8 +42,43 @@ from common.llm_services.base_llm import (
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics
+from common.py_schemas import GraphRAGResponse
 
 logger = logging.getLogger(__name__)
+
+
+class _Triage(BaseModel):
+    """Front-desk classification of a user message before any DB/MCP work."""
+    needs_retrieval: bool = Field(
+        description="True if answering requires looking up the user's data in the "
+        "knowledge graph. False for greetings, small talk, thanks/goodbye, or "
+        "questions about the assistant itself (who/what are you, what can you do)."
+    )
+    answer: str = Field(
+        default="",
+        description="When needs_retrieval is False, the complete direct answer to "
+        "give the user. Empty when needs_retrieval is True.",
+    )
+
+
+def _triage_question(llm, question, convo):
+    """One cheap classify-and-answer call. Returns a ``_Triage`` or ``None`` if
+    triage itself fails (caller then proceeds with normal retrieval). Uses only
+    the question + conversation — no schema, no MCP, no DB."""
+    try:
+        user = (
+            f"## Conversation\n{json.dumps(convo or [])[:2000]}\n\n"
+            f"## Message\n{question}"
+        )
+        # Customizable routing prompt (fixed contract + operator-editable
+        # routing policy); the default lives in base_llm.
+        return llm.invoke_structured(
+            [("system", llm.agentic_triage_prompt), ("user", user)],
+            _Triage, caller_name="agentic_triage",
+        )
+    except Exception as exc:
+        logger.warning(f"agentic triage skipped ({exc}); proceeding with retrieval")
+        return None
 
 
 def _resolve_style(requested, config_style) -> str:
@@ -105,10 +143,36 @@ class AgenticAgent:
         start_usage_collection()
         try:
             LogWriter.info(f"request_id={req_id_cv.get()} ENTRY agentic question_for_agent")
+            # Emit an initial progress message as soon as the question arrives.
+            self.emit_progress("Thinking")
             convo = [
                 {"query": c["query"], "response": c["response"]}
                 for c in (conversation or [])
             ]
+            # Front-desk triage: answer greetings and questions about the
+            # assistant itself directly, before any schema read, MCP discovery,
+            # or retrieval. Only short-circuits when the model is confident no
+            # knowledge-graph lookup is needed AND produced an answer.
+            triage = _triage_question(self.llm, question, convo)
+            if triage is not None and not triage.needs_retrieval and triage.answer.strip():
+                self.emit_progress(DONE)
+                LogWriter.info(
+                    f"request_id={req_id_cv.get()} agentic triage answered directly "
+                    "(no retrieval)"
+                )
+                return GraphRAGResponse(
+                    natural_language_response=triage.answer.strip(),
+                    answered_question=True,
+                    response_type="agentic",
+                    query_sources={
+                        "engine": "triage",
+                        "agent_steps": [{
+                            "node": "triage", "kind": "answer",
+                            "output": {"answer": triage.answer.strip()},
+                        }],
+                        "citations": [],
+                    },
+                )
             # Per-user creds for the tigergraph-mcp tools (when available), so
             # those tool calls run as the logged-in user too.
             tg_cfg = None
