@@ -58,22 +58,6 @@ _TOOL_LABELS = {
 def _tool_label(name: str) -> str:
     return _TOOL_LABELS.get(name, "Gathering information")
 
-def _gather_for_response(messages):
-    """Collect the tool-message observations across the loop, capped, for
-    inclusion in ``query_sources.result``. Lets the Trace Logs UI / chat
-    history show what the agent saw, not just the final answer.
-    """
-    out = []
-    for m in messages:
-        if isinstance(m, ToolMessage):
-            try:
-                content = json.loads(m.content) if isinstance(m.content, str) else m.content
-            except Exception:
-                content = m.content
-            out.append({"tool_call_id": m.tool_call_id, "observation": content})
-    return cap_for_trace(out)
-
-
 def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     """Run the free tool-calling loop for one question and return a response."""
     emit = ctx.emit
@@ -173,12 +157,15 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
             tool_t0 = time.time()
             out = registry.run(name or "", args or {}, ctx)
             tool_dur = round(time.time() - tool_t0, 3)
+            # Feed the FULL tool result to the model so it reasons and answers
+            # on complete context (retrieval size is bounded by max_results).
+            # The trace records only summaries and chunk ids (below), never the
+            # raw retrieval text.
             obs = {"summary": out.get("summary", "")}
             if out.get("context") is not None:
                 obs["result"] = out.get("context")
-            obs_capped = cap_for_trace(obs)
             messages.append(ToolMessage(
-                content=json.dumps(obs_capped, default=str),
+                content=json.dumps(obs, default=str),
                 tool_call_id=tc_id or "",
             ))
             per_call_traces.append({
@@ -219,7 +206,6 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
             "iterations": len([s for s in agent_steps if s["kind"] in ("react", "answer")]),
             "max_iterations": max_iters,
             "hit_iteration_cap": hit_cap,
-            "result": _gather_for_response(messages),
             "citations": selected_citations,
             "retrieved_citations": retrieved_citations,
         },
