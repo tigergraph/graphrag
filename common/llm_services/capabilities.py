@@ -92,6 +92,21 @@ def _openai_thinking(model: str) -> bool:
     )
 
 
+def openai_rejects_temperature(model: str) -> bool:
+    """OpenAI o-series reasoning models (o1/o3/o4) reject a custom
+    ``temperature`` — only the default value is accepted, and sending the
+    parameter fails the request. Callers should omit ``temperature`` for these
+    models. GPT-5 models accept a custom temperature and are not included.
+    Case-insensitive.
+    """
+    m = (model or "").strip().lower()
+    return (
+        m.startswith("o1")
+        or m.startswith("o3")
+        or m.startswith("o4")
+    )
+
+
 def _gemini_tool_calling(model: str) -> bool:
     # Gemini 1.5+ and 2.x support function calling.
     return "gemini-1.5" in model or "gemini-2" in model or "gemini-exp" in model

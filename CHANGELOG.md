@@ -29,6 +29,7 @@
 - **Ingestion resumes after a transient database disconnect.** Files whose load hits a connection error are retried once the database is reachable again (bounded, so a persistent outage fails out rather than hanging), and any that still fail are named so re-running ingest reloads only those — already-loaded documents upsert idempotently.
 - **Non-ASCII answers no longer break when context is large.** Retrieved context is measured against the model's input limit in the same form that is sent to it, so Japanese and other multi-byte content is no longer mis-sized and truncated incorrectly.
 - **A malformed answer no longer surfaces raw context to the user.** When the model returns slightly broken JSON, the readable answer (and its citations, when intact) is recovered from the response instead of falling back to dumping the retrieved context as the "answer."
+- **OpenAI reasoning models can be configured as the chat model.** The `temperature` setting is omitted for OpenAI o-series models (o1/o3/o4), which reject it; other OpenAI models are unaffected.
 
 ## [1.4.2]
 
