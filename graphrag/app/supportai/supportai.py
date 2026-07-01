@@ -27,13 +27,11 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
 
     current_schema = conn.gsql("""USE GRAPH {}\n ls""".format(graphname))
 
-    supportai_queries = [
-        "common/gsql/supportai/Scan_For_Updates.gsql",
-        "common/gsql/supportai/Update_Vertices_Processing_Status.gsql",
-        "common/gsql/supportai/Selected_Set_Display.gsql",
-        "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display.gsql",
-        "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display.gsql",
-    ]
+    from common.db.query_sets import SUPPORTAI_INIT_QUERIES, with_gsql
+    supportai_queries = with_gsql(SUPPORTAI_INIT_QUERIES + [
+        "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display",
+        "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display",
+    ])
 
     logger.info(f"Checking if schema needs to be created")
     if "- VERTEX EntityType" in current_schema:

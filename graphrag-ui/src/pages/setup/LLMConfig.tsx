@@ -162,6 +162,22 @@ const LLMConfig = () => {
   const [configScope, setConfigScope] = useState<"global" | "graph">("global");
   const [graphOverrides, setGraphOverrides] = useState<Record<string, any>>({});
 
+  // Whether the saved chat model supports the agentic engine (tool-calling).
+  // Re-checked on scope/graph change and after each save (capRefresh bump).
+  const [chatAgenticAvailable, setChatAgenticAvailable] = useState(true);
+  const [capRefresh, setCapRefresh] = useState(0);
+
+  useEffect(() => {
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) return;
+    const q = configScope === "graph" && selectedGraph
+      ? `?graphname=${encodeURIComponent(selectedGraph)}` : "";
+    fetch(`/ui/chat_capabilities${q}`, { headers: { Authorization: creds } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) setChatAgenticAvailable(d.agentic_available !== false); })
+      .catch(() => {});
+  }, [selectedGraph, configScope, capRefresh]);
+
 
   // Load available graphs and config on mount
   useEffect(() => {
@@ -515,6 +531,7 @@ const LLMConfig = () => {
 
         setMessage("Configuration saved successfully!");
         setMessageType("success");
+        setCapRefresh((n) => n + 1);
         setTestResults(null);
         setConnectionTested(false);
         setIsSaving(false);
@@ -540,6 +557,7 @@ const LLMConfig = () => {
       const scopeLabel = configScope === "graph" ? `graph "${selectedGraph}"` : "global";
       setMessage(`Configuration saved successfully (${scopeLabel})!`);
       setMessageType("success");
+      setCapRefresh((n) => n + 1);
       setTestResults(null);
       setConnectionTested(false);
 
@@ -1010,6 +1028,12 @@ const LLMConfig = () => {
             </div>
           </div>
         </div>
+
+        {!chatAgenticAvailable && (
+          <div className="mb-6 rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 px-4 py-3 text-sm text-amber-800 dark:text-amber-300">
+            ⚠️ The selected chat model does not support tool-calling, so <strong>Agentic mode is unavailable</strong> — only the Classic engine will be offered in chat. Choose a tool-calling model to enable Agentic mode.
+          </div>
+        )}
 
         <fieldset>
         <div className="space-y-6">

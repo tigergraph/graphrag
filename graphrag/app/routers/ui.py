@@ -1250,44 +1250,21 @@ def _local_query_hash(q_path: str, q_name: str,
     return _gsql_hash(body)
 
 
-# DISTRIBUTED QUERY bodies the migration assistant checks for drift,
-# spanning the ECC and supportai namespaces and the shipped retrievers.
-# Loading-job and schema-change .gsql files are excluded — they aren't
-# queries and SHOW QUERY can't introspect them; schema-change tracking
-# lives in ``common.db.migrate.check_and_apply_schema``.
-_MIGRATION_QUERY_PATHS = [
-    # graphrag namespace (ECC REQUIRED_QUERIES)
-    "common/gsql/graphrag/StreamIds.gsql",
-    "common/gsql/graphrag/StreamDocContent.gsql",
-    "common/gsql/graphrag/StreamChunkContent.gsql",
-    "common/gsql/graphrag/SetEpochProcessing.gsql",
-    "common/gsql/graphrag/get_vertices_or_remove.gsql",
-    # graphrag namespace (COMMUNITY_QUERIES)
-    "common/gsql/graphrag/get_community_children.gsql",
-    "common/gsql/graphrag/communities_have_desc.gsql",
-    "common/gsql/graphrag/graphrag_delete_all_communities.gsql",
-    "common/gsql/graphrag/graphrag_stream_entity_community_pairs.gsql",
-    "common/gsql/graphrag/graphrag_stream_all_ids.gsql",
-    "common/gsql/graphrag/louvain/graphrag_louvain_init.gsql",
-    "common/gsql/graphrag/louvain/graphrag_louvain_communities.gsql",
-    "common/gsql/graphrag/louvain/modularity.gsql",
-    "common/gsql/graphrag/louvain/stream_community.gsql",
-    # supportai (ECC checker + init_supportai)
-    "common/gsql/supportai/Scan_For_Updates.gsql",
-    "common/gsql/supportai/Update_Vertices_Processing_Status.gsql",
-    "common/gsql/supportai/Selected_Set_Display.gsql",
-    "common/gsql/supportai/ECC_Status.gsql",
-    "common/gsql/supportai/Check_Nonexistent_Vertices.gsql",
-    # supportai retrievers — only the vector variants and Display queries
-    # init_supportai actually installs on vector-enabled graphs. The legacy
-    # non-vector retrievers are excluded so they aren't flagged as missing.
-    "common/gsql/supportai/retrievers/Chunk_Sibling_Vector_Search.gsql",
-    "common/gsql/supportai/retrievers/Content_Similarity_Vector_Search.gsql",
-    "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display.gsql",
-    "common/gsql/supportai/retrievers/GraphRAG_Community_Vector_Search.gsql",
-    "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display.gsql",
-    "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Vector_Search.gsql",
-]
+# The queries the migration assistant checks for a GraphRAG graph come from the
+# shared canonical list (common.db.query_sets) so they can't drift from what the
+# ECC rebuild and SupportAI init actually install. The opt-in ECC-checker
+# queries are intentionally excluded — the checker is off by default, so those
+# queries aren't part of what a graph normally needs. Loading-job and
+# schema-change .gsql files aren't queries and are tracked separately by
+# ``common.db.migrate.check_and_apply_schema``.
+from common.db.query_sets import MIGRATION_QUERIES, with_gsql
+from common.db.query_errors import (
+    concise_gsql_error,
+    create_response_error,
+    http_error_response_body,
+)
+from common.db.schema_utils import gsql_output_error
+_MIGRATION_QUERY_PATHS = with_gsql(MIGRATION_QUERIES)
 
 
 @router.get(route_prefix + "/{graphname}/migration/status")
@@ -1306,7 +1283,7 @@ def migration_status(
     Schema-attribute drift is reported as ``{}`` for now; the detection
     is stubbed in ``common.db.migrate.check_and_apply_schema``.
     """
-    from common.db.migrate import _gsql_hash, _extract_query_body
+    from common.db.migrate import _gsql_hash, get_installed_query_names, get_installed_query_body
 
     import os.path
 
@@ -1321,10 +1298,11 @@ def migration_status(
     not_installed: list[str] = []
     missing_files: list[str] = []
 
-    # Use SHOW QUERY as the single source of truth: a query that
-    # doesn't exist on TG returns output with no extractable CREATE
-    # block (or an explicit error string). Avoids the extra
-    # ``getEndpoints`` round-trip and its token-auth requirement.
+    # Install state (authoritative) comes from the installed-query endpoints in
+    # one batched call; a query absent here needs installing. For the installed
+    # ones, the body is read via the query API (getQueryContent) and compared to
+    # local to detect drift.
+    installed_names = get_installed_query_names(conn, graphname)
     for q_path in _MIGRATION_QUERY_PATHS:
         if not os.path.exists(q_path):
             missing_files.append(q_path)
@@ -1336,15 +1314,17 @@ def migration_status(
         if local_hash is None:
             missing_files.append(q_path)
             continue
-        try:
-            show_out = conn.gsql(f"USE GRAPH {graphname}\nSHOW QUERY {q_name}")
-        except Exception as e:
-            logger.warning(f"migration_status: SHOW QUERY {q_name} failed: {e}")
+        if q_name not in installed_names:
             not_installed.append(q_name)
             continue
-        s = str(show_out)
-        installed_body = _extract_query_body(s)
+        try:
+            installed_body = get_installed_query_body(conn, graphname, q_name)
+        except Exception as e:
+            logger.warning(f"migration_status: reading query {q_name} failed: {e}")
+            not_installed.append(q_name)
+            continue
         if not installed_body:
+            # Installed endpoint but no readable body — treat as needing repair.
             not_installed.append(q_name)
             continue
         if _gsql_hash(installed_body) != local_hash:
@@ -1352,10 +1332,15 @@ def migration_status(
         else:
             up_to_date.append(q_name)
 
-    # Prompt-override compatibility: for each split-prompt override present for
-    # this graph, report (a) a legacy full-prompt override that will be ignored
-    # at runtime, (b) placeholder tokens that get stripped, and (c) an LLM check
-    # for lines that override the fixed system rules. Best-effort, never fatal.
+    # Prompt-override compatibility: DETERMINISTIC, LOCAL checks only. This
+    # endpoint is user-triggered and must stay fast, cheap, and side-effect
+    # free, so it performs NO LLM calls. For each split-prompt override present
+    # for this graph, report (a) a legacy full-prompt override that will be
+    # ignored at runtime, and (b) placeholder tokens that get stripped on save.
+    # The LLM-based system-rule conflict review is intentionally not run here
+    # (slow, costly, quota-sensitive, nondeterministic); it runs at the explicit
+    # prompt-save path, where a single edited prompt is reviewed on demand.
+    # Best-effort, never fatal.
     prompt_issues: dict = {}
     try:
         from common.utils.prompt_validation import find_placeholders
@@ -1378,12 +1363,8 @@ def migration_status(
                 prompt_issues[fname] = {"legacy_full_prompt": True}
                 continue
             placeholders = find_placeholders(raw)
-            review = review_svc.review_user_portion_llm(fname, raw)
-            if placeholders or review.get("has_conflict"):
-                prompt_issues[fname] = {
-                    "removed_placeholders": placeholders,
-                    "conflict": review if review.get("has_conflict") else None,
-                }
+            if placeholders:
+                prompt_issues[fname] = {"removed_placeholders": placeholders}
     except Exception as e:
         logger.warning(f"migration_status prompt check failed: {e}")
 
@@ -1417,18 +1398,19 @@ def migration_apply(
     Request body (all optional):
 
         {
-          "apply_outdated": true,       # re-create installed queries whose body has drifted
-          "apply_not_installed": false, # install expected queries that are missing on TG
+          "outdated": ["Q1", ...],      # queries whose installed body drifted from local
+          "not_installed": ["Q2", ...], # required queries missing / not installed
           "apply_schema": false         # stubbed — no-op until check_and_apply_schema is implemented
         }
 
-    Default behavior: repair only drifted queries. The operator must
-    opt in to installing missing queries — some are conditional on
-    vector schema and may be missing intentionally.
+    The goal is that every required query ends up installed and current, so
+    each listed query is (re)created and (re)installed — there is no
+    per-category opt-in. When neither list is provided the endpoint detects
+    the repair set itself. Only shipped query names are honored.
 
     Acquires the per-graph lock for the duration of the repair so that
     a concurrent ingest / rebuild / schema-extraction on the same graph
-    cannot race against the CREATE OR REPLACE + INSTALL QUERY ALL
+    cannot race against the CREATE OR REPLACE + INSTALL QUERY
     sequence. Also rejects upfront if any rebuild is in flight
     (rebuilds hold their own catalog locks on TG and would deadlock).
     """
@@ -1437,8 +1419,13 @@ def migration_apply(
     import os.path
 
     body = payload or {}
-    apply_outdated = bool(body.get("apply_outdated", True))
-    apply_not_installed = bool(body.get("apply_not_installed", False))
+    # Explicit repair lists from the status check. The repair button is only
+    # enabled after detection produced them, so when present apply trusts them
+    # and skips its own per-query re-detection. The goal is simply that every
+    # required query ends up installed and current, so every listed query is
+    # (re)created and (re)installed — no per-category opt-in.
+    queries_outdated = body.get("outdated")
+    queries_not_installed = body.get("not_installed")
     apply_schema = bool(body.get("apply_schema", False))
 
     # Pre-flight: reject if any rebuild is in flight. The rebuild's
@@ -1469,8 +1456,8 @@ def migration_apply(
         conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
         return _migration_apply_inner(
             graphname, conn,
-            apply_outdated=apply_outdated,
-            apply_not_installed=apply_not_installed,
+            queries_outdated=queries_outdated,
+            queries_not_installed=queries_not_installed,
             apply_schema=apply_schema,
         )
     finally:
@@ -1480,14 +1467,15 @@ def migration_apply(
 def _migration_apply_inner(
     graphname: str,
     conn,
-    apply_outdated: bool,
-    apply_not_installed: bool,
     apply_schema: bool,
+    queries_outdated: list[str] | None = None,
+    queries_not_installed: list[str] | None = None,
 ):
     """Body of migration_apply, separated so the outer wrapper handles
     the graph-lock acquire/release boilerplate.
     """
-    from common.db.migrate import _gsql_hash, _extract_query_body, check_and_apply_schema
+    from common.db.migrate import _gsql_hash, get_installed_query_names, get_installed_query_body, check_and_apply_schema
+    from common.db.query_install import install_query_set
     import os.path
 
     # Read live domain schema for templated-retriever rendering.
@@ -1497,33 +1485,57 @@ def _migration_apply_inner(
     installed_new: list[str] = []
     errors: list[dict] = []
 
-    # SHOW QUERY is the single source of truth: empty / missing body
-    # means the query isn't installed; non-empty body that differs from
-    # local (after rendering for templated retrievers) means drift.
+    # Shipped query name -> local .gsql path.
+    name_to_path = {
+        os.path.splitext(os.path.basename(p))[0]: p
+        for p in _MIGRATION_QUERY_PATHS if os.path.exists(p)
+    }
+
     paths_to_create: list[tuple[str, bool]] = []  # (path, was_installed)
-    for q_path in _MIGRATION_QUERY_PATHS:
-        if not os.path.exists(q_path):
-            continue
-        q_name = os.path.splitext(os.path.basename(q_path))[0]
-        local_hash = _local_query_hash(
-            q_path, q_name, domain_vts, domain_edges, include_entity
-        )
-        if local_hash is None:
-            continue
-        try:
-            show_out = conn.gsql(f"USE GRAPH {graphname}\nSHOW QUERY {q_name}")
-        except Exception as e:
-            errors.append({"query": q_name, "phase": "detect", "error": str(e)})
-            continue
-        installed_body = _extract_query_body(str(show_out))
-        if not installed_body:
-            if apply_not_installed:
+
+    if queries_outdated is not None or queries_not_installed is not None:
+        # The status check already detected what needs repair and enabled the
+        # repair button with these lists — trust them and skip the redundant
+        # re-detection. Every listed query is (re)created and (re)installed;
+        # only shipped query names are honored.
+        for name in (queries_outdated or []):
+            p = name_to_path.get(name)
+            if p:
+                paths_to_create.append((p, True))
+            else:
+                errors.append({"query": name, "phase": "detect", "error": "unknown query"})
+        for name in (queries_not_installed or []):
+            p = name_to_path.get(name)
+            if p:
+                paths_to_create.append((p, False))
+            else:
+                errors.append({"query": name, "phase": "detect", "error": "unknown query"})
+    else:
+        # No explicit lists: detect what needs repair ourselves. A required
+        # query needs (re)create + (re)install if it isn't installed (absent
+        # from the installed-query endpoints — covers "never created" too) or
+        # its installed body differs from local (after rendering templated
+        # retrievers). Install state comes from one batched call.
+        installed_names = get_installed_query_names(conn, graphname)
+        for q_path in _MIGRATION_QUERY_PATHS:
+            if not os.path.exists(q_path):
+                continue
+            q_name = os.path.splitext(os.path.basename(q_path))[0]
+            local_hash = _local_query_hash(
+                q_path, q_name, domain_vts, domain_edges, include_entity
+            )
+            if local_hash is None:
+                continue
+            if q_name not in installed_names:
                 paths_to_create.append((q_path, False))
-            continue
-        if not apply_outdated:
-            continue
-        if _gsql_hash(installed_body) != local_hash:
-            paths_to_create.append((q_path, True))
+                continue
+            try:
+                installed_body = get_installed_query_body(conn, graphname, q_name)
+            except Exception as e:
+                errors.append({"query": q_name, "phase": "detect", "error": str(e)})
+                continue
+            if not installed_body or _gsql_hash(installed_body) != local_hash:
+                paths_to_create.append((q_path, True))
 
     # Pass 1: re-create each drifted/missing query body (CREATE OR REPLACE).
     # Templated retrievers get rendered with the live domain schema before
@@ -1543,26 +1555,54 @@ def _migration_apply_inner(
                     domain_edges=domain_edges,
                     include_entity=include_entity,
                 )
-            res = conn.gsql(
-                f"USE GRAPH {graphname}\nBEGIN\n{q_body}\nEND\n"
-            )
-            logger.info(f"Migration: created/updated '{q_name}' ({str(res)[:120]})")
+            # Create/replace the body via the pyTigerGraph query API
+            # (createQuery -> POST /gsql/v1/queries). Distinguish a TigerGraph
+            # query error — the body fails type/semantic checks, so TG saves it
+            # as a draft and returns an explanatory ``message`` — from a genuine
+            # HTTP/transport error. A query error is definitive: report the
+            # response ``message`` directly, with no retry. Only a transport
+            # error (no TG query-error body) falls back to a GSQL CREATE, whose
+            # error text (returned as a string, not raised) is checked and
+            # compressed for display.
+            conn.graphname = graphname
+            tg_err = None
+            try:
+                res = conn.createQuery(q_body)
+                tg_err = create_response_error(res)
+            except Exception as create_exc:
+                tg_err = create_response_error(http_error_response_body(create_exc))
+                if not tg_err:
+                    logger.info(f"Migration: createQuery transport error for '{q_name}'; gsql fallback: {create_exc}")
+                    gres = conn.gsql(f"USE GRAPH {graphname}\nBEGIN\n{q_body}\nEND\n")
+                    if gsql_output_error(gres):
+                        logger.debug(f"Migration: full gsql result for '{q_name}': {gres}")
+                        tg_err = concise_gsql_error(gres)
+            if tg_err:
+                raise Exception(tg_err)
+            logger.info(f"Migration: created/updated '{q_name}'")
             if was_installed:
                 reinstalled.append(q_name)
             else:
                 installed_new.append(q_name)
         except Exception as e:
+            # ``e`` already carries a display-ready message (the TG response
+            # ``message`` for a query error, or a compressed gsql error);
+            # other failures (file read / render) surface their own text.
             logger.error(f"Migration: failed to create '{q_name}': {e}", exc_info=True)
-            errors.append({"query": q_name, "phase": "create", "error": str(e)})
+            errors.append({"query": q_name, "phase": "create", "error": str(e)[:400]})
 
-    # Pass 2: a single INSTALL QUERY ALL covers everything just re-created.
-    if reinstalled or installed_new:
+    # Pass 2: install ONLY the queries just re-created, by name — never
+    # INSTALL QUERY ALL, which recompiles every query on the graph and is the
+    # dominant cost of a repair. Uses the shared async-submit + poll utility
+    # (common.db.query_install) rather than pyTigerGraph's installQueries.
+    to_install = reinstalled + installed_new
+    if to_install:
         try:
-            install_res = conn.gsql(f"USE GRAPH {graphname}\nINSTALL QUERY ALL\n")
-            logger.info(f"Migration: INSTALL QUERY ALL returned {str(install_res)[:200]}")
+            install_query_set(conn, to_install)
+            logger.info(f"Migration: installed {len(to_install)} query(ies): {', '.join(to_install)}")
         except Exception as e:
-            logger.error(f"Migration: INSTALL QUERY ALL failed: {e}", exc_info=True)
-            errors.append({"query": "*", "phase": "install", "error": str(e)})
+            logger.error(f"Migration: installing {to_install} failed: {e}", exc_info=True)
+            errors.append({"query": ", ".join(to_install), "phase": "install", "error": concise_gsql_error(e)})
 
     schema_result = {"applied": [], "skipped_reason": "skipped by request"}
     if apply_schema:
@@ -2639,8 +2679,15 @@ def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
         "GraphRAG had an issue answering your question. "
         "Please try again, or rephrase your prompt."
     )
+    # Never return raw exception text to the client. It can carry sensitive
+    # configuration, URLs, request fragments, or credentials, and the chat
+    # response is persisted to conversation history. Admins instead get a
+    # reference ID that correlates to the full detail in the protected server
+    # logs (logged here at ERROR so the mapping is guaranteed).
     if is_superadmin and error_msg:
-        return f"{generic}\n\n(Admin detail: {error_msg})"
+        ref = req_id_cv.get() or "n/a"
+        logger.error(f"agent error [ref={ref}]: {error_msg}")
+        return f"{generic}\n\n(Admin reference ID: {ref} — see server logs for details.)"
     return generic
 
 
@@ -2777,19 +2824,50 @@ async def write_message_to_history(
     else:
         LogWriter.info(f"chat-history not enabled. chat-history url: {ch}")
 
+# Recognized agentic orchestrator styles. A value routed to the agentic engine
+# that is not one of these (e.g. a classic retriever name like "hybrid") would
+# otherwise be silently coerced into a bogus style, so it is normalized instead.
+_AGENT_STYLES = {"auto", "planned", "reactive", "react"}
+
+
 def _chat_agent(graphname, conn, use_cypher, mode, value, ws=None):
     """Build the chat agent from one menu selection.
 
     ``mode`` (``"agentic"`` | ``"classic"`` | ``None`` → graph config) picks the
     engine; ``value`` is the single menu value — the agent style (``"auto"`` |
     ``"planned"`` | ``"reactive"``) when agentic, or the retriever (``"auto"`` |
-    a name) when classic. ``make_agent`` reads the side that matches the
-    resolved engine, so passing it to both is safe.
+    a name) when classic.
+
+    ``value`` is overloaded, so it is validated against the *resolved* engine
+    before use — a value belonging to the other engine is never mis-mapped
+    (e.g. a classic retriever name reaching the agentic orchestrator). When the
+    caller sends no ``mode``, a non-``auto`` value that isn't an agent style is
+    treated as a retriever and routed to the classic engine, preserving
+    pre-agentic clients that selected a retriever via ``rag_method`` alone.
     """
-    value = value or "auto"
+    from common.config import get_agent_mode
+
+    value = (value or "auto").strip()
+    vlow = value.lower()
+    resolved_mode = (mode or "").strip().lower()
+    if resolved_mode not in ("agentic", "classic"):
+        if vlow == "auto":
+            resolved_mode = get_agent_mode(graphname)      # ambiguous -> graph config
+        elif vlow in _AGENT_STYLES:
+            resolved_mode = "agentic"                       # an agent style implies agentic
+        else:
+            resolved_mode = "classic"                       # a retriever name implies classic
+
+    if resolved_mode == "classic":
+        # Classic side maps an unknown value to its default retriever.
+        retriever, style = value, "auto"
+    else:
+        # Only a real agent style reaches the orchestrator; else fall back.
+        retriever, style = "auto", (value if vlow in _AGENT_STYLES else "auto")
+
     return make_agent(
-        graphname, conn, use_cypher, ws=ws, mode=mode,
-        supportai_retriever=value, agent_style=value,
+        graphname, conn, use_cypher, ws=ws, mode=resolved_mode,
+        supportai_retriever=retriever, agent_style=style,
     )
 
 
@@ -4216,6 +4294,27 @@ def _strip_auth(config: dict) -> dict:
         if svc and "authentication_configuration" in svc and isinstance(svc["authentication_configuration"], dict):
             svc["authentication_configuration"] = _mask_secret_values(svc["authentication_configuration"])
     return result
+
+
+@router.get(f"{route_prefix}/chat_capabilities")
+async def get_chat_capabilities(
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
+    graphname: str | None = None,
+):
+    """Tool-calling / thinking capability of the resolved chat model.
+
+    Lets the UI warn when the agentic engine is unavailable (the model can't
+    tool-call) and disable the Agentic options in the chat menu.
+    """
+    from common.config import get_chat_config
+    from common.llm_services.capabilities import model_capabilities
+
+    caps = model_capabilities(get_chat_config(graphname))
+    return {
+        "supports_tool_calling": caps["supports_tool_calling"],
+        "supports_thinking": caps["supports_thinking"],
+        "agentic_available": caps["supports_tool_calling"],
+    }
 
 
 @router.get(f"{route_prefix}/config")

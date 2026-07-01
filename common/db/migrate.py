@@ -71,6 +71,43 @@ def _extract_query_body(show_query_output: str) -> str:
     return m.group(1) if m else ""
 
 
+def get_installed_query_names(conn, graphname: str) -> set[str]:
+    """Return the set of query names that are INSTALLED (have an active REST
+    endpoint) on ``graphname`` — the authoritative install-state signal.
+
+    A query can be *created* (its body exists in the catalog) yet not
+    *installed*; only an installed query serves requests. Uses the pyTigerGraph
+    query API (``getInstalledQueries`` → ``getEndpoints(dynamic=True)``); one
+    call covers every query on the graph.
+    """
+    conn.graphname = graphname
+    return set(conn.getInstalledQueries(fmt="list"))
+
+
+def get_installed_query_body(conn, graphname: str, q_name: str) -> str | None:
+    """Return the source of query ``q_name`` on ``graphname``, or ``None`` if the
+    query does not exist (was never created).
+
+    Uses the pyTigerGraph query API (``getQueryContent`` → ``GET /gsql/v1/
+    queries/{name}``), which returns the clean source directly. GraphRAG requires
+    TG >= 4.2, so this endpoint is always available. NOTE: this reflects the
+    *created* body, not install state — pair it with ``get_installed_query_names``
+    to decide whether a query needs installing.
+    """
+    conn.graphname = graphname
+    try:
+        res = conn.getQueryContent(q_name)
+    except Exception as e:
+        if "404" in str(e):
+            return None  # query does not exist (never created)
+        raise
+    if isinstance(res, dict):
+        if res.get("error"):
+            return None
+        return res.get("queryContent") or None
+    return None
+
+
 def _query_name_from_path(query_path: str) -> str:
     """``common/gsql/graphrag/StreamIds.gsql`` → ``StreamIds``."""
     base = os.path.basename(query_path)

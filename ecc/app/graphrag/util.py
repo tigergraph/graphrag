@@ -53,25 +53,12 @@ _default_concurrency = graphrag_config.get("default_concurrency", 10)
 _worker_concurrency = _default_concurrency * 2
 tg_sem = asyncio.Semaphore(_default_concurrency)
 
-COMMUNITY_QUERIES = [
-    "common/gsql/graphrag/louvain/graphrag_louvain_init",
-    "common/gsql/graphrag/louvain/graphrag_louvain_communities",
-    "common/gsql/graphrag/louvain/modularity",
-    "common/gsql/graphrag/louvain/stream_community",
-    "common/gsql/graphrag/get_community_children",
-    "common/gsql/graphrag/communities_have_desc",
-    "common/gsql/graphrag/graphrag_delete_all_communities",
-    "common/gsql/graphrag/graphrag_stream_entity_community_pairs",
-    "common/gsql/graphrag/graphrag_stream_all_ids",
-]
+# Canonical lists live in common.db.query_sets so SupportAI init, the ECC
+# rebuild, and the Migration Assistant share one source of truth.
+from common.db.query_sets import GRAPHRAG_REQUIRED_QUERIES, GRAPHRAG_COMMUNITY_QUERIES
 
-REQUIRED_QUERIES = [
-    "common/gsql/graphrag/StreamIds",
-    "common/gsql/graphrag/StreamDocContent",
-    "common/gsql/graphrag/StreamChunkContent",
-    "common/gsql/graphrag/SetEpochProcessing",
-    "common/gsql/graphrag/get_vertices_or_remove",
-]
+COMMUNITY_QUERIES = GRAPHRAG_COMMUNITY_QUERIES
+REQUIRED_QUERIES = GRAPHRAG_REQUIRED_QUERIES
 load_q = reusable_channel.ReuseableChannel()
 
 # will pause workers until the event is false
@@ -103,48 +90,16 @@ async def install_queries(
         logger.info("All required queries already installed and up to date.")
         return
 
-    # Install ONLY the new/changed queries via the REST install endpoint
-    # (GET /gsql/v1/queries/install), which polls the install job to
-    # completion. Replaces a GSQL `INSTALL QUERY ALL` text command, whose
-    # large/verbose response could be truncated mid-stream under load.
-    # Submit the install with async=true so TG runs it as a background job and
-    # returns a requestId immediately, then poll for completion. A synchronous
-    # install (pyTigerGraph's installQueries omits async=true) blocks the HTTP
-    # request, and TG's gsql gateway drops it at ~390s — so a fresh
-    # community-query set (compiles for >390s) fails with a server disconnect
-    # regardless of the client timeout. The async submit returns in ~0.1s and
-    # the compile time no longer bounds any single request.
-    logger.info(f"Installing {len(to_install)} query(ies): {', '.join(sorted(to_install))}")
-    params = {
-        "graph": conn.graphname,
-        "queries": ",".join(to_install),
-        "flag": "-force",
-        "async": "true",
-    }
-    async with tg_sem:
-        res = await conn._req(
-            "GET", conn.gsUrl + "/gsql/v1/queries/install",
-            params=params, authMode="pwd", resKey=None,
-        )
-    request_id = res.get("requestId") if isinstance(res, dict) else None
-    if not request_id:
-        raise Exception(f"Query install submit returned no requestId: {res}")
+    # Install ONLY the new/changed queries via the shared async-submit + poll
+    # utility (see common.db.query_install for why pyTigerGraph's installQueries
+    # is unsafe for large sets). The submit is quick and TG-semaphore-guarded;
+    # the poll runs outside the semaphore so it never holds a slot for minutes.
+    from common.db.query_install import submit_query_install_async, poll_query_install_async
 
-    # Poll until the background install reports SUCCESS/FAILED (each poll is a
-    # short status request, so no single request approaches the gateway limit).
-    deadline_s = 1800
-    waited = 0
-    while waited < deadline_s:
-        await asyncio.sleep(10)
-        waited += 10
-        status = await conn.getQueryInstallationStatus(request_id)
-        msg = (status.get("message", "") if isinstance(status, dict) else str(status)) or ""
-        if "SUCCESS" in msg.upper():
-            break
-        if "FAIL" in msg.upper():
-            raise Exception(f"Query installation failed: {status}")
-    else:
-        raise Exception(f"Query installation timed out after {deadline_s}s (requestId={request_id})")
+    logger.info(f"Installing {len(to_install)} query(ies): {', '.join(sorted(to_install))}")
+    async with tg_sem:
+        request_id = await submit_query_install_async(conn, to_install)
+    await poll_query_install_async(conn, request_id)
     logger.info("Required queries installed and verified.")
 
 

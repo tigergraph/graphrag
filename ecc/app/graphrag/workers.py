@@ -27,6 +27,7 @@ from graphrag import community_summarizer, util
 from langchain_community.graphs.graph_document import GraphDocument, Node
 from pyTigerGraph import AsyncTigerGraphConnection
 
+from common.db.schema_utils import gsql_output_error
 from common.embeddings.embedding_services import EmbeddingModel
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.extractors import BaseExtractor, LLMEntityRelationshipExtractor
@@ -42,10 +43,6 @@ async def install_query(
         query_text = f.read()
     query_name = query_path.split("/")[-1]
 
-    def _gsql_failed(res) -> bool:
-        rl = res.lower() if isinstance(res, str) else ""
-        return ("error" in rl) or ("does not exist" in rl) or ("failed" in rl)
-
     # CREATE/REPLACE the query body. Prefer the REST endpoint
     # (POST /gsql/v1/queries via createQuery); fall back to a GSQL CREATE
     # statement only if the REST call errors.
@@ -55,7 +52,7 @@ async def install_query(
         except Exception as rest_err:
             LogWriter.info(f"createQuery REST failed for {query_name}; gsql fallback: {rest_err}")
             res = await conn.gsql(f"USE GRAPH {conn.graphname}\n{query_text}\n")
-            if _gsql_failed(res):
+            if gsql_output_error(res):
                 LogWriter.error(res)
                 return {"result": None, "error": True,
                         "message": f"Failed to create query {query_name}"}
@@ -67,7 +64,7 @@ async def install_query(
             except Exception as inst_err:
                 LogWriter.info(f"installQueries REST failed for {query_name}; gsql fallback: {inst_err}")
                 res = await conn.gsql(f"USE GRAPH {conn.graphname}\nINSTALL QUERY {query_name}\n")
-                if _gsql_failed(res):
+                if gsql_output_error(res):
                     LogWriter.error(res)
                     return {"result": None, "error": True,
                             "message": f"Failed to install query {query_name}"}

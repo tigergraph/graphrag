@@ -28,8 +28,32 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
   const [ragPattern, setRagPattern] = useState(sessionStorage.getItem("ragPattern") || 'auto');
   const [streaming, setStreaming] = useState(false);
   const [sendBtn, setSendBtn] = useState<HTMLElement | null>(null);
+  const [agenticAvailable, setAgenticAvailable] = useState(true);
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Whether the configured chat model supports the agentic engine (tool-calling).
+  // When it doesn't, the Agent options are disabled and the menu falls back to
+  // Classic. Re-checked when the selected graph changes.
+  useEffect(() => {
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) return;
+    const q = selectedGraph ? `?graphname=${encodeURIComponent(selectedGraph)}` : "";
+    fetch(`/ui/chat_capabilities${q}`, { headers: { Authorization: creds } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) return;
+        const available = d.agentic_available !== false;
+        setAgenticAvailable(available);
+        if (!available && sessionStorage.getItem("chatMode") === "agentic") {
+          setChatMode("classic");
+          setRagPattern("auto");
+          sessionStorage.setItem("chatMode", "classic");
+          sessionStorage.setItem("ragPattern", "auto");
+        }
+      })
+      .catch(() => {});
+  }, [selectedGraph]);
 
   // While a response streams, replace the send icon with a red Stop icon IN
   // PLACE: grab the send button node so we can portal the stop icon into it
@@ -173,6 +197,11 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
               <DropdownMenuContent className="w-72">
                 <DropdownMenuLabel className="flex items-center gap-2 px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                   <span className="text-sm">🤖</span> Agent
+                  {!agenticAvailable && (
+                    <span className="normal-case font-normal tracking-normal text-[10px] text-amber-600 dark:text-amber-500">
+                      needs a tool-calling model
+                    </span>
+                  )}
                 </DropdownMenuLabel>
                 <DropdownMenuGroup>
                   {[
@@ -184,7 +213,8 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
                     return (
                       <DropdownMenuItem
                         key={"agent-" + value}
-                        onSelect={() => handleSelectMode("agentic", value)}
+                        disabled={!agenticAvailable}
+                        onSelect={() => agenticAvailable && handleSelectMode("agentic", value)}
                         className="flex flex-col items-start gap-0.5 py-2 pl-4 pr-2"
                       >
                         <span className="flex w-full items-center justify-between text-sm">

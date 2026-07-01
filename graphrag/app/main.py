@@ -68,6 +68,26 @@ async def _install_mcp_libraries() -> None:
         logging.getLogger(__name__).warning(f"mcp library install failed: {e}")
 
 
+@app.on_event("startup")
+async def _check_agentic_capability() -> None:
+    """Warn at boot if the configured chat model can't tool-call, so operators
+    know the agentic engine will fall back to the classic engine."""
+    try:
+        from common.config import get_chat_config
+        from common.llm_services.capabilities import model_capabilities
+        cfg = get_chat_config()
+        if not model_capabilities(cfg).get("supports_tool_calling"):
+            logging.getLogger(__name__).warning(
+                "Chat model llm_service=%r llm_model=%r does not support "
+                "tool-calling; the agentic chat engine is unavailable and "
+                "requests will use the classic engine. Configure a "
+                "tool-calling model to enable Agentic mode.",
+                (cfg or {}).get("llm_service"), (cfg or {}).get("llm_model"),
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"agentic capability check skipped: {e}")
+
+
 @app.on_event("shutdown")
 async def _shutdown_mcp_addons() -> None:
     """Close every cached external-MCP client and stop the dedicated event
