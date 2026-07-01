@@ -1,4 +1,3 @@
-import os
 from pyTigerGraph import TigerGraphConnection
 
 host = "http://localhost"
@@ -27,7 +26,7 @@ resp = conn.ai.answerQuestion(
     query,
     method="hybrid",
     method_parameters = {
-        "indices": ["DocumentChunk", "Community"],
+        "indices": ["Document", "DocumentChunk"],
         "top_k": 2,
         "num_hops": 2,
         "num_seen_min": 2,
@@ -47,3 +46,10 @@ resp = conn.ai.answerQuestion(
     })
 
 print(f"""\nAnswer using Community Search:\n{resp["response"]}""")
+
+# Uses the graph's configured engine (agentic by default; falls back to
+# classic if the chat model can't tool-call).
+# Override (pyTigerGraph 2.0.5+): conn.ai.query(query, mode="agentic", rag_method="planned")
+agentic = conn.ai.query(query)
+
+print(f"""\nAnswer using the Agentic engine:\n{agentic["natural_language_response"]}""")
