@@ -25,6 +25,46 @@ router = APIRouter(tags=["InquiryAI"])
 security = HTTPBase(scheme="basic", auto_error=False)
 
 
+def _caller_is_superadmin(credentials) -> bool:
+    """Best-effort: True if the caller has a superadmin role.
+
+    Resolves roles from Basic credentials; returns False for token/secret
+    logins or any lookup failure. Used to decide whether to surface an
+    exception's root cause to the caller (GML-2136).
+    """
+    try:
+        from routers.ui import _parse_auth_header, _get_user_roles, _is_superadmin
+        if not credentials or not getattr(credentials, "credentials", None):
+            return False
+        c = _parse_auth_header(f"Basic {credentials.credentials}")
+        return _is_superadmin(_get_user_roles(c.username, c.password))
+    except Exception:
+        return False
+
+
+# Response fields returned only when the caller opts in via include_fields.
+# The answer envelope (natural_language_response, answered_question,
+# response_type) is always returned; query_sources carries the heavier
+# retrieval sources / trace.
+_OPTIONAL_RESPONSE_FIELDS = {"query_sources"}
+
+
+def _apply_field_selection(resp: GraphRAGResponse, include_fields) -> GraphRAGResponse:
+    """Trim optional response fields unless explicitly requested.
+
+    By default (``include_fields`` is None/empty) the response carries the
+    answer envelope only. Pass field names (or ``"all"``) to additionally
+    include heavier fields such as ``query_sources``.
+    """
+    requested = {f.strip().lower() for f in (include_fields or []) if f}
+    if "all" in requested:
+        return resp
+    for field in _OPTIONAL_RESPONSE_FIELDS:
+        if field not in requested:
+            setattr(resp, field, None)
+    return resp
+
+
 def check_embedding_store_status():
     """Validate embedding store is ready, raising 503 if not.
 
@@ -52,10 +92,8 @@ def retrieve_answer(
         f"/{graphname}/query request_id={req_id_cv.get()} database connection created"
     )
 
-    if query.rag_method:
-        agent = make_agent(graphname, conn, use_cypher, supportai_retriever=query.rag_method)
-    else:
-        agent = make_agent(graphname, conn, use_cypher)
+    from routers.ui import _chat_agent
+    agent = _chat_agent(graphname, conn, use_cypher, query.mode, query.rag_method)
     resp = GraphRAGResponse(
         natural_language_response="", answered_question=False, response_type="inquiryai"
     )
@@ -78,11 +116,8 @@ def retrieve_answer(
             f"/{graphname}/query request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
     except Exception as e:
-        error_msg = str(e)
-        if "does not exist" in error_msg or "not found" in error_msg.lower():
-            resp.natural_language_response = f"Error: {error_msg}. Please check the knowledge graph name and try again."
-        else:
-            resp.natural_language_response = "GraphRAG had an issue answering your question. Please try again, or rephrase your prompt."
+        from routers.ui import _agent_error_text
+        resp.natural_language_response = _agent_error_text(e, _caller_is_superadmin(credentials))
         exc = traceback.format_exc()
         resp.query_sources = {"error_traceback": exc}
         resp.answered_question = False
@@ -94,7 +129,7 @@ def retrieve_answer(
         )
         pmetrics.llm_query_error_total.labels(get_embedding_service().model_name).inc()
 
-    return resp
+    return _apply_field_selection(resp, query.include_fields)
 
 
 conversation_history = []
@@ -119,11 +154,8 @@ def retrieve_answer_with_chathistory(
         f"/{graphname}/query_with_history request_id={req_id_cv.get()} database connection created"
     )
 
-    # TODO: This needs to be refactored just to use config.py
-    if query.rag_method:
-        agent = make_agent(graphname, conn, use_cypher, supportai_retriever=query.rag_method)
-    else:
-        agent = make_agent(graphname, conn, use_cypher)
+    from routers.ui import _chat_agent
+    agent = _chat_agent(graphname, conn, use_cypher, query.mode, query.rag_method)
     resp = GraphRAGResponse(
         natural_language_response="", answered_question=False, response_type="inquiryai"
     )
@@ -172,12 +204,8 @@ def retrieve_answer_with_chathistory(
             f"/{graphname}/query_with_history request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
     except Exception as e:
-        error_msg = str(e)
-        if "does not exist" in error_msg or "not found" in error_msg.lower():
-            resp.natural_language_response = f"Error: {error_msg}. Please check the knowledge graph name and try again."
-        else:
-            resp.natural_language_response = "GraphRAG had an issue answering your question. Please try again, or rephrase your prompt."
-
+        from routers.ui import _agent_error_text
+        resp.natural_language_response = _agent_error_text(e, _caller_is_superadmin(credentials))
         resp.query_sources = {}
         resp.answered_question = False
         LogWriter.warning(
@@ -189,7 +217,7 @@ def retrieve_answer_with_chathistory(
         )
         pmetrics.llm_query_error_total.labels(get_embedding_service().model_name).inc()
 
-    return resp
+    return _apply_field_selection(resp, query.include_fields)
 
 
 @router.get("/{graphname}/list_registered_queries")

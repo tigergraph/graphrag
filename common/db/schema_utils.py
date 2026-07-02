@@ -1378,10 +1378,10 @@ async def render_schema_rep_async(
 
     Same semantics as the sync version — see :func:`render_schema_rep`.
     """
-    from common.db.connections import get_schema_ver as _get_schema_ver
+    from common.db.connections import get_schema_ver_async as _get_schema_ver_async
 
     try:
-        schema_ver = _get_schema_ver(conn)
+        schema_ver = await _get_schema_ver_async(conn)
     except Exception:
         schema_ver = None
 

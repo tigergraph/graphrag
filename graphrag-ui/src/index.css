@@ -88,13 +88,31 @@
   .react-chatbot-kit-chat-input-container {
     @apply !bg-background !border-[#3D3D3D];
   }
-  /* Block submitting another question while the previous answer is
-     still streaming. ActionProvider toggles ``chat-streaming`` on
-     ``document.body`` at stream start / end. */
-  body.chat-streaming .react-chatbot-kit-chat-input-container,
-  body.chat-streaming .react-chatbot-kit-chat-input-form {
+  /* While a response streams, lock the text input. The Send button keeps its
+     rounded cap (background) but its paper-plane icon is hidden and its click
+     disabled; a red Stop icon is overlaid in the exact same spot (Bot.tsx
+     portals it into the input-container). ActionProvider toggles
+     ``chat-streaming`` on ``document.body`` at stream start / end. */
+  body.chat-streaming .react-chatbot-kit-chat-input {
     pointer-events: none;
     opacity: 0.5;
+  }
+  /* Replace the send icon with a red Stop icon IN PLACE — same button, same
+     position. Bot.tsx hides the native paper-plane and portals the stop icon
+     into the send button; the button's click is intercepted to stop. */
+  body.chat-streaming .react-chatbot-kit-chat-btn-send-icon {
+    display: none;
+  }
+  .graphrag-stop-icon {
+    display: block;
+    width: 15px;
+    height: 15px;
+    margin: 0 auto;
+    fill: #dc2626;
+    cursor: pointer;
+  }
+  .react-chatbot-kit-chat-btn-send:hover .graphrag-stop-icon {
+    fill: #b91c1c;
   }
   .open-dg {
     @apply bg-background;

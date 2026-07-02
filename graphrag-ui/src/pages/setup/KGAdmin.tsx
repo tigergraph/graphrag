@@ -83,7 +83,6 @@ const KGAdmin = () => {
   const [migrationChecking, setMigrationChecking] = useState(false);
   const [migrationApplying, setMigrationApplying] = useState(false);
   const [migrationMessage, setMigrationMessage] = useState("");
-  const [migrationApplyNotInstalled, setMigrationApplyNotInstalled] = useState(false);
   // Reset states when dialogs close
   const handleInitializeDialogChange = (open: boolean) => {
     if (!open && isConfirmDialogOpen) {
@@ -179,8 +178,12 @@ const KGAdmin = () => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          apply_outdated: true,
-          apply_not_installed: migrationApplyNotInstalled,
+          // Send the exact query lists the status check found; the repair
+          // (re)creates and (re)installs only those, by name. The goal is that
+          // every required query ends up installed and current, so both lists
+          // are always repaired.
+          outdated: migrationStatus?.queries?.outdated ?? [],
+          not_installed: migrationStatus?.queries?.not_installed ?? [],
         }),
       });
       const data = await resp.json();
@@ -194,15 +197,27 @@ const KGAdmin = () => {
       const newInst = data.queries_installed_new?.length || 0;
       const errs = data.errors?.length || 0;
       if (errs > 0) {
+        // Surface the actual failure so schema/query problems are visible
+        // (e.g. the graph has no GraphRAG schema, so queries can't be built).
+        // Keep this message and the current status on screen — do NOT re-run
+        // the check here, since that clears the message and repaints the
+        // "ready to repair" state, hiding the error.
+        const shown = (data.errors || [])
+          .slice(0, 3)
+          .map((e: any) => `• ${e.query ? e.query + ": " : ""}${e.error || ""}`)
+          .join("\n");
+        const more = errs > 3 ? `\n…and ${errs - 3} more.` : "";
         setMigrationMessage(
-          `⚠️ Repaired ${reinst} outdated, installed ${newInst} new — ${errs} error(s).`
+          `❌ Repair failed — ${errs} error(s)` +
+          (reinst || newInst ? ` (${reinst} reinstalled, ${newInst} installed)` : "") +
+          (shown ? `:\n${shown}${more}` : ".")
         );
-      } else {
-        setMigrationMessage(
-          `✅ Repaired ${reinst} outdated; installed ${newInst} new query(s).`
-        );
+        return;
       }
-      // Re-run the check so the user sees the updated state.
+      setMigrationMessage(
+        `✅ Repaired ${reinst} outdated; installed ${newInst} new query(s).`
+      );
+      // Re-run the check so the user sees the now-clean state.
       await runMigrationCheck(migrationGraph);
     } catch (err: any) {
       setMigrationMessage(`Apply failed: ${err.message || err}`);
@@ -1328,17 +1343,17 @@ const KGAdmin = () => {
             </div>
           </div>
 
-          {/* Compatibility Check Card */}
+          {/* Migration Assistant Card */}
           <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
             <div className="mb-4">
               <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
                 <Wrench className="h-6 w-6 text-tigerOrange" />
               </div>
               <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
-                Compatibility Check
+                Migration Assistant
               </h2>
               <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
-                Check an existing graph against the current release and repair any drifted queries.
+                Check an existing graph against the current release — repair drifted queries and review prompt-override compatibility.
               </p>
             </div>
             <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
@@ -1351,7 +1366,7 @@ const KGAdmin = () => {
                 className="gradient w-full text-white"
               >
                 <Wrench className="h-4 w-4 mr-2" />
-                Check Compatibility
+                Open Migration Assistant
               </Button>
             </div>
           </div>
@@ -2705,7 +2720,7 @@ const KGAdmin = () => {
           </DialogContent>
         </Dialog>
 
-        {/* Compatibility / Migration Dialog */}
+        {/* Migration Assistant Dialog */}
         <Dialog open={migrationDialogOpen} onOpenChange={setMigrationDialogOpen}>
           <DialogContent
             className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
@@ -2713,11 +2728,11 @@ const KGAdmin = () => {
           >
             <DialogHeader>
               <DialogTitle className="text-black dark:text-white">
-                Compatibility Check
+                Migration Assistant
               </DialogTitle>
               <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
-                Verify that an existing graph's installed GSQL queries match the current release.
-                Use this after upgrading graphrag to repair any drifted queries without recreating the graph.
+                Check an existing graph against the current release after upgrading graphrag:
+                repair drifted GSQL queries and review prompt-override compatibility — without recreating the graph.
               </DialogDescription>
             </DialogHeader>
 
@@ -2815,26 +2830,12 @@ const KGAdmin = () => {
                 </div>
               )}
 
-              {migrationStatus?.needs_repair && (migrationStatus.queries?.not_installed?.length ?? 0) > 0 && (
-                <label className="flex items-center gap-2 text-sm text-black dark:text-white">
-                  <input
-                    type="checkbox"
-                    checked={migrationApplyNotInstalled}
-                    onChange={(e) => setMigrationApplyNotInstalled(e.target.checked)}
-                    disabled={migrationApplying || isRebuildRunning}
-                  />
-                  Also install queries reported as not installed
-                  {" "}
-                  <span className="text-xs text-gray-500">
-                    (some retrievers are lazily installed on first use — only enable if you know they should be present)
-                  </span>
-                </label>
-              )}
-
               {migrationMessage && (
                 <div
-                  className={`p-3 rounded-lg text-sm ${
-                    migrationMessage.includes("✅")
+                  className={`p-3 rounded-lg text-sm whitespace-pre-line ${
+                    migrationMessage.includes("❌")
+                      ? "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
+                      : migrationMessage.includes("✅")
                       ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
                       : migrationMessage.includes("⚠️")
                       ? "bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300"

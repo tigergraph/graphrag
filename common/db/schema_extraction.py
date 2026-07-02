@@ -28,7 +28,7 @@ import logging
 import re
 from typing import Iterable, List, Optional
 
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from common.db.schema_utils import (

@@ -31,7 +31,7 @@ from agent.method_selector import (
     has_insufficient_context,
 )
 from agent.Q import DONE, Q
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import END, StateGraph
 from pyTigerGraph.common.exception import TigerGraphException

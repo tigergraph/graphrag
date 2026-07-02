@@ -31,11 +31,114 @@ _md_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
 # cannot detect a column header from the PDF structure (common in form PDFs).
 _coln_pattern = re.compile(r'\bCol\d+\b')
 
+# Vertical-CJK-character runs produced when pymupdf4llm encounters a PDF
+# cell containing Japanese / Chinese / Korean text laid out top-to-bottom
+# (one character per typographic line). pymupdf4llm preserves each
+# character on its own logical line and per-character bold formatting,
+# producing patterns like:
+#   **個**<br>**別**<br>**信**<br>**用**...
+#   個<br>別<br>信<br>用...
+# which bloat tokens 3-5x and confuse retrieval embeddings. The CJK
+# Unicode ranges below cover CJK Unified Ideographs (U+4E00-U+9FFF),
+# Hiragana / Katakana / CJK Symbols (U+3000-U+30FF), and full-width
+# / half-width forms (U+FF00-U+FFEF).
+_CJK_CHAR_CLASS = r"[　-鿿＀-￯]"
+_VERTICAL_BOLD_CJK = re.compile(
+    rf"(?:\*\*{_CJK_CHAR_CLASS}\*\*(?:<br\s*/?>)){{2,}}\*\*{_CJK_CHAR_CLASS}\*\*"
+)
+_VERTICAL_CJK = re.compile(
+    rf"(?:{_CJK_CHAR_CLASS}<br\s*/?>){{2,}}{_CJK_CHAR_CLASS}"
+)
 
-def _clean_pdf_markdown(markdown: str) -> str:
+# Within-cell <br> tags inside markdown table rows. pymupdf4llm uses these
+# to mark visual line breaks inside a single cell (vertical-numeric runs
+# like ``|3<br>4<br>5|``, or single-character mojibake glyph sequences).
+# Whatever the cause, the result is a cell that retrieval treats as
+# multiple unrelated tokens. Stripping ``<br>`` inside ``|...|`` rows
+# reunites the cell text on one logical line; ``<br>`` outside table
+# rows is left alone since it usually marks an intentional break.
+_TABLE_LINE_RE = re.compile(r"^\s*\|")
+_BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+# Mojibake detection: PDFs whose embedded font CMap can't be resolved
+# emit runs of Latin-1 supplement characters (À-ÿ, ¡-¿), control glyphs,
+# or U+FFFD replacement characters. None of these are expected in
+# legitimate Japanese or English text at high density. A line whose
+# share of suspicious characters exceeds the threshold gets logged.
+_MOJIBAKE_HIGH_LATIN1 = re.compile(r"[ -ÿ-]")
+_MOJIBAKE_REPLACEMENT = "�"
+_MOJIBAKE_LINE_RATIO = 0.20  # report lines where >=20% of chars look corrupt
+_MOJIBAKE_MIN_LINE_LEN = 8
+
+
+def _detect_mojibake(text: str, source_hint: str = "") -> list[dict]:
+    """Scan markdown for lines that look like failed glyph decoding.
+
+    Returns a list of finding dicts with line_no, ratio, sample. Callers
+    log these so PDFs with broken CMaps can be flagged for re-extraction
+    or OCR fallback. We do not attempt to repair the text in-place —
+    upstream extraction is the only place where the original glyphs can
+    actually be recovered.
+    """
+    findings: list[dict] = []
+    if not text:
+        return findings
+    for line_no, line in enumerate(text.split("\n"), 1):
+        if len(line) < _MOJIBAKE_MIN_LINE_LEN:
+            continue
+        suspicious = len(_MOJIBAKE_HIGH_LATIN1.findall(line))
+        replacement = line.count(_MOJIBAKE_REPLACEMENT)
+        weighted = suspicious + replacement * 5
+        ratio = weighted / max(1, len(line))
+        if ratio >= _MOJIBAKE_LINE_RATIO:
+            findings.append({
+                "line_no": line_no,
+                "ratio": round(ratio, 3),
+                "suspicious_chars": suspicious,
+                "replacement_chars": replacement,
+                "sample": line[:160],
+                "source": source_hint,
+            })
+    return findings
+
+
+def _strip_br_in_table_rows(text: str) -> str:
+    """Remove ``<br>`` tags inside markdown table rows.
+
+    Rationale documented at _TABLE_LINE_RE.
+    """
+    out: list[str] = []
+    for line in text.split("\n"):
+        if _TABLE_LINE_RE.match(line):
+            line = _BR_TAG_RE.sub(" ", line)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _collapse_vertical_cjk(text: str) -> str:
+    """Collapse pymupdf4llm's per-character vertical-CJK runs back into a
+    single token. Bold runs ``**X**<br>**Y**<br>**Z**`` become ``**XYZ**``;
+    non-bold runs ``X<br>Y<br>Z`` become ``XYZ``.
+
+    Only operates on runs of three or more contiguous CJK characters
+    separated by ``<br>`` tags — incidental two-character ``<br>``-joined
+    pairs aren't matched so we don't disturb legitimate inline content.
+    """
+    def _fix_bold(m: re.Match) -> str:
+        chars = re.findall(rf"\*\*({_CJK_CHAR_CLASS})\*\*", m.group(0))
+        return f"**{''.join(chars)}**" if chars else m.group(0)
+
+    def _fix_plain(m: re.Match) -> str:
+        return re.sub(r"<br\s*/?>", "", m.group(0))
+
+    text = _VERTICAL_BOLD_CJK.sub(_fix_bold, text)
+    return _VERTICAL_CJK.sub(_fix_plain, text)
+
+
+def _clean_pdf_markdown(markdown: str, source_hint: str = "") -> str:
     """Apply post-processing to markdown produced by pymupdf4llm for form PDFs.
 
-    Two specific artefacts are fixed:
+    Three specific artefacts are fixed:
 
     1. **Duplicate table rows** — complex form PDFs (e.g. IRS forms) often have
        overlapping text layers (a rendered background layer plus a searchable text
@@ -49,11 +152,42 @@ def _clean_pdf_markdown(markdown: str) -> str:
        cannot derive a header from the PDF's column structure.  These are replaced
        with empty strings so the table is still valid markdown but does not expose
        internal artefacts to downstream consumers.
+
+    3. **Vertical-CJK runs** — Japanese / Chinese / Korean characters laid out
+       vertically in a PDF table cell get emitted as one character per line
+       with ``<br>`` separators and per-character bold markers. The run is
+       collapsed back into a single token so embedding and retrieval see the
+       intended word (e.g. ``**個別信用購入あっせん**``) rather than ten
+       fragments.
     """
     # --- Pass 1: remove ColN placeholders ---
     markdown = _coln_pattern.sub('', markdown)
 
-    # --- Pass 2: deduplicate consecutive table rows ---
+    # --- Pass 2: collapse vertical-CJK runs (do this BEFORE row dedup so
+    # rows that differ only by the collapsed form aren't treated as
+    # distinct rows).
+    markdown = _collapse_vertical_cjk(markdown)
+
+    # --- Pass 2b: strip <br> inside markdown table rows ---
+    markdown = _strip_br_in_table_rows(markdown)
+
+    # --- Pass 2c: log lines that look like mojibake (failed glyph decode).
+    # We don't repair these — the underlying glyphs aren't recoverable
+    # from the markdown — but logging gives operators a grep target.
+    findings = _detect_mojibake(markdown, source_hint)
+    if findings:
+        logger.warning(
+            "[CONVERSION ISSUE] %s: %d line(s) look like mojibake / glyph-decode failure (first 3 shown)",
+            source_hint or "<unknown source>",
+            len(findings),
+        )
+        for f in findings[:3]:
+            logger.warning(
+                "[CONVERSION ISSUE]   line %d (ratio=%.2f, suspicious=%d, replacement=%d): %r",
+                f["line_no"], f["ratio"], f["suspicious_chars"], f["replacement_chars"], f["sample"],
+            )
+
+    # --- Pass 3: deduplicate consecutive table rows ---
     lines = markdown.splitlines()
     cleaned: list[str] = []
     for line in lines:
@@ -67,7 +201,15 @@ def _clean_pdf_markdown(markdown: str) -> str:
                 continue
         cleaned.append(line)
 
-    return '\n'.join(cleaned)
+    markdown = '\n'.join(cleaned)
+
+    # --- Pass 4: collapse runs of 3+ blank lines into a single blank
+    # line. pymupdf4llm emits large vertical whitespace where the PDF
+    # has visual blank space (e.g. below a chart that fills most of a
+    # page); these don't add information and bloat chunk sizes.
+    markdown = re.sub(r"(?:\r?\n[ \t]*){3,}", "\n\n", markdown)
+
+    return markdown
 
 
 def extract_images(md_text):
@@ -477,29 +619,55 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
         if image_output_folder.exists():
             shutil.rmtree(image_output_folder, ignore_errors=True)
 
-        # Convert PDF to markdown with extracted image files
+        # Convert PDF to markdown with extracted image files.
         # Use lock because pymupdf4llm's table extraction is not thread-safe
-        # See: https://github.com/pymupdf/PyMuPDF/issues/3241
+        # (https://github.com/pymupdf/PyMuPDF/issues/3241).
+        #
+        # page_chunks=True returns a list[dict] (one per page) carrying
+        # per-page metadata. We re-join into a single markdown string with
+        # `<!-- PAGE N -->` markers between pages so the structured chunker
+        # (common/chunkers/structured.py) can attach page_no to each
+        # emitted chunk. Markdown / character / semantic chunkers ignore
+        # the comments — they're inert HTML comments to those chunkers.
+        def _to_markdown_paged(strategy: str | None = None):
+            kwargs = dict(
+                write_images=True,
+                image_path=str(image_output_folder),
+                margins=0,
+                image_size_limit=0.08,
+                page_chunks=True,
+            )
+            if strategy:
+                kwargs["table_strategy"] = strategy
+            pages = pymupdf4llm.to_markdown(file_path, **kwargs)
+            if not isinstance(pages, list):
+                return pages or ""
+            parts = []
+            for p in pages:
+                page_no = None
+                meta = p.get("metadata") or {}
+                # pymupdf4llm exposes the page index under ``page_number``
+                # (1-based) in each chunk's metadata. ``page`` is the
+                # filename-style label and not always populated.
+                for key in ("page_number", "page"):
+                    if key in meta:
+                        try:
+                            page_no = int(meta[key])
+                            break
+                        except (TypeError, ValueError):
+                            page_no = None
+                if page_no is not None:
+                    parts.append(f"<!-- PAGE {page_no} -->")
+                parts.append(p.get("text") or "")
+            return "\n\n".join(parts)
+
         with _pymupdf4llm_lock:
             try:
-                markdown_content = pymupdf4llm.to_markdown(
-                    file_path,
-                    write_images=True,
-                    image_path=str(image_output_folder),  # unique folder per PDF
-                    margins=0,
-                    image_size_limit=0.08,
-                )
+                markdown_content = _to_markdown_paged()
             except Exception:
                 # Retry with table_strategy="lines" if first attempt fails
                 try:
-                    markdown_content = pymupdf4llm.to_markdown(
-                        file_path,
-                        write_images=True,
-                        image_path=str(image_output_folder),  # unique folder per PDF
-                        margins=0,
-                        image_size_limit=0.08,
-                        table_strategy="lines",
-                    )
+                    markdown_content = _to_markdown_paged(strategy="lines")
                 except Exception as e:
                     logger.error(f"pymupdf4llm failed for {file_path}: {e}")
                     # Cleanup folder if it was created
@@ -527,7 +695,7 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
             }]
 
         # Clean up artefacts common in form PDFs (duplicate rows, ColN headers)
-        markdown_content = _clean_pdf_markdown(markdown_content)
+        markdown_content = _clean_pdf_markdown(markdown_content, source_hint=str(file_path))
 
         # Rename image files that contain spaces to avoid path-parsing issues
         markdown_content = _sanitize_image_filenames(image_output_folder, markdown_content)

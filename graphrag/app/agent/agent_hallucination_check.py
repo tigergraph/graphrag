@@ -1,5 +1,5 @@
 import logging
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 
 from pydantic import BaseModel, Field

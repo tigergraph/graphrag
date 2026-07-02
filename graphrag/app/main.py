@@ -52,6 +52,53 @@ app.include_router(routers.inquiryai_router, prefix=PATH_PREFIX)
 app.include_router(routers.supportai_router, prefix=PATH_PREFIX)
 app.include_router(routers.queryai_router, prefix=PATH_PREFIX)
 app.include_router(routers.ui_router, prefix=PATH_PREFIX)
+app.include_router(routers.mcp_servers_router, prefix=PATH_PREFIX)
+
+
+@app.on_event("startup")
+async def _install_mcp_libraries() -> None:
+    """Install the source tarballs referenced by configured stdio MCP servers
+    (global + per-graph), so their console-script commands are available. Runs
+    each boot, which is what makes them persist across container recreation.
+    """
+    try:
+        from common.mcp_config import install_configured_libraries
+        install_configured_libraries()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"mcp library install failed: {e}")
+
+
+@app.on_event("startup")
+async def _check_agentic_capability() -> None:
+    """Warn at boot if the configured chat model can't tool-call, so operators
+    know the agentic engine will fall back to the classic engine."""
+    try:
+        from common.config import get_chat_config
+        from common.llm_services.capabilities import model_capabilities
+        cfg = get_chat_config()
+        if not model_capabilities(cfg).get("supports_tool_calling"):
+            logging.getLogger(__name__).warning(
+                "Chat model llm_service=%r llm_model=%r does not support "
+                "tool-calling; the agentic chat engine is unavailable and "
+                "requests will use the classic engine. Configure a "
+                "tool-calling model to enable Agentic mode.",
+                (cfg or {}).get("llm_service"), (cfg or {}).get("llm_model"),
+            )
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"agentic capability check skipped: {e}")
+
+
+@app.on_event("shutdown")
+async def _shutdown_mcp_addons() -> None:
+    """Close every cached external-MCP client and stop the dedicated event
+    loop on app shutdown so stdio subprocesses don't outlive the worker.
+    """
+    try:
+        from mcp_addons import shutdown_all, stop_loop, run_async
+        await run_async(shutdown_all())
+        stop_loop()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"mcp_addons shutdown failed: {e}")
 
 
 excluded_metrics_paths = ("/docs", "/openapi.json", "/metrics")

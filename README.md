@@ -1,7 +1,7 @@
 # TigerGraph GraphRAG
 
 > ⚠️ **Disclaimer**  
-> - **Supported Backend:** TigerGraph is the only Vector and Graph DB supported in this project. Hybrid Search is the officially retriever method supported at backend.  
+> - **Supported Backend:** TigerGraph is the only Vector and Graph DB supported in this project. Hybrid Search is the officially supported retrieval method; other retrieval methods, and the agentic chat engine that orchestrates them, are provided as-is for self-service use.
 > - **Limitations:** No official support is provided unless delivered through a Statement of Work (SOW) with the Solutions team. Customizations are customer-owned self-service to handle custom LLM service, prompt logic, UI integration, and pipeline orchestration. This project is provided "as is" without any warranties or guarantees.
 
 ## Table of Contents
@@ -22,6 +22,9 @@
 - [Use TigerGraph GraphRAG](#use-tigergraph-graphrag)
   - [Run Demo with Preloaded GraphRAG](#run-demo-with-preloaded-graphrag)
   - [Manually Build GraphRAG From Scratch](#manually-build-graphrag-from-scratch)
+- [Chat Engines and Agents](#chat-engines-and-agents)
+  - [Agentic](#agentic)
+  - [Classic](#classic)
 - [Document Ingestion for Knowledge Graph](#document-ingestion-for-knowledge-graph)
   - [Ingest Documents from the UI](#ingest-documents-from-the-ui)
     - [Local File Upload](#local-file-upload)
@@ -32,6 +35,7 @@
   - [DB configuration](#db-configuration)
   - [GraphRAG configuration](#graphrag-configuration)
   - [Chat History Configuration](#chat-history-configuration)
+  - [MCP servers (agentic tools)](#mcp-servers-agentic-tools)
   - [LLM provider configuration](#llm-provider-configuration)
     - [Supported parameters](#supported-parameters)
     - [Provider examples](#provider-examples)
@@ -63,6 +67,7 @@
 ---
 
 ## Releases
+* **7/1/2026**: GraphRAG v2.0.0 released. Added an agentic chat engine that plans and runs its own retrieval (Planner and Reactive styles), external MCP tools, and structure-aware document chunking, along with additive prompt customization and many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.0) for details.
 * **6/23/2026**: GraphRAG v1.4.2 released. Added a knowledge graph compatibility check and repair tool to pick up shipped query fixes on existing graphs, along with more reliable ingestion for documents with spaces in their filenames and other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.2) for details.
 * **5/30/2026**: GraphRAG v1.4.1 released. Added token-based login and a pre-flight upload conflict check, along with more resilient chat when vector search is unavailable and other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.1) for details.
 * **5/16/2026**: GraphRAG v1.4.0 released. Added schema-aware knowledge graphs, auto retrieval method selection, and a Trace Logs UI, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.0) for details.
@@ -307,7 +312,7 @@ Enter the username and password of the TigerGraph database to login.
 
 ![Chat Login](./docs/img/ChatLogin.jpg)
 
-On the top of the page, select `Community Search` as RAG pattern and `TigerGraphRAG` as Graph.
+On the top of the page, select `Classic` -> `Community Search` as RAG pattern and `TigerGraphRAG` as Graph.
 ![RAG Config](./docs/img/RAGConfig.jpg)
 
 In the chat box, input the question `how to load data to tigergraph vector store, give an example in Python` and click the `send` button.
@@ -356,6 +361,31 @@ The script will:
 1. Load the sample data
 1. Init the GraphRAG based on the graph and install required queries
 1. Ask a question via Python to get answer from GraphRAG
+
+[Go back to top](#top)
+
+---
+
+## Chat Engines and Agents
+
+GraphRAG offers two chat engines, chosen from the chat menu (or set as a per-graph default via `agent_style`). The **Agentic** engine is the default and recommended engine; the **Classic** engine remains available for straightforward, predictable question-answering.
+
+### Agentic
+
+The agent decides its **own** retrieval instead of following a fixed pipeline: it picks which methods to use (structural graph queries, vector search, community search), can call external [MCP tools](#mcp-servers-agentic-tools), answers greetings and questions about itself directly, and cites the chunks and queries it used. It comes in two styles:
+
+- **Planned** *(default)* — analyzes the question up front and lays out the whole retrieval plan (which methods, how many, in what order) as a small DAG, executes it, then synthesizes one grounded answer. Predictable and efficient; a strong fit for most questions, including multi-part ones.
+- **Reactive** — reasons and acts one step at a time, deciding each next retrieval from what the previous step returned, and keeps going until it can answer completely and accurately. More adaptive to what it finds, at the cost of more steps (and tokens) on complex questions.
+
+Both styles send trivial/conversational messages straight to a direct answer, and record their retrieval in the admin **Trace** — the plan/steps and reasoning, which chunks were retrieved, and which the agent selected for the answer.
+
+**Selecting an engine.** In the chat UI, use the engine/style picker (Classic, or Agentic → Planned / Reactive). To set a per-graph default, configure `agent_style` (`auto` follows the configured default; `planned` or `reactive` force a style) — see [GraphRAG configuration](#graphrag-configuration). Depth is bounded by `agent_max_iterations` (Reactive) and `agent_max_replans` / `agent_max_total_steps` (Planned).
+
+**Customizing agent behavior.** Each agentic style's retrieval strategy — and how messages are routed to a direct answer versus retrieval — is editable on the *Customize Prompts* page; see [§5 Prompts](#5-prompts--last-resort-biggest-leverage-when-the-rest-is-right).
+
+### Classic
+
+A fixed pipeline: it routes the question to a retrieval method (auto-selected or configured), retrieves supporting passages and graph context, and synthesizes the answer. Fast and predictable, and it always grounds answers in retrieved passages — a solid choice for straightforward question-answering.
 
 [Go back to top](#top)
 
@@ -467,7 +497,8 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
         "chunker": "semantic",
         "extractor": "llm",
         "top_k": 5,
-        "num_hops": 2
+        "num_hops": 2,
+        "max_results": 10
     }
 }
 ```
@@ -493,7 +524,12 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `top_k` | int | `5` | Number of initial seed results to retrieve per search. Also caps the final scored results. Increasing `top_k` increases the overall context size sent to the LLM. |
 | `num_hops` | int | `2` | Number of graph hops to traverse from seed nodes during hybrid search. More hops expand the result set with related context. |
 | `num_seen_min` | int | `2` | Minimum occurrence count for a node to be included during hybrid search traversal. Higher values filter out loosely connected nodes, reducing context size. |
+| `max_results` | int | `2 × top_k` | Caps the number of result chunks hybrid and community search return, ranked by relevance to the question, instead of every chunk the expansion (or community membership) reaches. When unset it is twice `top_k`, which is also the minimum; set higher to return more context. Lowering it reduces the context sent to the LLM. |
 | `community_level` | int | `2` | Community hierarchy level for community search. Higher levels retrieve broader, higher-order community summaries. |
+| `agent_style` | string | `"planned"` | Default agentic engine style: `"planned"` (plan the whole retrieval up front) or `"reactive"` (decide each step from the last result). The chat menu can override per request. See [Chat Engines and Agents](#chat-engines-and-agents). |
+| `agent_max_iterations` | int | `30` | Reactive agent only: maximum reason-act-observe steps before it must answer. |
+| `agent_max_replans` | int | `3` | Planned agent only: how many times the planner may extend its plan when the gathered context is insufficient. |
+| `agent_max_total_steps` | int | `20` | Planned agent only: hard cap on executed retrieval steps across all replans. |
 | `chunk_only` | bool | `true` | If true, hybrid search only retrieves document chunks, excluding entity data. |
 | `doc_only` | bool | `false` | If true, hybrid search retrieves whole documents instead of chunks. Significantly increases context size. |
 | `with_chunk` | bool | `true` | If true, community search also includes document chunks alongside community summaries. Increases context size. |
@@ -525,6 +561,60 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
     }
 }
 ```
+
+[Go back to top](#top)
+
+
+### MCP servers (agentic tools)
+The agentic chat engine can call external [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers as extra tools. Configure them on the **Setup → Server Configuration → MCP Servers** page (**superuser only**). Each server has a **Test** button that connects exactly as the engine will and lists its tools; a server can only be **Saved** after its test passes.
+
+#### Fields
+
+| Field | Applies to | What it is | Example |
+|---|---|---|---|
+| **Name** | both | Unique label; also the planner's tool prefix (`<name>.<tool>`). No dots. | `weather` |
+| **Transport** | both | `http` (recommended) or `stdio`. | `http` |
+| **URL** | http | The server's streamable HTTP endpoint. | `https://mcp.example.com/mcp` |
+| **Headers** | http | Static headers sent on every request (e.g. auth). Stored masked. | `Authorization` = `Bearer abc123` |
+| **Library tarball** | stdio | Filename of a `.tar.gz` in `configs/mcp_servers/` that GraphRAG installs. | `weather_mcp-1.0.tar.gz` |
+| **Command** | stdio | The console script the installed package provides, or `python`. | `weather-mcp` |
+| **Args** | stdio | Arguments passed to the command. | `-vv` |
+| **Env** | stdio | Environment variables for the subprocess. Stored masked. | `WEATHER_API_KEY` = `…` |
+| **Allowed tools** | both | Globs of tool names to expose (default `*`). | `get_*, list_*` |
+| **Enabled** | both | Off hides the server (and, per-graph, suppresses a same-named global one). | `true` |
+| **Forward user** | both | Send the signed-in username to the server (via MCP `_meta`). | `false` |
+
+#### HTTP (recommended)
+The MCP server is an **external resource you run and manage yourself** — GraphRAG only needs its URL.
+
+Example — a hosted server that needs an API key:
+- **Transport**: `http`
+- **URL**: `https://mcp.example.com/mcp`  *(for a server on the same host as GraphRAG, use `http://host.docker.internal:9000/mcp`)*
+- **Headers**: `Authorization` = `Bearer abc123`
+
+Click **Test**, then **Save**. Nothing runs inside the GraphRAG container.
+
+#### stdio (Python server run by GraphRAG)
+Provide the server as a **source tarball** (`.tar.gz`); GraphRAG installs it (with its dependencies) and launches it by the **console script** the package ships.
+
+1. Get the server's `.tar.gz` — build it with `python -m build` (produces `dist/<name>-<ver>.tar.gz`) or download the sdist from PyPI.
+2. In **MCP Servers → Add server**, set **Transport** = `stdio`, then either:
+   - click **Upload** next to *Library tarball* to upload the `.tar.gz` (the field auto-fills with its filename), **or**
+   - copy the `.tar.gz` into `configs/mcp_servers/` on the host and type the filename in the field.
+3. Fill the remaining fields, then **Test** (GraphRAG installs the tarball, launches the command, lists its tools) and **Save**.
+
+Example — a packaged `weather-mcp` server:
+- **Transport**: `stdio`
+- **Library tarball**: `weather_mcp-1.0.tar.gz`
+- **Command**: `weather-mcp`  *(the console script the package registers; if it has none, use **Command** `python` + **Args** `-m, weather_mcp`)*
+- **Args**: `-vv`
+- **Env**: `WEATHER_API_KEY` = `…`
+
+GraphRAG re-installs the configured tarballs on startup (only those referenced by the MCP config), so they persist across restarts. Uploading is **superuser-only**, since the package runs inside the GraphRAG server.
+
+> Only **Python** servers run under stdio (GraphRAG bundles Python + the MCP SDK). For a server needing another runtime — e.g. a Node `npx` server — run it yourself and connect over **HTTP**.
+
+Servers added under a specific graph override global ones with the same name; setting a per-graph entry to *disabled* suppresses a same-named global server.
 
 [Go back to top](#top)
 
@@ -948,6 +1038,8 @@ If extraction quality is still poor after iterating on the prompt, declare a dom
 
 ### 4. Retrieval — match context size to the question
 
+> In the **Agentic** engine the agent chooses the retrieval method itself, so the *method-selection* guidance in this section (e.g. "use Community Search for aggregation") applies to the **Classic** engine. The size knobs below (`top_k`, `num_hops`, `max_results`, `community_level`, …) still bound and default the retrievers in **both** engines, so they're worth tuning regardless of which engine you run.
+
 Three knobs interact: `top_k`, `num_hops`, `num_seen_min`. Also `chunk_only` / `doc_only` and (for community search) `community_level` / `with_chunk`.
 
 | Question style | Recommended start | Reasoning |
@@ -970,12 +1062,14 @@ Each tweak should be made **alone** — moving `top_k` and `num_hops` together m
 
 ### 5. Prompts — last resort, biggest leverage when the rest is right
 
-Customize prompts via the UI: *Settings → Customize Prompts*. The four customizable prompt groups (UI labels and underlying ids):
+Customize prompts via the UI: *Settings → Customize Prompts*. Customization is **additive** — you edit an instructions-and-examples layer that is appended to fixed, non-editable rules, so a customization extends behavior without dropping the rules that keep the prompt working. The customizable prompt groups (UI labels and underlying ids):
 
 - **Entity Relationships** (`entity_relationship`) — combined entity- and relationship-extraction prompt; controls what becomes a vertex / edge. Tune for noise suppression, domain specificity, and verb-form edge names (e.g. `PUBLISHES`, `OWNS`, `MANAGES` instead of nominal phrases). See §3.
 - **Schema Instructions** (`query_generation`) — instructions used when generating GSQL / Cypher and when filtering the schema for a structured query. Tune if your domain has unusual type names that aren't matching user phrasing, or if generated queries miss obvious joins.
 - **Community Summarization** (`community_summarization`) — how community summaries are produced during knowledge-graph build. Tune for length / tone and to bias summaries toward domain-specific framing.
 - **Chatbot Responses** (`chatbot_response`) — the final answer template. Keep it short; the LLM responds best to clear constraints (*"answer in ≤3 sentences, cite the doc id"*).
+- **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — the retrieval strategy for each agentic engine: which methods to use, when, and in what order. The role and act model stay fixed.
+- **Agent Routing** (`agentic_triage`) — the policy that decides whether a message is answered directly (greetings, questions about the assistant) or sent to the agent to retrieve / use a tool.
 
 When customizing:
 
@@ -1020,21 +1114,22 @@ The chatbot UI's *Explain* panel (which lists the chunks fed into the answer) is
 TigerGraph GraphRAG is designed to be easily extensible. The service can be configured to use different LLM providers, different graph schemas, and different LangChain tools. The service can also be extended to use different embedding services, different LLM generation services, and different LangChain tools. For more information on how to extend the service, see the [Developer Guide](./docs/DeveloperGuide.md).
 
 ### Test Your Code Changes
-A family of tests are included under the `tests` directory. If you would like to add more tests please refer to the [guide here](./docs/DeveloperGuide.md#adding-a-new-test-suite). A shell script `run_tests.sh` is also included in the folder which is the driver for running the tests. The easiest way to use this script is to execute it in the Docker Container for testing.
 
-#### Testing with Pytest
-You can run testing for each service by going to the top level of the service's directory and running `python -m pytest`
+Unit and integration tests live under `graphrag/tests`. Run them with pytest from the service directory, in an environment that has the service dependencies installed — the simplest is inside the built `graphrag` image, which already bundles them:
 
-e.g. (from the top level)
 ```sh
 cd graphrag
 python -m pytest
-cd ..
 ```
 
-#### Test Code Change in Docker Container
+Run a single suite while iterating, e.g.:
 
-First, make sure that all your LLM service provider configuration files are working properly. The configs will be mounted for the container to access. Also make sure that all the dependencies such as database are ready. If not, you can run the included docker compose file to create those services.
+```sh
+python -m pytest graphrag/tests/test_schema_utils.py -q
+```
+
+To exercise a change against a live stack, bring the services up with the compose file and run the tests against them:
+
 ```sh
 docker compose up -d --build
 ```
@@ -1045,43 +1140,5 @@ docker compose up -d --build
 > cp docs/tutorials/configs/server_config.json configs/server_config.json
 > ```
 
-If you want to use Weights And Biases for logging the test results, your WandB API key needs to be set in an environment variable on the host machine.
-
-```sh
-export WANDB_API_KEY=KEY HERE
-```
-
-Then, you can build the docker container from the `Dockerfile.tests` file and run the test script in the container.
-```sh
-docker build -f Dockerfile.tests -t graphrag-tests:0.1 .
-
-docker run -d -v $(pwd)/configs/:/ -e GOOGLE_APPLICATION_CREDENTIALS=/GOOGLE_SERVICE_ACCOUNT_CREDS.json -e WANDB_API_KEY=$WANDB_API_KEY -it --name graphrag-tests graphrag-tests:0.1
-
-
-docker exec graphrag-tests bash -c "conda run --no-capture-output -n py39 ./run_tests.sh all all"
-```
-
-### Test Script Options
-
-To edit what tests are executed, one can pass arguments to the `./run_tests.sh` script. Currently, one can configure what LLM service to use (defaults to all), what schemas to test against (defaults to all), and whether or not to use Weights and Biases for logging (defaults to true). Instructions of the options are found below:
-
-#### Configure LLM Service
-The first parameter to `run_tests.sh` is what LLMs to test against. Defaults to `all`. The options are:
-
-* `all` - run tests against all LLMs
-* `azure_gpt35` - run tests against GPT-3.5 hosted on Azure
-* `openai_gpt35` - run tests against GPT-3.5 hosted on OpenAI
-* `openai_gpt4` - run tests on GPT-4 hosted on OpenAI
-* `gcp_textbison` - run tests on text-bison hosted on GCP
-
-#### Configure Testing Graphs
-The second parameter to `run_tests.sh` is what graphs to test against. Defaults to `all`. The options are:
-
-* `all` - run tests against all available graphs
-* `OGB_MAG` - The academic paper dataset provided by: https://ogb.stanford.edu/docs/nodeprop/#ogbn-mag.
-* `DigtialInfra` - Digital infrastructure digital twin dataset
-* `Synthea` - Synthetic health dataset
-
-#### Configure Weights and Biases
-If you wish to log the test results to Weights and Biases (and have the correct credentials setup above), the final parameter to `run_tests.sh` automatically defaults to true. If you wish to disable Weights and Biases logging, use `false`.
+For adding a new test suite and the broader developer workflow — extending the service with different LLM providers, embedding services, or tools — see the [Developer Guide](./docs/DeveloperGuide.md).
 

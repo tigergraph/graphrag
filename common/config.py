@@ -325,6 +325,44 @@ def get_graphrag_config(graphname=None):
     return result
 
 
+def get_agent_mode(graphname=None) -> str:
+    """Return the chat answer engine for the graph: ``"agentic"`` (default)
+    or ``"classic"``. Read from ``graphrag_config.agent_mode`` with per-graph
+    override. The make_agent capability gate may still downgrade an
+    ``"agentic"`` request to classic when the chat model can't tool-call.
+    """
+    mode = get_graphrag_config(graphname).get("agent_mode", "agentic")
+    return "classic" if str(mode).lower() == "classic" else "agentic"
+
+
+def get_tool_selection_mode(graphname=None) -> str:
+    """Return the planner's external-tool-selection mode for the graph.
+
+    ``"flat"`` (default) — every enabled external MCP tool is included in
+    every planner prompt alongside the always-on GraphRAG built-ins.
+    ``"purpose_filter"`` — a cheap pre-step picks relevant servers from
+    each spec's ``purpose`` text before assembling the planner prompt
+    (deferred; currently falls back to flat with a one-line warning).
+    """
+    mode = get_graphrag_config(graphname).get("tool_selection", "flat")
+    mode = str(mode).lower()
+    return "purpose_filter" if mode == "purpose_filter" else "flat"
+
+
+def get_mcp_servers(graphname=None):
+    """Return the merged, enabled external MCP server list for the graph.
+
+    Resolution: global ``mcp_servers`` (top-level, sibling of
+    ``graphrag_config``) merged with per-graph ``mcp_servers``. Per-graph
+    entries override global ones by ``name``; ``enabled=False`` suppresses
+    an entry from the result. See ``common.mcp_config`` for the schema.
+    """
+    from common.mcp_config import resolve_mcp_servers
+    global_list = server_config.get("mcp_servers") or []
+    graph_list = _load_graph_config(graphname).get("mcp_servers") or []
+    return resolve_mcp_servers(global_list, graph_list)
+
+
 PATH_PREFIX = os.getenv("PATH_PREFIX", "")
 PRODUCTION = os.getenv("PRODUCTION", "false").lower() == "true"
 
@@ -431,7 +469,7 @@ if _mm_config:
 if graphrag_config is None:
     graphrag_config = {"reuse_embedding": True}
 if "chunker" not in graphrag_config:
-    graphrag_config["chunker"] = "semantic"
+    graphrag_config["chunker"] = "auto"
 if "extractor" not in graphrag_config:
     graphrag_config["extractor"] = "llm"
 # ``retrieval_include_entity`` is resolved at install time
@@ -879,7 +917,7 @@ def reload_graphrag_config():
         
         # Set defaults (same as startup logic)
         if "chunker" not in new_graphrag_config:
-            new_graphrag_config["chunker"] = "semantic"
+            new_graphrag_config["chunker"] = "auto"
         if "extractor" not in new_graphrag_config:
             new_graphrag_config["extractor"] = "llm"
         

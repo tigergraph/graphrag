@@ -27,6 +27,7 @@ from graphrag import community_summarizer, util
 from langchain_community.graphs.graph_document import GraphDocument, Node
 from pyTigerGraph import AsyncTigerGraphConnection
 
+from common.db.schema_utils import gsql_output_error
 from common.embeddings.embedding_services import EmbeddingModel
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.extractors import BaseExtractor, LLMEntityRelationshipExtractor
@@ -39,30 +40,36 @@ async def install_query(
 ) -> dict[str, httpx.Response | str | None]:
     LogWriter.info(f"Installing query {query_path}")
     with open(f"{query_path}.gsql", "r") as f:
-        query = f.read()
-
+        query_text = f.read()
     query_name = query_path.split("/")[-1]
-    query = f"""\
-USE GRAPH {conn.graphname}
-{query}
-"""
-    if install:
-       query += f"""
-INSTALL QUERY {query_name}
-"""
+
+    # CREATE/REPLACE the query body. Prefer the REST endpoint
+    # (POST /gsql/v1/queries via createQuery); fall back to a GSQL CREATE
+    # statement only if the REST call errors.
     async with util.tg_sem:
-        res = await conn.gsql(query)
+        try:
+            await conn.createQuery(query_text)
+        except Exception as rest_err:
+            LogWriter.info(f"createQuery REST failed for {query_name}; gsql fallback: {rest_err}")
+            res = await conn.gsql(f"USE GRAPH {conn.graphname}\n{query_text}\n")
+            if gsql_output_error(res):
+                LogWriter.error(res)
+                return {"result": None, "error": True,
+                        "message": f"Failed to create query {query_name}"}
 
-    res_lower = res.lower() if isinstance(res, str) else ""
-    if "error" in res_lower or "does not exist" in res_lower or "failed" in res_lower:
-        LogWriter.error(res)
-        return {
-            "result": None,
-            "error": True,
-            "message": f"Failed to install query {query_name}",
-        }
+    if install:
+        async with util.tg_sem:
+            try:
+                await conn.installQueries([query_name], flag="-force", wait=True)
+            except Exception as inst_err:
+                LogWriter.info(f"installQueries REST failed for {query_name}; gsql fallback: {inst_err}")
+                res = await conn.gsql(f"USE GRAPH {conn.graphname}\nINSTALL QUERY {query_name}\n")
+                if gsql_output_error(res):
+                    LogWriter.error(res)
+                    return {"result": None, "error": True,
+                            "message": f"Failed to install query {query_name}"}
 
-    return {"result": res, "error": False}
+    return {"result": "ok", "error": False}
 
 
 chunk_sem = asyncio.Semaphore(util._worker_concurrency)
@@ -114,9 +121,13 @@ async def chunk_doc(
             logger.debug("chunk writes to extract_chan")
             await extract_chan.put((chunk, chunk_id))
 
-            # send chunks to be embedded
-            logger.debug("chunk writes to embed_chan")
-            await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
+            # When extraction is enabled the extract worker pushes the
+            # summary-augmented embed message itself (Contextual Retrieval),
+            # so only embed the raw chunk here when extraction is off.
+            from common.config import entity_extraction_switch
+            if not entity_extraction_switch:
+                logger.debug("chunk writes to embed_chan (no extraction)")
+                await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
 
     return v_id
 
@@ -239,6 +250,7 @@ extract_sem = asyncio.Semaphore(util._worker_concurrency)
 
 async def extract(
     upsert_chan: Channel,
+    embed_chan: Channel,
     extractor: BaseExtractor,
     conn: AsyncTigerGraphConnection,
     chunk: str,
@@ -259,6 +271,21 @@ async def extract(
         except Exception as e:
             logger.error(f"Failed to extract chunk {chunk_id}: {e}")
             extracted = []
+
+        # Contextual Retrieval: the extractor's LLM call also produces a
+        # compact ``chunk_summary`` (carried on ``source.metadata`` of the
+        # first GraphDocument). Embed ``summary + raw chunk`` so dense
+        # vectors carry the chunk's topic / entities explicitly — improves
+        # retrieval on table-heavy and numeric content where raw text embeds
+        # poorly. When extraction is enabled the chunk/residual workers skip
+        # their own embed push, so this is the sole embed for the chunk;
+        # an empty summary falls back to embedding the raw chunk.
+        chunk_summary = ""
+        if extracted:
+            md = getattr(extracted[0].source, "metadata", None) or {}
+            chunk_summary = (md.get("chunk_summary") or "").strip()
+        embed_input = (chunk_summary + "\n\n" + str(chunk)) if chunk_summary else str(chunk)
+        await embed_chan.put((chunk_id, embed_input, "DocumentChunk"))
 
         # Schema-aware ingest helpers — derive case-insensitive
         # lookups from the extractor once per chunk so the loops below

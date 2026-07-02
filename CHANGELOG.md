@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.0.0]
+
+### Added
+- **The agentic agent's retrieval strategy is customizable, per style.** The Customize Prompts page has separate *Agentic Planner* and *React Agent* entries, each pre-filled with its default retrieval strategy — which methods to use, when, how many, and in what order — that you can edit. The role, act model (plan-up-front for the planner, reason-act-observe for React), and output format stay fixed.
+- **Customizable prompts open with editable starting guidance.** The Customize Prompts page now pre-fills each prompt's preference-style guidance (answer formatting and language, summary length and voice, schema granularity hints and examples) as an editable default you can adjust or clear; the format, input, and structural rules that keep the feature working stay locked and out of view.
+- **External MCP servers can be configured as agentic tools.** Superusers can register external MCP servers (including installing the Python libraries they need) so the chat agent can call their tools during a conversation.
+- **Query responses can return just the answer.** The query endpoints return the answer alone by default and accept an option to include the supporting sources and trace when a caller needs them.
+- **The agent answers greetings and questions about itself directly.** Hellos, thanks, and "who are you / what can you do" are answered immediately without searching the knowledge base, so trivial messages return faster and no longer surface unrelated data. How messages are routed — answered directly versus sent to retrieval — is editable on the *Customize Prompts* page.
+
+### Changed
+- **Structured documents chunk more faithfully.** Markdown and HTML are split with a structure-aware chunker that keeps each section's heading context inside the chunk, rolls small sections up into their parent up to the size budget, and keeps tables intact — including tables nested inside lists — so retrieval and answers hold together on heading- and table-heavy documents.
+- **Prompt customization is additive instead of a full rewrite.** The *Customize Prompts* page now exposes only an editable instructions-and-examples section; the underlying rules are fixed and no longer user-editable, so a customization can extend behavior without accidentally dropping required rules. Pre-existing full-prompt overrides are ignored until re-saved in the new form.
+- **Retrieval matches table-heavy and numeric content more reliably.** Each chunk is embedded together with a compact summary of its topic, section, and key entities, so dense vectors carry that context explicitly — improving answers on documents where the raw text alone embeds poorly.
+
+- **Query installation is more reliable on large graphs.** Graph queries install through a non-blocking request with status polling instead of one long call, so initialization no longer fails on a gateway timeout while queries compile.
+- **Hybrid and community search results are bounded by relevance.** Search returns at most a configurable number of chunks (`max_results`, default twice Top K), ranked by similarity to the question, instead of every chunk the graph expansion or community membership reaches — reducing the context sent to the model. Tunable on the GraphRAG Configuration page alongside Top K and Number of Hops.
+- **Chat and admin UI refinements.** The chat engine/style picker is clearer, older conversations can be cleared in bulk, the graph *Compatibility Check* is renamed *Migration Assistant*, and a rendering glitch that clipped the bottoms of letters in text inputs is fixed.
+- **The agentic agent grounds answers in document text more reliably.** It now always includes a vector search unless a question is confidently a pure structured-data request (an exact count, lookup, relationship, or aggregation), so it no longer answers passage questions from a graph query alone.
+- **The React agent reports which sources it used.** Its answers now cite the chunks and queries the agent actually selected — visible in the admin trace alongside the planned and classic engines — and follow the same answer formatting and language guidance as the other engines.
+- **Questions that don't need the graph skip graph lookups.** The agent loads the graph schema only when a question actually requires structured or document retrieval, so greetings and questions answered by a connected tool return without unnecessary database work.
+- **A streaming answer can be stopped.** While the agent is responding, the chat's send button becomes a stop control that ends the current response and re-enables the input, so the next question can be asked without waiting.
+
+### Fixed
+- **A single oversized chunk no longer drops embeddings for the rest of a batch.** Embeddings that exceed the provider's input limit are retried at progressively shorter lengths, and a vertex that still doesn't fit is skipped individually instead of aborting the batch; similarity search ignores vertices without an embedding.
+- **Large ingests no longer fail on oversized upsert batches.** Upserts are sized to the pending work so very large flushes are not rejected, and progress counts reflect distinct vertices and edges.
+- **Schema lookups resolve correctly on asynchronous request paths.** The schema-version lookup is now awaited where it was previously used without awaiting.
+- **Ingestion resumes after a transient database disconnect.** Files whose load hits a connection error are retried once the database is reachable again (bounded, so a persistent outage fails out rather than hanging), and any that still fail are named so re-running ingest reloads only those — already-loaded documents upsert idempotently.
+- **Non-ASCII answers no longer break when context is large.** Retrieved context is measured against the model's input limit in the same form that is sent to it, so Japanese and other multi-byte content is no longer mis-sized and truncated incorrectly.
+- **A malformed answer no longer surfaces raw context to the user.** When the model returns slightly broken JSON, the readable answer (and its citations, when intact) is recovered from the response instead of falling back to dumping the retrieved context as the "answer."
+- **OpenAI reasoning models can be configured as the chat model.** The `temperature` setting is omitted for OpenAI o-series models (o1/o3/o4), which reject it; other OpenAI models are unaffected.
+
 ## [1.4.2]
 
 ### Added

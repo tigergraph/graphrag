@@ -85,12 +85,56 @@ class Relationship(BaseRelationship):
     )
 
 
+class ChunkSummary(BaseModel):
+    """Compact metadata summary for a chunk, used to augment its dense
+    embedding so retrieval matches natural-language queries more
+    reliably on table-heavy and numeric content. Tag-line format keeps
+    each field short and clusterable per keyword.
+    """
+
+    topic: str = Field(
+        "",
+        description=(
+            "One short noun phrase (<= 12 chars) naming what this chunk is "
+            "primarily about. In the source language."
+        ),
+    )
+    section: str = Field(
+        "",
+        description=(
+            "The heading or section title this chunk falls under, copied "
+            "verbatim from the source when present; empty string otherwise."
+        ),
+    )
+    entities: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Proper nouns / named entities / categories mentioned in the "
+            "chunk (e.g. company names, prefecture names, years, "
+            "regulatory bodies). When the chunk contains a table, include "
+            "every column header / row label as an entity too — they carry "
+            "the dimensional vocabulary a retrieval query is most likely to "
+            "match on. Used for keyword-style retrieval signals."
+        ),
+    )
+
+
 class KnowledgeGraph(BaseModel):
     """Generate a knowledge graph with entities and relationships."""
 
     nodes: List[Node] = Field(..., description="List of nodes in the knowledge graph")
     rels: List[Relationship] = Field(
         ..., description="List of relationships in the knowledge graph"
+    )
+    summary: Optional[ChunkSummary] = Field(
+        default=None,
+        description=(
+            "Compact metadata summary for the chunk. Used by Contextual "
+            "Retrieval — concatenated with the raw text before embedding so "
+            "dense vectors carry the chunk's topic / entities / values "
+            "explicitly. Optional: parsers tolerate missing summaries from "
+            "legacy outputs."
+        ),
     )
 
 

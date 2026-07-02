@@ -1,5 +1,6 @@
 import "react-chatbot-kit/build/main.css";
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useLocation } from "react-router-dom";
 import Chatbot from "react-chatbot-kit";
 import ActionProvider from "../actions/ActionProvider.js";
@@ -23,9 +24,69 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
   const [store, setStore] = useState<any>();
   const [currentDate, setCurrentDate] = useState('');
   const [selectedGraph, setSelectedGraph] = useState(sessionStorage.getItem("selectedGraph") || '');
-  const [ragPattern, setRagPattern] = useState(sessionStorage.getItem("ragPattern") || '');
+  const [chatMode, setChatMode] = useState(sessionStorage.getItem("chatMode") || 'agentic');
+  const [ragPattern, setRagPattern] = useState(sessionStorage.getItem("ragPattern") || 'auto');
+  const [streaming, setStreaming] = useState(false);
+  const [sendBtn, setSendBtn] = useState<HTMLElement | null>(null);
+  const [agenticAvailable, setAgenticAvailable] = useState(true);
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Whether the configured chat model supports the agentic engine (tool-calling).
+  // When it doesn't, the Agent options are disabled and the menu falls back to
+  // Classic. Re-checked when the selected graph changes.
+  useEffect(() => {
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) return;
+    const q = selectedGraph ? `?graphname=${encodeURIComponent(selectedGraph)}` : "";
+    fetch(`/ui/chat_capabilities${q}`, { headers: { Authorization: creds } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) return;
+        const available = d.agentic_available !== false;
+        setAgenticAvailable(available);
+        if (!available && sessionStorage.getItem("chatMode") === "agentic") {
+          setChatMode("classic");
+          setRagPattern("auto");
+          sessionStorage.setItem("chatMode", "classic");
+          sessionStorage.setItem("ragPattern", "auto");
+        }
+      })
+      .catch(() => {});
+  }, [selectedGraph]);
+
+  // While a response streams, replace the send icon with a red Stop icon IN
+  // PLACE: grab the send button node so we can portal the stop icon into it
+  // (the CSS hides the native paper-plane). Mirrors the same window events the
+  // side menu / mode toggle listen to.
+  useEffect(() => {
+    const onStart = () => {
+      setStreaming(true);
+      setSendBtn(
+        document.querySelector(".react-chatbot-kit-chat-btn-send") as HTMLElement | null
+      );
+    };
+    const onEnd = () => setStreaming(false);
+    window.addEventListener("chat:streaming-start", onStart);
+    window.addEventListener("chat:streaming-end", onEnd);
+    return () => {
+      window.removeEventListener("chat:streaming-start", onStart);
+      window.removeEventListener("chat:streaming-end", onEnd);
+    };
+  }, []);
+
+  // While streaming, intercept the send button's click (capture phase, before
+  // react-chatbot-kit's send handler) and turn it into a Stop.
+  useEffect(() => {
+    if (!streaming || !sendBtn) return;
+    const onClick = (e: Event) => {
+      e.preventDefault();
+      e.stopPropagation();
+      window.dispatchEvent(new Event("chat:stop"));
+    };
+    sendBtn.addEventListener("click", onClick, true);
+    return () => sendBtn.removeEventListener("click", onClick, true);
+  }, [streaming, sendBtn]);
 
   useEffect(() => {
     // Function to load store from sessionStorage
@@ -52,11 +113,13 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
       }
     }
 
-    // Set default ragPattern if no value in sessionStorage. "Auto" lets the
-    // backend RetrieverSelector pick a method per question.
-    if (!sessionStorage.getItem("ragPattern")) {
-      setRagPattern("Auto");
-      sessionStorage.setItem("ragPattern", "Auto");
+    // Default the chat menu to Agent · Auto when nothing is stored yet
+    // (also resets any stale pre-2.0 retriever-only selection).
+    if (!sessionStorage.getItem("chatMode")) {
+      setChatMode("agentic");
+      sessionStorage.setItem("chatMode", "agentic");
+      setRagPattern("auto");
+      sessionStorage.setItem("ragPattern", "auto");
     }
 
     const date = new Date();
@@ -100,12 +163,18 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
     //window.location.reload();
   };
 
-  const handleSelectRag = (value) => {
+  const handleSelectMode = (mode, value) => {
+    setChatMode(mode);
     setRagPattern(value);
+    sessionStorage.setItem("chatMode", mode);
     sessionStorage.setItem("ragPattern", value);
     navigate("/chat");
-    //window.location.reload();
   };
+
+  const triggerLabel =
+    chatMode === "agentic"
+      ? "Agent · " + ragPattern.charAt(0).toUpperCase() + ragPattern.slice(1)
+      : "Classic · " + ragPattern;
 
   return (
     <div className={layout}>
@@ -121,21 +190,69 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
                   className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-white dark:bg-background z-50 rounded-tr-lg"
                 >
                   <img src="/graph-icon.svg" alt="" className="mr-2" />
-                  {ragPattern} <MdKeyboardArrowDown className="text-2xl" />
+                  {triggerLabel} <MdKeyboardArrowDown className="text-2xl" />
                 </Button>
               </DropdownMenuTrigger>
 
-              <DropdownMenuContent className="w-56">
-                <DropdownMenuLabel>Select a GraphRAG Pattern</DropdownMenuLabel>
-                <DropdownMenuSeparator />
+              <DropdownMenuContent className="w-72">
+                <DropdownMenuLabel className="flex items-center gap-2 px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                  <span className="text-sm">🤖</span> Agent
+                  {!agenticAvailable && (
+                    <span className="normal-case font-normal tracking-normal text-[10px] text-amber-600 dark:text-amber-500">
+                      needs a tool-calling model
+                    </span>
+                  )}
+                </DropdownMenuLabel>
                 <DropdownMenuGroup>
-                  {["Auto", "Similarity Search", "Contextual Search", "Hybrid Search", "Community Search"].map((f, i) => (
-                    <DropdownMenuItem key={i} onSelect={() => handleSelectRag(f)}>
-                      {/* <User className="mr-2 h-4 w-4" /> */}
-                      <span>{f}</span>
-                      {/* <DropdownMenuShortcut>⇧⌘P</DropdownMenuShortcut> */}
-                    </DropdownMenuItem>
-                  ))}
+                  {[
+                    ["Auto", "auto", "Use the graph's configured strategy"],
+                    ["Planned", "planned", "Plan all steps up front, then retrieve"],
+                    ["Reactive", "reactive", "Decide each step as it goes"],
+                  ].map(([label, value, desc]) => {
+                    const active = chatMode === "agentic" && ragPattern === value;
+                    return (
+                      <DropdownMenuItem
+                        key={"agent-" + value}
+                        disabled={!agenticAvailable}
+                        onSelect={() => agenticAvailable && handleSelectMode("agentic", value)}
+                        className="flex flex-col items-start gap-0.5 py-2 pl-4 pr-2"
+                      >
+                        <span className="flex w-full items-center justify-between text-sm">
+                          <span className={active ? "font-semibold" : "font-medium"}>{label}</span>
+                          {active && <span className="text-xs">✓</span>}
+                        </span>
+                        <span className="text-xs text-gray-500 dark:text-gray-400">{desc}</span>
+                      </DropdownMenuItem>
+                    );
+                  })}
+                </DropdownMenuGroup>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel className="flex items-center gap-2 px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
+                  <span className="text-sm">🔍</span> Classic
+                </DropdownMenuLabel>
+                <DropdownMenuGroup>
+                  {[
+                    ["Auto", "Auto pick a retriever per question"],
+                    ["Similarity Search", "Vector similarity over chunks"],
+                    ["Contextual Search", "Similarity plus surrounding chunks"],
+                    ["Hybrid Search", "Vector search plus graph traversal"],
+                    ["Community Search", "Summaries over graph communities"],
+                  ].map(([f, desc]) => {
+                    const active = chatMode === "classic" && ragPattern === f;
+                    return (
+                      <DropdownMenuItem
+                        key={"classic-" + f}
+                        onSelect={() => handleSelectMode("classic", f)}
+                        className="flex flex-col items-start gap-0.5 py-2 pl-4 pr-2"
+                      >
+                        <span className="flex w-full items-center justify-between text-sm">
+                          <span className={active ? "font-semibold" : "font-medium"}>{f}</span>
+                          {active && <span className="text-xs">✓</span>}
+                        </span>
+                        <span className="text-xs text-gray-500 dark:text-gray-400">{desc}</span>
+                      </DropdownMenuItem>
+                    );
+                  })}
                 </DropdownMenuGroup>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -174,7 +291,7 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
         </div>
       
       <SelectedGraphContext.Provider value={selectedGraph}>
-        <RagPatternContext.Provider value={ragPattern}>
+        <RagPatternContext.Provider value={{ mode: chatMode, pattern: ragPattern }}>
           <Chatbot
             // eslint-disable-next-line
             // @ts-ignore
@@ -186,6 +303,17 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
           />
         </RagPatternContext.Provider>
       </SelectedGraphContext.Provider>
+
+      {streaming && sendBtn && createPortal(
+        <svg
+          className="graphrag-stop-icon"
+          viewBox="0 0 24 24"
+          aria-label="Stop"
+        >
+          <rect x="5" y="5" width="14" height="14" rx="2" />
+        </svg>,
+        sendBtn
+      )}
     </div>
   );
 };

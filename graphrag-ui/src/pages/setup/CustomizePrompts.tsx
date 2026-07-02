@@ -15,12 +15,19 @@ import { useLocation } from "react-router-dom";
 // customization need (domain hints + examples). The underlying prompt
 // is still available on disk and editable via direct API for advanced
 // use cases.
+// Each editor below customizes only the *user portion* of a prompt —
+// additional instructions and examples appended to fixed, non-editable system
+// rules. The system rules (and runtime placeholders) live server-side and are
+// never shown or editable here.
 const ALL_PROMPT_TYPES = [
-  { id: "schema_extraction", name: "Schema Extraction", description: "Rules the LLM follows when proposing a domain schema from sample documents (Initialize Graph dialog)." },
-  { id: "entity_relationship", name: "Entity Relationships", description: "Extract entities and relationships from document chunks during ingest." },
-  { id: "community_summarization", name: "Community Summarization", description: "Summarize each community after Louvain detection during rebuild." },
+  { id: "schema_extraction", name: "Schema Extraction", description: "Extra instructions/examples for proposing a domain schema from sample documents (Initialize Graph dialog). Appended to fixed system rules." },
+  { id: "entity_relationship", name: "Entity Relationships", description: "Extra instructions/examples for extracting entities and relationships during ingest. Appended to fixed system rules." },
+  { id: "community_summarization", name: "Community Summarization", description: "Extra instructions/examples for summarizing each community during rebuild. Appended to fixed system rules." },
   { id: "query_guidance", name: "Query Guidance", description: "Free-form domain hints and example mappings — injected into question-to-schema, generate-function, generate-cypher, and generate-gsql prompts. Empty by default. Max 8000 characters." },
-  { id: "chatbot_response", name: "Chatbot Responses", description: "How the chatbot composes the final answer to the user from retrieved context." },
+  { id: "chatbot_response", name: "Chatbot Responses", description: "Extra instructions/examples for how the chatbot composes the final answer. Appended to fixed system rules." },
+  { id: "agentic_planner", name: "Agentic Planner", description: "The planner's retrieval strategy — which methods to use, how many, and in what order — pre-filled with the default and fully editable. The role, plan model, and output format stay fixed." },
+  { id: "agentic_agent", name: "React Agent", description: "The React agent's retrieval strategy — which methods to prioritize and when, step by step — pre-filled with the default and fully editable. The role and reason-act-observe model stay fixed." },
+  { id: "agentic_triage", name: "Agent Routing", description: "The routing policy that decides whether a question is answered directly (greetings, about the assistant) or sent to the agent to retrieve/use a tool — pre-filled with the default and fully editable. The output contract stays fixed." },
 ];
 
 const CustomizePrompts = () => {
@@ -40,6 +47,9 @@ const CustomizePrompts = () => {
     query_generation: "",
     schema_extraction: "",
     query_guidance: "",
+    agentic_agent: "",
+    agentic_planner: "",
+    agentic_triage: "",
   });
 
   // Template variables that should not be edited (stored separately)
@@ -50,6 +60,9 @@ const CustomizePrompts = () => {
     query_generation: "",
     schema_extraction: "",
     query_guidance: "",
+    agentic_agent: "",
+    agentic_planner: "",
+    agentic_triage: "",
   });
 
   // Only render prompt types the backend returned for this user
@@ -77,9 +90,10 @@ const CustomizePrompts = () => {
           Authorization: creds!,
         },
         body: JSON.stringify({
+          // Only the user portion is sent; the system rules are hardcoded
+          // server-side and never editable. ``template_variables`` is obsolete.
           prompt_type: promptId,
           editable_content: prompts[promptId as keyof typeof prompts],
-          template_variables: promptTemplates[promptId as keyof typeof promptTemplates],
           graphname: selectedGraph || undefined,
         }),
       });
@@ -145,6 +159,15 @@ const CustomizePrompts = () => {
         query_guidance: data.prompts.query_guidance?.editable_content !== undefined
           ? data.prompts.query_guidance.editable_content
           : (typeof data.prompts.query_guidance === 'string' ? data.prompts.query_guidance : ""),
+        agentic_agent: data.prompts.agentic_agent?.editable_content !== undefined
+          ? data.prompts.agentic_agent.editable_content
+          : (typeof data.prompts.agentic_agent === 'string' ? data.prompts.agentic_agent : ""),
+        agentic_planner: data.prompts.agentic_planner?.editable_content !== undefined
+          ? data.prompts.agentic_planner.editable_content
+          : (typeof data.prompts.agentic_planner === 'string' ? data.prompts.agentic_planner : ""),
+        agentic_triage: data.prompts.agentic_triage?.editable_content !== undefined
+          ? data.prompts.agentic_triage.editable_content
+          : (typeof data.prompts.agentic_triage === 'string' ? data.prompts.agentic_triage : ""),
       });
 
       // Store template variables separately
@@ -155,6 +178,9 @@ const CustomizePrompts = () => {
         query_generation: data.prompts.query_generation?.template_variables || "",
         schema_extraction: data.prompts.schema_extraction?.template_variables || "",
         query_guidance: data.prompts.query_guidance?.template_variables || "",
+        agentic_agent: data.prompts.agentic_agent?.template_variables || "",
+        agentic_planner: data.prompts.agentic_planner?.template_variables || "",
+        agentic_triage: data.prompts.agentic_triage?.template_variables || "",
       });
     } catch (error) {
       console.error("Error loading prompts:", error);
@@ -306,12 +332,16 @@ const CustomizePrompts = () => {
                     
                     {expandedPrompt === prompt.id && (
                       <div className="mt-4 space-y-3">
+                        <p className="text-xs text-muted-foreground">
+                          Your additional instructions and examples, appended to the fixed system rules.
+                          Placeholder-style <code>{"{variables}"}</code> aren't allowed and will be removed on save.
+                        </p>
                         <textarea
                           value={prompts[prompt.id as keyof typeof prompts]}
                           onChange={(e) => handlePromptChange(prompt.id, e.target.value)}
                           rows={15}
                           className="w-full p-3 rounded border dark:border-[#3D3D3D] dark:bg-background text-sm font-mono"
-                          placeholder="Enter your prompt template here..."
+                          placeholder="Add domain-specific instructions and examples here..."
                         />
                         <div className="flex gap-2">
                           <Button

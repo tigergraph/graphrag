@@ -80,13 +80,21 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
   children,
 }) => {
   const selectedGraph = useContext(SelectedGraphContext);
-  const selectedRagPattern = useContext(RagPatternContext);
+  const { mode: selectedMode, pattern: selectedRagPattern } = useContext(RagPatternContext);
   const lastUserQueryRef = useRef<string>("");
-  const WS_URL = "/ui/" + selectedGraph + "/chat" + "?rag_pattern=" + selectedRagPattern;
+  // Set true when the user hits Stop, so late messages from the aborted task
+  // are ignored; reset when the next question is sent.
+  const abortedRef = useRef<boolean>(false);
+  const WS_URL = selectedGraph
+    ? "/ui/" + selectedGraph + "/chat?rag_pattern=" +
+      encodeURIComponent(selectedRagPattern) + "&mode=" + encodeURIComponent(selectedMode)
+    : null;
   const [messageHistory, setMessageHistory] = useState<MessageEvent<Message>[]>(
     [],
   );
-  const { sendMessage, lastMessage, readyState } = useWebSocket(WS_URL, {
+  // Don't open the socket until a graph is selected — avoids the
+  // ws://…/ui//chat connect/1006/reconnect churn on a fresh login.
+  const { sendMessage, lastMessage, readyState, getWebSocket } = useWebSocket(WS_URL, {
     onOpen: () => {
       // Defensive: the route guard normally ensures ``auth`` is set
       // before the chat page mounts, but idle-timeout expiry mid-session
@@ -228,6 +236,7 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
 
   const queryGraphragWs = (msg) => {
     lastUserQueryRef.current = msg;
+    abortedRef.current = false;  // new question — resume processing messages
     const queryGraphragWsTest = (msg: string) => {
       sendMessage(msg);
     };
@@ -279,6 +288,8 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
 
   useEffect(() => {
     if (lastMessage !== null) {
+      // After Stop, ignore any buffered/late messages from the aborted task.
+      if (abortedRef.current) return;
       setMessageHistory((prev) => prev.concat(lastMessage));
 
       try {
@@ -289,6 +300,17 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
           conversationManager.setCurrentConversationId(messageData.conversation_id);
           // Don't dispatch refresh event here - refresh happens when user sends the question
           return; // Don't create a bot message for conversation ID
+        }
+
+        // One-off engine notice (e.g. Agent mode downgraded to Classic). It
+        // arrives before any user turn, so append it without slicing a loader.
+        if (messageData.system_note) {
+          const noteMessage = createChatBotMessage({
+            content: messageData.system_note,
+            response_type: "system",
+          });
+          setState((prev: any) => ({ ...prev, messages: [...prev.messages, noteMessage] }));
+          return;
         }
 
         // Attach the user query so the trace page can display it
@@ -323,6 +345,31 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
       }
     }
   }, [lastMessage]);
+
+  // Stop button (frontend-only abort). Fired by the Stop control in the input
+  // area via a window event. Closes the socket to discard the in-flight
+  // streaming response (it auto-reconnects for the next question), replaces the
+  // loader with a "Stopped." notice, and re-enables the input. In-flight
+  // backend work may still finish in the background; its messages are dropped.
+  useEffect(() => {
+    const onStop = () => {
+      if (!document.body.classList.contains("chat-streaming")) return;
+      abortedRef.current = true;
+      try { getWebSocket()?.close(); } catch (e) { /* ignore */ }
+      const stopped = createChatBotMessage({
+        content: "Stopped.",
+        response_type: "system",
+      });
+      setState((prev: any) => {
+        const msgs = prev.messages.length ? prev.messages.slice(0, -1) : prev.messages;
+        return { ...prev, messages: [...msgs, stopped] };
+      });
+      document.body.classList.remove("chat-streaming");
+      window.dispatchEvent(new Event("chat:streaming-end"));
+    };
+    window.addEventListener("chat:stop", onStop);
+    return () => window.removeEventListener("chat:stop", onStop);
+  }, [getWebSocket, createChatBotMessage, setState]);
 
   // FOR REFERENCE
   // const queryGraphrag = async (usrMsg: string) => {

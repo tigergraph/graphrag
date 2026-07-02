@@ -16,11 +16,11 @@ import json
 import logging
 from typing import Dict, List, Optional, Type, Union
 
-from langchain.llms.base import LLM
+from langchain_core.language_models.llms import LLM
 from langchain_core.output_parsers import PydanticOutputParser
-from langchain.prompts import PromptTemplate
-from langchain.tools import BaseTool
-from langchain.tools.base import ToolException
+from langchain_core.prompts import PromptTemplate
+from langchain_core.tools import BaseTool
+from langchain_core.tools import ToolException
 
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.embeddings.embedding_services import EmbeddingModel

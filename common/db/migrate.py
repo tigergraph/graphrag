@@ -71,6 +71,43 @@ def _extract_query_body(show_query_output: str) -> str:
     return m.group(1) if m else ""
 
 
+def get_installed_query_names(conn, graphname: str) -> set[str]:
+    """Return the set of query names that are INSTALLED (have an active REST
+    endpoint) on ``graphname`` — the authoritative install-state signal.
+
+    A query can be *created* (its body exists in the catalog) yet not
+    *installed*; only an installed query serves requests. Uses the pyTigerGraph
+    query API (``getInstalledQueries`` → ``getEndpoints(dynamic=True)``); one
+    call covers every query on the graph.
+    """
+    conn.graphname = graphname
+    return set(conn.getInstalledQueries(fmt="list"))
+
+
+def get_installed_query_body(conn, graphname: str, q_name: str) -> str | None:
+    """Return the source of query ``q_name`` on ``graphname``, or ``None`` if the
+    query does not exist (was never created).
+
+    Uses the pyTigerGraph query API (``getQueryContent`` → ``GET /gsql/v1/
+    queries/{name}``), which returns the clean source directly. GraphRAG requires
+    TG >= 4.2, so this endpoint is always available. NOTE: this reflects the
+    *created* body, not install state — pair it with ``get_installed_query_names``
+    to decide whether a query needs installing.
+    """
+    conn.graphname = graphname
+    try:
+        res = conn.getQueryContent(q_name)
+    except Exception as e:
+        if "404" in str(e):
+            return None  # query does not exist (never created)
+        raise
+    if isinstance(res, dict):
+        if res.get("error"):
+            return None
+        return res.get("queryContent") or None
+    return None
+
+
 def _query_name_from_path(query_path: str) -> str:
     """``common/gsql/graphrag/StreamIds.gsql`` → ``StreamIds``."""
     base = os.path.basename(query_path)
@@ -106,12 +143,15 @@ def query_needs_update_sync(conn, graphname: str, query_path: str) -> bool:
     local_hash = _gsql_hash(local_body)
 
     try:
-        installed_text = conn.gsql(f"USE GRAPH {graphname}\nSHOW QUERY {q_name}")
+        gc = conn.getQueryContent(q_name)
     except Exception as e:
-        logger.warning(f"SHOW QUERY {q_name} failed ({e}); will reinstall.")
+        logger.warning(f"getQueryContent {q_name} failed ({e}); will reinstall.")
         return True
 
-    installed_body = _extract_query_body(str(installed_text))
+    # getQueryContent returns the clean installed body in ``queryContent`` —
+    # no ``Using graph`` / ``# installed`` headers, so it normalizes to the same
+    # body as the local .gsql (SHOW QUERY's header wrapping caused false drift).
+    installed_body = gc.get("queryContent", "") if isinstance(gc, dict) and not gc.get("error") else ""
     if not installed_body:
         logger.info(f"Query '{q_name}' not installed yet; will install.")
         return True
@@ -156,14 +196,15 @@ async def query_needs_update_async(conn, query_path: str) -> bool:
     local_hash = _gsql_hash(local_body)
 
     try:
-        installed_text = await conn.gsql(
-            f"USE GRAPH {conn.graphname}\nSHOW QUERY {q_name}"
-        )
+        gc = await conn.getQueryContent(q_name)
     except Exception as e:
-        logger.warning(f"SHOW QUERY {q_name} failed ({e}); will reinstall.")
+        logger.warning(f"getQueryContent {q_name} failed ({e}); will reinstall.")
         return True
 
-    installed_body = _extract_query_body(str(installed_text))
+    # getQueryContent returns the clean installed body in ``queryContent`` —
+    # no header wrapping, so it normalizes to the same body as the local .gsql
+    # (SHOW QUERY's headers caused false drift).
+    installed_body = gc.get("queryContent", "") if isinstance(gc, dict) and not gc.get("error") else ""
     if not installed_body:
         logger.info(f"Query '{q_name}' not installed yet; will install.")
         return True

@@ -1250,44 +1250,21 @@ def _local_query_hash(q_path: str, q_name: str,
     return _gsql_hash(body)
 
 
-# DISTRIBUTED QUERY bodies the migration assistant checks for drift,
-# spanning the ECC and supportai namespaces and the shipped retrievers.
-# Loading-job and schema-change .gsql files are excluded — they aren't
-# queries and SHOW QUERY can't introspect them; schema-change tracking
-# lives in ``common.db.migrate.check_and_apply_schema``.
-_MIGRATION_QUERY_PATHS = [
-    # graphrag namespace (ECC REQUIRED_QUERIES)
-    "common/gsql/graphrag/StreamIds.gsql",
-    "common/gsql/graphrag/StreamDocContent.gsql",
-    "common/gsql/graphrag/StreamChunkContent.gsql",
-    "common/gsql/graphrag/SetEpochProcessing.gsql",
-    "common/gsql/graphrag/get_vertices_or_remove.gsql",
-    # graphrag namespace (COMMUNITY_QUERIES)
-    "common/gsql/graphrag/get_community_children.gsql",
-    "common/gsql/graphrag/communities_have_desc.gsql",
-    "common/gsql/graphrag/graphrag_delete_all_communities.gsql",
-    "common/gsql/graphrag/graphrag_stream_entity_community_pairs.gsql",
-    "common/gsql/graphrag/graphrag_stream_all_ids.gsql",
-    "common/gsql/graphrag/louvain/graphrag_louvain_init.gsql",
-    "common/gsql/graphrag/louvain/graphrag_louvain_communities.gsql",
-    "common/gsql/graphrag/louvain/modularity.gsql",
-    "common/gsql/graphrag/louvain/stream_community.gsql",
-    # supportai (ECC checker + init_supportai)
-    "common/gsql/supportai/Scan_For_Updates.gsql",
-    "common/gsql/supportai/Update_Vertices_Processing_Status.gsql",
-    "common/gsql/supportai/Selected_Set_Display.gsql",
-    "common/gsql/supportai/ECC_Status.gsql",
-    "common/gsql/supportai/Check_Nonexistent_Vertices.gsql",
-    # supportai retrievers — only the vector variants and Display queries
-    # init_supportai actually installs on vector-enabled graphs. The legacy
-    # non-vector retrievers are excluded so they aren't flagged as missing.
-    "common/gsql/supportai/retrievers/Chunk_Sibling_Vector_Search.gsql",
-    "common/gsql/supportai/retrievers/Content_Similarity_Vector_Search.gsql",
-    "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display.gsql",
-    "common/gsql/supportai/retrievers/GraphRAG_Community_Vector_Search.gsql",
-    "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display.gsql",
-    "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Vector_Search.gsql",
-]
+# The queries the migration assistant checks for a GraphRAG graph come from the
+# shared canonical list (common.db.query_sets) so they can't drift from what the
+# ECC rebuild and SupportAI init actually install. The opt-in ECC-checker
+# queries are intentionally excluded — the checker is off by default, so those
+# queries aren't part of what a graph normally needs. Loading-job and
+# schema-change .gsql files aren't queries and are tracked separately by
+# ``common.db.migrate.check_and_apply_schema``.
+from common.db.query_sets import MIGRATION_QUERIES, with_gsql
+from common.db.query_errors import (
+    concise_gsql_error,
+    create_response_error,
+    http_error_response_body,
+)
+from common.db.schema_utils import gsql_output_error
+_MIGRATION_QUERY_PATHS = with_gsql(MIGRATION_QUERIES)
 
 
 @router.get(route_prefix + "/{graphname}/migration/status")
@@ -1306,7 +1283,7 @@ def migration_status(
     Schema-attribute drift is reported as ``{}`` for now; the detection
     is stubbed in ``common.db.migrate.check_and_apply_schema``.
     """
-    from common.db.migrate import _gsql_hash, _extract_query_body
+    from common.db.migrate import _gsql_hash, get_installed_query_names, get_installed_query_body
 
     import os.path
 
@@ -1321,10 +1298,11 @@ def migration_status(
     not_installed: list[str] = []
     missing_files: list[str] = []
 
-    # Use SHOW QUERY as the single source of truth: a query that
-    # doesn't exist on TG returns output with no extractable CREATE
-    # block (or an explicit error string). Avoids the extra
-    # ``getEndpoints`` round-trip and its token-auth requirement.
+    # Install state (authoritative) comes from the installed-query endpoints in
+    # one batched call; a query absent here needs installing. For the installed
+    # ones, the body is read via the query API (getQueryContent) and compared to
+    # local to detect drift.
+    installed_names = get_installed_query_names(conn, graphname)
     for q_path in _MIGRATION_QUERY_PATHS:
         if not os.path.exists(q_path):
             missing_files.append(q_path)
@@ -1336,21 +1314,59 @@ def migration_status(
         if local_hash is None:
             missing_files.append(q_path)
             continue
-        try:
-            show_out = conn.gsql(f"USE GRAPH {graphname}\nSHOW QUERY {q_name}")
-        except Exception as e:
-            logger.warning(f"migration_status: SHOW QUERY {q_name} failed: {e}")
+        if q_name not in installed_names:
             not_installed.append(q_name)
             continue
-        s = str(show_out)
-        installed_body = _extract_query_body(s)
+        try:
+            installed_body = get_installed_query_body(conn, graphname, q_name)
+        except Exception as e:
+            logger.warning(f"migration_status: reading query {q_name} failed: {e}")
+            not_installed.append(q_name)
+            continue
         if not installed_body:
+            # Installed endpoint but no readable body — treat as needing repair.
             not_installed.append(q_name)
             continue
         if _gsql_hash(installed_body) != local_hash:
             outdated.append(q_name)
         else:
             up_to_date.append(q_name)
+
+    # Prompt-override compatibility: DETERMINISTIC, LOCAL checks only. This
+    # endpoint is user-triggered and must stay fast, cheap, and side-effect
+    # free, so it performs NO LLM calls. For each split-prompt override present
+    # for this graph, report (a) a legacy full-prompt override that will be
+    # ignored at runtime, and (b) placeholder tokens that get stripped on save.
+    # The LLM-based system-rule conflict review is intentionally not run here
+    # (slow, costly, quota-sensitive, nondeterministic); it runs at the explicit
+    # prompt-save path, where a single edited prompt is reviewed on demand.
+    # Best-effort, never fatal.
+    prompt_issues: dict = {}
+    try:
+        from common.utils.prompt_validation import find_placeholders
+        from common.llm_services.base_llm import LLM_Model
+
+        review_svc = get_llm_service(get_chat_config(graphname))
+        graph_prompt_dir = os.path.join(
+            "configs", "graph_configs", graphname, "prompts"
+        )
+        for fname in LLM_Model._SPLIT_PROMPT_SPEC:
+            p = os.path.join(graph_prompt_dir, fname)
+            if not os.path.exists(p):
+                continue
+            try:
+                raw = open(p, encoding="utf-8").read()
+            except Exception:
+                continue
+            sys_attr, _ = LLM_Model._SPLIT_PROMPT_SPEC[fname]
+            if review_svc._is_legacy_full_prompt(raw, getattr(review_svc, sys_attr)):
+                prompt_issues[fname] = {"legacy_full_prompt": True}
+                continue
+            placeholders = find_placeholders(raw)
+            if placeholders:
+                prompt_issues[fname] = {"removed_placeholders": placeholders}
+    except Exception as e:
+        logger.warning(f"migration_status prompt check failed: {e}")
 
     return {
         "graphname": graphname,
@@ -1366,7 +1382,8 @@ def migration_status(
             "missing_attributes": {},
             "schema_change_required": False,
         },
-        "needs_repair": bool(outdated) or bool(not_installed),
+        "prompts": prompt_issues,
+        "needs_repair": bool(outdated) or bool(not_installed) or bool(prompt_issues),
     }
 
 
@@ -1381,18 +1398,19 @@ def migration_apply(
     Request body (all optional):
 
         {
-          "apply_outdated": true,       # re-create installed queries whose body has drifted
-          "apply_not_installed": false, # install expected queries that are missing on TG
+          "outdated": ["Q1", ...],      # queries whose installed body drifted from local
+          "not_installed": ["Q2", ...], # required queries missing / not installed
           "apply_schema": false         # stubbed — no-op until check_and_apply_schema is implemented
         }
 
-    Default behavior: repair only drifted queries. The operator must
-    opt in to installing missing queries — some are conditional on
-    vector schema and may be missing intentionally.
+    The goal is that every required query ends up installed and current, so
+    each listed query is (re)created and (re)installed — there is no
+    per-category opt-in. When neither list is provided the endpoint detects
+    the repair set itself. Only shipped query names are honored.
 
     Acquires the per-graph lock for the duration of the repair so that
     a concurrent ingest / rebuild / schema-extraction on the same graph
-    cannot race against the CREATE OR REPLACE + INSTALL QUERY ALL
+    cannot race against the CREATE OR REPLACE + INSTALL QUERY
     sequence. Also rejects upfront if any rebuild is in flight
     (rebuilds hold their own catalog locks on TG and would deadlock).
     """
@@ -1401,8 +1419,13 @@ def migration_apply(
     import os.path
 
     body = payload or {}
-    apply_outdated = bool(body.get("apply_outdated", True))
-    apply_not_installed = bool(body.get("apply_not_installed", False))
+    # Explicit repair lists from the status check. The repair button is only
+    # enabled after detection produced them, so when present apply trusts them
+    # and skips its own per-query re-detection. The goal is simply that every
+    # required query ends up installed and current, so every listed query is
+    # (re)created and (re)installed — no per-category opt-in.
+    queries_outdated = body.get("outdated")
+    queries_not_installed = body.get("not_installed")
     apply_schema = bool(body.get("apply_schema", False))
 
     # Pre-flight: reject if any rebuild is in flight. The rebuild's
@@ -1433,8 +1456,8 @@ def migration_apply(
         conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
         return _migration_apply_inner(
             graphname, conn,
-            apply_outdated=apply_outdated,
-            apply_not_installed=apply_not_installed,
+            queries_outdated=queries_outdated,
+            queries_not_installed=queries_not_installed,
             apply_schema=apply_schema,
         )
     finally:
@@ -1444,14 +1467,15 @@ def migration_apply(
 def _migration_apply_inner(
     graphname: str,
     conn,
-    apply_outdated: bool,
-    apply_not_installed: bool,
     apply_schema: bool,
+    queries_outdated: list[str] | None = None,
+    queries_not_installed: list[str] | None = None,
 ):
     """Body of migration_apply, separated so the outer wrapper handles
     the graph-lock acquire/release boilerplate.
     """
-    from common.db.migrate import _gsql_hash, _extract_query_body, check_and_apply_schema
+    from common.db.migrate import _gsql_hash, get_installed_query_names, get_installed_query_body, check_and_apply_schema
+    from common.db.query_install import install_query_set
     import os.path
 
     # Read live domain schema for templated-retriever rendering.
@@ -1461,33 +1485,57 @@ def _migration_apply_inner(
     installed_new: list[str] = []
     errors: list[dict] = []
 
-    # SHOW QUERY is the single source of truth: empty / missing body
-    # means the query isn't installed; non-empty body that differs from
-    # local (after rendering for templated retrievers) means drift.
+    # Shipped query name -> local .gsql path.
+    name_to_path = {
+        os.path.splitext(os.path.basename(p))[0]: p
+        for p in _MIGRATION_QUERY_PATHS if os.path.exists(p)
+    }
+
     paths_to_create: list[tuple[str, bool]] = []  # (path, was_installed)
-    for q_path in _MIGRATION_QUERY_PATHS:
-        if not os.path.exists(q_path):
-            continue
-        q_name = os.path.splitext(os.path.basename(q_path))[0]
-        local_hash = _local_query_hash(
-            q_path, q_name, domain_vts, domain_edges, include_entity
-        )
-        if local_hash is None:
-            continue
-        try:
-            show_out = conn.gsql(f"USE GRAPH {graphname}\nSHOW QUERY {q_name}")
-        except Exception as e:
-            errors.append({"query": q_name, "phase": "detect", "error": str(e)})
-            continue
-        installed_body = _extract_query_body(str(show_out))
-        if not installed_body:
-            if apply_not_installed:
+
+    if queries_outdated is not None or queries_not_installed is not None:
+        # The status check already detected what needs repair and enabled the
+        # repair button with these lists — trust them and skip the redundant
+        # re-detection. Every listed query is (re)created and (re)installed;
+        # only shipped query names are honored.
+        for name in (queries_outdated or []):
+            p = name_to_path.get(name)
+            if p:
+                paths_to_create.append((p, True))
+            else:
+                errors.append({"query": name, "phase": "detect", "error": "unknown query"})
+        for name in (queries_not_installed or []):
+            p = name_to_path.get(name)
+            if p:
+                paths_to_create.append((p, False))
+            else:
+                errors.append({"query": name, "phase": "detect", "error": "unknown query"})
+    else:
+        # No explicit lists: detect what needs repair ourselves. A required
+        # query needs (re)create + (re)install if it isn't installed (absent
+        # from the installed-query endpoints — covers "never created" too) or
+        # its installed body differs from local (after rendering templated
+        # retrievers). Install state comes from one batched call.
+        installed_names = get_installed_query_names(conn, graphname)
+        for q_path in _MIGRATION_QUERY_PATHS:
+            if not os.path.exists(q_path):
+                continue
+            q_name = os.path.splitext(os.path.basename(q_path))[0]
+            local_hash = _local_query_hash(
+                q_path, q_name, domain_vts, domain_edges, include_entity
+            )
+            if local_hash is None:
+                continue
+            if q_name not in installed_names:
                 paths_to_create.append((q_path, False))
-            continue
-        if not apply_outdated:
-            continue
-        if _gsql_hash(installed_body) != local_hash:
-            paths_to_create.append((q_path, True))
+                continue
+            try:
+                installed_body = get_installed_query_body(conn, graphname, q_name)
+            except Exception as e:
+                errors.append({"query": q_name, "phase": "detect", "error": str(e)})
+                continue
+            if not installed_body or _gsql_hash(installed_body) != local_hash:
+                paths_to_create.append((q_path, True))
 
     # Pass 1: re-create each drifted/missing query body (CREATE OR REPLACE).
     # Templated retrievers get rendered with the live domain schema before
@@ -1507,26 +1555,54 @@ def _migration_apply_inner(
                     domain_edges=domain_edges,
                     include_entity=include_entity,
                 )
-            res = conn.gsql(
-                f"USE GRAPH {graphname}\nBEGIN\n{q_body}\nEND\n"
-            )
-            logger.info(f"Migration: created/updated '{q_name}' ({str(res)[:120]})")
+            # Create/replace the body via the pyTigerGraph query API
+            # (createQuery -> POST /gsql/v1/queries). Distinguish a TigerGraph
+            # query error — the body fails type/semantic checks, so TG saves it
+            # as a draft and returns an explanatory ``message`` — from a genuine
+            # HTTP/transport error. A query error is definitive: report the
+            # response ``message`` directly, with no retry. Only a transport
+            # error (no TG query-error body) falls back to a GSQL CREATE, whose
+            # error text (returned as a string, not raised) is checked and
+            # compressed for display.
+            conn.graphname = graphname
+            tg_err = None
+            try:
+                res = conn.createQuery(q_body)
+                tg_err = create_response_error(res)
+            except Exception as create_exc:
+                tg_err = create_response_error(http_error_response_body(create_exc))
+                if not tg_err:
+                    logger.info(f"Migration: createQuery transport error for '{q_name}'; gsql fallback: {create_exc}")
+                    gres = conn.gsql(f"USE GRAPH {graphname}\nBEGIN\n{q_body}\nEND\n")
+                    if gsql_output_error(gres):
+                        logger.debug(f"Migration: full gsql result for '{q_name}': {gres}")
+                        tg_err = concise_gsql_error(gres)
+            if tg_err:
+                raise Exception(tg_err)
+            logger.info(f"Migration: created/updated '{q_name}'")
             if was_installed:
                 reinstalled.append(q_name)
             else:
                 installed_new.append(q_name)
         except Exception as e:
+            # ``e`` already carries a display-ready message (the TG response
+            # ``message`` for a query error, or a compressed gsql error);
+            # other failures (file read / render) surface their own text.
             logger.error(f"Migration: failed to create '{q_name}': {e}", exc_info=True)
-            errors.append({"query": q_name, "phase": "create", "error": str(e)})
+            errors.append({"query": q_name, "phase": "create", "error": str(e)[:400]})
 
-    # Pass 2: a single INSTALL QUERY ALL covers everything just re-created.
-    if reinstalled or installed_new:
+    # Pass 2: install ONLY the queries just re-created, by name — never
+    # INSTALL QUERY ALL, which recompiles every query on the graph and is the
+    # dominant cost of a repair. Uses the shared async-submit + poll utility
+    # (common.db.query_install) rather than pyTigerGraph's installQueries.
+    to_install = reinstalled + installed_new
+    if to_install:
         try:
-            install_res = conn.gsql(f"USE GRAPH {graphname}\nINSTALL QUERY ALL\n")
-            logger.info(f"Migration: INSTALL QUERY ALL returned {str(install_res)[:200]}")
+            install_query_set(conn, to_install)
+            logger.info(f"Migration: installed {len(to_install)} query(ies): {', '.join(to_install)}")
         except Exception as e:
-            logger.error(f"Migration: INSTALL QUERY ALL failed: {e}", exc_info=True)
-            errors.append({"query": "*", "phase": "install", "error": str(e)})
+            logger.error(f"Migration: installing {to_install} failed: {e}", exc_info=True)
+            errors.append({"query": ", ".join(to_install), "phase": "install", "error": concise_gsql_error(e)})
 
     schema_result = {"applied": [], "skipped_reason": "skipped by request"}
     if apply_schema:
@@ -2084,7 +2160,7 @@ def extract_schema_from_jsonl(
             f"({len(jsonl_paths)} JSONLs, {len(samples)} doc parts, "
             f"{len(vertex_hints or [])} vertex hints, {len(edge_hints or [])} edge hints)"
         )
-        llm_service = get_llm_service(get_completion_config(graphname))
+        llm_service = get_llm_service(get_chat_config(graphname))
         gsql_text, rendered_prompt = schema_extraction_mod.extract_schema_gsql(
             llm_service, samples,
             vertex_hints=vertex_hints, edge_hints=edge_hints,
@@ -2576,12 +2652,52 @@ async def emit_progress(agent: TigerGraphAgent, ws: WebSocket):
                 return message.model_dump_json()
 
 
+# When agent execution fails, non-superadmins get a generic message;
+# superadmins additionally see the exception's root cause so they can
+# diagnose backend failures (e.g. an LLM provider quota/auth error)
+# without exposing internals to regular users. The full stack stays out
+# of the chat bubble. See GML-2136.
+# Matches the trace-log read gate (get_trace_log) so error-detail and
+# trace visibility share one definition of "superadmin".
+SUPERADMIN_ROLES = {"superuser"}
+
+
+def _is_superadmin(global_roles: list[str]) -> bool:
+    return any(r in SUPERADMIN_ROLES for r in (global_roles or []))
+
+
+def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
+    # asyncio.TaskGroup wraps a failing sub-task in an ExceptionGroup whose
+    # message is only "unhandled errors in a TaskGroup (N sub-exception(s))".
+    # Unwrap to the underlying cause so the admin detail shows the real error.
+    while isinstance(e, BaseExceptionGroup) and e.exceptions:
+        e = e.exceptions[0]
+    error_msg = str(e)
+    if "does not exist" in error_msg or "not found" in error_msg.lower():
+        return f"Error: {error_msg}. Please check the knowledge graph name and try again."
+    generic = (
+        "GraphRAG had an issue answering your question. "
+        "Please try again, or rephrase your prompt."
+    )
+    # Never return raw exception text to the client. It can carry sensitive
+    # configuration, URLs, request fragments, or credentials, and the chat
+    # response is persisted to conversation history. Admins instead get a
+    # reference ID that correlates to the full detail in the protected server
+    # logs (logged here at ERROR so the mapping is guaranteed).
+    if is_superadmin and error_msg:
+        ref = req_id_cv.get() or "n/a"
+        logger.error(f"agent error [ref={ref}]: {error_msg}")
+        return f"{generic}\n\n(Admin reference ID: {ref} — see server logs for details.)"
+    return generic
+
+
 async def run_agent(
     agent: TigerGraphAgent,
     data: str,
     conversation_history: list[dict[str, str]],
     graphname,
     ws: WebSocket,
+    is_superadmin: bool = False,
 ) -> GraphRAGResponse:
     resp = GraphRAGResponse(
         natural_language_response="", answered_question=False, response_type="inquiryai"
@@ -2621,13 +2737,11 @@ async def run_agent(
             f"/{graphname}/ui/chat request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
     except Exception as e:
-        error_msg = str(e)
-        if "does not exist" in error_msg or "not found" in error_msg.lower():
-            resp.natural_language_response = f"Error: {error_msg}. Please check the knowledge graph name and try again."
-        else:
-            resp.natural_language_response = "GraphRAG had an issue answering your question. Please try again, or rephrase your prompt."
-
-        resp.query_sources = {}
+        resp.natural_language_response = _agent_error_text(e, is_superadmin)
+        # Preserve the steps the agent completed before failing so the
+        # (superuser-only) trace log shows how far it got (GML-2136).
+        partial_steps = getattr(agent, "_last_agent_steps", None)
+        resp.query_sources = {"agent_steps": partial_steps} if partial_steps else {}
         resp.answered_question = False
         LogWriter.warning(
             f"/{graphname}/ui/chat request_id={req_id_cv.get()} agent execution failed due to exception: {e}"
@@ -2710,14 +2824,81 @@ async def write_message_to_history(
     else:
         LogWriter.info(f"chat-history not enabled. chat-history url: {ch}")
 
+# Recognized agentic orchestrator styles. A value routed to the agentic engine
+# that is not one of these (e.g. a classic retriever name like "hybrid") would
+# otherwise be silently coerced into a bogus style, so it is normalized instead.
+_AGENT_STYLES = {"auto", "planned", "reactive", "react"}
+
+
+def _chat_agent(graphname, conn, use_cypher, mode, value, ws=None):
+    """Build the chat agent from one menu selection.
+
+    ``mode`` (``"agentic"`` | ``"classic"`` | ``None`` → graph config) picks the
+    engine; ``value`` is the single menu value — the agent style (``"auto"`` |
+    ``"planned"`` | ``"reactive"``) when agentic, or the retriever (``"auto"`` |
+    a name) when classic.
+
+    ``value`` is overloaded, so it is validated against the *resolved* engine
+    before use — a value belonging to the other engine is never mis-mapped
+    (e.g. a classic retriever name reaching the agentic orchestrator). When the
+    caller sends no ``mode``, a non-``auto`` value that isn't an agent style is
+    treated as a retriever and routed to the classic engine, preserving
+    pre-agentic clients that selected a retriever via ``rag_method`` alone.
+    """
+    from common.config import get_agent_mode
+
+    value = (value or "auto").strip()
+    vlow = value.lower()
+    resolved_mode = (mode or "").strip().lower()
+    if resolved_mode not in ("agentic", "classic"):
+        if vlow == "auto":
+            resolved_mode = get_agent_mode(graphname)      # ambiguous -> graph config
+        elif vlow in _AGENT_STYLES:
+            resolved_mode = "agentic"                       # an agent style implies agentic
+        else:
+            resolved_mode = "classic"                       # a retriever name implies classic
+
+    if resolved_mode == "classic":
+        # Classic side maps an unknown value to its default retriever.
+        retriever, style = value, "auto"
+    else:
+        # Only a real agent style reaches the orchestrator; else fall back.
+        retriever, style = "auto", (value if vlow in _AGENT_STYLES else "auto")
+
+    return make_agent(
+        graphname, conn, use_cypher, ws=ws, mode=resolved_mode,
+        supportai_retriever=retriever, agent_style=style,
+    )
+
+
+def _select_message_fields(message: Message, include_fields: str | None) -> Message:
+    """Trim optional fields from the response copy of a chat message.
+
+    By default the response carries the answer envelope only. ``include_fields``
+    is a comma-separated list; pass ``query_sources`` (or ``all``) to include the
+    supporting sources / trace. The persisted message keeps the full set
+    regardless — only the returned payload is trimmed.
+    """
+    requested = {f.strip().lower() for f in (include_fields or "").split(",") if f.strip()}
+    if "all" in requested:
+        return message
+    out = message.model_copy()
+    if "query_sources" not in requested:
+        out.query_sources = None
+    return out
+
+
 @router.get(route_prefix + "/{graphname}/query")
 async def graph_query(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     q: str | None = None,
     rag_pattern: str | None = None,
+    mode: str | None = None,
     conversation_id: str | None = None,
+    include_fields: str | None = None,
 ):
+    is_superadmin = _is_superadmin(creds[0])
     creds = creds[1]
     auth_header = "Basic " + base64.b64encode(
         f"{creds.username}:{creds.password}".encode()
@@ -2735,10 +2916,8 @@ async def graph_query(
             convo_id = conversation_id
             LogWriter.info(f"Continuing conversation with ID: {convo_id}")
 
-        # create agent
-        # get retrieval pattern to use; default "auto" lets RetrieverSelector pick.
-        rag_pattern = rag_pattern or "auto"
-        agent = make_agent(graphname, conn, use_cypher, supportai_retriever=rag_pattern)
+        # create agent from the menu selection (engine + style/retriever)
+        agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern)
 
         prev_id = None
         data = q
@@ -2759,7 +2938,8 @@ async def graph_query(
         # generate response and keep track of response time
         start = time.monotonic()
         resp = await run_agent(
-            agent, data, conversation_history, graphname, None
+            agent, data, conversation_history, graphname, None,
+            is_superadmin=is_superadmin,
         )
         elapsed = time.monotonic() - start
 
@@ -2780,8 +2960,8 @@ async def graph_query(
         await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, creds.username)
         prev_id = message.message_id
 
-        # reply
-        return message.model_dump_json()
+        # reply — trim to the answer envelope unless extra fields were requested
+        return _select_message_fields(message, include_fields).model_dump_json()
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
@@ -2794,6 +2974,7 @@ async def chat(
     graphname: ValidGraphName,
     websocket: WebSocket,
     rag_pattern: str | None = None,
+    mode: str | None = None,
 ):
     """
     WebSocket endpoint for chat functionality with conversation history support.
@@ -2842,10 +3023,12 @@ async def chat(
         # tracking. For sentinel logins (API token / secret) this is
         # the sentinel itself; we resolve to the real TG identity below.
         usr_creds = _parse_auth_header(usr_auth)
+        ws_is_superadmin = False
         try:
-            _, _, ws_username = _get_user_role_details(
+            ws_global_roles, _, ws_username = _get_user_role_details(
                 usr_creds.username, usr_creds.password
             )
+            ws_is_superadmin = _is_superadmin(ws_global_roles)
         except Exception:
             ws_username = usr_creds.username
         ws_username = ws_username or usr_creds.username
@@ -2876,7 +3059,7 @@ async def chat(
         return
     logger.info(
         f"WebSocket conversation_id received: {conversation_id or 'empty'} "
-        f"(graph={graphname}, rag_pattern={rag_pattern})"
+        f"(graph={graphname}, mode={mode or 'config'}, selection={rag_pattern})"
     )
     
     # Load conversation history if not a new conversation
@@ -2893,8 +3076,12 @@ async def chat(
     # Send conversation ID to frontend
     await websocket.send_text(json.dumps({"conversation_id": convo_id}))
 
-    # create agent
-    agent = make_agent(graphname, conn, use_cypher, ws=websocket, supportai_retriever=rag_pattern)
+    # create agent from the menu selection (engine + style/retriever)
+    agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern, ws=websocket)
+    # If Agent mode was requested but the model can't tool-call, make_agent
+    # downgraded to the Classic engine — tell the user once.
+    if getattr(agent, "engine_note", None):
+        await websocket.send_text(json.dumps({"system_note": agent.engine_note}))
 
     prev_id = None
     try:
@@ -2917,7 +3104,8 @@ async def chat(
             # generate response and keep track of response time
             start = time.monotonic()
             resp = await run_agent(
-                agent, data, conversation_history, graphname, websocket
+                agent, data, conversation_history, graphname, websocket,
+                is_superadmin=ws_is_superadmin,
             )
             elapsed = time.monotonic() - start
 
@@ -4108,6 +4296,27 @@ def _strip_auth(config: dict) -> dict:
     return result
 
 
+@router.get(f"{route_prefix}/chat_capabilities")
+async def get_chat_capabilities(
+    credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
+    graphname: str | None = None,
+):
+    """Tool-calling / thinking capability of the resolved chat model.
+
+    Lets the UI warn when the agentic engine is unavailable (the model can't
+    tool-call) and disable the Agentic options in the chat menu.
+    """
+    from common.config import get_chat_config
+    from common.llm_services.capabilities import model_capabilities
+
+    caps = model_capabilities(get_chat_config(graphname))
+    return {
+        "supports_tool_calling": caps["supports_tool_calling"],
+        "supports_thinking": caps["supports_thinking"],
+        "agentic_available": caps["supports_tool_calling"],
+    }
+
+
 @router.get(f"{route_prefix}/config")
 async def get_config(
     credentials: Annotated[HTTPBasicCredentials, Depends(ui_creds)],
@@ -4487,15 +4696,15 @@ async def get_prompts(
             chat_cfg["graphname"] = graphname
             completion_cfg["graphname"] = graphname
 
-        # ``chatbot_response`` is consumed by the chat agent and must
-        # resolve through the chat service's ``prompt_path``. Every
-        # other prompt is consumed by completion-side code paths
-        # (entity / relationship extraction, schema extraction,
-        # community summarization, schema mapping) and resolves
-        # through the completion service's ``prompt_path``. When no
-        # ``chat_service`` is configured, ``get_chat_config`` already
-        # falls back to ``completion_service`` so this routing stays
-        # correct for single-service deployments.
+        # ``chatbot_response`` and ``schema_extraction`` are consumed
+        # by the chat agent and the schema-extraction LLM call, both of
+        # which run through the chat service. Every other prompt is
+        # consumed by completion-side code paths (entity / relationship
+        # extraction, community summarization, schema mapping) and
+        # resolves through the completion service's ``prompt_path``.
+        # When no ``chat_service`` is configured, ``get_chat_config``
+        # already falls back to ``completion_service`` so this routing
+        # stays correct for single-service deployments.
         chat_llm = get_llm_service(chat_cfg)
         completion_llm = get_llm_service(completion_cfg)
 
@@ -4514,16 +4723,50 @@ async def get_prompts(
             "query_generation":
                 (completion_llm, "map_question_schema_prompt"),
             "schema_extraction":
-                (completion_llm, "schema_extraction_prompt"),
+                (chat_llm, "schema_extraction_prompt"),
             # Free-form partial injected into the four query-related
             # templates (map_question_to_schema, generate_function,
             # generate_cypher, generate_gsql). Empty by default.
             "query_guidance":
                 (completion_llm, "query_guidance_prompt"),
+            # Agentic (react) agent system prompt — runs through the chat service.
+            "agentic_agent":
+                (chat_llm, "agentic_agent_prompt"),
+            # Agentic planner system prompt — runs through the chat service.
+            "agentic_planner":
+                (chat_llm, "agentic_planner_prompt"),
+            # Front-desk triage / routing gate — runs through the chat service.
+            "agentic_triage":
+                (chat_llm, "agentic_triage_prompt"),
+        }
+
+        # Split prompts expose ONLY the user portion; the system prompt (rules
+        # + runtime placeholders) is hardcoded in base_llm and never returned.
+        _SPLIT_FILE = {
+            "chatbot_response": "chatbot_response.txt",
+            "entity_relationship": "entity_relationship_extraction.txt",
+            "community_summarization": "community_summarization.txt",
+            "schema_extraction": "schema_extraction.txt",
+            "agentic_agent": "agentic_agent.txt",
+            "agentic_planner": "agentic_planner.txt",
+            "agentic_triage": "agentic_triage.txt",
         }
 
         def _get_prompt(prompt_type: str) -> dict:
             svc, prop = _PROMPT_SOURCE[prompt_type]
+            if prompt_type in _SPLIT_FILE:
+                try:
+                    return {
+                        "editable_content": svc.get_user_portion(
+                            _SPLIT_FILE[prompt_type]
+                        )
+                    }
+                except Exception as exc:
+                    logger.warning(
+                        f"Falling back to empty user portion for {prompt_type}: {exc}"
+                    )
+                    return {"editable_content": ""}
+            # Non-split (query_generation, query_guidance): legacy full-template.
             try:
                 text = getattr(svc, prop, "") or ""
             except Exception as exc:
@@ -4546,7 +4789,7 @@ async def get_prompts(
 
         # Graph-admin (chatbot_only) only sees chatbot_response
         if access_level == "chatbot_only":
-            prompts = {"chatbot_response": prompts.get("chatbot_response", {"editable_content": "", "template_variables": ""})}
+            prompts = {"chatbot_response": prompts.get("chatbot_response", {"editable_content": ""})}
 
         return {
             "prompts": prompts,
@@ -4569,11 +4812,12 @@ async def save_prompts(
     """
     Save customized prompts.
     Expects: {
-        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation",
+        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation|schema_extraction|query_guidance",
         "editable_content": "...",
-        "template_variables": "...",
         "graphname": "..."  (optional - graph-admin users must supply this)
     }
+    For split prompts ``editable_content`` is the user portion only; the system
+    rules are hardcoded and never accepted here.
     """
     try:
         graphname = prompt_data.get("graphname")
@@ -4584,18 +4828,17 @@ async def save_prompts(
         if access_level == "chatbot_only" and prompt_type != "chatbot_response":
             raise HTTPException(status_code=403, detail="Graph admins can only edit the chatbot response prompt.")
         editable_content = prompt_data.get("editable_content")
-        template_variables = prompt_data.get("template_variables", "")
-
-        if not editable_content:
+        if editable_content is None:
             editable_content = prompt_data.get("content")
 
-        if not prompt_type or not editable_content:
-            raise HTTPException(status_code=400, detail="prompt_type and editable_content are required")
+        if not prompt_type:
+            raise HTTPException(status_code=400, detail="prompt_type is required")
 
-        if template_variables:
-            content = editable_content + "\n\n" + template_variables
-        else:
-            content = editable_content
+        # ``template_variables`` is obsolete under the system/user split — the
+        # saved file is the user portion only. An empty user portion is valid
+        # for split prompts (reverts to the default, no additional instructions);
+        # non-split prompts fail the required-placeholder check below.
+        content = editable_content or ""
 
         if graphname:
             # Per-graph: only write the single customized prompt file to the override dir.
@@ -4666,47 +4909,71 @@ async def save_prompts(
             "query_generation": "map_question_to_schema.txt",
             "schema_extraction": "schema_extraction.txt",
             "query_guidance": "query_guidance.txt",
+            "agentic_agent": "agentic_agent.txt",
+            "agentic_planner": "agentic_planner.txt",
+            "agentic_triage": "agentic_triage.txt",
         }
 
         if prompt_type not in prompt_type_to_file:
             raise HTTPException(status_code=400, detail=f"Invalid prompt_type: {prompt_type}")
 
-        # Hard length cap on Query Guidance specifically. It's a
-        # free-form partial that flows into four templates; runaway
-        # content can push the surrounding prompts past the LLM's
-        # context window. 8000 chars ≈ 2K tokens is plenty for
-        # rules + a half-dozen examples while leaving room for
-        # everything else.
-        QUERY_GUIDANCE_MAX_CHARS = 8000
-        if prompt_type == "query_guidance" and len(content) > QUERY_GUIDANCE_MAX_CHARS:
+        from common.utils.prompt_validation import (
+            validate_and_escape_prompt,
+            sanitize_user_portion,
+            find_placeholders,
+            SPLIT_PROMPT_TYPES,
+        )
+
+        # Hard length cap on user-portion prompts (split prompts + the
+        # free-form Query Guidance partial). Runaway content can push the
+        # surrounding hardcoded prompt past the LLM's context window. 8000
+        # chars ≈ 2K tokens is plenty for instructions + a half-dozen examples.
+        USER_PORTION_MAX_CHARS = 8000
+        if (
+            prompt_type in SPLIT_PROMPT_TYPES or prompt_type == "query_guidance"
+        ) and len(content) > USER_PORTION_MAX_CHARS:
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Query Guidance is too long ({len(content)} characters); "
-                    f"keep it under {QUERY_GUIDANCE_MAX_CHARS}."
+                    f"Prompt is too long ({len(content)} characters); "
+                    f"keep it under {USER_PORTION_MAX_CHARS}."
                 ),
             )
 
-        # Gatekeepers — escape stray ``{token}`` occurrences (so user
-        # examples like ``{example}`` don't crash str.format at call
-        # time) and reject saves that miss a required placeholder.
-        from common.utils.prompt_validation import validate_and_escape_prompt
-        content, missing = validate_and_escape_prompt(content, prompt_type)
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Prompt is missing required placeholders: "
-                    + ", ".join("{" + m + "}" for m in missing)
-                    + ". Add them to the prompt before saving."
-                ),
-            )
+        removed_placeholders: list = []
+        if prompt_type in SPLIT_PROMPT_TYPES:
+            # Split prompt: the saved file is the user portion only. Detect any
+            # placeholder-style ``{token}`` first (to report back to the user),
+            # then strip them — the system prompt owns all runtime placeholders.
+            removed_placeholders = find_placeholders(content)
+            content = sanitize_user_portion(content)
+        else:
+            # Non-split (query_generation full template, query_guidance): escape
+            # stray ``{token}`` occurrences and reject missing required placeholders.
+            content, missing = validate_and_escape_prompt(content, prompt_type)
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Prompt is missing required placeholders: "
+                        + ", ".join("{" + m + "}" for m in missing)
+                        + ". Add them to the prompt before saving."
+                    ),
+                )
 
         file_path = os.path.join(prompt_path, prompt_type_to_file[prompt_type])
-        temp_file = f"{file_path}.tmp"
-        with open(temp_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(temp_file, file_path)
+        # For a split prompt, an empty user portion means "revert to the shipped
+        # default" — remove the override file so the built-in default user
+        # portion is served, rather than persisting an empty file that would
+        # shadow it.
+        if prompt_type in SPLIT_PROMPT_TYPES and not content.strip():
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        else:
+            temp_file = f"{file_path}.tmp"
+            with open(temp_file, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(temp_file, file_path)
 
         messages = {
             "chatbot_response": "Chatbot response prompt saved successfully",
@@ -4716,7 +4983,27 @@ async def save_prompts(
             "schema_extraction": "Schema extraction prompt saved successfully",
             "query_guidance": "Query guidance saved successfully",
         }
-        return {"status": "success", "message": messages.get(prompt_type, "Prompt saved successfully")}
+        resp = {"status": "success", "message": messages.get(prompt_type, "Prompt saved successfully")}
+        # Heads-up (non-blocking) for split prompts: (1) which placeholder tokens
+        # were removed, and (2) an LLM check for lines that try to override the
+        # fixed system rules. The save still succeeds — the rules win at answer
+        # time — so the UI can warn and offer the cleaned text.
+        if prompt_type in SPLIT_PROMPT_TYPES:
+            if removed_placeholders:
+                resp["removed_placeholders"] = removed_placeholders
+            if content.strip():
+                try:
+                    review_svc = get_llm_service(get_chat_config(graphname))
+                    review = await asyncio.to_thread(
+                        review_svc.review_user_portion_llm,
+                        prompt_type_to_file[prompt_type],
+                        content,
+                    )
+                    if review.get("has_conflict"):
+                        resp["review"] = review
+                except Exception as exc:
+                    logger.warning(f"prompt conflict review failed: {exc}")
+        return resp
 
     except HTTPException:
         raise

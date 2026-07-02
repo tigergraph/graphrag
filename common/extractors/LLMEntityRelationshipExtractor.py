@@ -222,6 +222,25 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
 
         raise ValueError(f"Could not extract JSON from LLM output: {content[:200]}")
 
+    def _summary_text(self, json_out: dict) -> str:
+        """Format the optional ``summary`` block from the extractor output
+        as a compact 4-tag string used by Contextual Retrieval to augment
+        the chunk's dense embedding. Returns an empty string when the
+        summary is absent or malformed.
+        """
+        s = json_out.get("summary") if isinstance(json_out, dict) else None
+        if not isinstance(s, dict):
+            return ""
+        topic = str(s.get("topic", "")).strip()
+        section = str(s.get("section", "")).strip()
+        ents = s.get("entities") or []
+        ents_s = ", ".join(str(x).strip() for x in ents if str(x).strip()) if isinstance(ents, list) else ""
+        parts = []
+        if topic:   parts.append(f"TOPIC: {topic}")
+        if section: parts.append(f"SECTION: {section}")
+        if ents_s:  parts.append(f"ENTITIES: {ents_s}")
+        return "\n".join(parts)
+
     async def _aextract_kg_from_doc(self, doc, chain, parser) -> list[GraphDocument]:
         try:
             logger.debug(str(doc))
@@ -252,10 +271,16 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                         if rel["type"] in self.allowed_edge_types
                     ]
 
+            # Contextual Retrieval: the same LLM call also produces a
+            # compact summary; carry it through source.metadata so the
+            # ECC worker can upsert ``Content.summary`` and prepend it
+            # to the embedding input. Empty string when the LLM
+            # omitted the summary block.
+            summary = self._summary_text(json_out)
             return [GraphDocument(
                 nodes=self._build_nodes(formatted_nodes),
                 relationships=self._build_rels(formatted_rels),
-                source=Document(page_content=doc),
+                source=Document(page_content=doc, metadata={"chunk_summary": summary}),
             )]
 
         except:
@@ -289,10 +314,11 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                         if rel["type"] in self.allowed_edge_types
                     ]
 
+            summary = self._summary_text(json_out)
             return [GraphDocument(
                 nodes=self._build_nodes(formatted_nodes),
                 relationships=self._build_rels(formatted_rels),
-                source=Document(page_content=doc),
+                source=Document(page_content=doc, metadata={"chunk_summary": summary}),
             )]
 
         except:
@@ -408,8 +434,8 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
         return relationships
         
     async def adocument_er_extraction(self, document):
-        from langchain.prompts import ChatPromptTemplate
-        from langchain.output_parsers import PydanticOutputParser
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import PydanticOutputParser
 
     
         parser = PydanticOutputParser(pydantic_object=KnowledgeGraph)
@@ -421,10 +447,6 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                 "not include any explanations. "
                 "Use the given format to extract information from the "
                 "following input: {input}",
-            ),
-            (
-                "human",
-                "Mandatory: Make sure to answer in the correct format, specified here: {format_instructions}",
             ),
         ]
         if self.allowed_vertex_types or self.allowed_edge_types:
@@ -447,8 +469,8 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
 
 
     def document_er_extraction(self, document):
-        from langchain.prompts import ChatPromptTemplate
-        from langchain.output_parsers import PydanticOutputParser
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import PydanticOutputParser
 
     
         parser = PydanticOutputParser(pydantic_object=KnowledgeGraph)
@@ -460,10 +482,6 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                 "not include any explanations. "
                 "Use the given format to extract information from the "
                 "following input: {input}",
-            ),
-            (
-                "human",
-                "Mandatory: Make sure to answer in the correct format, specified here: {format_instructions}",
             ),
         ]
         if self.allowed_vertex_types or self.allowed_edge_types:

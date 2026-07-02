@@ -11,8 +11,8 @@ from datetime import datetime
 from common.status import Status, IngestionProgress
 from common.extractors import LLMEntityRelationshipExtractor
 
-from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
 
 logger = logging.getLogger(__name__)
 

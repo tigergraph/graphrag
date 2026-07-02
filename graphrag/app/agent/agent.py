@@ -103,6 +103,11 @@ class TigerGraphAgent:
         start_time = time.time()
         metrics.llm_inprogress_requests.labels(self.model_name).inc()
 
+        # Steps completed so far; exposed to the caller on failure so the
+        # trace log can show how far execution got before the error (GML-2136).
+        agent_steps = []
+        self._last_agent_steps = None
+
         try:
             LogWriter.info(f"request_id={req_id_cv.get()} ENTRY question_for_agent")
             logger.debug_pii(
@@ -252,6 +257,9 @@ class TigerGraphAgent:
         except Exception as e:
             metrics.llm_query_error_total.labels(self.model_name).inc()
             LogWriter.error(f"request_id={req_id_cv.get()} FAILURE question_for_agent")
+            # Preserve the steps completed before the failure so the caller
+            # can record them in the trace log (GML-2136).
+            self._last_agent_steps = agent_steps
             import traceback
 
             traceback.print_exc()
@@ -269,22 +277,67 @@ class TigerGraphAgent:
             )
 
 
-def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto") -> TigerGraphAgent:
+def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto", mode=None, agent_style="auto"):
+    """Build the chat agent for a graph.
+
+    ``mode`` selects the engine: ``"agentic"`` (default) returns the
+    ``AgenticAgent`` when the chat model supports tool-calling, otherwise the
+    classic ``TigerGraphAgent``. ``agent_style`` (``"auto"`` | ``"planned"`` |
+    ``"reactive"``) picks the agentic orchestrator; ``supportai_retriever``
+    (``"auto"`` | a retriever name) picks the classic retrieval method. Both
+    engines expose the same ``question_for_agent`` / ``q`` interface.
+
+    When agentic is requested but the model can't tool-call, the returned
+    (classic) agent carries an ``engine_note`` describing the downgrade so the
+    caller can surface it to the user.
+    """
+    from common.config import get_agent_mode
+    from common.llm_services.capabilities import model_supports_agentic
+
     llm_provider = get_llm_service(get_chat_config(graphname))
     chat_config = llm_provider.config
 
+    resolved_mode = (mode or get_agent_mode(graphname)).lower()
+    want_agentic = resolved_mode == "agentic"
+    agentic = want_agentic and model_supports_agentic(chat_config)
+
     logger.info(
         f"[CHATBOT] graph={graphname} model={chat_config['llm_model']} "
-        f"provider={chat_config['llm_service']} prompt_path={chat_config.get('prompt_path', 'unknown')}"
+        f"provider={chat_config['llm_service']} mode={'agentic' if agentic else 'classic'} "
+        f"(requested={resolved_mode}, style={agent_style}, retriever={supportai_retriever}) "
+        f"prompt_path={chat_config.get('prompt_path', 'unknown')}"
     )
 
+    embedding_service = get_embedding_service()
+    embedding_store = get_embedding_store()
+
+    if agentic:
+        from agent.agentic_agent import AgenticAgent
+        agent = AgenticAgent(
+            llm_provider, conn, embedding_service, embedding_store,
+            use_cypher=use_cypher, ws=ws, agent_style=agent_style,
+        )
+        agent.engine_note = None
+        return agent
+
+    # Classic engine. If agentic was requested but the model can't tool-call,
+    # the request value was an agent style (not a retriever), so fall back to
+    # the default retriever and flag the downgrade for the caller.
+    note = None
+    if want_agentic:
+        supportai_retriever = "auto"
+        note = (
+            "The selected chat model can't run Agent mode; "
+            "answered with the Classic engine."
+        )
     agent = TigerGraphAgent(
         llm_provider,
         conn,
-        get_embedding_service(),
-        get_embedding_store(),
+        embedding_service,
+        embedding_store,
         use_cypher=use_cypher,
         ws=ws,
-        supportai_retriever=supportai_retriever
+        supportai_retriever=supportai_retriever,
     )
+    agent.engine_note = note
     return agent

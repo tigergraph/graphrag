@@ -25,6 +25,7 @@ from pyTigerGraph import AsyncTigerGraphConnection
 
 from common.config import (
     graphrag_config,
+    db_config,
     embedding_service,
     get_llm_service,
     get_completion_config,
@@ -52,25 +53,12 @@ _default_concurrency = graphrag_config.get("default_concurrency", 10)
 _worker_concurrency = _default_concurrency * 2
 tg_sem = asyncio.Semaphore(_default_concurrency)
 
-COMMUNITY_QUERIES = [
-    "common/gsql/graphrag/louvain/graphrag_louvain_init",
-    "common/gsql/graphrag/louvain/graphrag_louvain_communities",
-    "common/gsql/graphrag/louvain/modularity",
-    "common/gsql/graphrag/louvain/stream_community",
-    "common/gsql/graphrag/get_community_children",
-    "common/gsql/graphrag/communities_have_desc",
-    "common/gsql/graphrag/graphrag_delete_all_communities",
-    "common/gsql/graphrag/graphrag_stream_entity_community_pairs",
-    "common/gsql/graphrag/graphrag_stream_all_ids",
-]
+# Canonical lists live in common.db.query_sets so SupportAI init, the ECC
+# rebuild, and the Migration Assistant share one source of truth.
+from common.db.query_sets import GRAPHRAG_REQUIRED_QUERIES, GRAPHRAG_COMMUNITY_QUERIES
 
-REQUIRED_QUERIES = [
-    "common/gsql/graphrag/StreamIds",
-    "common/gsql/graphrag/StreamDocContent",
-    "common/gsql/graphrag/StreamChunkContent",
-    "common/gsql/graphrag/SetEpochProcessing",
-    "common/gsql/graphrag/get_vertices_or_remove",
-]
+COMMUNITY_QUERIES = GRAPHRAG_COMMUNITY_QUERIES
+REQUIRED_QUERIES = GRAPHRAG_REQUIRED_QUERIES
 load_q = reusable_channel.ReuseableChannel()
 
 # will pause workers until the event is false
@@ -81,69 +69,38 @@ async def install_queries(
     requried_queries: list[str],
     conn: AsyncTigerGraphConnection,
 ):
-    from common.db.migrate import query_needs_update_async
-
     installed_queries = [q.split("/")[-1] for q in await conn.getEndpoints(dynamic=True) if f"/{conn.graphname}/" in q]
 
-    required_names = set()
-    drift_detected = False
+    # ECC installs only queries that are MISSING from TG. Drift-based
+    # reinstallation of already-present queries belongs to the Migration
+    # Assistant, not the rebuild — doing it here would reinstall every query on
+    # every warm rebuild (slow, and stresses the install endpoint). For each
+    # missing query we (re)create the body now; the install is batched below.
+    to_install: list[str] = []
     for q in requried_queries:
         q_name = q.split("/")[-1]
-        required_names.add(q_name)
-        if q_name not in installed_queries:
-            res = await workers.install_query(conn, q, False)
-            if res["error"]:
-                raise Exception(res["message"])
-            logger.info(f"Successfully created query '{q_name}'.")
+        if q_name in installed_queries:
             continue
-        # Already installed — check whether the shipped body has drifted
-        # from what's on TG. If so, re-create so the new body actually
-        # takes effect after a graphrag version upgrade.
-        if await query_needs_update_async(conn, f"{q}.gsql"):
-            res = await workers.install_query(conn, q, False)
-            if res["error"]:
-                raise Exception(res["message"])
-            logger.info(f"Re-installed '{q_name}' (body drift detected).")
-            drift_detected = True
+        res = await workers.install_query(conn, q, False)  # create body only
+        if res["error"]:
+            raise Exception(res["message"])
+        to_install.append(q_name)
 
-    if not drift_detected and required_names.issubset(set(installed_queries)):
-        logger.info("All required queries already installed, skipping INSTALL QUERY ALL.")
+    if not to_install:
+        logger.info("All required queries already installed and up to date.")
         return
 
-    logger.info("Submitting INSTALL QUERY ALL ...")
-    query = f"USE GRAPH {conn.graphname}\nINSTALL QUERY ALL\n"
+    # Install ONLY the new/changed queries via the shared async-submit + poll
+    # utility (see common.db.query_install for why pyTigerGraph's installQueries
+    # is unsafe for large sets). The submit is quick and TG-semaphore-guarded;
+    # the poll runs outside the semaphore so it never holds a slot for minutes.
+    from common.db.query_install import submit_query_install_async, poll_query_install_async
+
+    logger.info(f"Installing {len(to_install)} query(ies): {', '.join(sorted(to_install))}")
     async with tg_sem:
-        res = await conn.gsql(query)
-        logger.info(f"INSTALL QUERY ALL returned: {str(res)[:200]}")
-        err = gsql_output_error(res) if isinstance(res, str) else None
-        if err:
-            raise Exception(res)
-
-    max_wait = 600  # seconds
-    poll_interval = 10
-    elapsed = 0
-    while elapsed < max_wait:
-        ready = [
-            q.split("/")[-1]
-            for q in await conn.getEndpoints(dynamic=True)
-            if f"/{conn.graphname}/" in q
-        ]
-        missing = required_names - set(ready)
-        if not missing:
-            break
-        logger.info(
-            f"Waiting for query installation to finish "
-            f"({len(missing)} remaining: {', '.join(sorted(missing))})"
-        )
-        await asyncio.sleep(poll_interval)
-        elapsed += poll_interval
-    else:
-        raise Exception(
-            f"Query installation timed out after {max_wait}s. "
-            f"Still missing: {', '.join(sorted(missing))}"
-        )
-
-    logger.info("All required queries installed and verified.")
+        request_id = await submit_query_install_async(conn, to_install)
+    await poll_query_install_async(conn, request_id)
+    logger.info("Required queries installed and verified.")
 
 
 async def init(

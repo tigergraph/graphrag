@@ -251,6 +251,85 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
             attrs[k] = {"value": v}
         return attrs
 
+    # Markers an embedding provider raises when input exceeds its context
+    # window. Match by substring so we don't depend on a specific SDK
+    # exception class (langchain wraps Bedrock / OpenAI / Anthropic errors
+    # heterogeneously). Anything else is treated as a transient failure
+    # and propagated.
+    _EMBED_OVERFLOW_MARKERS = (
+        "Too many input tokens",
+        "Max input tokens",
+        "input too long",
+        "maximum context length",
+        "context length",
+        "InvalidRequestError",
+        "ValidationException",
+    )
+
+    @classmethod
+    def _is_embed_overflow(cls, err: Exception) -> bool:
+        msg = str(err)
+        return any(m.lower() in msg.lower() for m in cls._EMBED_OVERFLOW_MARKERS)
+
+    @staticmethod
+    def _truncation_candidates(text: str) -> List[str]:
+        """Yield progressively shorter prefixes when full text overflows.
+
+        The 75/50/25% schedule handles the common case (a chunk slightly
+        over the limit) without dropping useful tail content when one
+        smaller step would have fit. Final fallback is a hard prefix of
+        ~3000 chars which is safely below any modern embedding cap.
+        """
+        if len(text) <= 4000:
+            return [text]
+        return [text, text[: len(text) * 75 // 100], text[: len(text) // 2], text[:3000]]
+
+    def _embed_sync_with_truncation_retry(self, text: str, v_id):
+        """Sync embed with input-overflow fallback. See aadd_embeddings's
+        truncation gatekeeper for the rationale."""
+        last_err = None
+        for i, candidate in enumerate(self._truncation_candidates(text)):
+            try:
+                return self.embedding_service.embed_query(candidate)
+            except Exception as e:
+                last_err = e
+                if not self._is_embed_overflow(e):
+                    break
+                LogWriter.warning(
+                    f"Embed for {v_id} overflowed at len={len(candidate)} "
+                    f"(attempt {i + 1}); retrying with shorter prefix"
+                )
+        LogWriter.error(f"Failed to embed {v_id} after truncation: {last_err}")
+        return None
+
+    async def _embed_with_truncation_retry(self, text: str, v_id):
+        """Async embed with input-overflow fallback.
+
+        Bedrock Titan and similar providers reject inputs over their
+        token cap with a 400 error. Chunks larger than expected can
+        happen even with chunker-side guards (model-specific token
+        counts vary). Rather than abandoning the whole batch on one
+        bad chunk, truncate the offending text to progressively
+        shorter prefixes until it fits. The persisted chunk text is
+        unchanged; only the embedding represents the prefix. A chunk
+        for which no truncation level fits is left without an
+        embedding — the similarity_search GSQL skips empty vectors.
+        """
+        last_err = None
+        for i, candidate in enumerate(self._truncation_candidates(text)):
+            try:
+                return await self.embedding_service.aembed_query(candidate)
+            except Exception as e:
+                last_err = e
+                if not self._is_embed_overflow(e):
+                    break
+                LogWriter.warning(
+                    f"Embed for {v_id} overflowed at len={len(candidate)} "
+                    f"(attempt {i + 1}); retrying with shorter prefix"
+                )
+        LogWriter.error(f"Failed to embed {v_id} after truncation: {last_err}")
+        return None
+
     def add_embeddings(
         self,
         embeddings: Iterable[Tuple[Tuple[str, str], List[float]]],
@@ -289,11 +368,9 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                         skipped.append((v_type, vec_attr))
                     continue
                 vec_attrs_used.add(vec_attr)
-                try:
-                    embedding = self.embedding_service.embed_query(text)
-                except Exception as e:
-                    LogWriter.error(f"Failed to embed {v_id}: {e}")
-                    return
+                embedding = self._embed_sync_with_truncation_retry(text, v_id)
+                if embedding is None:
+                    continue
                 attr = self.map_attrs([(vec_attr, embedding)])
                 batch["vertices"][v_type][v_id] = attr
 
@@ -366,11 +443,13 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                         skipped.append((v_type, vec_attr))
                     continue
                 vec_attrs_used.add(vec_attr)
-                try:
-                    embedding = await self.embedding_service.aembed_query(text)
-                except Exception as e:
-                    LogWriter.error(f"Failed to embed {v_id}: {e}")
-                    return
+                embedding = await self._embed_with_truncation_retry(text, v_id)
+                if embedding is None:
+                    # No truncation level worked. Leave this vertex without an
+                    # embedding so similarity_search can skip it (the GSQL
+                    # query filters on v.embedding.size() > 0) — better than
+                    # abandoning the entire batch on one bad chunk.
+                    continue
                 attr = self.map_attrs([(vec_attr, embedding)])
                 batch["vertices"][v_type][v_id] = attr
 

@@ -41,11 +41,14 @@ const METHOD_LABELS: Record<string, string> = {
   communitysearch: "Community",
 };
 
+const ENGINE_LABELS: Record<string, string> = {
+  planned: "Planned",
+  react: "Reactive",
+};
+
 const RetrieverBadge: FC<{ message: any }> = ({ message }) => {
   const qs = message?.query_sources;
   if (!qs || typeof qs !== "object") return null;
-  const method = qs.chosen_retriever as string | undefined;
-  if (!method) return null;
   // Suppress for greetings / errors / progress events — those don't run a retriever.
   if (
     message.response_type === "progress" ||
@@ -54,6 +57,23 @@ const RetrieverBadge: FC<{ message: any }> = ({ message }) => {
   ) {
     return null;
   }
+  // Agent mode: the answer came from the Agent engine, which plans its own
+  // retrieval — show the agent style, not a single retriever method.
+  if (message.response_type === "agentic" || qs.engine) {
+    const style = ENGINE_LABELS[qs.engine as string] || "";
+    const agentLabel = style ? `Agent · ${style}` : "Agent";
+    return (
+      <div
+        className="inline-flex items-center gap-1.5 text-[11px] text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-shadeA rounded-full px-2 py-0.5 mt-1"
+        title="Answered by the Agent engine"
+      >
+        <span>🤖</span>
+        <span className="font-medium">{agentLabel}</span>
+      </div>
+    );
+  }
+  const method = qs.chosen_retriever as string | undefined;
+  if (!method) return null;
   const label = METHOD_LABELS[method] || method;
   const reason = (qs.chosen_retriever_reason as string | undefined) || "";
   const source = (qs.chosen_retriever_source as string | undefined) || "";

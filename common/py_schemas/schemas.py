@@ -15,12 +15,20 @@
 import enum
 from typing import Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class NaturalLanguageQuery(BaseModel):
     query: str
+    # Engine: "agentic" | "classic" | None (defer to graph config).
+    mode: Optional[str] = None
+    # Single menu value: agent style ("auto"|"planned"|"reactive") when agentic,
+    # or retriever ("auto"|<name>) when classic.
     rag_method: Optional[str] = None
+    # Optional response fields beyond the answer. None/empty -> answer only;
+    # name fields (e.g. "query_sources") or "all" to include the supporting
+    # sources / trace in the response.
+    include_fields: Optional[List[str]] = Field(default=None)
 
 
 class SupportAIQuestion(BaseModel):
@@ -51,6 +59,38 @@ class GraphRAGResponse(BaseModel):
     answered_question: bool
     response_type: str
     query_sources: Dict = None
+
+
+# --- Agentic engine (v2.0 deep-thinking mode) ------------------------------
+
+class PlanStep(BaseModel):
+    """One step in an agentic plan DAG.
+
+    ``kind`` is advisory; ``tool`` is the registry tool name actually run.
+    ``arg_bindings`` maps an arg name to ``"<step_id>.<dotted.path>"`` and is
+    resolved from earlier ``StepResult`` contexts just before the call — this
+    is how a later structural/unstructured step consumes an earlier one.
+    """
+    id: str
+    kind: str = "unstructured"   # schema | structural | unstructured | answer
+    tool: str
+    args: Dict = {}
+    arg_bindings: Dict[str, str] = {}
+    depends_on: List[str] = []
+    rationale: str = ""
+
+
+class Plan(BaseModel):
+    steps: List[PlanStep] = []
+    strategy: str = ""           # one-line, user-facing summary
+
+
+class StepResult(BaseModel):
+    step_id: str
+    ok: bool
+    summary: str = ""
+    context: Optional[object] = None
+    citations: List[Dict] = []
 
 
 class BatchDocumentIngest(BaseModel):
@@ -97,6 +137,13 @@ class DocumentChunk(BaseModel):
     chunk_embedding: List[float] = None
     entities: List[Dict] = None
     relationships: List[Dict] = None
+    # Set by the page- and structure-aware chunker (v2.0). None for chunks
+    # written by the legacy char-count chunkers.
+    chunk_kind: str = None
+    page_no: int = None
+    under_heading: str = None
+    continues_from_page: int = None
+    continues_to_page: int = None
 
 
 class Document(BaseModel):

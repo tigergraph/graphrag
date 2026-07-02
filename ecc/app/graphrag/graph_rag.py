@@ -75,12 +75,12 @@ async def stream_docs(
                         "StreamDocContent",
                         params={"doc": (d,)},
                     )
-                logger.debug(f"stream_docs writes {d} to docs")
+                logger.debug(f"stream_docs writes '{d}' to docs")
                 await docs_chan.put(res[0]["DocContent"][0])
                 n_docs += 1
             except Exception as e:
                 exc = traceback.format_exc()
-                logger.error(f"Error retrieving doc: {d} --> {e}\n{exc}")
+                logger.error(f"Error retrieving doc: '{d}' --> {e}\n{exc}")
                 continue
 
     logger.info(f"stream_docs done: {n_docs} document(s) streamed")
@@ -139,8 +139,11 @@ async def stream_chunks(
                 ).decode('unicode_escape')
                 logger.debug("chunk writes to extract_chan")
                 await extract_chan.put((content, c))
-                logger.debug("chunk writes to embed_chan")
-                await embed_chan.put((c, content, "DocumentChunk"))
+                # With extraction on, the extract worker pushes the
+                # summary-augmented embed; only embed raw here when it's off.
+                if not entity_extraction_switch:
+                    logger.debug("chunk writes to embed_chan")
+                    await embed_chan.put((c, content, "DocumentChunk"))
                 n_chunks += 1
                 if n_chunks % 100 == 0:
                     logger.info(f"streaming chunks: {n_chunks} streamed")
@@ -243,10 +246,6 @@ async def load(conn: AsyncTigerGraphConnection):
                 "vertices": defaultdict(dict[str, any]),
                 "edges": dd(),
             }
-            n_verts = 0
-            n_edges = 0
-            vt_counts: Counter = Counter()
-            et_counts: Counter = Counter()
             # Cap every batch at batch_size — even on close / flush. Extraction
             # can flood the queue faster than TG drains it; sending the whole
             # backlog as one upsert produces a multi-GB request that RESTPP
@@ -263,8 +262,6 @@ async def load(conn: AsyncTigerGraphConnection):
                     case "vertices":
                         vt, v_id, attr = elem
                         batch["vertices"][vt][v_id] = attr
-                        n_verts += 1
-                        vt_counts[vt] += 1
                     case "edges":
                         src_v_type, src_v_id, edge_type, tgt_v_type, tgt_v_id, attrs = (
                             elem
@@ -272,8 +269,6 @@ async def load(conn: AsyncTigerGraphConnection):
                         batch["edges"][src_v_type][src_v_id][edge_type][tgt_v_type][
                             tgt_v_id
                         ] = attrs
-                        n_edges += 1
-                        et_counts[edge_type] += 1
                     case "group":
                         # Atomic multi-vertex + multi-edge bundle from
                         # ``upsert_group``. Producers enqueue all related
@@ -282,14 +277,27 @@ async def load(conn: AsyncTigerGraphConnection):
                         # they reach TG in one upsertData call.
                         for vt, v_id, attr in elem.get("vertices", []):
                             batch["vertices"][vt][v_id] = attr
-                            n_verts += 1
-                            vt_counts[vt] += 1
                         for (src_v_type, src_v_id, edge_type, tgt_v_type, tgt_v_id, attrs) in elem.get("edges", []):
                             batch["edges"][src_v_type][src_v_id][edge_type][tgt_v_type][tgt_v_id] = attrs
-                            n_edges += 1
-                            et_counts[edge_type] += 1
                     case _:
                         logger.debug(f"Unexpected data {t} -> {elem} in load_q")
+
+            # Count DISTINCT vertices/edges actually in the batch dict, not raw
+            # drained items. Repeated primary ids / edge tuples collapse onto the
+            # same key (last write wins) before the send, so the drained count
+            # overstates what reaches TG. Reporting the distinct counts makes the
+            # upsert-response GAP reflect genuine TG rejections, not in-batch dedup.
+            vt_counts: Counter = Counter(
+                {vt: len(ids) for vt, ids in batch["vertices"].items()}
+            )
+            et_counts: Counter = Counter()
+            for srcs in batch["edges"].values():
+                for etypes in srcs.values():
+                    for edge_type, tgts in etypes.items():
+                        for tgt_ids in tgts.values():
+                            et_counts[edge_type] += len(tgt_ids)
+            n_verts = sum(vt_counts.values())
+            n_edges = sum(et_counts.values())
 
             batch_seq += 1
             if n_verts > 0 or n_edges > 0:
@@ -397,7 +405,7 @@ async def extract(
                 else:
                     if entity_extraction_switch:
                         grp.create_task(
-                            workers.extract(upsert_chan, extractor, conn, *item)
+                            workers.extract(upsert_chan, embed_chan, extractor, conn, *item)
                         )
                         n_chunks += 1
                         if n_chunks % 50 == 0:

@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from langchain.tools import BaseTool
-from langchain.tools.base import ToolException
-from langchain.llms.base import LLM
-from langchain.prompts import PromptTemplate
+from langchain_core.tools import BaseTool
+from langchain_core.tools import ToolException
+from langchain_core.language_models.llms import LLM
+from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 
 from common.metrics.tg_proxy import TigerGraphConnectionProxy

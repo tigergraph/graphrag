@@ -156,10 +156,13 @@ class BaseRetriever:
                     self.logger.info(f"Truncated retrieved text from {retrieved_tokens} to {max_context_tokens} tokens")
 
         response_parser = PydanticOutputParser(pydantic_object=GraphRAGAnswerOutput)
-        prompt = ChatPromptTemplate.from_template(self.llm_service.chatbot_response_prompt)
+        # {format_instructions} lives in the (hardcoded) system prompt; bind it
+        # as a partial, consistent with the other prompts (see base_llm A1b).
+        prompt = ChatPromptTemplate.from_template(
+            self.llm_service.chatbot_response_prompt
+        ).partial(format_instructions=response_parser.get_format_instructions())
         input_vars = {
             "question": question, "context": retrieved, "query": query,
-            "format_instructions": response_parser.get_format_instructions(),
         }
 
         if verbose:
