@@ -333,7 +333,7 @@ async def load(conn: AsyncTigerGraphConnection):
 
 
 async def embed(
-    embed_chan: Channel, embedding_store: EmbeddingStore, graphname: str
+    embed_chan: Channel, embedding_store: EmbeddingStore, graphname: str, progress=None
 ):
     """
     Creates and starts one worker for each embed job
@@ -366,6 +366,11 @@ async def embed(
                 n_embed += 1
                 if n_embed % 100 == 0:
                     logger.info(f"Embedding Processing: {n_embed} embedded so far")
+                    if progress is not None:
+                        try:
+                            progress(f"Embedding documents ({n_embed} embedded so far)")
+                        except Exception:
+                            pass
             except ChannelClosed:
                 break
             except Exception:
@@ -383,6 +388,7 @@ async def extract(
     extractor: BaseExtractor,
     conn: AsyncTigerGraphConnection,
     num_senders: int,
+    progress=None,
 ):
     """
     Creates and starts one worker for each extract job
@@ -412,6 +418,11 @@ async def extract(
                             logger.info(
                                 f"Entity Extraction: {n_chunks} chunks dispatched"
                             )
+                            if progress is not None:
+                                try:
+                                    progress(f"Extracting entities ({n_chunks} chunks processed)")
+                                except Exception:
+                                    pass
             except ChannelClosed:
                 break
             except Exception:
@@ -536,6 +547,7 @@ async def summarize_communities(
     comm_process_chan: Channel,
     upsert_chan: Channel,
     embed_chan: Channel,
+    progress=None,
 ):
     logger.info("Community summarization started")
     n_comm = 0
@@ -552,6 +564,11 @@ async def summarize_communities(
                     logger.info(
                         f"Community summarization: {n_comm} dispatched"
                     )
+                    if progress is not None:
+                        try:
+                            progress(f"Summarizing communities ({n_comm} done so far)")
+                        except Exception:
+                            pass
             except ChannelClosed:
                 break
             except Exception:
@@ -634,9 +651,9 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
 
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
-            grp.create_task(embed(embed_chan, embedding_store, graphname))
+            grp.create_task(embed(embed_chan, embedding_store, graphname, progress))
             grp.create_task(
-                extract(extract_chan, upsert_chan, embed_chan, extractor, conn, num_chunk_senders)
+                extract(extract_chan, upsert_chan, embed_chan, extractor, conn, num_chunk_senders, progress)
             )
     logger.info("Join docs_chan")
     await docs_chan.join()
@@ -687,11 +704,11 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
             grp.create_task(communities(conn, comm_process_chan))
             # summarize each community
             grp.create_task(
-                summarize_communities(conn, comm_process_chan, upsert_chan, embed_chan)
+                summarize_communities(conn, comm_process_chan, upsert_chan, embed_chan, progress)
             )
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
-            grp.create_task(embed(embed_chan, embedding_store, graphname))
+            grp.create_task(embed(embed_chan, embedding_store, graphname, progress))
         logger.info("Join comm_process_chan")
         await comm_process_chan.join()
         logger.info("Join embed_chan")
