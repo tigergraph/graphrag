@@ -2307,6 +2307,10 @@ async def forceupdate(
             import traceback
             LogWriter.error(traceback.format_exc())
         finally:
+            # Always drop cached status when monitoring ends (success,
+            # timeout, or unexpected failure) so timeout fallbacks do
+            # not keep reporting a stale rebuild as active.
+            _last_ecc_status_cache.pop(graphname, None)
             # Release lock only after ALL stages complete (or timeout/error)
             release_rebuild_lock(graphname)
             LogWriter.info(f"Released global rebuild lock for {graphname}")
@@ -2361,7 +2365,7 @@ def get_rebuild_status(
             **cached,
             "graphname": graphname,
             "is_running": True,
-            "status": "unknown",
+            "status": cached.get("status", "unknown"),
             "error": "ECC is busy processing, status check timed out. Rebuild likely still in progress."
         }
     except Exception as e:
