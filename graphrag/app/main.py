@@ -88,6 +88,56 @@ async def _check_agentic_capability() -> None:
         logging.getLogger(__name__).warning(f"agentic capability check skipped: {e}")
 
 
+_retention_sweeper = None
+
+
+@app.on_event("startup")
+async def _start_trace_retention() -> None:
+    global _retention_sweeper
+    try:
+        from pyTigerGraph import TigerGraphConnection
+
+        from common.chat_history.retention_sweep import (
+            DEFAULT_INTERVAL_HOURS, DEFAULT_RETENTION_DAYS, RetentionSweeper,
+        )
+        from common.config import chat_store_config, db_config
+
+        def _service_conn(graphname: str):
+            return TigerGraphConnection(
+                host=db_config.get("hostname", "http://tigergraph"),
+                username=db_config.get("username", "tigergraph"),
+                password=db_config.get("password", "tigergraph"),
+                gsPort=db_config.get("gsPort", "14240"),
+                restppPort=db_config.get("restppPort", "9000"),
+                graphname=graphname,
+                apiToken=db_config.get("apiToken", ""),
+            )
+
+        def _graphs():
+            conn = _service_conn("")
+            return [g["graphName"] for g in conn.listGraphs() if "graphName" in g]
+
+        _retention_sweeper = RetentionSweeper(
+            conn_factory=_service_conn,
+            graphs_factory=_graphs,
+            retention_days=chat_store_config.get(
+                "traceRetentionDays", DEFAULT_RETENTION_DAYS
+            ),
+            interval_hours=chat_store_config.get(
+                "traceRetentionSweepHours", DEFAULT_INTERVAL_HOURS
+            ),
+        )
+        _retention_sweeper.start()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"trace retention not started: {e}")
+
+
+@app.on_event("shutdown")
+async def _stop_trace_retention() -> None:
+    if _retention_sweeper is not None:
+        _retention_sweeper.stop()
+
+
 @app.on_event("shutdown")
 async def _shutdown_mcp_addons() -> None:
     """Close every cached external-MCP client and stop the dedicated event

@@ -1,0 +1,54 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+*/
+
+// One conversation and its messages, ordered.
+//
+// Ownership is enforced by the traversal, not by a post-filter: the message
+// set is reachable only through the OWNS_CONVERSATION edge out of u, so a
+// conversation_id belonging to another user yields an empty Convs and
+// therefore an empty Msgs. There is no ownership branch to forget or invert
+// -- a caller passing someone else's conversation_id gets an empty result
+// rather than a 403, and the distinction is deliberate: the query cannot
+// confirm the conversation exists.
+
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Get_Conversation(VERTEX<ChatUser> u, STRING conversation_id) {
+  // parent_id is carried by the REPLIES_TO edge, not by an attribute, so it
+  // has to be resolved by traversal and re-attached to each row. Callers pair
+  // a user turn with the reply naming it as parent; without this the pairing
+  // finds nothing and the agent is handed an empty history.
+  // Returned as its own map rather than projected onto each row: naming
+  // attributes explicitly in PRINT prefixes every key with the set alias
+  // ("Msgs.seq"), which silently changes the wire contract for all of them.
+  MapAccum<STRING, STRING> @@parents;
+
+  Start = {u};
+
+  Convs = SELECT c
+          FROM Start:s -(OWNS_CONVERSATION>)- ChatConversation:c
+          WHERE c.conversation_id == conversation_id AND c.deleted_epoch == 0;
+
+  Msgs = SELECT m
+         FROM Convs:c -(HAS_MESSAGE>)- ChatMessage:m
+         ORDER BY m.seq ASC, m.create_epoch ASC;
+
+  Replies = SELECT m
+            FROM Msgs:m -(REPLIES_TO>)- ChatMessage:p
+            ACCUM @@parents += (m.message_id -> p.message_id);
+
+  PRINT Convs;
+  PRINT Msgs;
+  PRINT @@parents AS parents;
+}

@@ -65,6 +65,7 @@ class GraphRAGToolContext:
     external_tools: Dict[str, Any] = field(default_factory=dict)
     mcp_manager: Optional[Any] = None
     user: Optional[str] = None       # logged-in user, for MCP per-call _meta
+    chat_repo: Optional[Any] = None  # principal-bound ConversationRepository, or None
 
     def emit(self, msg: str) -> None:
         if self.progress is not None:

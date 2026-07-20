@@ -390,6 +390,8 @@ db_config = server_config.get("db_config")
 llm_config = server_config.get("llm_config")
 graphrag_config = server_config.get("graphrag_config")
 
+chat_store_config = server_config.get("chat_config") or {}
+
 if db_config is None:
     raise Exception("db_config is not found in SERVER_CONFIG")
 if llm_config is None:

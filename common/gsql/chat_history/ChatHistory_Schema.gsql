@@ -1,0 +1,62 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+*/
+
+// Conversation history and execution traces.
+//
+// Types are Chat-prefixed because a domain schema (add_domain_schema_*) may
+// declare its own User / Message / Conversation types on the same graph. The
+// prefix also lets the retrieval tooling exclude these types by prefix rather
+// than by an enumerated list that a new type could be omitted from.
+
+CREATE SCHEMA_CHANGE JOB add_chat_history_schema {
+    ADD VERTEX ChatUser(PRIMARY_ID user_name STRING) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+    ADD VERTEX ChatConversation(PRIMARY_ID conversation_id STRING, name STRING, create_epoch UINT, update_epoch UINT, deleted_epoch UINT) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+    ADD VERTEX ChatMessage(PRIMARY_ID message_id STRING, content STRING, role STRING, model_name STRING, response_time DOUBLE, feedback INT, comment STRING, seq INT, create_epoch UINT) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+    ADD VERTEX ChatTrace(PRIMARY_ID trace_id STRING, user_query STRING, response_type STRING, response_time DOUBLE, answered_question BOOL, natural_language_response STRING, tokens_in INT, tokens_out INT, plan STRING, create_epoch UINT) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+    ADD VERTEX ChatTraceStep(PRIMARY_ID step_id STRING, name STRING, idx INT, duration_ms INT, input STRING, output STRING, tokens_in INT, tokens_out INT, status STRING) WITH STATS="OUTDEGREE_BY_EDGETYPE", PRIMARY_ID_AS_ATTRIBUTE="true";
+
+    // No REVERSE_EDGE on any edge below. Every retrieval query seeds from a
+    // ChatUser and walks outward, so a named reverse type buys nothing.
+    //
+    // This does NOT make reverse traversal impossible: GSQL walks a directed
+    // edge backward via `-(<EDGE)-` (and via the untyped `-(:e)-` pattern)
+    // whether or not a reverse edge is declared. Only explicitly-named forward
+    // patterns are direction-checked. Per-user isolation is enforced by the
+    // installed query set -- every query seeds from ChatUser and none traverse
+    // back out of a shared corpus vertex -- not by the shape of this schema.
+    //
+    // Omitting reverse edges is defense in depth, not a guarantee: a declared
+    // reverse_RETRIEVED would also surface in conn.getEdgeTypes(), which feeds
+    // the schema description handed to the LLM during retrieval planning.
+    ADD DIRECTED EDGE OWNS_CONVERSATION(FROM ChatUser, TO ChatConversation);
+    ADD DIRECTED EDGE HAS_MESSAGE(FROM ChatConversation, TO ChatMessage);
+    ADD DIRECTED EDGE REPLIES_TO(FROM ChatMessage, TO ChatMessage);
+    ADD DIRECTED EDGE HAS_TRACE(FROM ChatMessage, TO ChatTrace);
+    ADD DIRECTED EDGE HAS_STEP(FROM ChatTrace, TO ChatTraceStep);
+    ADD DIRECTED EDGE NEXT_STEP(FROM ChatTraceStep, TO ChatTraceStep);
+
+    // Provenance: which corpus vertices were fetched while answering.
+    // Storing the edge rather than the retrieved text is what keeps traces
+    // small — the file-based writer had to strip final_retrieval for size and
+    // lost the linkage entirely.
+    //
+    // Sourced from ChatTrace as well as ChatTraceStep because the agent
+    // reports retrieval at answer granularity (query_sources
+    // ["retrieved_citations"], harvested by agentic_executor.retrieved_chunk_ids)
+    // rather than per node. The step pairs carry per-node attribution when a
+    // caller has it; the trace pairs are what the current engines populate.
+    ADD DIRECTED EDGE RETRIEVED(FROM ChatTraceStep, TO DocumentChunk|FROM ChatTraceStep, TO Entity|FROM ChatTraceStep, TO Community|FROM ChatTrace, TO DocumentChunk|FROM ChatTrace, TO Entity|FROM ChatTrace, TO Community);
+}

@@ -1,0 +1,53 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+*/
+
+// Substring search over u's own messages. Backs the assistant's
+// "what did I ask about earlier?" tool.
+//
+// u is the only way in and is supplied by the request handler, never by the
+// model: the tool that calls this exposes no user argument, so there is no
+// value an instruction like "search as bob" could land in. A prompt asking
+// for everyone's history reaches this query with u still bound to the caller
+// and gets the caller's own messages back -- not because the model complied,
+// but because the query has no other start set.
+
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Search_My_Messages(
+    VERTEX<ChatUser> u, STRING q, INT result_limit = 10) {
+  TYPEDEF TUPLE<STRING conversation_id, STRING conversation_name,
+                STRING message_id, STRING content, STRING role,
+                UINT create_epoch> MessageHit;
+  HeapAccum<MessageHit>(10, create_epoch DESC) @@hits;
+  SumAccum<STRING> @conv_name;
+  SumAccum<STRING> @conv_id;
+
+  @@hits.resize(result_limit);
+
+  Start = {u};
+
+  Convs = SELECT c
+          FROM Start:s -(OWNS_CONVERSATION>)- ChatConversation:c
+          WHERE c.deleted_epoch == 0
+          ACCUM c.@conv_name += c.name, c.@conv_id += c.conversation_id;
+
+  Msgs = SELECT m
+         FROM Convs:c -(HAS_MESSAGE>)- ChatMessage:m
+         WHERE q == "" OR lower(m.content) LIKE "%" + lower(q) + "%"
+         ACCUM @@hits += MessageHit(
+           c.@conv_id, c.@conv_name, m.message_id,
+           m.content, m.role, m.create_epoch);
+
+  PRINT @@hits AS hits;
+}

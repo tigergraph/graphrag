@@ -27,7 +27,9 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
 
     current_schema = conn.gsql("""USE GRAPH {}\n ls""".format(graphname))
 
-    from common.db.query_sets import SUPPORTAI_INIT_QUERIES, with_gsql
+    from common.db.query_sets import (
+        CHAT_HISTORY_QUERIES, SUPPORTAI_INIT_QUERIES, with_gsql,
+    )
     supportai_queries = with_gsql(SUPPORTAI_INIT_QUERIES + [
         "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display",
         "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display",
@@ -94,6 +96,22 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
             ])
         else:
             raise Exception(f"Vector feature is not supported by the current TigerGraph version: {ver}")
+
+    logger.info(f"Checking if chat history schema needs to be created")
+    if "- VERTEX ChatConversation" in current_schema:
+        schema_res += " Chat history schema already exists, skipped."
+    else:
+        file_path = "common/gsql/chat_history/ChatHistory_Schema.gsql"
+        with open(file_path, "r") as f:
+            chat_schema = f.read()
+        schema_res += " "
+        schema_res += conn.gsql(
+            """USE GRAPH {}\n{}\nRUN SCHEMA_CHANGE JOB add_chat_history_schema""".format(
+                graphname, chat_schema
+            )
+        )
+
+    supportai_queries.extend(with_gsql(CHAT_HISTORY_QUERIES))
 
     logger.info(f"Checking if index needs to be created")
     if "- doc_chunk_epoch_processed_index" in current_schema:

@@ -1,0 +1,54 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+*/
+
+// Every message carrying feedback, across all users, with its owner.
+//
+// The one query here that is deliberately not scoped to a caller: it backs
+// the admin feedback view that chat_config.conversationAccessRoles has always
+// gated (superuser / globaldesigner). Kept as its own query, reachable only
+// through AdminFeedbackRepository, so that ConversationRepository retains the
+// property that none of its methods can return another user's data.
+//
+// Seeds from ChatUser and walks down, so every row carries the owner it was
+// reached through rather than being recovered afterwards.
+//
+// Callers MUST check roles first. Like the other chat queries this is
+// installed but never registered in the embedding store, so the agent cannot
+// invoke it: validate_function_call admits a runInstalledQuery only when the
+// name is both installed and registered.
+
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Get_All_Feedback() {
+  TYPEDEF TUPLE<STRING user_name, STRING conversation_id, STRING message_id,
+                STRING content, STRING role, INT feedback, STRING comment> FeedbackRow;
+  SetAccum<FeedbackRow> @@rows;
+  SumAccum<STRING> @owner;
+
+  Users = {ChatUser.*};
+
+  Convs = SELECT c
+          FROM Users:u -(OWNS_CONVERSATION>)- ChatConversation:c
+          WHERE c.deleted_epoch == 0
+          ACCUM c.@owner += u.user_name;
+
+  Msgs = SELECT m
+         FROM Convs:c -(HAS_MESSAGE>)- ChatMessage:m
+         WHERE m.feedback != 0
+         ACCUM @@rows += FeedbackRow(
+           c.@owner, c.conversation_id, m.message_id,
+           m.content, m.role, m.feedback, m.comment);
+
+  PRINT @@rows AS feedback;
+}

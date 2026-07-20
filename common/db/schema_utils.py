@@ -56,6 +56,34 @@ from typing import Callable, Iterable, List, Optional, Sequence, Set, Tuple
 # Structural type registry
 # -----------------------------------------------------------------------------
 
+#: Vertex types holding conversation history and execution traces. Separated
+#: from the corpus types below because they carry per-user private data: the
+#: retrieval tooling excludes these from the schema it describes to the LLM
+#: and refuses generated calls that name one. See
+#: ``common.chat_history.repository``, which is the only sanctioned reader.
+CHAT_HISTORY_VERTEX_TYPES: frozenset = frozenset({
+    "ChatUser",
+    "ChatConversation",
+    "ChatMessage",
+    "ChatTrace",
+    "ChatTraceStep",
+})
+
+
+#: Edge types connecting conversation history. RETRIEVED is included even
+#: though it terminates on corpus vertices — traversing it in reverse is the
+#: path from shared corpus into another user's trace.
+CHAT_HISTORY_EDGE_TYPES: frozenset = frozenset({
+    "OWNS_CONVERSATION",
+    "HAS_MESSAGE",
+    "REPLIES_TO",
+    "HAS_TRACE",
+    "HAS_STEP",
+    "NEXT_STEP",
+    "RETRIEVED",
+})
+
+
 #: GraphRAG-internal vertex types. The user must not propose these as domain
 #: types; the permissive parser silently drops any line that names one of
 #: these (case-insensitive match).
@@ -68,7 +96,7 @@ GRAPHRAG_STRUCTURAL_VERTEX_TYPES: frozenset = frozenset({
     "Content",
     "Community",
     "Image",
-})
+}) | CHAT_HISTORY_VERTEX_TYPES
 
 
 #: GraphRAG-internal edge types. The user must not propose these as domain
@@ -91,7 +119,7 @@ GRAPHRAG_STRUCTURAL_EDGE_TYPES: frozenset = frozenset({
     "HAS_PARENT",
     "HAS_IMAGE",
     "REFERENCES_IMAGE",
-})
+}) | CHAT_HISTORY_EDGE_TYPES
 
 
 # TigerGraph identifier pattern (graphs, jobs, vertex/edge types). Must

@@ -15,7 +15,7 @@
 import enum
 from typing import Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class NaturalLanguageQuery(BaseModel):
@@ -78,6 +78,16 @@ class PlanStep(BaseModel):
     arg_bindings: Dict[str, str] = {}
     depends_on: List[str] = []
     rationale: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _tolerate_field_synonyms(cls, data):
+        if isinstance(data, dict):
+            if "id" not in data and "name" in data:
+                data = {**data, "id": data["name"]}
+            if "args" not in data and "params" in data:
+                data = {**data, "args": data["params"]}
+        return data
 
 
 class Plan(BaseModel):

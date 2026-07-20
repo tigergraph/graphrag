@@ -1,8 +1,11 @@
-# TigerGraph GraphRAG
+# TigerGraph GraphRAG (Please view [SUBMISSION-DOCS](./SUBMISSION-DOCS/) for implementation of Chat features in TigerGraph)
 
 > ⚠️ **Disclaimer**  
+>
 > - **Supported Backend:** TigerGraph is the only Vector and Graph DB supported in this project. Hybrid Search is the officially supported retrieval method; other retrieval methods, and the agentic chat engine that orchestrates them, are provided as-is for self-service use.
 > - **Limitations:** No official support is provided unless delivered through a Statement of Work (SOW) with the Solutions team. Customizations are customer-owned self-service to handle custom LLM service, prompt logic, UI integration, and pipeline orchestration. This project is provided "as is" without any warranties or guarantees.
+
+
 
 ## Table of Contents
 
@@ -66,31 +69,38 @@
 
 ---
 
+
+
 ## Releases
-* **7/1/2026**: GraphRAG v2.0.0 released. Added an agentic chat engine that plans and runs its own retrieval (Planner and Reactive styles), external MCP tools, and structure-aware document chunking, along with additive prompt customization and many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.0) for details.
-* **6/23/2026**: GraphRAG v1.4.2 released. Added a knowledge graph compatibility check and repair tool to pick up shipped query fixes on existing graphs, along with more reliable ingestion for documents with spaces in their filenames and other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.2) for details.
-* **5/30/2026**: GraphRAG v1.4.1 released. Added token-based login and a pre-flight upload conflict check, along with more resilient chat when vector search is unavailable and other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.1) for details.
-* **5/16/2026**: GraphRAG v1.4.0 released. Added schema-aware knowledge graphs, auto retrieval method selection, and a Trace Logs UI, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.0) for details.
-* **4/10/2026**: GraphRAG v1.3.0 released. Added an admin configuration UI with role-based access and per-graph chatbot LLM override, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.3.0) for details.
-* **2/28/2026**: GraphRAG v1.2.0 released. Added Admin UI for graph initialization, document ingestion, and knowledge graph rebuild, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.2.0) for details.
-* **9/22/2025**: GraphRAG is available now officially v1.1 (v1.1.0). AWS Bedrock support is completed with BDA integration for multimodal document ingestion. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.1.0) for details.
-* **6/18/2025**: GraphRAG is available now officially v1.0 (v1.0.0). TigerGraph database is the only graph and vector storagge supported.
+
+- **7/1/2026**: GraphRAG v2.0.0 released. Added an agentic chat engine that plans and runs its own retrieval (Planner and Reactive styles), external MCP tools, and structure-aware document chunking, along with additive prompt customization and many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.0) for details.
+- **6/23/2026**: GraphRAG v1.4.2 released. Added a knowledge graph compatibility check and repair tool to pick up shipped query fixes on existing graphs, along with more reliable ingestion for documents with spaces in their filenames and other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.2) for details.
+- **5/30/2026**: GraphRAG v1.4.1 released. Added token-based login and a pre-flight upload conflict check, along with more resilient chat when vector search is unavailable and other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.1) for details.
+- **5/16/2026**: GraphRAG v1.4.0 released. Added schema-aware knowledge graphs, auto retrieval method selection, and a Trace Logs UI, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.0) for details.
+- **4/10/2026**: GraphRAG v1.3.0 released. Added an admin configuration UI with role-based access and per-graph chatbot LLM override, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.3.0) for details.
+- **2/28/2026**: GraphRAG v1.2.0 released. Added Admin UI for graph initialization, document ingestion, and knowledge graph rebuild, along with many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.2.0) for details.
+- **9/22/2025**: GraphRAG is available now officially v1.1 (v1.1.0). AWS Bedrock support is completed with BDA integration for multimodal document ingestion. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.1.0) for details.
+- **6/18/2025**: GraphRAG is available now officially v1.0 (v1.0.0). TigerGraph database is the only graph and vector storagge supported.
 Please see [Release Notes](https://docs.tigergraph.com/tg-graphrag/current/release-notes/) for details.
 
 ---
 
+
+
 ## Overview
 
-![GraphRAG Overview](./docs/img/TG-GraphRAG-Overview.png)
+GraphRAG Overview
 
 TigerGraph GraphRAG is an AI assistant that is meticulously designed to combine the powers of vector store, graph databases and generative AI to draw the most value from data and to enhance productivity across various business functions, including analytics, development, and administration tasks. It is one AI assistant with two core component services:
-* A natural language assistant for Q&A with graph-powered solutions
-* A knowledge graph builder for managing documents and graphs
+
+- A natural language assistant for Q&A with graph-powered solutions
+- A knowledge graph builder for managing documents and graphs
 
 You can interact with GraphRAG through the built-in chat interface and APIs. For now, your own LLM services (from OpenAI, Azure, GCP, AWS Bedrock, Ollama, Hugging Face and Groq.) are required to use GraphRAG, but in future releases you can use TigerGraph’s LLMs.
 
 ### Nature Language Query
-![Nature Language Query](./docs/img/NatureLanguageQuery-Architecture.png)
+
+Nature Language Query
 
 When a question is posed in natural language, GraphRAG employs a novel three-phase interaction with both the TigerGraph database and a LLM of the user's choice, to obtain accurate and relevant responses.
 
@@ -99,7 +109,8 @@ The first phase aligns the question with the particular data available in the da
 Using pre-approved queries provides multiple benefits. First and foremost, it reduces the likelihood of hallucinations, because the meaning and behavior of each query has been validated.  Second, the system has the potential of predicting the execution resources needed to answer the question.
 
 ### Knowledge Graph Query
-![Knowledge Graph Query](./docs/img/GraphRAG-Architecture.png)
+
+Knowledge Graph Query
 
 For inquiries cannot be answered with structured graph data, GraphRAG employs an AI chatbots with graph-augmented Knowledge Graph based on a user's own documents or text data. It builds a knowledge graph from source material and applies its unique variant of knowledge graph-based RAG (Retrieval Augmented Generation) to improve the contextual relevance and accuracy of answers to natural-language questions.
 
@@ -111,18 +122,28 @@ Organizing the data as a knowledge graph allows a chatbot to access accurate, fa
 
 ---
 
+
+
 ## Getting Started
 
+
+
 ### Prerequisites
-* Docker + Docker Compose Plugin, or Kubernetes
-* TigerGraph DB 4.2+.
-* API key of your LLM provider. (An LLM provider refers to a company or organization that offers Large Language Models (LLMs) as a service. The API key verifies the identity of the requester, ensuring that the request is coming from a registered and authorized user or application.) Currently, GraphRAG supports the following LLM providers: OpenAI, Azure OpenAI, GCP, AWS Bedrock.
+
+- Docker + Docker Compose Plugin, or Kubernetes
+- TigerGraph DB 4.2+.
+- API key of your LLM provider. (An LLM provider refers to a company or organization that offers Large Language Models (LLMs) as a service. The API key verifies the identity of the requester, ensuring that the request is coming from a registered and authorized user or application.) Currently, GraphRAG supports the following LLM providers: OpenAI, Azure OpenAI, GCP, AWS Bedrock.
+
 
 
 ### Quick Start
 
+
+
 #### Use TigerGraph Docker-Based Instance
+
 Set your LLM Provider (supported `openai` or `gemini`) api key as environment variable LLM_API_KEY and use the following command for a one-step quick deployment with TigerGraph Community Edition and default configurations:
+
 ```
 curl -k https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/setup_graphrag.sh | bash
 ```
@@ -132,8 +153,12 @@ To change installation folder, use `bash -s -- <graphrag_folder> <llm_provider>`
 
 > Note: for other LLM providers, manually update `configs/server_config.json` accordingly and re-run `docker compose up -d`
 
+
+
 #### Use Pre-Installed TigerGraph Instance
+
 Similar to the above setup, and use the following command for a one-step quick deployment connecting to a pre-installed TigerGraph with default configurations:
+
 ```
 curl -k https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/setup_graphrag_tg.sh | bash
 ```
@@ -143,13 +168,16 @@ To change installation folder, TigerGraph instance location or username/password
 
 [Go back to top](#top)
 
-
 ### Deploy GraphRAG Manually
+
 The GraphRAG services can be deployed manually using Docker Compose or Kubernetes with updated configurations for different use cases.
 
 #### Manual Deploy of GraphRAG with Docker Compose
 
+
+
 ##### Step 1: Get docker-compose file
+
 Download the [docker-compose.yml](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/docker-compose.yml) file directly
 
 The Docker Compose file contains all dependencies for GraphRAG including a TigerGraph database. If you want to use a separate TigerGraph instance, you can comment out the `tigergraph` section from the docker compose file and restart all services. However, please follow the instructions below to make sure your standalone TigerGraph server is accessible from other GraphRAG containers.
@@ -157,10 +185,12 @@ The Docker Compose file contains all dependencies for GraphRAG including a Tiger
 ##### Step 2: Set up configurations
 
 Next, download the following configuration files and put them in a `configs` subdirectory of the directory contains the Docker Compose file:
-* [configs/server_config.json](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/configs/server_config.json)
-* [configs/nginx.conf](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/configs/nginx.conf)
+
+- [configs/server_config.json](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/configs/server_config.json)
+- [configs/nginx.conf](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/configs/nginx.conf)
 
 Here’s what the folder structure looks like:
+
 ```
     graphrag
     ├── configs
@@ -169,11 +199,15 @@ Here’s what the folder structure looks like:
     └── docker-compose.yml
 ```
 
+
+
 ##### Step 3: Adjust configurations
 
 Edit `llm_config` section of `configs/server_config.json` and replace `<YOUR_LLM_API_KEY>` to your own LLM_API_KEY for the LLM provider. 
- 
+
 > If desired, you can also change the model to be used for the embedding service and completion service to your preferred models to adjust the output from the LLM service.
+
+
 
 ##### Step 4: Configure Logging Level in Dockerfile (Optional)
 
@@ -189,21 +223,27 @@ This line can be changed to support different logging levels.
 
 **The levels are described below:**
 
-| Level | Description |
-| --- | --- |
-| `CRITICAL` | A serious error. |
-| `ERROR` | Failing to perform functions. |
-| `WARNING` | Indication of unexpected problems, e.g. failure to map a user’s question to the graph schema. |
-| `INFO` | Confirming that the service is performing as expected. |
-| `DEBUG` | Detailed information, e.g. the functions retrieved during the `GenerateFunction` step, etc. |
+
+| Level       | Description                                                                                                                                                                       |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CRITICAL`  | A serious error.                                                                                                                                                                  |
+| `ERROR`     | Failing to perform functions.                                                                                                                                                     |
+| `WARNING`   | Indication of unexpected problems, e.g. failure to map a user’s question to the graph schema.                                                                                     |
+| `INFO`      | Confirming that the service is performing as expected.                                                                                                                            |
+| `DEBUG`     | Detailed information, e.g. the functions retrieved during the `GenerateFunction` step, etc.                                                                                       |
 | `DEBUG_PII` | Finer-grained information that could potentially include `PII`, such as a user’s question, the complete function call (with parameters), and the LLM’s natural language response. |
-| NOTSET | All messages are processed. |
+| NOTSET      | All messages are processed.                                                                                                                                                       |
+
+
+
 
 ##### Step 5: Start all services
 
 Now, simply run `docker compose up -d` and wait for all the services to start.
 
 > Note: `graphrag` container will be down if TigerGraph service is not ready. Log into the `tigergraph` container, bring up tigergraph services and rerun `docker compose up -d` should resolve the issue.
+
+
 
 ##### Step 6: Stop all services (when needed)
 
@@ -213,9 +253,10 @@ Run command `docker compose down` and wait for all the service containers to sto
 
 #### Use Standalone TigerGraph instance (If preferred)
 
-> **_Note:_** Vector feature is available in both TigerGraph Community Edition 4.2.0+ and Enterprise Edition 4.2.0+.
+> ***Note:*** Vector feature is available in both TigerGraph Community Edition 4.2.0+ and Enterprise Edition 4.2.0+.
 
 If you prefer to start a TigerGraph Community Edition instance without a license key, please make sure the container can be accessed from the GraphRAG containers by add `--network graphrag_default`:
+
 ```
 docker run -d -p 14240:14240 --name tigergraph --ulimit nofile=1000000:1000000 --init --network graphrag_default -t tigergraph/community:4.2.2
 ```
@@ -225,6 +266,7 @@ docker run -d -p 14240:14240 --name tigergraph --ulimit nofile=1000000:1000000 -
 > Or modify`hostname` in `db_config` section of `configs/server_config.json` and replace `http://tigergraph` to your tigergraph container IP address, e.g., `http://172.19.0.2`. 
 
 Check the service status with the following commands:
+
 ```
 docker exec -it tigergraph /bin/bash
 gadmin status
@@ -232,43 +274,54 @@ gadmin start all
 ```
 
 After using the database, and you want to shutdown it, use the following shell commmand
+
 ```
 gadmin stop all
 ```
 
 [Go back to top](#top)
 
-
 #### Manual Deploy of GraphRAG with Kubernetes
 
+
+
 ##### Step 1: Get kubernetes deployment file
+
   Download the [graphrag-k8s.yml](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/graphrag-k8s.yml) file directly
 
 ##### Step 2: Modify `graphrag-k8s.yml` (Optional)
+
   Remove the sections for tigergraph instance if you're using a standalone TigerGraph instance instead
 
 ##### Step 3: Set up server configurations
+
   Next, in the same directory as the Kubernetes deployment file is in, create a `configs` directory and download the following configuration files:
-  * [configs/server_config.json](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/configs/server_config.json)
+
+- [configs/server_config.json](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/configs/server_config.json)
 
   Update the TigerGraph database information, LLM API keys and other configs accordingly.
 
 ##### Step 4: Install Nginx Ingress (Optional)
+
   If Nginx Ingress is not installed yet, it can be installed using `kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.2.1/deploy/static/provider/cloud/deploy.yaml`
 
 ##### Step 5: Start all services
+
   Replace `/path/to/graphrag/configs` with the absolute path of the `configs` folder inside `graphrag-k8s.yml`, and update the TigerGraph database information and other configs accordingly.
 
   Now, simply run `kubectl apply -f graphrag-k8s.yml` and wait for all the services to start.
 
 ##### Step 6: Stop all services (Optional)
+
   Run kubectl delete -f graphrag-k8s.yml and wait for all the services in the deployment to be deleted.
 
-> Note: Nginx Ingress should be deleted using kubectl delete -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.2.1/deploy/static/provider/cloud/deploy.yaml if port 80 needs to be released
+> Note: Nginx Ingress should be deleted using kubectl delete -f [https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.2.1/deploy/static/provider/cloud/deploy.yaml](https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.2.1/deploy/static/provider/cloud/deploy.yaml) if port 80 needs to be released
 
 [Go back to top](#top)
 
 ---
+
+
 
 ## Use TigerGraph GraphRAG
 
@@ -281,9 +334,11 @@ The pre-loaded knowledge graph `TigerGraphRAG` is provided for an express access
 #### Step 1: Get data package
 
 Download the following data file and put it under `/home/tigergraph/graphrag/` inside your TigerGraph container:
-* [ExportedGraph.zip](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/data/ExportedGraph.zip)
+
+- [ExportedGraph.zip](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/data/ExportedGraph.zip)
 
 Use the following commands if the file cannot be downloaded inside the TigerGraph container directly:
+
 ```
 docker exec -it tigergraph mkdir -p /home/tigergraph/graphrag
 docker exec -it tigergraph curl -kL https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/data/ExportedGraph.zip -o /home/tigergraph/graphrag/ExportedGraph.zip
@@ -291,8 +346,12 @@ docker exec -it tigergraph curl -kL https://raw.githubusercontent.com/tigergraph
 
 > Note: command should be changed to equivalent formats if standalone TigerGraph instance is used
 
+
+
 #### Step 2: Import data package
+
 Next, log onto the TigerGraph instance and make use of the Database Import feature to recreate the GraphRAG:
+
 ```
 docker exec -it tigergraph /bin/bash
 gsql "import graph all from \"/home/tigergraph/graphrag\""
@@ -300,29 +359,32 @@ gsql "install query all"
 ```
 
 Wait until the following output is given:
+
 ```
 [======================================================================================================] 100% (26/26)
 Query installation finished.
 ```
 
+
+
 #### Step 3: Access Chatbot UI
-Open your browser to access `http://localhost:<nginx_port>` to access GraphRAG Chat. For example: http://localhost:80
+
+Open your browser to access `http://localhost:<nginx_port>` to access GraphRAG Chat. For example: [http://localhost:80](http://localhost:80)
 
 Enter the username and password of the TigerGraph database to login.
 
-![Chat Login](./docs/img/ChatLogin.jpg)
+Chat Login
 
 On the top of the page, select `Classic` -> `Community Search` as RAG pattern and `TigerGraphRAG` as Graph.
-![RAG Config](./docs/img/RAGConfig.jpg)
+RAG Config
 
 In the chat box, input the question `how to load data to tigergraph vector store, give an example in Python` and click the `send` button.
-![Demo Question](./docs/img/DemoQuestion.jpg)
+Demo Question
 
 You can also ask other questions on statistics and data inside the TigerGraph database.
-![Data          ](./docs/img/Inquiry.jpg)
+Data          
 
 [Go back to top](#top)
-
 
 ### Manually Build GraphRAG From Scratch
 
@@ -331,40 +393,51 @@ If you want to experience the whole process of GraphRAG, you can build the Graph
 #### Step 1: Get demo script
 
 The following scripts are needed to run the demo. Please download and put them in the same directory `./graphrag` as the Docker Compose file:
-* Demo driver: [graphrag_demo.sh](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/graphrag_demo.sh)
-* GraphRAG initializer: [init_graphrag.py](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/init_graphrag.py)
-* Example: [answer_question.py](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/answer_question.py)
+
+- Demo driver: [graphrag_demo.sh](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/graphrag_demo.sh)
+- GraphRAG initializer: [init_graphrag.py](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/init_graphrag.py)
+- Example: [answer_question.py](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/tutorials/answer_question.py)
+
+
 
 #### Step 2: Download the demo data
 
 Next, download the following data file and put it in a `data` subdirectory of the directory contains the Docker Compose file:
-* [data/tg_tutorials.jsonl](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/data/tg_tutorials.jsonl)
+
+- [data/tg_tutorials.jsonl](https://raw.githubusercontent.com/tigergraph/graphrag/refs/heads/main/docs/data/tg_tutorials.jsonl)
+
+
 
 #### Step 3: Run the demo driver script
 
 > Note: Python 3.11+ is needed to run the demo
 
 It is recommended to use a virtual env to isolate the runtime environment for the demo
+
 ```
 python3.11 -m venv demo
 source demo/bin/activate
 ```
 
 Now, simply run the demo script to try GraphRAG.
+
 ```
   ./graphrag_demo.sh
 ```
 
 The script will:
+
 1. Check the environment
-1. Init TigerGraph schema and related queries needed
-1. Load the sample data
-1. Init the GraphRAG based on the graph and install required queries
-1. Ask a question via Python to get answer from GraphRAG
+2. Init TigerGraph schema and related queries needed
+3. Load the sample data
+4. Init the GraphRAG based on the graph and install required queries
+5. Ask a question via Python to get answer from GraphRAG
 
 [Go back to top](#top)
 
 ---
+
+
 
 ## Chat Engines and Agents
 
@@ -391,13 +464,15 @@ A fixed pipeline: it routes the question to a retrieval method (auto-selected or
 
 ---
 
+
+
 ## Document Ingestion for Knowledge Graph
 
 Documents can be ingested into the knowledge graph either through the UI Admin page or manually via backend APIs.
 
 > **Import Note**: Knowledge Graph needs to be initialized before document ingestion and should be refreshed after document ingestion to update graph content
 
-![Document Processing Workflow](./docs/img/IngestionWorkflow.png)
+Document Processing Workflow
 
 ### Ingest Documents from the UI
 
@@ -407,54 +482,57 @@ You can upload local files, download files from cloud storage, or use **Amazon B
 
 Local file ingestion follows a two-step process:
 
-1. **Upload local files to the server**  
-   Files are first uploaded to the GraphRAG server for pre-processing.  
-   - Multimodal files (e.g., PDFs) are converted into text along with extracted images.  
-   - Each image receives a generated description and a reference inside the converted text file.  
-   - Uploaded files may be manually deleted before ingestion if they are no longer needed.
+1. **Upload local files to the server**
+  Files are first uploaded to the GraphRAG server for pre-processing.  
+  - Multimodal files (e.g., PDFs) are converted into text along with extracted images.  
+  - Each image receives a generated description and a reference inside the converted text file.  
+  - Uploaded files may be manually deleted before ingestion if they are no longer needed.
+2. **Ingest files into your knowledge graph**
+  The pre-processed documents are loaded into the graph database as vertices using a dedicated ingestion job.
 
-2. **Ingest files into your knowledge graph**  
-   The pre-processed documents are loaded into the graph database as vertices using a dedicated ingestion job.
-
-![Upload Files](./docs/img/LocalFileUpload.png)
+Upload Files
 
 #### Download from Cloud
 
 Cloud ingestion works similarly to local uploads and also follows a two-step process:
 
-1. **Download files from cloud storage**  
-   Instead of selecting local files, you can connect to a cloud provider (S3, GCS, Azure) using the appropriate credentials.  
-   - Files are downloaded to the GraphRAG server for pre-processing.  
-   - Multimodal files (e.g., PDFs) are converted to text with extracted images, each with descriptive references.  
-   - Downloaded files can be manually deleted before ingestion if no longer needed.
+1. **Download files from cloud storage**
+  Instead of selecting local files, you can connect to a cloud provider (S3, GCS, Azure) using the appropriate credentials.  
+  - Files are downloaded to the GraphRAG server for pre-processing.  
+  - Multimodal files (e.g., PDFs) are converted to text with extracted images, each with descriptive references.  
+  - Downloaded files can be manually deleted before ingestion if no longer needed.
+2. **Ingest files into your knowledge graph**
+  After pre-processing, the documents are loaded into the graph database as vertices via a dedicated ingestion job.
 
-2. **Ingest files into your knowledge graph**  
-   After pre-processing, the documents are loaded into the graph database as vertices via a dedicated ingestion job.
-
-![Download from Cloud](./docs/img/DownloadFromCloud.png)
+Download from Cloud
 
 #### Use Amazon BDA
 
 You may choose **Amazon Bedrock Data Automation (BDA)** as the external document pre-processor instead of the built-in GraphRAG processor.  
+
 - Amazon BDA processes multimodal documents stored in an S3 bucket.  
 - It writes the converted outputs to a separate S3 bucket.  
 - These processed documents can then be ingested directly into your knowledge graph.  
 - This method is a **single-step ingestion workflow** since pre-processing is completed by BDA.
 
-![Use Amazon BDA](./docs/img/UseAmazonBDA.png)
+Use Amazon BDA
 
 ### Ingest Documents via API
 
 For examples of how to ingest documents through the backend API, refer to the **[GraphRAG Demo Notebook](./docs/notebooks/GraphRAGDemo.ipynb)**.
 
-
 [Go back to top](#top)
 
 ---
 
+
+
 ## More Detailed Configurations
 
+
+
 ### DB configuration
+
 Copy the below into `configs/server_config.json` and edit the `hostname` to match your database's configuration. Token authentication is handled automatically — an api token is obtained from the username/password when the database requires one, unless a static api token is configured. Set the timeout, memory threshold, and thread limit parameters as desired to control how much of the database's resources are consumed when answering a question.
 
 ```json
@@ -472,20 +550,25 @@ Copy the below into `configs/server_config.json` and edit the `hostname` to matc
 }
 ```
 
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `hostname` | string | `"http://tigergraph"` | TigerGraph server URL. |
-| `restppPort` | string | `"9000"` | RESTPP port for TigerGraph API requests. |
-| `gsPort` | string | `"14240"` | GSQL port for TigerGraph admin operations. |
-| `username` | string | `"tigergraph"` | TigerGraph database username. |
-| `password` | string | `"tigergraph"` | TigerGraph database password. |
-| `graphname` | string | `""` | Default graph name. Usually left empty (selected at runtime). |
-| `apiToken` | string | `""` | Optional pre-generated token for the service's background operations. Interactive requests always authenticate as the signed-in user. |
-| `default_timeout` | int | `300` | Default query timeout in seconds. |
-| `default_mem_threshold` | int | `5000` | Memory threshold (MB) for query execution. |
-| `default_thread_limit` | int | `8` | Max threads for query execution. |
+
+| Parameter               | Type   | Default               | Description                                                                                                                           |
+| ----------------------- | ------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `hostname`              | string | `"http://tigergraph"` | TigerGraph server URL.                                                                                                                |
+| `restppPort`            | string | `"9000"`              | RESTPP port for TigerGraph API requests.                                                                                              |
+| `gsPort`                | string | `"14240"`             | GSQL port for TigerGraph admin operations.                                                                                            |
+| `username`              | string | `"tigergraph"`        | TigerGraph database username.                                                                                                         |
+| `password`              | string | `"tigergraph"`        | TigerGraph database password.                                                                                                         |
+| `graphname`             | string | `""`                  | Default graph name. Usually left empty (selected at runtime).                                                                         |
+| `apiToken`              | string | `""`                  | Optional pre-generated token for the service's background operations. Interactive requests always authenticate as the signed-in user. |
+| `default_timeout`       | int    | `300`                 | Default query timeout in seconds.                                                                                                     |
+| `default_mem_threshold` | int    | `5000`                | Memory threshold (MB) for query execution.                                                                                            |
+| `default_thread_limit`  | int    | `8`                   | Max threads for query execution.                                                                                                      |
+
+
+
 
 ### GraphRAG configuration
+
 Copy the below code into `configs/server_config.json`. You shouldn’t need to change anything unless you change the port of the chat history service in the Docker Compose file.
 
 ```json
@@ -503,51 +586,56 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 }
 ```
 
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `reuse_embedding` | bool | `true` | Reuse existing embeddings instead of regenerating them. |
-| `ecc` | string | `"http://graphrag-ecc:8001"` | URL of the knowledge graph build service. No change needed when using the provided Docker Compose file. |
-| `chat_history_api` | string | `"http://chat-history:8002"` | URL of the chat history service. No change needed when using the provided Docker Compose file. |
-| `chunker` | string | `"semantic"` | Default document chunker. Options: `semantic`, `character`, `regex`, `markdown`, `html`, `recursive`. |
-| `extractor` | string | `"llm"` | Entity extraction method. Options: `llm`, `graphrag`. |
-| `strict_mode` | bool | `false` | Dynamic-schema enforcement during extraction. When `true`, entities and relationships that don't match the domain schema are dropped. When `false` (default), unmatched nodes fall back to generic `Entity` vertices. |
-| `retrieval_include_entity` | bool \| null | `null` (auto) | Whether retriever queries include the generic `Entity` vertex alongside domain types. When unset, the server uses `false` if a domain schema exists and `true` otherwise. Set explicitly to override. |
-| `schema_max_sample_files` | int | `5` | Maximum number of sample documents accepted by the *Generate from sample documents* path on the *Initialize Knowledge Graph* dialog. |
-| `schema_max_total_mb` | int | `50` | Combined upload cap (MB) across all sample files for schema extraction. Bounds the content sent to the LLM. A single file may use the full budget; no separate per-file cap. |
-| `enable_router_fallback` | bool | `true` | When the function-call or Cypher path fails after 3 retries, fall back to vector search instead of failing the query. |
-| `chunker_config` | object | `{}` | Chunker-specific settings (see sub-parameters below). All settings are saved regardless of which chunker is selected as default. |
-| ↳ `chunk_size` | int | `2048` | Maximum number of characters per chunk. Used by `character`, `markdown`, `html`, and `recursive` chunkers. Larger values produce fewer, bigger chunks; smaller values produce more, finer-grained chunks. |
-| ↳ `overlap_size` | int | 1/8 of `chunk_size` | Number of overlapping characters between consecutive chunks. Used by `character`, `markdown`, `html`, and `recursive` chunkers. More overlap preserves cross-chunk context but increases total chunk count. Set to `0` for no overlap. |
-| ↳ `method` | string | `"percentile"` | Breakpoint detection method for the `semantic` chunker. Options: `percentile`, `standard_deviation`, `interquartile`, `gradient`. Controls how the chunker decides where to split based on embedding similarity. |
-| ↳ `threshold` | float | `0.95` | Similarity threshold for the `semantic` chunker. Higher values produce more splits (smaller chunks); lower values produce fewer splits (larger chunks). |
-| ↳ `pattern` | string | `""` | Regular expression pattern for the `regex` chunker. The document is split at each match of this pattern. |
-| `top_k` | int | `5` | Number of initial seed results to retrieve per search. Also caps the final scored results. Increasing `top_k` increases the overall context size sent to the LLM. |
-| `num_hops` | int | `2` | Number of graph hops to traverse from seed nodes during hybrid search. More hops expand the result set with related context. |
-| `num_seen_min` | int | `2` | Minimum occurrence count for a node to be included during hybrid search traversal. Higher values filter out loosely connected nodes, reducing context size. |
-| `max_results` | int | `2 × top_k` | Caps the number of result chunks hybrid and community search return, ranked by relevance to the question, instead of every chunk the expansion (or community membership) reaches. When unset it is twice `top_k`, which is also the minimum; set higher to return more context. Lowering it reduces the context sent to the LLM. |
-| `community_level` | int | `2` | Community hierarchy level for community search. Higher levels retrieve broader, higher-order community summaries. |
-| `agent_style` | string | `"planned"` | Default agentic engine style: `"planned"` (plan the whole retrieval up front) or `"reactive"` (decide each step from the last result). The chat menu can override per request. See [Chat Engines and Agents](#chat-engines-and-agents). |
-| `agent_max_iterations` | int | `30` | Reactive agent only: maximum reason-act-observe steps before it must answer. |
-| `agent_max_replans` | int | `3` | Planned agent only: how many times the planner may extend its plan when the gathered context is insufficient. |
-| `agent_max_total_steps` | int | `20` | Planned agent only: hard cap on executed retrieval steps across all replans. |
-| `chunk_only` | bool | `true` | If true, hybrid search only retrieves document chunks, excluding entity data. |
-| `doc_only` | bool | `false` | If true, hybrid search retrieves whole documents instead of chunks. Significantly increases context size. |
-| `with_chunk` | bool | `true` | If true, community search also includes document chunks alongside community summaries. Increases context size. |
-| `doc_process_switch` | bool | `true` | Enable/disable document processing during knowledge graph build. |
-| `entity_extraction_switch` | bool | same as `doc_process_switch` | Enable/disable entity extraction during knowledge graph build. |
-| `community_detection_switch` | bool | same as `entity_extraction_switch` | Enable/disable community detection during knowledge graph build. |
-| `extract_images` | bool | `true` | Run the multimodal LLM on images extracted from documents to generate alt-text. Set to `false` to skip the image-description pass entirely — much faster, at the cost of losing image content from retrieval. Configurable per graph. |
-| `min_image_dim_px` | int | `100` | Smallest side (in px) an image must have to be sent to the multimodal LLM. Smaller images are tagged "decorative image" without an LLM call. Configurable per graph. |
-| `load_batch_size` | int | `500` | Batch size for document loading. |
-| `upsert_delay` | int | `0` | Delay in seconds between loading batches. |
-| `default_concurrency` | int | `10` | Base concurrency level for parallel processing. Configurable per graph. |
-| `process_interval_seconds` | int | `300` | Interval (seconds) for background consistency processing. |
-| `cleanup_interval_seconds` | int | `300` | Interval (seconds) for background cleanup. |
-| `checker_batch_size` | int | `100` | Batch size for background consistency checking. |
-| `enable_consistency_checker` | bool | `false` | Enable the background consistency checker. |
-| `graph_names` | list | `[]` | Graphs to monitor when consistency checker is enabled. |
+
+| Parameter                    | Type        | Default                            | Description                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------- | ----------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reuse_embedding`            | bool        | `true`                             | Reuse existing embeddings instead of regenerating them.                                                                                                                                                                                                                                                                          |
+| `ecc`                        | string      | `"http://graphrag-ecc:8001"`       | URL of the knowledge graph build service. No change needed when using the provided Docker Compose file.                                                                                                                                                                                                                          |
+| `chat_history_api`           | string      | `"http://chat-history:8002"`       | URL of the chat history service. No change needed when using the provided Docker Compose file.                                                                                                                                                                                                                                   |
+| `chunker`                    | string      | `"semantic"`                       | Default document chunker. Options: `semantic`, `character`, `regex`, `markdown`, `html`, `recursive`.                                                                                                                                                                                                                            |
+| `extractor`                  | string      | `"llm"`                            | Entity extraction method. Options: `llm`, `graphrag`.                                                                                                                                                                                                                                                                            |
+| `strict_mode`                | bool        | `false`                            | Dynamic-schema enforcement during extraction. When `true`, entities and relationships that don't match the domain schema are dropped. When `false` (default), unmatched nodes fall back to generic `Entity` vertices.                                                                                                            |
+| `retrieval_include_entity`   | bool | null | `null` (auto)                      | Whether retriever queries include the generic `Entity` vertex alongside domain types. When unset, the server uses `false` if a domain schema exists and `true` otherwise. Set explicitly to override.                                                                                                                            |
+| `schema_max_sample_files`    | int         | `5`                                | Maximum number of sample documents accepted by the *Generate from sample documents* path on the *Initialize Knowledge Graph* dialog.                                                                                                                                                                                             |
+| `schema_max_total_mb`        | int         | `50`                               | Combined upload cap (MB) across all sample files for schema extraction. Bounds the content sent to the LLM. A single file may use the full budget; no separate per-file cap.                                                                                                                                                     |
+| `enable_router_fallback`     | bool        | `true`                             | When the function-call or Cypher path fails after 3 retries, fall back to vector search instead of failing the query.                                                                                                                                                                                                            |
+| `chunker_config`             | object      | `{}`                               | Chunker-specific settings (see sub-parameters below). All settings are saved regardless of which chunker is selected as default.                                                                                                                                                                                                 |
+| ↳ `chunk_size`               | int         | `2048`                             | Maximum number of characters per chunk. Used by `character`, `markdown`, `html`, and `recursive` chunkers. Larger values produce fewer, bigger chunks; smaller values produce more, finer-grained chunks.                                                                                                                        |
+| ↳ `overlap_size`             | int         | 1/8 of `chunk_size`                | Number of overlapping characters between consecutive chunks. Used by `character`, `markdown`, `html`, and `recursive` chunkers. More overlap preserves cross-chunk context but increases total chunk count. Set to `0` for no overlap.                                                                                           |
+| ↳ `method`                   | string      | `"percentile"`                     | Breakpoint detection method for the `semantic` chunker. Options: `percentile`, `standard_deviation`, `interquartile`, `gradient`. Controls how the chunker decides where to split based on embedding similarity.                                                                                                                 |
+| ↳ `threshold`                | float       | `0.95`                             | Similarity threshold for the `semantic` chunker. Higher values produce more splits (smaller chunks); lower values produce fewer splits (larger chunks).                                                                                                                                                                          |
+| ↳ `pattern`                  | string      | `""`                               | Regular expression pattern for the `regex` chunker. The document is split at each match of this pattern.                                                                                                                                                                                                                         |
+| `top_k`                      | int         | `5`                                | Number of initial seed results to retrieve per search. Also caps the final scored results. Increasing `top_k` increases the overall context size sent to the LLM.                                                                                                                                                                |
+| `num_hops`                   | int         | `2`                                | Number of graph hops to traverse from seed nodes during hybrid search. More hops expand the result set with related context.                                                                                                                                                                                                     |
+| `num_seen_min`               | int         | `2`                                | Minimum occurrence count for a node to be included during hybrid search traversal. Higher values filter out loosely connected nodes, reducing context size.                                                                                                                                                                      |
+| `max_results`                | int         | `2 × top_k`                        | Caps the number of result chunks hybrid and community search return, ranked by relevance to the question, instead of every chunk the expansion (or community membership) reaches. When unset it is twice `top_k`, which is also the minimum; set higher to return more context. Lowering it reduces the context sent to the LLM. |
+| `community_level`            | int         | `2`                                | Community hierarchy level for community search. Higher levels retrieve broader, higher-order community summaries.                                                                                                                                                                                                                |
+| `agent_style`                | string      | `"planned"`                        | Default agentic engine style: `"planned"` (plan the whole retrieval up front) or `"reactive"` (decide each step from the last result). The chat menu can override per request. See [Chat Engines and Agents](#chat-engines-and-agents).                                                                                          |
+| `agent_max_iterations`       | int         | `30`                               | Reactive agent only: maximum reason-act-observe steps before it must answer.                                                                                                                                                                                                                                                     |
+| `agent_max_replans`          | int         | `3`                                | Planned agent only: how many times the planner may extend its plan when the gathered context is insufficient.                                                                                                                                                                                                                    |
+| `agent_max_total_steps`      | int         | `20`                               | Planned agent only: hard cap on executed retrieval steps across all replans.                                                                                                                                                                                                                                                     |
+| `chunk_only`                 | bool        | `true`                             | If true, hybrid search only retrieves document chunks, excluding entity data.                                                                                                                                                                                                                                                    |
+| `doc_only`                   | bool        | `false`                            | If true, hybrid search retrieves whole documents instead of chunks. Significantly increases context size.                                                                                                                                                                                                                        |
+| `with_chunk`                 | bool        | `true`                             | If true, community search also includes document chunks alongside community summaries. Increases context size.                                                                                                                                                                                                                   |
+| `doc_process_switch`         | bool        | `true`                             | Enable/disable document processing during knowledge graph build.                                                                                                                                                                                                                                                                 |
+| `entity_extraction_switch`   | bool        | same as `doc_process_switch`       | Enable/disable entity extraction during knowledge graph build.                                                                                                                                                                                                                                                                   |
+| `community_detection_switch` | bool        | same as `entity_extraction_switch` | Enable/disable community detection during knowledge graph build.                                                                                                                                                                                                                                                                 |
+| `extract_images`             | bool        | `true`                             | Run the multimodal LLM on images extracted from documents to generate alt-text. Set to `false` to skip the image-description pass entirely — much faster, at the cost of losing image content from retrieval. Configurable per graph.                                                                                            |
+| `min_image_dim_px`           | int         | `100`                              | Smallest side (in px) an image must have to be sent to the multimodal LLM. Smaller images are tagged "decorative image" without an LLM call. Configurable per graph.                                                                                                                                                             |
+| `load_batch_size`            | int         | `500`                              | Batch size for document loading.                                                                                                                                                                                                                                                                                                 |
+| `upsert_delay`               | int         | `0`                                | Delay in seconds between loading batches.                                                                                                                                                                                                                                                                                        |
+| `default_concurrency`        | int         | `10`                               | Base concurrency level for parallel processing. Configurable per graph.                                                                                                                                                                                                                                                          |
+| `process_interval_seconds`   | int         | `300`                              | Interval (seconds) for background consistency processing.                                                                                                                                                                                                                                                                        |
+| `cleanup_interval_seconds`   | int         | `300`                              | Interval (seconds) for background cleanup.                                                                                                                                                                                                                                                                                       |
+| `checker_batch_size`         | int         | `100`                              | Batch size for background consistency checking.                                                                                                                                                                                                                                                                                  |
+| `enable_consistency_checker` | bool        | `false`                            | Enable the background consistency checker.                                                                                                                                                                                                                                                                                       |
+| `graph_names`                | list        | `[]`                               | Graphs to monitor when consistency checker is enabled.                                                                                                                                                                                                                                                                           |
+
+
+
 
 ### Chat History Configuration
+
 Copy the below code into `configs/server_config.json`. You shouldn’t need to change anything unless you change the port of the chat history service in the Docker Compose file.
 
 ```json
@@ -564,49 +652,57 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 
 [Go back to top](#top)
 
-
 ### MCP servers (agentic tools)
+
 The agentic chat engine can call external [Model Context Protocol](https://modelcontextprotocol.io) (MCP) servers as extra tools. Configure them on the **Setup → Server Configuration → MCP Servers** page (**superuser only**). Each server has a **Test** button that connects exactly as the engine will and lists its tools; a server can only be **Saved** after its test passes.
 
 #### Fields
 
-| Field | Applies to | What it is | Example |
-|---|---|---|---|
-| **Name** | both | Unique label; also the planner's tool prefix (`<name>.<tool>`). No dots. | `weather` |
-| **Transport** | both | `http` (recommended) or `stdio`. | `http` |
-| **URL** | http | The server's streamable HTTP endpoint. | `https://mcp.example.com/mcp` |
-| **Headers** | http | Static headers sent on every request (e.g. auth). Stored masked. | `Authorization` = `Bearer abc123` |
-| **Library tarball** | stdio | Filename of a `.tar.gz` in `configs/mcp_servers/` that GraphRAG installs. | `weather_mcp-1.0.tar.gz` |
-| **Command** | stdio | The console script the installed package provides, or `python`. | `weather-mcp` |
-| **Args** | stdio | Arguments passed to the command. | `-vv` |
-| **Env** | stdio | Environment variables for the subprocess. Stored masked. | `WEATHER_API_KEY` = `…` |
-| **Allowed tools** | both | Globs of tool names to expose (default `*`). | `get_*, list_*` |
-| **Enabled** | both | Off hides the server (and, per-graph, suppresses a same-named global one). | `true` |
-| **Forward user** | both | Send the signed-in username to the server (via MCP `_meta`). | `false` |
+
+| Field               | Applies to | What it is                                                                 | Example                           |
+| ------------------- | ---------- | -------------------------------------------------------------------------- | --------------------------------- |
+| **Name**            | both       | Unique label; also the planner's tool prefix (`<name>.<tool>`). No dots.   | `weather`                         |
+| **Transport**       | both       | `http` (recommended) or `stdio`.                                           | `http`                            |
+| **URL**             | http       | The server's streamable HTTP endpoint.                                     | `https://mcp.example.com/mcp`     |
+| **Headers**         | http       | Static headers sent on every request (e.g. auth). Stored masked.           | `Authorization` = `Bearer abc123` |
+| **Library tarball** | stdio      | Filename of a `.tar.gz` in `configs/mcp_servers/` that GraphRAG installs.  | `weather_mcp-1.0.tar.gz`          |
+| **Command**         | stdio      | The console script the installed package provides, or `python`.            | `weather-mcp`                     |
+| **Args**            | stdio      | Arguments passed to the command.                                           | `-vv`                             |
+| **Env**             | stdio      | Environment variables for the subprocess. Stored masked.                   | `WEATHER_API_KEY` = `…`           |
+| **Allowed tools**   | both       | Globs of tool names to expose (default `*`).                               | `get_*, list_`*                   |
+| **Enabled**         | both       | Off hides the server (and, per-graph, suppresses a same-named global one). | `true`                            |
+| **Forward user**    | both       | Send the signed-in username to the server (via MCP `_meta`).               | `false`                           |
+
+
+
 
 #### HTTP (recommended)
+
 The MCP server is an **external resource you run and manage yourself** — GraphRAG only needs its URL.
 
 Example — a hosted server that needs an API key:
+
 - **Transport**: `http`
-- **URL**: `https://mcp.example.com/mcp`  *(for a server on the same host as GraphRAG, use `http://host.docker.internal:9000/mcp`)*
+- **URL**: `https://mcp.example.com/mcp`  *(for a server on the same host as GraphRAG, use* `http://host.docker.internal:9000/mcp`*)*
 - **Headers**: `Authorization` = `Bearer abc123`
 
 Click **Test**, then **Save**. Nothing runs inside the GraphRAG container.
 
 #### stdio (Python server run by GraphRAG)
+
 Provide the server as a **source tarball** (`.tar.gz`); GraphRAG installs it (with its dependencies) and launches it by the **console script** the package ships.
 
 1. Get the server's `.tar.gz` — build it with `python -m build` (produces `dist/<name>-<ver>.tar.gz`) or download the sdist from PyPI.
 2. In **MCP Servers → Add server**, set **Transport** = `stdio`, then either:
-   - click **Upload** next to *Library tarball* to upload the `.tar.gz` (the field auto-fills with its filename), **or**
-   - copy the `.tar.gz` into `configs/mcp_servers/` on the host and type the filename in the field.
+  - click **Upload** next to *Library tarball* to upload the `.tar.gz` (the field auto-fills with its filename), **or**
+  - copy the `.tar.gz` into `configs/mcp_servers/` on the host and type the filename in the field.
 3. Fill the remaining fields, then **Test** (GraphRAG installs the tarball, launches the command, lists its tools) and **Save**.
 
 Example — a packaged `weather-mcp` server:
+
 - **Transport**: `stdio`
 - **Library tarball**: `weather_mcp-1.0.tar.gz`
-- **Command**: `weather-mcp`  *(the console script the package registers; if it has none, use **Command** `python` + **Args** `-m, weather_mcp`)*
+- **Command**: `weather-mcp`  *(the console script the package registers; if it has none, use **Command*** `python` *+ **Args*** `-m, weather_mcp`*)*
 - **Args**: `-vv`
 - **Env**: `WEATHER_API_KEY` = `…`
 
@@ -618,8 +714,8 @@ Servers added under a specific graph override global ones with the same name; se
 
 [Go back to top](#top)
 
-
 ### LLM provider configuration
+
 In the `llm_config` section of `configs/server_config.json` file, copy JSON config template from below for your LLM provider, and fill out the appropriate fields. Only one provider is needed.
 
 #### Structure overview
@@ -657,65 +753,82 @@ In the `llm_config` section of `configs/server_config.json` file, copy JSON conf
 - `chat_service` *(optional)*: Chatbot LLM override. Missing keys are inherited from `completion_service`. Configurable per graph.
 - `multimodal_service` *(optional)*: Vision/image model for document ingestion.
 
+
+
 #### Supported parameters
 
-**Top-level `llm_config` parameters:**
+**Top-level** `llm_config` **parameters:**
 
-| Parameter | Type | Default | Description |
-| --- | --- | --- | --- |
-| `authentication_configuration` | object | — | Shared authentication credentials for all services. Service-level values take precedence. |
-| `token_limit` | int | — | Hard cap on token count for retrieved context sent to the LLM. Context exceeding this limit is truncated. Inherited by all services if not set at service level. `0` or omitted means unlimited. |
 
-**`completion_service` parameters:**
+| Parameter                      | Type   | Default | Description                                                                                                                                                                                      |
+| ------------------------------ | ------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `authentication_configuration` | object | —       | Shared authentication credentials for all services. Service-level values take precedence.                                                                                                        |
+| `token_limit`                  | int    | —       | Hard cap on token count for retrieved context sent to the LLM. Context exceeding this limit is truncated. Inherited by all services if not set at service level. `0` or omitted means unlimited. |
 
-| Parameter | Type | Required | Default | Description |
-| --- | --- | --- | --- | --- |
-| `llm_service` | string | **Yes** | — | LLM provider. Options: `openai`, `azure`, `vertexai`, `genai`, `bedrock`, `sagemaker`, `groq`, `ollama`, `huggingface`, `watsonx`. |
-| `llm_model` | string | **Yes** | — | Model name for knowledge graph building and query generation (e.g., `gpt-4.1-mini`). |
-| `authentication_configuration` | object | No | inherited from top-level | Service-specific auth credentials. Overrides top-level values. |
-| `model_kwargs` | object | No | `{}` | Additional model parameters (e.g., `{"temperature": 0}`). |
-| `prompt_path` | string | No | `"./common/prompts/openai_gpt4/"` | Path to prompt template files. |
-| `base_url` | string | No | — | Custom API endpoint URL. |
-| `token_limit` | int | No | inherited from top-level | Hard cap on token count for retrieved context sent to the LLM. Context exceeding this limit is truncated. `0` or omitted means unlimited. |
 
-**`embedding_service` parameters:**
+`completion_service` **parameters:**
 
-| Parameter | Type | Required | Default | Description |
-| --- | --- | --- | --- | --- |
-| `embedding_model_service` | string | **Yes** | — | Embedding provider. Options: `openai`, `azure`, `vertexai`, `genai`, `bedrock`, `ollama`. |
-| `model_name` | string | **Yes** | — | Embedding model name (e.g., `text-embedding-3-small`). |
-| `dimensions` | int | No | `1536` | Embedding vector dimensions. |
-| `authentication_configuration` | object | No | inherited from top-level | Service-specific auth credentials. Overrides top-level values. |
 
-**`chat_service` parameters (optional):**
+| Parameter                      | Type   | Required | Default                           | Description                                                                                                                               |
+| ------------------------------ | ------ | -------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `llm_service`                  | string | **Yes**  | —                                 | LLM provider. Options: `openai`, `azure`, `vertexai`, `genai`, `bedrock`, `sagemaker`, `groq`, `ollama`, `huggingface`, `watsonx`.        |
+| `llm_model`                    | string | **Yes**  | —                                 | Model name for knowledge graph building and query generation (e.g., `gpt-4.1-mini`).                                                      |
+| `authentication_configuration` | object | No       | inherited from top-level          | Service-specific auth credentials. Overrides top-level values.                                                                            |
+| `model_kwargs`                 | object | No       | `{}`                              | Additional model parameters (e.g., `{"temperature": 0}`).                                                                                 |
+| `prompt_path`                  | string | No       | `"./common/prompts/openai_gpt4/"` | Path to prompt template files.                                                                                                            |
+| `base_url`                     | string | No       | —                                 | Custom API endpoint URL.                                                                                                                  |
+| `token_limit`                  | int    | No       | inherited from top-level          | Hard cap on token count for retrieved context sent to the LLM. Context exceeding this limit is truncated. `0` or omitted means unlimited. |
+
+
+`embedding_service` **parameters:**
+
+
+| Parameter                      | Type   | Required | Default                  | Description                                                                               |
+| ------------------------------ | ------ | -------- | ------------------------ | ----------------------------------------------------------------------------------------- |
+| `embedding_model_service`      | string | **Yes**  | —                        | Embedding provider. Options: `openai`, `azure`, `vertexai`, `genai`, `bedrock`, `ollama`. |
+| `model_name`                   | string | **Yes**  | —                        | Embedding model name (e.g., `text-embedding-3-small`).                                    |
+| `dimensions`                   | int    | No       | `1536`                   | Embedding vector dimensions.                                                              |
+| `authentication_configuration` | object | No       | inherited from top-level | Service-specific auth credentials. Overrides top-level values.                            |
+
+
+`chat_service` **parameters (optional):**
 
 Chatbot LLM override. If not configured, inherits from `completion_service`. Configurable per graph via the UI.
 
-| Parameter | Type | Required | Default | Description |
-| --- | --- | --- | --- | --- |
-| `llm_service` | string | No | same as completion | LLM provider for the chatbot. |
-| `llm_model` | string | No | same as completion | Model name for the chatbot. |
-| `authentication_configuration` | object | No | inherited from completion | Auth credentials. Service-level values take precedence. |
-| `model_kwargs` | object | No | inherited from completion | Additional model parameters (e.g., `{"temperature": 0}`). |
-| `prompt_path` | string | No | inherited from completion | Path to prompt template files. |
-| `base_url` | string | No | inherited from completion | Custom API endpoint URL. |
-| `token_limit` | int | No | inherited from completion | Hard cap on token count for retrieved context sent to the chatbot LLM. Context exceeding this limit is truncated. `0` or omitted means unlimited. |
 
-**`multimodal_service` parameters (optional):**
+| Parameter                      | Type   | Required | Default                   | Description                                                                                                                                       |
+| ------------------------------ | ------ | -------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `llm_service`                  | string | No       | same as completion        | LLM provider for the chatbot.                                                                                                                     |
+| `llm_model`                    | string | No       | same as completion        | Model name for the chatbot.                                                                                                                       |
+| `authentication_configuration` | object | No       | inherited from completion | Auth credentials. Service-level values take precedence.                                                                                           |
+| `model_kwargs`                 | object | No       | inherited from completion | Additional model parameters (e.g., `{"temperature": 0}`).                                                                                         |
+| `prompt_path`                  | string | No       | inherited from completion | Path to prompt template files.                                                                                                                    |
+| `base_url`                     | string | No       | inherited from completion | Custom API endpoint URL.                                                                                                                          |
+| `token_limit`                  | int    | No       | inherited from completion | Hard cap on token count for retrieved context sent to the chatbot LLM. Context exceeding this limit is truncated. `0` or omitted means unlimited. |
+
+
+`multimodal_service` **parameters (optional):**
 
 Vision model for image processing during document ingestion. If not configured, inherits from `completion_service` — ensure the completion model supports vision input.
 
-| Parameter | Type | Required | Default | Description |
-| --- | --- | --- | --- | --- |
-| `llm_service` | string | No | inherited from completion | Multimodal LLM provider. |
-| `llm_model` | string | No | inherited from completion | Vision model name (e.g., `gpt-4o`). |
-| `authentication_configuration` | object | No | inherited from completion | Service-specific auth credentials. Overrides top-level values. |
-| `model_kwargs` | object | No | inherited from completion | Additional model parameters. |
-| `prompt_path` | string | No | inherited from completion | Path to prompt template files. |
+
+| Parameter                      | Type   | Required | Default                   | Description                                                    |
+| ------------------------------ | ------ | -------- | ------------------------- | -------------------------------------------------------------- |
+| `llm_service`                  | string | No       | inherited from completion | Multimodal LLM provider.                                       |
+| `llm_model`                    | string | No       | inherited from completion | Vision model name (e.g., `gpt-4o`).                            |
+| `authentication_configuration` | object | No       | inherited from completion | Service-specific auth credentials. Overrides top-level values. |
+| `model_kwargs`                 | object | No       | inherited from completion | Additional model parameters.                                   |
+| `prompt_path`                  | string | No       | inherited from completion | Path to prompt template files.                                 |
+
+
+
 
 #### Provider examples
 
+
+
 #### OpenAI
+
 In addition to the `OPENAI_API_KEY`, `llm_model` and `model_name` can be edited to match your specific configuration details.
 
 ```json
@@ -743,9 +856,11 @@ In addition to the `OPENAI_API_KEY`, `llm_model` and `model_name` can be edited 
 }
 ```
 
+
+
 #### Google GenAI
 
-Get your Gemini API key via https://aistudio.google.com/app/apikey.
+Get your Gemini API key via [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey).
 
 ```json
 {
@@ -773,9 +888,11 @@ Get your Gemini API key via https://aistudio.google.com/app/apikey.
 }
 ```
 
+
+
 #### GCP VertexAI
 
-Follow the GCP authentication information found here: https://cloud.google.com/docs/authentication/application-default-credentials#GAC and create a Service Account with VertexAI credentials. Then add the following to the docker run command:
+Follow the GCP authentication information found here: [https://cloud.google.com/docs/authentication/application-default-credentials#GAC](https://cloud.google.com/docs/authentication/application-default-credentials#GAC) and create a Service Account with VertexAI credentials. Then add the following to the docker run command:
 
 ```sh
 -v $(pwd)/configs/SERVICE_ACCOUNT_CREDS.json:/SERVICE_ACCOUNT_CREDS.json -e GOOGLE_APPLICATION_CREDENTIALS=/SERVICE_ACCOUNT_CREDS.json
@@ -802,6 +919,8 @@ And your JSON config should follow as:
     }
 }
 ```
+
+
 
 #### Azure
 
@@ -839,6 +958,8 @@ In addition to the `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `azure_d
     }
 }
 ```
+
+
 
 #### AWS Bedrock
 
@@ -904,6 +1025,8 @@ In addition to the `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`, and `azure_d
 }
 ```
 
+
+
 #### Hugging Face
 
 Example configuration for a model on Hugging Face with a dedicated endpoint is shown below. Please specify your configuration details:
@@ -961,6 +1084,8 @@ Example configuration for a model on Hugging Face with a serverless endpoint is 
 }
 ```
 
+
+
 #### Groq
 
 ```json
@@ -992,6 +1117,8 @@ Example configuration for a model on Hugging Face with a serverless endpoint is 
 
 ---
 
+
+
 ## Tuning Guideline
 
 GraphRAG answer quality, latency, and LLM cost are sensitive to a small set of parameters and prompts. This section is a high-level strategy — adjust *one knob at a time*, run the same set of evaluation questions before and after each change, and keep what helps. Detailed parameter descriptions live in [GraphRAG configuration](#graphrag-configuration).
@@ -1009,13 +1136,15 @@ A bad answer at step 4 is rarely fixed by editing the response prompt; usually i
 
 ### 2. Chunking — get the granularity right
 
-| Symptom | Likely cause | Tweak |
-| --- | --- | --- |
-| Answers cite irrelevant facts from elsewhere in the same chunk | chunks too large | drop `chunk_size` (`character` / `markdown` / `html` / `recursive` chunkers); raise `threshold` (`semantic`) so it splits more aggressively |
-| Answers miss context that's clearly in the source | chunks too small or no overlap | raise `chunk_size`; bump `overlap_size` (default 1/8 of `chunk_size`); lower `threshold` (`semantic`) |
-| Tables / figures get fragmented | wrong chunker for the source | use `markdown` for markdown / docs converted to markdown; use `html` for HTML pages with structure; use `regex` with a custom `pattern` for structured logs |
-| Cross-section reasoning fails | no overlap | increase `overlap_size` to ~25% of `chunk_size` |
-| Long tables get split mid-row and the answer loses column headers | `chunk_size` (default `2048`) is smaller than the table's serialized length | raise `chunker_config.chunk_size` to fit the largest table whole — for table-heavy regulator / industry reports, **`4096`–`8192` is often the right range** |
+
+| Symptom                                                           | Likely cause                                                                | Tweak                                                                                                                                                           |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Answers cite irrelevant facts from elsewhere in the same chunk    | chunks too large                                                            | drop `chunk_size` (`character` / `markdown` / `html` / `recursive` chunkers); raise `threshold` (`semantic`) so it splits more aggressively                     |
+| Answers miss context that's clearly in the source                 | chunks too small or no overlap                                              | raise `chunk_size`; bump `overlap_size` (default 1/8 of `chunk_size`); lower `threshold` (`semantic`)                                                           |
+| Tables / figures get fragmented                                   | wrong chunker for the source                                                | use `markdown` for markdown / docs converted to markdown; use `html` for HTML pages with structure; use `regex` with a custom `pattern` for structured logs     |
+| Cross-section reasoning fails                                     | no overlap                                                                  | increase `overlap_size` to ~25% of `chunk_size`                                                                                                                 |
+| Long tables get split mid-row and the answer loses column headers | `chunk_size` (default `2048`) is smaller than the table's serialized length | raise `chunker_config.chunk_size` to fit the largest table whole — for table-heavy regulator / industry reports, `4096`**–**`8192` **is often the right range** |
+
 
 Default starting point for prose: `chunker: "semantic"`, `threshold: 0.95`, `chunker_config.method: "percentile"`. Move to `markdown` chunker with `chunk_size: 2048` and `overlap_size: 256` if your source is markdown-heavy and table integrity matters. For corpora dominated by large statistical tables (regulatory reports, fiscal yearbooks, multi-year financial summaries), start with `markdown`/`html` chunker and `chunk_size: 8192` so each table stays in one chunk.
 
@@ -1042,13 +1171,15 @@ If extraction quality is still poor after iterating on the prompt, declare a dom
 
 Three knobs interact: `top_k`, `num_hops`, `num_seen_min`. Also `chunk_only` / `doc_only` and (for community search) `community_level` / `with_chunk`.
 
-| Question style | Recommended start | Reasoning |
-| --- | --- | --- |
-| *"What is X?"* (specific lookup) | `top_k=3`, `num_hops=1`, `num_seen_min=1` | Tight neighborhood, few seeds. |
-| *"How are X and Y related?"* (relational) | `top_k=5`, `num_hops=2`, `num_seen_min=1` | Need to traverse between concepts. |
-| *"Summarize the report"* (broad) | `top_k=8`, `num_hops=2`, `num_seen_min=2` | More seeds, filter loose connections. |
-| *"Compare A across multiple sections"* (multi-hop reasoning) | `top_k=8`, `num_hops=3`, `num_seen_min=2` | Wide traversal, but tighten the filter. |
-| *"List all X"* (aggregation) | use *Community Search* with `community_level: 1–2` | Broader summaries, not chunk-level retrieval. |
+
+| Question style                                               | Recommended start                                  | Reasoning                                     |
+| ------------------------------------------------------------ | -------------------------------------------------- | --------------------------------------------- |
+| *"What is X?"* (specific lookup)                             | `top_k=3`, `num_hops=1`, `num_seen_min=1`          | Tight neighborhood, few seeds.                |
+| *"How are X and Y related?"* (relational)                    | `top_k=5`, `num_hops=2`, `num_seen_min=1`          | Need to traverse between concepts.            |
+| *"Summarize the report"* (broad)                             | `top_k=8`, `num_hops=2`, `num_seen_min=2`          | More seeds, filter loose connections.         |
+| *"Compare A across multiple sections"* (multi-hop reasoning) | `top_k=8`, `num_hops=3`, `num_seen_min=2`          | Wide traversal, but tighten the filter.       |
+| *"List all X"* (aggregation)                                 | use *Community Search* with `community_level: 1–2` | Broader summaries, not chunk-level retrieval. |
+
 
 Heuristics:
 
@@ -1083,17 +1214,21 @@ When customizing:
 - **Version-control the override directories** so they survive container rebuilds and travel with the deployment.
 - **Delete custom prompt overrides** if you suspect they're stale; the system falls back to the next layer cleanly.
 
+
+
 ### 6. Performance / cost knobs
 
-- **`default_concurrency`** drives all internal semaphores. ECC uses 2× this value for ingest workers; the chatbot uses 1×. Raise it to speed up ingestion of large corpora; lower it if you're hitting LLM rate limits or seeing socket exhaustion.
-- **`reuse_embedding: true`** skips re-embedding identical text — major saving on re-ingest of unchanged documents.
-- **Choose `llm_model` thoughtfully** — entity / relationship extraction tolerates cheaper / faster models (Haiku, Nova-lite, Flash); response synthesis benefits from stronger ones (Sonnet, GPT-4-class). The `multimodal_service` is independent — set it to a vision-capable model only when you actually ingest images.
-- **`load_batch_size`** and **`upsert_delay`** control ingestion pressure on TigerGraph. Defaults are fine for most loads; lower the batch size if you see write timeouts.
+- `default_concurrency` drives all internal semaphores. ECC uses 2× this value for ingest workers; the chatbot uses 1×. Raise it to speed up ingestion of large corpora; lower it if you're hitting LLM rate limits or seeing socket exhaustion.
+- `reuse_embedding: true` skips re-embedding identical text — major saving on re-ingest of unchanged documents.
+- **Choose** `llm_model` **thoughtfully** — entity / relationship extraction tolerates cheaper / faster models (Haiku, Nova-lite, Flash); response synthesis benefits from stronger ones (Sonnet, GPT-4-class). The `multimodal_service` is independent — set it to a vision-capable model only when you actually ingest images.
+- `load_batch_size` and `upsert_delay` control ingestion pressure on TigerGraph. Defaults are fine for most loads; lower the batch size if you see write timeouts.
 - **Image-description speed.** On image-heavy documents, every image is sent to the multimodal LLM, which dominates ingest time. Tune via `graphrag_config` (global or per graph) — both knobs are also editable from the *GraphRAG Configuration* page in the UI:
-    - `extract_images` (default `true`) — set to `false` to skip image description entirely.
-    - `min_image_dim_px` (default `100`) — smaller images are tagged "decorative image" without an LLM call.
-    - Multimodal calls share the same `default_concurrency` semaphore as the rest of the pipeline — raise it to parallelize more describe calls; lower it if the multimodal provider's rate limit is hit.
-    - AWS Bedrock users can further tune connection pool sizing via `boto3_config` in `llm_config`.
+  - `extract_images` (default `true`) — set to `false` to skip image description entirely.
+  - `min_image_dim_px` (default `100`) — smaller images are tagged "decorative image" without an LLM call.
+  - Multimodal calls share the same `default_concurrency` semaphore as the rest of the pipeline — raise it to parallelize more describe calls; lower it if the multimodal provider's rate limit is hit.
+  - AWS Bedrock users can further tune connection pool sizing via `boto3_config` in `llm_config`.
+
+
 
 ### 7. A working tuning loop
 
@@ -1110,7 +1245,10 @@ The chatbot UI's *Explain* panel (which lists the chunks fed into the answer) is
 
 ---
 
+
+
 ## Customization and Extensibility
+
 TigerGraph GraphRAG is designed to be easily extensible. The service can be configured to use different LLM providers, different graph schemas, and different LangChain tools. The service can also be extended to use different embedding services, different LLM generation services, and different LangChain tools. For more information on how to extend the service, see the [Developer Guide](./docs/DeveloperGuide.md).
 
 ### Test Your Code Changes
@@ -1135,10 +1273,10 @@ docker compose up -d --build
 ```
 
 > **Windows developers:** the repo's top-level `configs/nginx.conf` and `configs/server_config.json` are symlinks intended for POSIX shells and don't resolve on Windows. Before running `docker compose up -d` from the repo root, overwrite them with the tutorial copies:
+>
 > ```sh
 > cp docs/tutorials/configs/nginx.conf configs/nginx.conf
 > cp docs/tutorials/configs/server_config.json configs/server_config.json
 > ```
 
 For adding a new test suite and the broader developer workflow — extending the service with different LLM providers, embedding services, or tools — see the [Developer Guide](./docs/DeveloperGuide.md).
-

@@ -61,6 +61,17 @@ SUPPORTAI_RETRIEVER_QUERIES = [
     "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display",
 ]
 
+CHAT_HISTORY_QUERIES = [
+    "common/gsql/chat_history/Chat_List_Conversations",
+    "common/gsql/chat_history/Chat_Get_Conversation",
+    "common/gsql/chat_history/Chat_Get_Trace",
+    "common/gsql/chat_history/Chat_Delete_Conversation",
+    "common/gsql/chat_history/Chat_Get_Feedback",
+    "common/gsql/chat_history/Chat_Get_All_Feedback",
+    "common/gsql/chat_history/Chat_Search_My_Messages",
+    "common/gsql/chat_history/Chat_Expire_Traces",
+]
+
 # Eventual-consistency-checker queries. The ECC checker is opt-in and off by
 # default, so these are NOT part of what a graph normally needs — they are
 # excluded from the Migration Assistant's required set.
@@ -76,6 +87,7 @@ MIGRATION_QUERIES = (
     + GRAPHRAG_COMMUNITY_QUERIES
     + SUPPORTAI_INIT_QUERIES
     + SUPPORTAI_RETRIEVER_QUERIES
+    + CHAT_HISTORY_QUERIES
 )
 
 

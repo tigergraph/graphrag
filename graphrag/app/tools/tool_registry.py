@@ -73,6 +73,19 @@ class CommunitySearchArgs(BaseModel):
     with_chunk: Optional[bool] = Field(default=None, description="Also return chunks linked to the communities.")
 
 
+class ListMyConversationsArgs(BaseModel):
+    limit: Optional[int] = Field(default=None, description="Max conversations to return (server-capped).")
+
+
+class SearchMyMessagesArgs(BaseModel):
+    q: str = Field(description="Text to search for in the current user's own past messages.")
+    limit: Optional[int] = Field(default=None, description="Max matching messages to return (server-capped).")
+
+
+class GetMyConversationArgs(BaseModel):
+    conversation_id: str = Field(description="Id of one of the current user's own conversations (from chat_history__list_my_conversations).")
+
+
 class TgRunQueryArgs(BaseModel):
     query_text: str = Field(description="A complete interpreted GSQL query body to execute (read-only).")
 
@@ -153,15 +166,27 @@ def _ctx_external_tools(ctx) -> dict:
     return getattr(ctx, "external_tools", None) or {}
 
 
+#: Tools that operate on ``ctx.chat_repo``. Withheld from the catalog when
+#: the request carries no repository.
+_CHAT_HISTORY_TOOL_NAMES = frozenset({
+    "chat_history__list_my_conversations",
+    "chat_history__search_my_messages",
+    "chat_history__get_my_conversation",
+})
+
+
 def _merged_specs(ctx) -> dict:
     """Built-ins overlaid with ``ctx.external_tools`` (external names win
     only via the namespaced ``<server>.<tool>`` form, so collisions with
     built-ins like ``graphrag__hybrid_search`` cannot happen in practice).
+    Chat-history tools appear only when ``ctx.chat_repo`` is set.
     """
-    if ctx is None:
-        return dict(_TOOLS)
     merged = dict(_TOOLS)
-    merged.update(_ctx_external_tools(ctx))
+    if ctx is None or getattr(ctx, "chat_repo", None) is None:
+        for name in _CHAT_HISTORY_TOOL_NAMES:
+            merged.pop(name, None)
+    if ctx is not None:
+        merged.update(_ctx_external_tools(ctx))
     return merged
 
 
@@ -197,6 +222,31 @@ _register(
     "graphrag__community_search",
     "Search thematic community summaries. Use for broad / aggregative / 'overall' questions.",
     CommunitySearchArgs, gt.community_search,
+)
+
+from tools import chat_history_tools as cht  # noqa: E402
+
+_register(
+    "chat_history__list_my_conversations",
+    "List the current user's OWN past conversations on the current graph, newest "
+    "first. Always scoped to the authenticated user — there is no way to list "
+    "any other user's conversations or another graph's history.",
+    ListMyConversationsArgs, cht.list_my_conversations,
+)
+_register(
+    "chat_history__search_my_messages",
+    "Search the current user's OWN past chat messages on the current graph "
+    "(case-insensitive substring). Always scoped to the authenticated user — "
+    "there is no way to search any other user's messages or another graph's "
+    "history.",
+    SearchMyMessagesArgs, cht.search_my_messages,
+)
+_register(
+    "chat_history__get_my_conversation",
+    "Return ALL messages of ONE of the current user's OWN conversations, in "
+    "order, given its conversation_id. An id not in the current user's own "
+    "history returns empty — other users' conversations are unreachable.",
+    GetMyConversationArgs, cht.get_my_conversation,
 )
 
 # tigergraph-mcp read tools — registered only when the package is

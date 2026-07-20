@@ -2,6 +2,13 @@ import json
 import time
 import re
 from pyTigerGraph import TigerGraphConnection
+from common.chat_history.guard import (
+    ChatHistoryAccessDenied,
+    assert_agent_may_call,
+    filter_schema,
+    filter_types,
+    is_chat_history_query,
+)
 from common.metrics.prometheus_metrics import metrics
 from common.logs.logwriter import LogWriter
 import logging
@@ -10,6 +17,34 @@ from common.config import db_config
 
 
 logger = logging.getLogger(__name__)
+
+_SCHEMA_LISTING_METHODS = frozenset({"getVertexTypes", "getEdgeTypes"})
+
+_TYPED_DATA_METHODS = frozenset({
+    "getVertices",
+    "getVerticesById",
+    "getVertexCount",
+    "getVertexDataFrame",
+    "getVertexDataframe",
+    "getVertexDataFrameById",
+    "getVertexDataframeById",
+    "getVertexType",
+    "getVertexStats",
+    "getEdges",
+    "getEdgeCount",
+    "getEdgeCountFrom",
+    "getEdgeDataFrame",
+    "getEdgeDataframe",
+    "getEdgeType",
+    "getEdgeStats",
+    "delVertices",
+    "delVerticesById",
+    "delEdges",
+    "upsertVertex",
+    "upsertVertices",
+    "upsertEdge",
+    "upsertEdges",
+})
 
 
 class TigerGraphConnectionProxy:
@@ -28,8 +63,14 @@ class TigerGraphConnectionProxy:
             def hooked(*args, **kwargs):
                 if name == "runInstalledQuery":
                     return self._runInstalledQuery(*args, **kwargs)
-                else:
+                if name in _TYPED_DATA_METHODS:
+                    assert_agent_may_call(name, args, kwargs)
                     return original_attr(*args, **kwargs)
+                if name in _SCHEMA_LISTING_METHODS:
+                    return filter_types(original_attr(*args, **kwargs))
+                if name == "getSchema":
+                    return filter_schema(original_attr(*args, **kwargs))
+                return original_attr(*args, **kwargs)
 
             return hooked
         else:
@@ -45,6 +86,16 @@ class TigerGraphConnectionProxy:
             return self.original_req(method, url, "token", *args, **kwargs)
 
     def _runInstalledQuery(self, query_name, params, sizeLimit=None, usePost=False):
+        if is_chat_history_query(query_name):
+            logger.warning(
+                "request_id=%s refused agent runInstalledQuery(%r)",
+                req_id_cv.get(), query_name,
+            )
+            raise ChatHistoryAccessDenied(
+                f"{query_name} is not available to the assistant."
+            )
+        assert_agent_may_call("runInstalledQuery", (params,), {})
+
         start_time = time.time()
         metrics.tg_inprogress_requests.labels(query_name=query_name).inc()
         try:

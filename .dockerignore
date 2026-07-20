@@ -1,0 +1,9 @@
+# graphrag/app/common, graphrag/app/configs, ecc/app/common, ecc/app/configs
+# are symlinks to the top-level common/ and configs/ dirs, materialized as
+# plain files on checkouts with core.symlinks=false. Each Dockerfile already
+# does its own COPY common /code/common, so keep these out of the build
+# context or that COPY fails on "cannot copy to non-directory".
+graphrag/app/common
+graphrag/app/configs
+ecc/app/common
+ecc/app/configs

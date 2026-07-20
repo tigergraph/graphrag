@@ -113,6 +113,14 @@ def _resolve_path(results: dict, ref: str):
     return cur
 
 
+def _resolve_binding(results: dict, ref, step_ids: set):
+    """Resolve one ``arg_bindings`` value: a step reference, or a literal
+    when the first segment doesn't name a step in the plan."""
+    if isinstance(ref, str) and ref.split(".")[0] in step_ids:
+        return _resolve_path(results, ref)
+    return ref if ref not in (None, "") else None
+
+
 def _ready(step, done: set) -> bool:
     return all(dep in done for dep in (step.depends_on or []))
 
@@ -160,6 +168,7 @@ def execute_plan(plan, ctx):
     traces: list = []
     done: set = set()
     remaining = [s for s in plan.steps if s.kind != "answer" and s.tool]
+    step_ids = {s.id for s in plan.steps}
 
     # Dependency-ordered passes. Independent steps simply run in listed
     # order within a pass; dependents wait for their inputs.
@@ -172,7 +181,7 @@ def execute_plan(plan, ctx):
                 continue
             args = dict(step.args or {})
             for arg_name, ref in (step.arg_bindings or {}).items():
-                val = _resolve_path(results, ref)
+                val = _resolve_binding(results, ref, step_ids)
                 if val is not None:
                     args[arg_name] = val
             _run_step(step, args, ctx, results, traces)

@@ -139,4 +139,6 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
                          rationale="Answer from retrieved context."),
             ],
         )
-    return _sanitize(plan, ctx)
+    plan = _sanitize(plan, ctx)
+    logger.info(f"agentic plan: {plan.model_dump_json()[:2000]}")
+    return plan

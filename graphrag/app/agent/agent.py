@@ -277,7 +277,7 @@ class TigerGraphAgent:
             )
 
 
-def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto", mode=None, agent_style="auto"):
+def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto", mode=None, agent_style="auto", chat_repo=None):
     """Build the chat agent for a graph.
 
     ``mode`` selects the engine: ``"agentic"`` (default) returns the
@@ -316,6 +316,7 @@ def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retr
         agent = AgenticAgent(
             llm_provider, conn, embedding_service, embedding_store,
             use_cypher=use_cypher, ws=ws, agent_style=agent_style,
+            chat_repo=chat_repo,
         )
         agent.engine_note = None
         return agent

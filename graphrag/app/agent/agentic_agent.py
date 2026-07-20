@@ -105,10 +105,12 @@ class AgenticAgent:
         ws=None,
         supportai_retriever="auto",   # accepted for API parity; agentic plans dynamically
         agent_style="auto",           # "auto" (per config) | "planned" | "reactive"
+        chat_repo=None,               # principal-bound ConversationRepository, or None
     ):
         # Per-request orchestrator override. "auto" defers to the graph's
         # configured agent_style; "planned"/"reactive" force a style.
         self.agent_style = (agent_style or "auto").lower()
+        self.chat_repo = chat_repo
         self.conn = db_connection
         self.llm = llm_provider
         self.model_name = embedding_model.model_name
@@ -228,6 +230,7 @@ class AgenticAgent:
                 external_tools=external_tools,
                 mcp_manager=mcp_manager,
                 user=user,
+                chat_repo=self.chat_repo,
             )
             # agent_style picks the orchestrator: "planned" (planner ->
             # executor DAG) vs the free tool-calling loop ("autonomous",
