@@ -41,5 +41,5 @@ class GoogleGenAI(LLM_Model):
         )
         self.prompt_path = config["prompt_path"]
         LogWriter.info(
-            f"request_id={req_id_cv.get()} instantiated OpenAI model_name={model_name}"
+            f"request_id={req_id_cv.get()} instantiated GoogleGenAI model_name={model_name}"
         )
