@@ -55,6 +55,8 @@ SPLIT_PROMPT_TYPES: Set[str] = {
     "schema_extraction",
     "agentic_agent",
     "agentic_planner",
+    "agentic_triage",
+    "route_response",
 }
 
 REQUIRED_VARS_BY_PROMPT_TYPE: dict = {
@@ -69,6 +71,10 @@ REQUIRED_VARS_BY_PROMPT_TYPE: dict = {
     "agentic_agent": set(),
     # Agentic planner system prompt — split; no required placeholders.
     "agentic_planner": set(),
+    # Agentic front-desk triage — split; routing policy only.
+    "agentic_triage": set(),
+    # Classic datasource router — split; routing policy only.
+    "route_response": set(),
     # graphrag/app/tools/map_question_to_schema.py — NOT split; still a full
     # template override, so it keeps its required placeholders.
     "query_generation": {
@@ -100,6 +106,8 @@ ALLOWED_PARTIALS_BY_PROMPT_TYPE: dict = {
     "query_guidance": set(),
     "agentic_agent": set(),
     "agentic_planner": set(),
+    "agentic_triage": set(),
+    "route_response": set(),
 }
 
 
