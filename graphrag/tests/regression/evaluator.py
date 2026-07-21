@@ -331,7 +331,9 @@ def hallucination_check(
 
     try:
         from common.config import get_chat_config, get_llm_service
-        from agent.agent_hallucination_check import (
+        # Regression-only graded grader (0-1 confidence), kept in this folder so
+        # it stays independent of the production binary hallucination check.
+        from hallucination_check import (
             TigerGraphAgentHallucinationCheck,
         )
 
