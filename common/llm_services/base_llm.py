@@ -292,6 +292,39 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             flags=re.DOTALL,
         )
 
+    @staticmethod
+    def _message_text(raw) -> str:
+        """Plain text from a model response, normalized across providers.
+
+        LangChain returns ``AIMessage.content`` as a **list of typed content
+        blocks** (not a string) whenever a provider emits reasoning / thinking:
+        Anthropic and Bedrock Claude with extended thinking return
+        ``[{"type": "thinking", "signature": ...}, {"type": "text", "text": ...}]``,
+        and OpenAI reasoning models do the same via the Responses API. (OpenAI on
+        the default Chat Completions path returns a plain string, which is why
+        string-content models never hit this.) Downstream string parsers
+        (``PydanticOutputParser`` -> ``Generation(text=...)``) require a string.
+
+        This mirrors langchain-core's own ``.text`` accessor — keep ``type ==
+        "text"`` blocks and bare strings, drop reasoning / thinking — but is
+        inlined because that accessor's shape differs across our
+        ``langchain-core>=0.3.26`` range (a method in 0.3.x, a property in 1.x),
+        so calling it directly isn't version-portable. Reading ``.content``
+        (stable: str or list) is.
+        """
+        content = raw.content if hasattr(raw, "content") else raw
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, str):
+                    parts.append(b)
+                elif isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+                    parts.append(b["text"])
+            return "".join(parts)
+        return str(content)
+
     def _parse_or_repair(self, parser, text, caller_name):
         """Parse LLM output with a shared fallback: extract the JSON object,
         then (if it still fails) repair invalid escapes. Used by every
@@ -420,7 +453,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             logger.info(f"{caller_name} usage: {usage_data}")
             _record_usage(caller_name, usage_data)
 
-        raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
+        raw_text = self._message_text(raw_output)
 
         try:
             return self._parse_or_repair(parser, raw_text, caller_name)
@@ -490,7 +523,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
                 )
                 parser = PydanticOutputParser(pydantic_object=schema)
                 raw = self.llm.invoke(messages)
-                raw_text = raw.content if hasattr(raw, "content") else str(raw)
+                raw_text = self._message_text(raw)
                 result = self._parse_or_repair(parser, raw_text, caller_name)
             usage_data["input_tokens"] = cb.prompt_tokens
             usage_data["output_tokens"] = cb.completion_tokens
@@ -528,7 +561,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             logger.info(f"{caller_name} usage: {usage_data}")
             _record_usage(caller_name, usage_data)
 
-        raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
+        raw_text = self._message_text(raw_output)
 
         try:
             return self._parse_or_repair(parser, raw_text, caller_name)
