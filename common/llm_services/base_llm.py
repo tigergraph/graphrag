@@ -811,6 +811,8 @@ The role, the allowed datasources, the inputs, and the output contract above are
 {user_prompt}
 """
 
+    # Default routing policy matches release_2.0.1 wording. Operators can
+    # customize it from Customize Prompts → Question Routing.
     _ROUTE_RESPONSE_USER_DEFAULT = """\
 ## Routing
 - **`history`**: questions similar to previous ones, or that reference earlier answers / responses, or that refer to the same entities mentioned in a previous answer.
@@ -818,21 +820,13 @@ The role, the allowed datasources, the inputs, and the output contract above are
 - **`functions`**: questions about structured data or operations on structured data (see available entities / relationships above). Some "how many documents are there?" style questions can be answered here.
 
 ## Mandatory `functions` Routing
-Any question about graph database **statistics or metadata** MUST route to `functions`. This section has highest priority:
+Any question about graph database **statistics or metadata** MUST route to `functions`:
 - Counts of vertices / nodes / edges (e.g. "how many edges in the graph").
 - Listing or describing vertex / edge types, schema, or graph structure.
 - Aggregations, totals, or summaries of data in the graph database.
 - Any question mentioning "graph", "graph db", "graph database", "vertices", "nodes", or "edges" in the context of statistics / counts.
-- Structured counts or lookups against schema entities / relationships (e.g. how many X, list Y).
 
 These are **database queries, not document lookups** — always route them to `functions`.
-
-## Document analysis exception → `vectorstore`
-Use `vectorstore` (or `history` if the question clearly continues a prior answer) only for this case:
-- Domain / document analysis that asks for statistics or data **instead of** narrative text or description.
-- Examples: "backed by statistics of data instead of just reading from the text/description"; same intent plus a document topic (e.g. product stability trends).
-- Do **not** use this exception if the question asks for graph / vertex / edge / schema counts.
-- Do **not** broaden this exception. If the question could reasonably be a structured graph query, route to `functions`.
 
 Otherwise, route to `vectorstore`.
 """
