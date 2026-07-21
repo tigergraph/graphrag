@@ -18,6 +18,8 @@ services:
       USE_CYPHER: "true"
     volumes:
       - ./configs/:/code/configs
+      - ./graphrag/tests/regression/:/code/tests/regression/
+      - ./graphrag/tests/test_questions/:/code/tests/test_questions/
 
   graphrag-ecc:
     image: tigergraph/graphrag-ecc:latest
