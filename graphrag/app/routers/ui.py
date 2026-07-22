@@ -62,6 +62,10 @@ from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.utils.graph_locks import acquire_graph_lock, release_graph_lock, acquire_rebuild_lock, release_rebuild_lock, get_rebuilding_graph, get_current_operation
+
+# Cache the last successful ECC status response per graph so the UI
+# still sees started_at and stage when ECC is too busy to respond.
+_last_ecc_status_cache: dict = {}
 from supportai import supportai
 from common.py_schemas.schemas import (
     AgentProgess,
@@ -2258,7 +2262,7 @@ async def forceupdate(
             elapsed = 0
             
             while elapsed < max_wait_time:
-                await asyncio.sleep(poll_interval)  # Non-blocking sleep
+                await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
                 
                 try:
@@ -2272,6 +2276,11 @@ async def forceupdate(
                         status_data = status_response.json()
                         is_running = status_data.get("is_running", False)
                         status = status_data.get("status", "unknown")
+
+                        # Cache last known good response so the UI endpoint
+                        # can fall back to it when ECC is too busy to respond.
+                        if is_running and status_data.get("started_at"):
+                            _last_ecc_status_cache[graphname] = status_data
                         
                         # Log every minute to avoid spam
                         if elapsed % 60 == 0:
@@ -2280,6 +2289,7 @@ async def forceupdate(
                         # Check if ALL stages are complete
                         if not is_running and status in ["completed", "failed", "idle"]:
                             LogWriter.info(f"ECC rebuild finished for {graphname} with status: {status} after {elapsed}s")
+                            _last_ecc_status_cache.pop(graphname, None)
                             break
                     else:
                         LogWriter.warning(f"ECC status check returned {status_response.status_code} for {graphname}")
@@ -2290,12 +2300,17 @@ async def forceupdate(
             
             if elapsed >= max_wait_time:
                 LogWriter.error(f"ECC rebuild monitoring timed out for {graphname} after {max_wait_time}s")
+                _last_ecc_status_cache.pop(graphname, None)
                 
         except Exception as e:
             LogWriter.error(f"Error during ECC rebuild monitoring for {graphname}: {e}")
             import traceback
             LogWriter.error(traceback.format_exc())
         finally:
+            # Always drop cached status when monitoring ends (success,
+            # timeout, or unexpected failure) so timeout fallbacks do
+            # not keep reporting a stale rebuild as active.
+            _last_ecc_status_cache.pop(graphname, None)
             # Release lock only after ALL stages complete (or timeout/error)
             release_rebuild_lock(graphname)
             LogWriter.info(f"Released global rebuild lock for {graphname}")
@@ -2342,12 +2357,15 @@ def get_rebuild_status(
                 "error": f"ECC service returned status {response.status_code}"
             }
     except httpx.TimeoutException as e:
-        # ECC is busy (heavy processing) - assume rebuild is still running
+        # ECC is busy (heavy processing) - assume rebuild is still running.
+        # Return the last cached status so the UI keeps started_at and stage.
         LogWriter.warning(f"ECC status check timed out (ECC may be busy): {str(e)}")
+        cached = _last_ecc_status_cache.get(graphname, {})
         return {
+            **cached,
             "graphname": graphname,
             "is_running": True,
-            "status": "unknown",
+            "status": cached.get("status", "unknown"),
             "error": "ECC is busy processing, status check timed out. Rebuild likely still in progress."
         }
     except Exception as e:

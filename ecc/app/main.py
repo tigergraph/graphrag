@@ -226,6 +226,9 @@ def rebuild_status(
             "is_running": task_info.get("status") == "running",
             "status": task_info.get("status"),
             "stage": task_info.get("stage"),
+            "progress_current": task_info.get("progress_current"),
+            "progress_total": task_info.get("progress_total"),
+            "progress_pct": task_info.get("progress_pct"),
             "started_at": task_info.get("started_at"),
             "completed_at": task_info.get("completed_at"),
             "failed_at": task_info.get("failed_at"),
@@ -240,14 +243,33 @@ def rebuild_status(
     }
 
 
-def _set_stage(task_key: str, msg: str) -> None:
+def _set_stage(
+    task_key: str,
+    msg: str,
+    current=None,
+    total=None,
+    clear_progress: bool = False,
+) -> None:
     """Update the human-readable stage label for an in-flight task.
-    Pulled out so individual stage transitions don't have to know
-    about the ``running_tasks`` schema.
+
+    Optional *current*/*total* populate a progress bar. Progress fields
+    are left unchanged unless new values are provided or
+    *clear_progress* is True — otherwise a later stage string (e.g.
+    from stream_docs finishing early) would wipe the chunking bar
+    before the UI can poll it.
     """
     info = running_tasks.get(task_key)
-    if info is not None:
-        info["stage"] = msg
+    if info is None:
+        return
+    info["stage"] = msg
+    if current is not None and total is not None and total > 0:
+        info["progress_current"] = int(current)
+        info["progress_total"] = int(total)
+        info["progress_pct"] = min(100, int(100 * current / total))
+    elif clear_progress:
+        info.pop("progress_current", None)
+        info.pop("progress_total", None)
+        info.pop("progress_pct", None)
 
 
 async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
@@ -304,7 +326,15 @@ async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
         # ``run_func`` may ignore the kwarg (the supportai legacy path
         # does); the call falls back to the no-progress signature on
         # ``TypeError``.
-        progress_cb = lambda msg: _set_stage(task_key, msg)
+        def progress_cb(msg, current=None, total=None, clear_progress=False):
+            _set_stage(
+                task_key,
+                msg,
+                current=current,
+                total=total,
+                clear_progress=clear_progress,
+            )
+
         try:
             await run_func(graphname, conn, progress=progress_cb)
         except TypeError:

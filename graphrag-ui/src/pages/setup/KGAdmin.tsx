@@ -234,6 +234,7 @@ const KGAdmin = () => {
     if (!open) {
       setRefreshMessage("");
       setPollingActive(false);
+      setRebuildProgress(null);
     }
   };
 
@@ -471,6 +472,12 @@ const KGAdmin = () => {
   const isRebuildRunningRef = useRef(false);
   const [isCheckingStatus, setIsCheckingStatus] = useState(false);
   const [pollingActive, setPollingActive] = useState(false);
+  // Document-level chunking progress from ECC rebuild_status (optional).
+  const [rebuildProgress, setRebuildProgress] = useState<{
+    pct: number;
+    current: number;
+    total: number;
+  } | null>(null);
 
   // Load available graphs. First seed from sessionStorage so the
   // dropdown shows something immediately, then refresh from
@@ -1124,20 +1131,43 @@ const KGAdmin = () => {
           setRefreshMessage(
             `⚠️ A rebuild is already in progress for "${graphName}" (started at ${startTime})${stage}. Please wait for it to complete.`
           );
+          if (
+            typeof statusData.progress_pct === "number" &&
+            typeof statusData.progress_total === "number" &&
+            statusData.progress_total > 0
+          ) {
+            setRebuildProgress({
+              pct: statusData.progress_pct,
+              current: statusData.progress_current ?? 0,
+              total: statusData.progress_total,
+            });
+          } else if (
+            !(typeof statusData.stage === "string" &&
+              statusData.stage.includes("Chunking documents"))
+          ) {
+            // Keep last chunking bar if a poll lands between updates;
+            // clear only once we've left the chunking stage.
+            setRebuildProgress(null);
+          }
         } else if (wasRunning && statusData.status === "completed") {
           setRefreshMessage(`✅ Rebuild completed successfully for "${graphName}".`);
           setPollingActive(false);
+          setRebuildProgress(null);
         } else if (statusData.status === "failed") {
           setRefreshMessage(`❌ Previous rebuild failed: ${statusData.error || "Unknown error"}`);
           setPollingActive(false);
+          setRebuildProgress(null);
         } else if (statusData.status === "error") {
           setRefreshMessage(`❌ Failed to check rebuild status: ${statusData.error || "Unknown error"}`);
           setPollingActive(false);
+          setRebuildProgress(null);
         } else if (statusData.status === "unknown") {
           setRefreshMessage(`⚠️ ECC service returned unknown status. It may be unavailable.`);
           setPollingActive(false);
+          setRebuildProgress(null);
         } else {
           setRefreshMessage("");
+          setRebuildProgress(null);
         }
       } else {
         setRefreshMessage(`❌ Failed to check rebuild status (HTTP ${statusResponse.status}).`);
@@ -2671,6 +2701,23 @@ const KGAdmin = () => {
                     : "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
                 }`}>
                   {refreshMessage}
+                </div>
+              )}
+
+              {isRebuildRunning && rebuildProgress && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-gray-600 dark:text-[#D9D9D9]">
+                    <span>Chunking documents</span>
+                    <span>
+                      {rebuildProgress.current}/{rebuildProgress.total} ({rebuildProgress.pct}%)
+                    </span>
+                  </div>
+                  <div className="h-2 w-full rounded-full bg-gray-200 dark:bg-[#3D3D3D] overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-tigerOrange transition-all duration-300"
+                      style={{ width: `${Math.min(100, Math.max(0, rebuildProgress.pct))}%` }}
+                    />
+                  </div>
                 </div>
               )}
             </div>
