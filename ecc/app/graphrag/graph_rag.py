@@ -57,10 +57,9 @@ async def stream_docs(
     Streams the document contents into the docs_chan, over ``ttl_batches``
     partitions (each StreamIds call claims and returns one partition).
 
-    *progress* (optional) is a callable invoked once when document
-    streaming completes — runtime hands the rebuild status forward
-    from "Chunking documents" to "Extracting entities and
-    relationships" at that boundary.
+    *progress* is accepted for API compatibility with callers but is
+    not used here — the UI stage advances after chunk_docs finishes,
+    not when streaming completes.
     """
     logger.info(f"streaming docs ({ttl_batches} batches)")
     n_docs = 0
@@ -87,11 +86,9 @@ async def stream_docs(
     # close the docs chan -- this function is the only sender
     logger.info("closing docs chan")
     docs_chan.close()
-    if progress is not None:
-        try:
-            progress("Extracting entities and relationships")
-        except Exception:
-            pass
+    # Do NOT advance the UI stage here. Streaming finishing does not
+    # mean chunking is done; advancing here used to clear the chunking
+    # progress bar before chunk_docs finished (and before the UI polled).
 
 async def stream_chunks(
     conn: AsyncTigerGraphConnection,
@@ -163,29 +160,80 @@ async def chunk_docs(
     embed_chan: Channel,
     upsert_chan: Channel,
     extract_chan: Channel,
+    progress=None,
+    total_docs: int = 0,
 ):
     """
     Creates and starts one worker for each document
     in the docs channel.
+
+    When *total_docs* is known (unprocessed Document count), reports
+    document-level chunking progress via *progress* so the UI can show
+    a percentage bar.
     """
     logger.info("Chunk Processing Start")
-    doc_tasks = []
     n_docs = 0
+
+    async def _chunk_one(content):
+        nonlocal n_docs
+        await workers.chunk_doc(conn, content, upsert_chan, embed_chan, extract_chan)
+        n_docs += 1
+        if progress is not None and total_docs > 0:
+            pct = min(100, int(100 * n_docs / total_docs))
+            try:
+                progress(
+                    f"Chunking documents ({n_docs}/{total_docs} — {pct}%)",
+                    current=n_docs,
+                    total=total_docs,
+                )
+            except TypeError:
+                try:
+                    progress(f"Chunking documents ({n_docs}/{total_docs} — {pct}%)")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
     async with asyncio.TaskGroup() as grp:
         while True:
             try:
                 content = await docs_chan.get()
-                n_docs += 1
-                task = grp.create_task(
-                    workers.chunk_doc(conn, content, upsert_chan, embed_chan, extract_chan)
-                )
-                doc_tasks.append(task)
+                grp.create_task(_chunk_one(content))
             except ChannelClosed:
                 break
             except Exception:
                 raise
 
     logger.info(f"Chunk Processing End: {n_docs} document(s) processed")
+
+    # Chunking finished — mark 100% then move stage forward and clear bar.
+    if progress is not None:
+        if total_docs > 0:
+            try:
+                progress(
+                    f"Chunking documents ({n_docs}/{total_docs} — 100%)",
+                    current=total_docs,
+                    total=total_docs,
+                )
+            except TypeError:
+                try:
+                    progress(f"Chunking documents ({n_docs}/{total_docs} — 100%)")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        try:
+            progress(
+                "Extracting entities and relationships",
+                clear_progress=True,
+            )
+        except TypeError:
+            try:
+                progress("Extracting entities and relationships")
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     logger.info("closing extract_chan")
     await extract_chan.put(None)
@@ -333,7 +381,7 @@ async def load(conn: AsyncTigerGraphConnection):
 
 
 async def embed(
-    embed_chan: Channel, embedding_store: EmbeddingStore, graphname: str, progress=None
+    embed_chan: Channel, embedding_store: EmbeddingStore, graphname: str
 ):
     """
     Creates and starts one worker for each embed job
@@ -366,11 +414,6 @@ async def embed(
                 n_embed += 1
                 if n_embed % 100 == 0:
                     logger.info(f"Embedding Processing: {n_embed} embedded so far")
-                    if progress is not None:
-                        try:
-                            progress(f"Embedding documents ({n_embed} embedded so far)")
-                        except Exception:
-                            pass
             except ChannelClosed:
                 break
             except Exception:
@@ -388,7 +431,6 @@ async def extract(
     extractor: BaseExtractor,
     conn: AsyncTigerGraphConnection,
     num_senders: int,
-    progress=None,
 ):
     """
     Creates and starts one worker for each extract job
@@ -418,11 +460,6 @@ async def extract(
                             logger.info(
                                 f"Entity Extraction: {n_chunks} chunks dispatched"
                             )
-                            if progress is not None:
-                                try:
-                                    progress(f"Extracting entities ({n_chunks} chunks processed)")
-                                except Exception:
-                                    pass
             except ChannelClosed:
                 break
             except Exception:
@@ -547,7 +584,6 @@ async def summarize_communities(
     comm_process_chan: Channel,
     upsert_chan: Channel,
     embed_chan: Channel,
-    progress=None,
 ):
     logger.info("Community summarization started")
     n_comm = 0
@@ -564,11 +600,6 @@ async def summarize_communities(
                     logger.info(
                         f"Community summarization: {n_comm} dispatched"
                     )
-                    if progress is not None:
-                        try:
-                            progress(f"Summarizing communities ({n_comm} done so far)")
-                        except Exception:
-                            pass
             except ChannelClosed:
                 break
             except Exception:
@@ -599,11 +630,21 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
     where the job is.
     """
 
-    def _report(msg: str) -> None:
+    def _report(msg: str, current=None, total=None, clear_progress=False) -> None:
         if progress is None:
             return
         try:
-            progress(msg)
+            progress(
+                msg,
+                current=current,
+                total=total,
+                clear_progress=clear_progress,
+            )
+        except TypeError:
+            try:
+                progress(msg)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -640,20 +681,51 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
             # remaining producer racing chunk_docs' load_q writes.
             async def new_doc_pipeline():
                 await sc_task
+                # Count unprocessed Documents before StreamIds claims them,
+                # so chunking can report document-level % progress.
+                total_docs = 0
+                try:
+                    count_result = conn.getVertexCount(
+                        "Document", where="epoch_processed=0"
+                    )
+                    if asyncio.iscoroutine(count_result):
+                        count_result = await count_result
+                    total_docs = int(count_result or 0)
+                except Exception as e:
+                    logger.warning(
+                        f"Could not count unprocessed Documents for progress: {e}"
+                    )
+                if total_docs > 0:
+                    _report(
+                        f"Chunking documents (0/{total_docs} — 0%)",
+                        current=0,
+                        total=total_docs,
+                    )
+                    logger.info(
+                        f"Chunking progress denominator: {total_docs} unprocessed Document(s)"
+                    )
                 async with asyncio.TaskGroup() as inner:
                     inner.create_task(
                         stream_docs(conn, docs_chan, 100, progress=progress)
                     )
                     inner.create_task(
-                        chunk_docs(conn, docs_chan, embed_chan, upsert_chan, extract_chan)
+                        chunk_docs(
+                            conn,
+                            docs_chan,
+                            embed_chan,
+                            upsert_chan,
+                            extract_chan,
+                            progress=progress,
+                            total_docs=total_docs,
+                        )
                     )
             grp.create_task(new_doc_pipeline())
 
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
-            grp.create_task(embed(embed_chan, embedding_store, graphname, progress))
+            grp.create_task(embed(embed_chan, embedding_store, graphname))
             grp.create_task(
-                extract(extract_chan, upsert_chan, embed_chan, extractor, conn, num_chunk_senders, progress)
+                extract(extract_chan, upsert_chan, embed_chan, extractor, conn, num_chunk_senders)
             )
     logger.info("Join docs_chan")
     await docs_chan.join()
@@ -678,7 +750,7 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
     # schema edits could still leave queries missing.
     community_start = time.perf_counter()
     if community_detection_switch:
-        _report("Detecting communities")
+        _report("Detecting communities", clear_progress=True)
         await install_queries(COMMUNITY_QUERIES, conn)
         logger.info("Community Processing Start")
 
@@ -704,11 +776,11 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
             grp.create_task(communities(conn, comm_process_chan))
             # summarize each community
             grp.create_task(
-                summarize_communities(conn, comm_process_chan, upsert_chan, embed_chan, progress)
+                summarize_communities(conn, comm_process_chan, upsert_chan, embed_chan)
             )
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
-            grp.create_task(embed(embed_chan, embedding_store, graphname, progress))
+            grp.create_task(embed(embed_chan, embedding_store, graphname))
         logger.info("Join comm_process_chan")
         await comm_process_chan.join()
         logger.info("Join embed_chan")
@@ -738,7 +810,7 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
                     f"IN_COMMUNITY pair missing on schema"
                 )
             if mirrorable:
-                _report("Updating domain types")
+                _report("Updating domain types", clear_progress=True)
                 await graphrag_mirror_communities(conn, mirrorable)
     community_end = time.perf_counter()
     logger.info("Community Processing End")
