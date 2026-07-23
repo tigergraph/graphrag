@@ -473,7 +473,12 @@ async def extract(
     embed_chan.close()
 
 
-async def communities(conn: AsyncTigerGraphConnection, comm_process_chan: Channel):
+async def communities(
+    conn: AsyncTigerGraphConnection,
+    comm_process_chan: Channel,
+    progress=None,
+    layer_totals: dict | None = None,
+):
     """
     Run louvain
     """
@@ -503,7 +508,9 @@ async def communities(conn: AsyncTigerGraphConnection, comm_process_chan: Channe
 
     mod = res[0]["mod"]
     logger.info(f"****mod pass 1: {mod}")
-    await stream_communities(conn, 1, comm_process_chan)
+    await stream_communities(
+        conn, 1, comm_process_chan, progress=progress, layer_totals=layer_totals
+    )
 
     # nth pass: Iterate on Communities until modularity stops increasing
     prev_mod = -10
@@ -528,7 +535,13 @@ async def communities(conn: AsyncTigerGraphConnection, comm_process_chan: Channe
         mod = res[0]["mod"]
         logger.info(f"mod pass {i+1}: {mod} (diff= {abs(prev_mod - mod)})")
         # write iter to chan for layer to be processed
-        await stream_communities(conn, i + 1, comm_process_chan)
+        await stream_communities(
+            conn,
+            i + 1,
+            comm_process_chan,
+            progress=progress,
+            layer_totals=layer_totals,
+        )
 
         if mod == 0 or mod - prev_mod <= -0.05:
             break
@@ -544,6 +557,8 @@ async def stream_communities(
     conn: AsyncTigerGraphConnection,
     i: int,
     comm_process_chan: Channel,
+    progress=None,
+    layer_totals: dict | None = None,
 ):
     """
     Streams Community IDs from the grpah for a given iteration (from the channel)
@@ -560,6 +575,23 @@ async def stream_communities(
             params={"iter": i}
         )
     comms = resp[0]["Comms"]
+    total = len(comms)
+    if layer_totals is not None:
+        layer_totals[i] = total
+    if progress is not None and total > 0:
+        try:
+            progress(
+                f"Summarizing communities (layer {i}: 0/{total} — 0%)",
+                current=0,
+                total=total,
+            )
+        except TypeError:
+            try:
+                progress(f"Summarizing communities (layer {i}: 0/{total} — 0%)")
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     for c in comms:
         await comm_process_chan.put((i, c["v_id"]))
@@ -584,22 +616,51 @@ async def summarize_communities(
     comm_process_chan: Channel,
     upsert_chan: Channel,
     embed_chan: Channel,
+    progress=None,
+    layer_totals: dict | None = None,
 ):
+    """Summarize each community. When *layer_totals* is shared with
+    ``stream_communities``, reports per-layer completion progress so the
+    UI can show a percentage bar during the long LLM phase.
+    """
     logger.info("Community summarization started")
     n_comm = 0
+    layer_done: dict[int, int] = {}
+
+    async def _summarize_one(c):
+        nonlocal n_comm
+        layer, v_id = c
+        await workers.process_community(conn, upsert_chan, embed_chan, layer, v_id)
+        n_comm += 1
+        done = layer_done.get(layer, 0) + 1
+        layer_done[layer] = done
+        total = (layer_totals or {}).get(layer, 0)
+        if n_comm % 20 == 0:
+            logger.info(f"Community summarization: {n_comm} completed")
+        if progress is not None and total > 0:
+            pct = min(100, int(100 * done / total))
+            try:
+                progress(
+                    f"Summarizing communities (layer {layer}: {done}/{total} — {pct}%)",
+                    current=done,
+                    total=total,
+                )
+            except TypeError:
+                try:
+                    progress(
+                        f"Summarizing communities (layer {layer}: {done}/{total} — {pct}%)"
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
     async with asyncio.TaskGroup() as tg:
         while True:
             try:
                 c = await comm_process_chan.get()
-                tg.create_task(workers.process_community(conn, upsert_chan, embed_chan, *c))
+                tg.create_task(_summarize_one(c))
                 logger.debug(f"Added community to process: {c}")
-                n_comm += 1
-                # Per-community summarization can take 30s; emit a
-                # heartbeat every 20 so a long run doesn't go silent.
-                if n_comm % 20 == 0:
-                    logger.info(
-                        f"Community summarization: {n_comm} dispatched"
-                    )
             except ChannelClosed:
                 break
             except Exception:
@@ -609,7 +670,7 @@ async def summarize_communities(
     upsert_chan.close()
     embed_chan.close()
     logger.info(
-        f"Community summarization done: {n_comm} communities dispatched"
+        f"Community summarization done: {n_comm} communities completed"
     )
 
 
@@ -770,13 +831,29 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
         upsert_chan = Channel()
         embed_chan = Channel()
         load_q.reopen()
+        # Shared per-layer totals so summarize can report N/total bars.
+        layer_totals: dict = {}
         async with asyncio.TaskGroup() as grp:
             # run louvain
             # get the communities
-            grp.create_task(communities(conn, comm_process_chan))
+            grp.create_task(
+                communities(
+                    conn,
+                    comm_process_chan,
+                    progress=progress,
+                    layer_totals=layer_totals,
+                )
+            )
             # summarize each community
             grp.create_task(
-                summarize_communities(conn, comm_process_chan, upsert_chan, embed_chan)
+                summarize_communities(
+                    conn,
+                    comm_process_chan,
+                    upsert_chan,
+                    embed_chan,
+                    progress=progress,
+                    layer_totals=layer_totals,
+                )
             )
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))

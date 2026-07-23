@@ -472,11 +472,12 @@ const KGAdmin = () => {
   const isRebuildRunningRef = useRef(false);
   const [isCheckingStatus, setIsCheckingStatus] = useState(false);
   const [pollingActive, setPollingActive] = useState(false);
-  // Document-level chunking progress from ECC rebuild_status (optional).
+  // Document / community progress from ECC rebuild_status (optional).
   const [rebuildProgress, setRebuildProgress] = useState<{
     pct: number;
     current: number;
     total: number;
+    label: string;
   } | null>(null);
 
   // Load available graphs. First seed from sessionStorage so the
@@ -1136,17 +1137,29 @@ const KGAdmin = () => {
             typeof statusData.progress_total === "number" &&
             statusData.progress_total > 0
           ) {
+            const stageText =
+              typeof statusData.stage === "string" ? statusData.stage : "";
+            let label = "Progress";
+            if (stageText.includes("Chunking documents")) {
+              label = "Chunking documents";
+            } else if (stageText.includes("Summarizing communities")) {
+              label = "Summarizing communities";
+            }
             setRebuildProgress({
               pct: statusData.progress_pct,
               current: statusData.progress_current ?? 0,
               total: statusData.progress_total,
+              label,
             });
           } else if (
-            !(typeof statusData.stage === "string" &&
-              statusData.stage.includes("Chunking documents"))
+            !(
+              typeof statusData.stage === "string" &&
+              (statusData.stage.includes("Chunking documents") ||
+                statusData.stage.includes("Summarizing communities"))
+            )
           ) {
-            // Keep last chunking bar if a poll lands between updates;
-            // clear only once we've left the chunking stage.
+            // Keep last bar if a poll lands between updates; clear only
+            // once we've left a progress-reporting stage.
             setRebuildProgress(null);
           }
         } else if (wasRunning && statusData.status === "completed") {
@@ -2707,7 +2720,7 @@ const KGAdmin = () => {
               {isRebuildRunning && rebuildProgress && (
                 <div className="space-y-1">
                   <div className="flex justify-between text-xs text-gray-600 dark:text-[#D9D9D9]">
-                    <span>Chunking documents</span>
+                    <span>{rebuildProgress.label}</span>
                     <span>
                       {rebuildProgress.current}/{rebuildProgress.total} ({rebuildProgress.pct}%)
                     </span>
