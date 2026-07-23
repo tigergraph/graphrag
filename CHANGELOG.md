@@ -3,6 +3,7 @@
 ## [2.0.1]
 
 ### Changed
+- **License changed from Apache 2.0 to AGPL-3.0.** GraphRAG is now distributed under the GNU Affero General Public License v3.0; releases through v2.0.0 remain under Apache 2.0.
 - **Knowledge-graph rebuild shows per-stage progress and flags incomplete work.** The rebuild dialog now shows a progress bar for document processing and for community summarization, reports the community-detection level as it climbs, and ends with a warning — instead of a plain success — when some community summaries could not be generated.
 
 ### Fixed

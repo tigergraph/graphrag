@@ -1143,3 +1143,7 @@ docker compose up -d --build
 
 For adding a new test suite and the broader developer workflow — extending the service with different LLM providers, embedding services, or tools — see the [Developer Guide](./docs/DeveloperGuide.md).
 
+
+## License
+
+GraphRAG is licensed under the [GNU Affero General Public License v3.0](./LICENSE) (AGPL-3.0). Prior releases through v2.0.0 were distributed under the Apache License 2.0.
