@@ -5,8 +5,8 @@
 # reuses the container's Python environment (deepeval, langchain,
 # common.config, the agent code) — nothing is installed locally.
 #
-# Requires the regression code + test_questions to be mounted into the
-# container (see docker-compose.yml graphrag volumes).
+# The regression code + test_questions are copied into the container on demand
+# (no bind mount needed); results are copied back to results/ afterward.
 #
 # Usage (from repo root, on the host):
 #
@@ -42,9 +42,14 @@ export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
 CONTAINER="${GRAPHRAG_CONTAINER:-graphrag}"
+REG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${REG_DIR}/_container_sync.sh"
+
+sync_regression_to_container "${CONTAINER}" "${REG_DIR}"
 
 # FORCE_COLOR=1 keeps the colourised output even though docker exec output is
 # piped (no TTY). Set NO_COLOR=1 in your shell to turn colours off.
+set +e
 docker exec \
     -e PYTHONUNBUFFERED=1 \
     -e PYTHONWARNINGS=ignore \
@@ -52,3 +57,8 @@ docker exec \
     -e NO_COLOR="${NO_COLOR:-}" \
     "${CONTAINER}" \
     python /code/tests/regression/evaluator.py "$@"
+rc=$?
+set -e
+
+copy_results_from_container "${CONTAINER}" "${REG_DIR}"
+exit $rc

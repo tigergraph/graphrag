@@ -5,9 +5,8 @@
 # the container's Python environment (deepeval, langchain, common.config, etc.)
 # — nothing needs to be installed locally.
 #
-# Requires the regression code + test_questions to be mounted into the
-# container (see docker-compose.yml graphrag volumes). After adding the
-# mounts, recreate the container once with:  docker-compose up -d graphrag
+# The regression code + test_questions are copied into the container on demand
+# (no bind mount needed).
 #
 # Usage (from repo root, on the host):
 #   ./graphrag/tests/regression/run_setup.sh --dataset Toppan
@@ -25,6 +24,10 @@ export MSYS_NO_PATHCONV=1
 export MSYS2_ARG_CONV_EXCL="*"
 
 CONTAINER="${GRAPHRAG_CONTAINER:-graphrag}"
+REG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${REG_DIR}/_container_sync.sh"
+
+sync_regression_to_container "${CONTAINER}" "${REG_DIR}"
 
 docker exec -e PYTHONUNBUFFERED=1 "${CONTAINER}" \
     python /code/tests/regression/setup_graph.py "$@"
