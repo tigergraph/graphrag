@@ -35,6 +35,58 @@ from common.logs.logwriter import LogWriter
 
 logger = logging.getLogger(__name__)
 
+# Community summarization is a small single-shot call; cap it well below the
+# provider's ~600s default so an unreachable provider fails fast instead of
+# hanging the whole community layer.
+_SUMMARY_TIMEOUT_S = 120
+# After this many consecutive connectivity failures, stop calling the provider
+# for the rest of this run — the remaining communities fall back immediately
+# rather than each burning a full timeout.
+_SUMMARY_CONN_FAILURE_THRESHOLD = 3
+
+
+class CommunitySummaryBreaker:
+    """Per-rebuild circuit breaker for community summarization. Once the LLM
+    provider looks unreachable, `open` flips true so remaining communities skip
+    the call and take the placeholder immediately."""
+
+    def __init__(self, threshold: int = _SUMMARY_CONN_FAILURE_THRESHOLD):
+        self.threshold = threshold
+        self._consecutive = 0
+        self.open = False
+        self.incomplete = 0  # communities left with a placeholder summary
+
+    def record_success(self):
+        self._consecutive = 0
+
+    def record_conn_failure(self):
+        self._consecutive += 1
+        if self._consecutive >= self.threshold and not self.open:
+            self.open = True
+            logger.error(
+                "Community summarization circuit breaker OPEN: LLM provider "
+                "appears unreachable; remaining communities will be left with "
+                "placeholder summaries for later regeneration."
+            )
+
+
+async def _summarize_once(summarizer, comm_id, children) -> dict:
+    """Run one summarization attempt with an explicit timeout so a hung
+    provider fails in _SUMMARY_TIMEOUT_S instead of the ~600s library default."""
+    try:
+        return await asyncio.wait_for(
+            summarizer.summarize(comm_id, children),
+            timeout=_SUMMARY_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        return {
+            "error": True,
+            "summary": "",
+            "message": f"summarization timed out after {_SUMMARY_TIMEOUT_S}s",
+            "category": "connectivity",
+        }
+
+
 async def install_query(
     conn: AsyncTigerGraphConnection, query_path: str, install: bool = True
 ) -> dict[str, httpx.Response | str | None]:
@@ -81,6 +133,7 @@ async def chunk_doc(
     upsert_chan: Channel,
     embed_chan: Channel,
     extract_chan: Channel,
+    tracker=None,
 ):
     """
     Chunks a document.
@@ -98,7 +151,7 @@ async def chunk_doc(
             chunker_type = doc["attributes"]["ctype"].lower().strip()
         else:
             chunker_type = ""
-        
+
         v_id = doc["v_id"].lower()
 
         # Use get_chunker for all types (including images)
@@ -109,8 +162,13 @@ async def chunk_doc(
 
         # v_id / chunk_id derive from user document content.
         logger.debug(f"Chunking {v_id} into {len(chunks)} chunk(s)")
+        chunk_ids = [util.process_id(f"{v_id}_chunk_{i}") for i in range(len(chunks))]
+        # Register the document's chunks before dispatching any, so the extract
+        # worker can't complete a chunk before the tracker knows to expect it.
+        if tracker is not None:
+            tracker.register(v_id, chunk_ids)
         for i, chunk in enumerate(chunks):
-            chunk_id = util.process_id(f"{v_id}_chunk_{i}")
+            chunk_id = chunk_ids[i]
             logger.debug(f"Processing chunk {chunk_id}")
 
             # send chunks to be upserted (func, args)
@@ -760,6 +818,7 @@ async def process_community(
     conn: AsyncTigerGraphConnection,
     upsert_chan: Channel,
     embed_chan: Channel,
+    breaker: CommunitySummaryBreaker,
     i: int,
     comm_id: str,
 ):
@@ -787,18 +846,40 @@ async def process_community(
         # if the community only has one child, use its description
         if len(children) == 1:
             summary = children[0]
+        elif breaker.open:
+            # provider already confirmed unreachable this run: skip the call
+            summary = util.COMMUNITY_SUMMARY_PLACEHOLDER
+            breaker.incomplete += 1
         else:
             from common.config import get_llm_service, get_completion_config
             llm = get_llm_service(get_completion_config(conn.graphname))
             summarizer = community_summarizer.CommunitySummarizer(llm)
-            summary = await summarizer.summarize(comm_id, children)
-            if summary["error"]:
-                summary = await summarizer.summarize(comm_id, children)
-                if summary["error"]:
-                    logger.error(f"Failed to summarize community {comm_id} with message {summary['message']}")
-                summary = "Should ignore due to summary error."
+            result = await _summarize_once(summarizer, comm_id, children)
+            if not result["error"]:
+                breaker.record_success()
+                summary = result["summary"]
+            elif result.get("category") == "connectivity":
+                # connectivity failure: record and DON'T retry — a second call
+                # would just burn another timeout against a down provider
+                breaker.record_conn_failure()
+                logger.error(
+                    f"Failed to summarize community {comm_id} (connectivity): "
+                    f"{result['message']}"
+                )
+                summary = util.COMMUNITY_SUMMARY_PLACEHOLDER
+                breaker.incomplete += 1
             else:
-                summary = summary["summary"]
+                # content/transient error: one retry may recover
+                result = await _summarize_once(summarizer, comm_id, children)
+                if not result["error"]:
+                    breaker.record_success()
+                    summary = result["summary"]
+                else:
+                    logger.error(
+                        f"Failed to summarize community {comm_id}: {result['message']}"
+                    )
+                    summary = util.COMMUNITY_SUMMARY_PLACEHOLDER
+                    breaker.incomplete += 1
 
         if not err:
             logger.debug(f"Community {comm_id}: {children}, {summary}")
@@ -818,4 +899,7 @@ async def process_community(
             )
 
             # (v_id, content, index_name)
-            await embed_chan.put((comm_id, summary, "Community"))
+            # Don't embed placeholder summaries — they'd pollute the Community
+            # vector index. They get an embedding when regenerated later.
+            if summary != util.COMMUNITY_SUMMARY_PLACEHOLDER:
+                await embed_chan.put((comm_id, summary, "Community"))

@@ -24,7 +24,7 @@ from aiochannel import Channel, ChannelClosed
 from graphrag import workers
 from graphrag.util import (
     COMMUNITY_QUERIES,
-    check_vertex_has_desc,
+    community_desc_progress,
     http_timeout,
     init,
     install_queries,
@@ -46,6 +46,82 @@ from common.extractors.BaseExtractor import BaseExtractor
 logger = logging.getLogger(__name__)
 
 consistency_checkers = {}
+
+
+class _DocProgress:
+    """Tracks documents through the merged chunk+extract phase so the UI can
+    show a single 'Processing documents' bar that advances at extraction pace
+    (the slow, LLM-bound part) against a fixed document denominator — no
+    moving-denominator jump, and no misleading jump to 100% when chunking
+    finishes early.
+
+    A document is complete once it has been chunked and all of its chunks have
+    been extracted. When extraction is disabled, a document is complete as soon
+    as it is chunked.
+
+    Every method is defensive: a progress-tracking error must never break the
+    ingestion pipeline.
+    """
+
+    def __init__(self, report, extraction_on: bool):
+        self._report = report
+        self._extraction_on = extraction_on
+        self._total = 0
+        self._completed = 0
+        self._chunk_to_doc: dict = {}
+        self._doc_remaining: dict = {}
+
+    def set_total(self, total: int) -> None:
+        try:
+            self._total = int(total or 0)
+            self._emit()
+        except Exception:
+            pass
+
+    def register(self, doc_key: str, chunk_ids: list) -> None:
+        """Called once per document after chunking, with the ids of its chunks."""
+        try:
+            if not self._extraction_on or not chunk_ids:
+                self._completed += 1
+                self._emit()
+                return
+            self._doc_remaining[doc_key] = len(chunk_ids)
+            for cid in chunk_ids:
+                self._chunk_to_doc[cid] = doc_key
+        except Exception:
+            pass
+
+    def chunk_done(self, chunk_id: str) -> None:
+        """Called after a chunk finishes extraction. Ticks the doc's counter and
+        advances the bar when the document's last chunk clears. Unknown chunk ids
+        (e.g. residual orphans streamed outside the new-doc pipeline) are ignored."""
+        try:
+            doc = self._chunk_to_doc.pop(chunk_id, None)
+            if doc is None:
+                return
+            remaining = self._doc_remaining.get(doc, 0) - 1
+            if remaining <= 0:
+                self._doc_remaining.pop(doc, None)
+                self._completed += 1
+                self._emit()
+            else:
+                self._doc_remaining[doc] = remaining
+        except Exception:
+            pass
+
+    def _emit(self) -> None:
+        if self._report is None or self._total <= 0:
+            return
+        completed = min(self._completed, self._total)
+        pct = min(100, int(100 * completed / self._total))
+        try:
+            self._report(
+                f"Processing documents ({completed}/{self._total} — {pct}%)",
+                current=completed,
+                total=self._total,
+            )
+        except Exception:
+            pass
 
 async def stream_docs(
     conn: AsyncTigerGraphConnection,
@@ -162,37 +238,26 @@ async def chunk_docs(
     extract_chan: Channel,
     progress=None,
     total_docs: int = 0,
+    tracker: "_DocProgress | None" = None,
 ):
     """
     Creates and starts one worker for each document
     in the docs channel.
 
-    When *total_docs* is known (unprocessed Document count), reports
-    document-level chunking progress via *progress* so the UI can show
-    a percentage bar.
+    Document-level progress for the merged 'Processing documents' stage is
+    driven by *tracker*, which advances the bar as each document finishes
+    extraction (see :class:`_DocProgress`). This function no longer reports its
+    own chunking percentage — the tracker is the single source of truth.
     """
     logger.info("Chunk Processing Start")
     n_docs = 0
 
     async def _chunk_one(content):
         nonlocal n_docs
-        await workers.chunk_doc(conn, content, upsert_chan, embed_chan, extract_chan)
+        await workers.chunk_doc(
+            conn, content, upsert_chan, embed_chan, extract_chan, tracker=tracker
+        )
         n_docs += 1
-        if progress is not None and total_docs > 0:
-            pct = min(100, int(100 * n_docs / total_docs))
-            try:
-                progress(
-                    f"Chunking documents ({n_docs}/{total_docs} — {pct}%)",
-                    current=n_docs,
-                    total=total_docs,
-                )
-            except TypeError:
-                try:
-                    progress(f"Chunking documents ({n_docs}/{total_docs} — {pct}%)")
-                except Exception:
-                    pass
-            except Exception:
-                pass
 
     async with asyncio.TaskGroup() as grp:
         while True:
@@ -205,35 +270,6 @@ async def chunk_docs(
                 raise
 
     logger.info(f"Chunk Processing End: {n_docs} document(s) processed")
-
-    # Chunking finished — mark 100% then move stage forward and clear bar.
-    if progress is not None:
-        if total_docs > 0:
-            try:
-                progress(
-                    f"Chunking documents ({n_docs}/{total_docs} — 100%)",
-                    current=total_docs,
-                    total=total_docs,
-                )
-            except TypeError:
-                try:
-                    progress(f"Chunking documents ({n_docs}/{total_docs} — 100%)")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        try:
-            progress(
-                "Extracting entities and relationships",
-                clear_progress=True,
-            )
-        except TypeError:
-            try:
-                progress("Extracting entities and relationships")
-            except Exception:
-                pass
-        except Exception:
-            pass
 
     logger.info("closing extract_chan")
     await extract_chan.put(None)
@@ -431,6 +467,7 @@ async def extract(
     extractor: BaseExtractor,
     conn: AsyncTigerGraphConnection,
     num_senders: int,
+    tracker: "_DocProgress | None" = None,
 ):
     """
     Creates and starts one worker for each extract job
@@ -438,6 +475,17 @@ async def extract(
     (chunk , chunk_id) <- q.get()
     """
     logger.info("Entity Extration Start")
+
+    async def _extract_one(itm):
+        # itm == (chunk, chunk_id); tick the document tracker once this chunk's
+        # extraction is done (even on error) so the 'Processing documents' bar
+        # advances at extraction pace.
+        try:
+            await workers.extract(upsert_chan, embed_chan, extractor, conn, *itm)
+        finally:
+            if tracker is not None:
+                tracker.chunk_done(itm[1])
+
     # consume task queue
     n_chunks = 0
     async with asyncio.TaskGroup() as grp:
@@ -452,9 +500,7 @@ async def extract(
                         break
                 else:
                     if entity_extraction_switch:
-                        grp.create_task(
-                            workers.extract(upsert_chan, embed_chan, extractor, conn, *item)
-                        )
+                        grp.create_task(_extract_one(item))
                         n_chunks += 1
                         if n_chunks % 50 == 0:
                             logger.info(
@@ -473,12 +519,20 @@ async def extract(
     embed_chan.close()
 
 
-async def communities(conn: AsyncTigerGraphConnection, comm_process_chan: Channel):
+async def communities(conn: AsyncTigerGraphConnection, comm_process_chan: Channel, report=None):
     """
     Run louvain
     """
+    def _level(n):
+        if report is not None:
+            try:
+                report(f"Detecting communities — level {n}", clear_progress=True)
+            except Exception:
+                pass
+
     # first pass: Group Entities into Communities
     logger.info("Initializing Communities (first louvain pass)")
+    _level(1)
 
     async with tg_sem:
         try:
@@ -503,7 +557,7 @@ async def communities(conn: AsyncTigerGraphConnection, comm_process_chan: Channe
 
     mod = res[0]["mod"]
     logger.info(f"****mod pass 1: {mod}")
-    await stream_communities(conn, 1, comm_process_chan)
+    await stream_communities(conn, 1, comm_process_chan, report=report)
 
     # nth pass: Iterate on Communities until modularity stops increasing
     prev_mod = -10
@@ -512,6 +566,7 @@ async def communities(conn: AsyncTigerGraphConnection, comm_process_chan: Channe
         prev_mod = mod
         i += 1
         logger.info(f"Running louvain on Communities (iteration: {i})")
+        _level(i + 1)
         # louvain pass
         async with tg_sem:
             res = await conn.runInstalledQuery(
@@ -528,7 +583,7 @@ async def communities(conn: AsyncTigerGraphConnection, comm_process_chan: Channe
         mod = res[0]["mod"]
         logger.info(f"mod pass {i+1}: {mod} (diff= {abs(prev_mod - mod)})")
         # write iter to chan for layer to be processed
-        await stream_communities(conn, i + 1, comm_process_chan)
+        await stream_communities(conn, i + 1, comm_process_chan, report=report)
 
         if mod == 0 or mod - prev_mod <= -0.05:
             break
@@ -544,6 +599,7 @@ async def stream_communities(
     conn: AsyncTigerGraphConnection,
     i: int,
     comm_process_chan: Channel,
+    report=None,
 ):
     """
     Streams Community IDs from the grpah for a given iteration (from the channel)
@@ -567,10 +623,48 @@ async def stream_communities(
     # Wait for all communities for layer i to be processed before doing next layer
     # all community descriptions must be populated before the next layer can be processed
     if len(comms) > 0:
+        wait_interval = 5
+        # Give up waiting once no new community has been described for longer
+        # than one summarization timeout (+ margin). With the fast-fail timeout
+        # and circuit breaker upstream, failures write a placeholder quickly, so
+        # this only trips if summarization is truly stuck — never an infinite loop.
+        stall_limit_s = workers._SUMMARY_TIMEOUT_S + 60
+        last_described = -1
+        stalled_for = 0
         n_waits = 0
-        while not await check_vertex_has_desc(conn, i):
-            logger.info(f"Waiting for layer{i} to finish processing")
-            await asyncio.sleep(5)
+        while True:
+            progress = await community_desc_progress(conn, i)
+            if progress is None:
+                # progress query failed; treat as no forward progress
+                all_have, described, total = False, last_described, None
+            else:
+                all_have, described, total = progress
+            if report is not None and total:
+                try:
+                    report(
+                        f"Summarizing communities — level {i} ({described}/{total})",
+                        current=described,
+                        total=total,
+                    )
+                except Exception:
+                    pass
+            if all_have:
+                break
+            if described > last_described:
+                last_described = described
+                stalled_for = 0
+            else:
+                stalled_for += wait_interval
+            if stalled_for >= stall_limit_s:
+                logger.error(
+                    f"Layer {i} summarization stalled at {described}/{total} "
+                    f"for {stalled_for}s; abandoning wait and moving on."
+                )
+                break
+            logger.info(
+                f"Waiting for layer{i} to finish processing ({described}/{total})"
+            )
+            await asyncio.sleep(wait_interval)
             n_waits += 1
             if n_waits > 3:
                 logger.info("Flushing load_q")
@@ -584,6 +678,7 @@ async def summarize_communities(
     comm_process_chan: Channel,
     upsert_chan: Channel,
     embed_chan: Channel,
+    breaker: "workers.CommunitySummaryBreaker",
 ):
     logger.info("Community summarization started")
     n_comm = 0
@@ -591,7 +686,7 @@ async def summarize_communities(
         while True:
             try:
                 c = await comm_process_chan.get()
-                tg.create_task(workers.process_community(conn, upsert_chan, embed_chan, *c))
+                tg.create_task(workers.process_community(conn, upsert_chan, embed_chan, breaker, *c))
                 logger.debug(f"Added community to process: {c}")
                 n_comm += 1
                 # Per-community summarization can take 30s; emit a
@@ -611,6 +706,12 @@ async def summarize_communities(
     logger.info(
         f"Community summarization done: {n_comm} communities dispatched"
     )
+    if breaker.incomplete:
+        logger.warning(
+            f"{breaker.incomplete} community summaries could not be generated "
+            f"(LLM provider errors) and were left as placeholders; regenerate "
+            f"them once connectivity is restored."
+        )
 
 
 async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
@@ -648,18 +749,25 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
         except Exception:
             pass
 
+    # Summary bubbled up to run_with_tracking for the completion status /
+    # partial-success message.
+    run_summary = {"communities_incomplete": 0, "warnings": []}
+
     _report("Preparing rebuild")
     extractor, embedding_store = await init(conn)
     init_start = time.perf_counter()
 
     if doc_process_switch:
-        _report("Chunking documents")
+        _report("Processing documents")
         logger.info("Doc Processing Start")
         docs_chan = Channel(1)
         embed_chan = Channel()
         upsert_chan = Channel()
         extract_chan = Channel()
         num_chunk_senders = 2
+        # One bar for the merged chunk+extract phase; it advances as each
+        # document finishes extraction (see _DocProgress).
+        doc_tracker = _DocProgress(_report, entity_extraction_switch)
 
         async with asyncio.TaskGroup() as grp:
             # PHASE 1 — residual chunk sweep
@@ -696,13 +804,9 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
                         f"Could not count unprocessed Documents for progress: {e}"
                     )
                 if total_docs > 0:
-                    _report(
-                        f"Chunking documents (0/{total_docs} — 0%)",
-                        current=0,
-                        total=total_docs,
-                    )
+                    doc_tracker.set_total(total_docs)
                     logger.info(
-                        f"Chunking progress denominator: {total_docs} unprocessed Document(s)"
+                        f"Processing-documents denominator: {total_docs} unprocessed Document(s)"
                     )
                 async with asyncio.TaskGroup() as inner:
                     inner.create_task(
@@ -717,6 +821,7 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
                             extract_chan,
                             progress=progress,
                             total_docs=total_docs,
+                            tracker=doc_tracker,
                         )
                     )
             grp.create_task(new_doc_pipeline())
@@ -725,7 +830,7 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
             grp.create_task(load(conn))
             grp.create_task(embed(embed_chan, embedding_store, graphname))
             grp.create_task(
-                extract(extract_chan, upsert_chan, embed_chan, extractor, conn, num_chunk_senders)
+                extract(extract_chan, upsert_chan, embed_chan, extractor, conn, num_chunk_senders, tracker=doc_tracker)
             )
     logger.info("Join docs_chan")
     await docs_chan.join()
@@ -770,13 +875,16 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
         upsert_chan = Channel()
         embed_chan = Channel()
         load_q.reopen()
+        # Breaker is created here (not inside summarize_communities) so its
+        # incomplete count can bubble up into the rebuild's completion summary.
+        comm_breaker = workers.CommunitySummaryBreaker()
         async with asyncio.TaskGroup() as grp:
             # run louvain
             # get the communities
-            grp.create_task(communities(conn, comm_process_chan))
+            grp.create_task(communities(conn, comm_process_chan, report=_report))
             # summarize each community
             grp.create_task(
-                summarize_communities(conn, comm_process_chan, upsert_chan, embed_chan)
+                summarize_communities(conn, comm_process_chan, upsert_chan, embed_chan, comm_breaker)
             )
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
@@ -787,6 +895,18 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
         await embed_chan.join()
         logger.info("Join upsert_chan")
         await upsert_chan.join()
+
+        # Record community summaries left incomplete (LLM provider errors) so
+        # the rebuild can end with a partial-success warning instead of a flat
+        # green success.
+        if comm_breaker.incomplete:
+            run_summary["communities_incomplete"] = comm_breaker.incomplete
+            run_summary["warnings"].append(
+                f"{comm_breaker.incomplete} community "
+                f"{'summary' if comm_breaker.incomplete == 1 else 'summaries'} "
+                f"could not be generated (language model unavailable); "
+                f"regenerate them from the graph admin page."
+            )
 
         # Mirror Entity → Community memberships onto domain-VT instances
         # that share the same id.
@@ -857,3 +977,5 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
         )
     else:
         logger.info("Post-pipeline check: all loading jobs are intact.")
+
+    return run_summary

@@ -65,6 +65,20 @@ load_q = reusable_channel.ReuseableChannel()
 loading_event = asyncio.Event()
 loading_event.set() # set the event to true to allow the workers to run
 
+# Written as a community's description when summarization can't produce a real
+# one. Non-empty so the layer-completion check passes and the rebuild finishes,
+# and stable so it can be found and regenerated later.
+COMMUNITY_SUMMARY_PLACEHOLDER = "[summary unavailable - regenerate]"
+# Placeholder written by pre-2.0.1 builds; kept so re-summarization and progress
+# checks recognize communities left behind by older graphs too.
+LEGACY_SUMMARY_PLACEHOLDER = "Should ignore due to summary error."
+
+def is_placeholder_summary(text: str) -> bool:
+    """True if a community description is a placeholder needing regeneration:
+    the current or legacy sentinel, or empty."""
+    t = (text or "").strip()
+    return t in ("", COMMUNITY_SUMMARY_PLACEHOLDER, LEGACY_SUMMARY_PLACEHOLDER)
+
 async def install_queries(
     requried_queries: list[str],
     conn: AsyncTigerGraphConnection,
@@ -607,7 +621,11 @@ async def get_commuinty_children(conn, i: int, c: str):
     return descrs
 
 
-async def check_vertex_has_desc(conn, i: int):
+async def community_desc_progress(conn, i: int):
+    """Return (all_have_desc, described_count, total_count) for layer i, or
+    None if the progress query itself failed. `described_count` lets callers
+    detect forward progress and bail if summarization stalls."""
+    resp = None
     try:
         async with tg_sem:
             resp = await conn.runInstalledQuery(
@@ -616,11 +634,18 @@ async def check_vertex_has_desc(conn, i: int):
             )
     except Exception as e:
         logger.error(f"Check Vert Desc err:\n{e}")
+        return None
 
-    res = resp[0]["all_have_desc"]
-    logger.info(res)
+    try:
+        all_have = resp[0]["all_have_desc"]
+        described = resp[1]["described"]
+        total = resp[1]["total"]
+    except Exception as e:
+        logger.error(f"Check Vert Desc parse err:\n{e}")
+        return None
 
-    return res
+    logger.info(f"layer {i} progress: {described}/{total} described")
+    return all_have, described, total
 
 async def check_embedding_rebuilt(conn, v_type: str):
     try:

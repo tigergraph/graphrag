@@ -477,6 +477,7 @@ const KGAdmin = () => {
     pct: number;
     current: number;
     total: number;
+    label: string;
   } | null>(null);
 
   // Load available graphs. First seed from sessionStorage so the
@@ -1136,21 +1137,32 @@ const KGAdmin = () => {
             typeof statusData.progress_total === "number" &&
             statusData.progress_total > 0
           ) {
+            // Bar label = the stage name without its trailing "(n/total …)".
+            const stageStr =
+              typeof statusData.stage === "string" ? statusData.stage : "";
+            const label = stageStr.split(" (")[0] || "Processing";
             setRebuildProgress({
               pct: statusData.progress_pct,
               current: statusData.progress_current ?? 0,
               total: statusData.progress_total,
+              label,
             });
-          } else if (
-            !(typeof statusData.stage === "string" &&
-              statusData.stage.includes("Chunking documents"))
-          ) {
-            // Keep last chunking bar if a poll lands between updates;
-            // clear only once we've left the chunking stage.
+          } else {
+            // No progress fields → the current stage has no bar (e.g. community
+            // detection). Clear it.
             setRebuildProgress(null);
           }
         } else if (wasRunning && statusData.status === "completed") {
-          setRefreshMessage(`✅ Rebuild completed successfully for "${graphName}".`);
+          const warnings = Array.isArray(statusData.warnings)
+            ? statusData.warnings
+            : [];
+          if (warnings.length > 0) {
+            setRefreshMessage(
+              `⚠️ Rebuild for "${graphName}" completed with warnings: ${warnings.join(" ")}`
+            );
+          } else {
+            setRefreshMessage(`✅ Rebuild completed successfully for "${graphName}".`);
+          }
           setPollingActive(false);
           setRebuildProgress(null);
         } else if (statusData.status === "failed") {
@@ -2696,6 +2708,8 @@ const KGAdmin = () => {
                 <div className={`p-3 rounded-lg text-sm ${
                   refreshMessage.includes("✅")
                     ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
+                    : refreshMessage.includes("with warnings")
+                    ? "bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300"
                     : refreshMessage.includes("❌")
                     ? "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
                     : "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
@@ -2707,7 +2721,7 @@ const KGAdmin = () => {
               {isRebuildRunning && rebuildProgress && (
                 <div className="space-y-1">
                   <div className="flex justify-between text-xs text-gray-600 dark:text-[#D9D9D9]">
-                    <span>Chunking documents</span>
+                    <span>{rebuildProgress.label}</span>
                     <span>
                       {rebuildProgress.current}/{rebuildProgress.total} ({rebuildProgress.pct}%)
                     </span>

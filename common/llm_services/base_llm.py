@@ -23,6 +23,56 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+import asyncio as _asyncio
+
+# HTTP statuses that mean "provider-side / transient" rather than a problem with
+# our request — retrying the same call won't help and, in bulk, signals an
+# outage. 4xx like 400/401/404 are our fault and stay "content".
+_TRANSIENT_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
+def classify_llm_error(exc, _depth: int = 0) -> str:
+    """Classify an LLM call failure as ``"connectivity"`` or ``"content"``.
+
+    ``"connectivity"`` = provider unreachable, timed out, or a transient
+    server-side status — do NOT retry (it will just fail again) and count it
+    toward the summarization circuit breaker. ``"content"`` = a response-level
+    problem (bad JSON, an invalid request) that may succeed on a retry and is
+    specific to one call, so it must not trip the breaker.
+
+    Detection is by exception type and HTTP status code (what the SDKs already
+    give us), not by matching free-form error-message text.
+    """
+    # Our own summarization timeout and stdlib timeouts.
+    if isinstance(exc, (_asyncio.TimeoutError, TimeoutError)):
+        return "connectivity"
+
+    # HTTP status, when the provider SDK exposes one (openai, google, anthropic
+    # all surface .status_code, or .response.status_code).
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int) and status in _TRANSIENT_HTTP_STATUS:
+        return "connectivity"
+
+    # Exception class name — covers ConnectError/ConnectTimeout/ReadTimeout
+    # (httpx), APIConnectionError/APITimeoutError (openai),
+    # ServiceUnavailable/DeadlineExceeded (google) etc. without importing every
+    # provider SDK. The class name is SDK-controlled, unlike the message text.
+    name = type(exc).__name__.lower()
+    if any(t in name for t in ("timeout", "connect", "unavailable", "deadline")):
+        return "connectivity"
+
+    # SDKs often wrap the transport error as __cause__ (e.g. openai wraps httpx);
+    # inspect one level down before giving up.
+    if _depth < 3:
+        for nested in (getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+            if nested is not None and nested is not exc:
+                if classify_llm_error(nested, _depth + 1) == "connectivity":
+                    return "connectivity"
+
+    return "content"
+
 
 class UserPortionConflictReview(BaseModel):
     """Result of the LLM conflict check between a split prompt's fixed system

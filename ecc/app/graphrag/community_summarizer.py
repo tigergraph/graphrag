@@ -19,6 +19,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 
 from common.llm_services import LLM_Model
+from common.llm_services.base_llm import classify_llm_error
 from common.py_schemas import CommunitySummary
 
 logger = logging.getLogger(__name__)
@@ -55,5 +56,10 @@ class CommunitySummarizer:
                 caller_name="community_summarize",
             )
         except Exception as e:
-            return {"error": True, "summary": "", "message": str(e)}
+            return {
+                "error": True,
+                "summary": "",
+                "message": str(e),
+                "category": classify_llm_error(e),
+            }
         return {"error": False, "summary": summary.summary}

@@ -232,7 +232,9 @@ def rebuild_status(
             "started_at": task_info.get("started_at"),
             "completed_at": task_info.get("completed_at"),
             "failed_at": task_info.get("failed_at"),
-            "error": task_info.get("error")
+            "error": task_info.get("error"),
+            "warnings": task_info.get("warnings"),
+            "communities_incomplete": task_info.get("communities_incomplete"),
         }
     
     return {
@@ -336,10 +338,20 @@ async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
             )
 
         try:
-            await run_func(graphname, conn, progress=progress_cb)
+            result = await run_func(graphname, conn, progress=progress_cb)
         except TypeError:
-            await run_func(graphname, conn)
-        running_tasks[task_key] = {"status": "completed", "completed_at": time.time()}
+            result = await run_func(graphname, conn)
+        completion = {"status": "completed", "completed_at": time.time()}
+        # Carry any partial-success info (e.g. community summaries left
+        # incomplete) into the completion status so the UI can warn instead of
+        # reporting a flat success.
+        if isinstance(result, dict):
+            warnings = result.get("warnings") or []
+            if warnings:
+                completion["warnings"] = warnings
+            if result.get("communities_incomplete"):
+                completion["communities_incomplete"] = result["communities_incomplete"]
+        running_tasks[task_key] = completion
         LogWriter.info(f"Completed ECC task: {task_key}")
     except Exception as e:
         running_tasks[task_key] = {"status": "failed", "error": str(e), "failed_at": time.time()}
