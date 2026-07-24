@@ -1,6 +1,5 @@
 from langchain_community.graphs.graph_document import GraphDocument
 from langchain_core.documents import Document
-from langchain_experimental.graph_transformers import LLMGraphTransformer
 
 from common.config import get_llm_service, get_completion_config
 from common.extractors.BaseExtractor import BaseExtractor
@@ -8,6 +7,11 @@ from common.extractors.BaseExtractor import BaseExtractor
 
 class GraphExtractor(BaseExtractor):
     def __init__(self):
+        # Imported lazily: langchain-experimental is being sunset upstream, so
+        # only pay the deprecation warning if this extractor is actually used
+        # (the default "llm" path uses LLMEntityRelationshipExtractor instead).
+        from langchain_experimental.graph_transformers import LLMGraphTransformer
+
         llm = get_llm_service(get_completion_config()).llm
         self.transformer = LLMGraphTransformer(
             llm=llm,

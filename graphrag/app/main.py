@@ -1,16 +1,16 @@
 # Copyright (c) 2024-2026 TigerGraph, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program may be redistributed and/or modified under the terms of the GNU
+# Affero General Public License as published by the Free Software Foundation,
+# either version 3 of the License, or (at your option) any later version.
 #
-#    http://www.apache.org/licenses/LICENSE-2.0
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+# details.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import json
 import logging
@@ -32,46 +32,23 @@ from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
 
-if PRODUCTION:
-    app = FastAPI(
-        title="TigerGraph GraphRAG", docs_url=None, redoc_url=None, openapi_url=None
-    )
-else:
-    app = FastAPI(title="TigerGraph GraphRAG")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(routers.root_router, prefix=PATH_PREFIX)
-app.include_router(routers.inquiryai_router, prefix=PATH_PREFIX)
-app.include_router(routers.supportai_router, prefix=PATH_PREFIX)
-app.include_router(routers.queryai_router, prefix=PATH_PREFIX)
-app.include_router(routers.ui_router, prefix=PATH_PREFIX)
-app.include_router(routers.mcp_servers_router, prefix=PATH_PREFIX)
+from contextlib import asynccontextmanager
 
 
-@app.on_event("startup")
-async def _install_mcp_libraries() -> None:
-    """Install the source tarballs referenced by configured stdio MCP servers
-    (global + per-graph), so their console-script commands are available. Runs
-    each boot, which is what makes them persist across container recreation.
-    """
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- startup ---
+    # Install source tarballs referenced by configured stdio MCP servers
+    # (global + per-graph) each boot, so their console-script commands persist
+    # across container recreation.
     try:
         from common.mcp_config import install_configured_libraries
         install_configured_libraries()
     except Exception as e:
         logging.getLogger(__name__).warning(f"mcp library install failed: {e}")
 
-
-@app.on_event("startup")
-async def _check_agentic_capability() -> None:
-    """Warn at boot if the configured chat model can't tool-call, so operators
-    know the agentic engine will fall back to the classic engine."""
+    # Warn if the configured chat model can't tool-call, so operators know the
+    # agentic engine will fall back to the classic engine.
     try:
         from common.config import get_chat_config
         from common.llm_services.capabilities import model_capabilities
@@ -87,18 +64,41 @@ async def _check_agentic_capability() -> None:
     except Exception as e:
         logging.getLogger(__name__).warning(f"agentic capability check skipped: {e}")
 
+    yield
 
-@app.on_event("shutdown")
-async def _shutdown_mcp_addons() -> None:
-    """Close every cached external-MCP client and stop the dedicated event
-    loop on app shutdown so stdio subprocesses don't outlive the worker.
-    """
+    # --- shutdown ---
+    # Close every cached external-MCP client and stop the dedicated event loop
+    # so stdio subprocesses don't outlive the worker.
     try:
         from mcp_addons import shutdown_all, stop_loop, run_async
         await run_async(shutdown_all())
         stop_loop()
     except Exception as e:
         logging.getLogger(__name__).warning(f"mcp_addons shutdown failed: {e}")
+
+
+if PRODUCTION:
+    app = FastAPI(
+        title="TigerGraph GraphRAG", docs_url=None, redoc_url=None, openapi_url=None,
+        lifespan=lifespan,
+    )
+else:
+    app = FastAPI(title="TigerGraph GraphRAG", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(routers.root_router, prefix=PATH_PREFIX)
+app.include_router(routers.inquiryai_router, prefix=PATH_PREFIX)
+app.include_router(routers.supportai_router, prefix=PATH_PREFIX)
+app.include_router(routers.queryai_router, prefix=PATH_PREFIX)
+app.include_router(routers.ui_router, prefix=PATH_PREFIX)
+app.include_router(routers.mcp_servers_router, prefix=PATH_PREFIX)
 
 
 excluded_metrics_paths = ("/docs", "/openapi.json", "/metrics")

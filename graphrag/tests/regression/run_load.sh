@@ -24,6 +24,8 @@ export MSYS2_ARG_CONV_EXCL="*"
 CONTAINER="${GRAPHRAG_CONTAINER:-graphrag}"
 TG_CONTAINER="${TG_CONTAINER:-tigergraph}"
 GSQL_BIN="/home/tigergraph/tigergraph/app/4.2.1/cmd/gsql"
+REG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${REG_DIR}/_container_sync.sh"
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 DATASET=""
@@ -40,7 +42,10 @@ done
 
 [ -z "${DATASET}" ] && { echo "ERROR: --dataset is required." >&2; exit 1; }
 
-# The dataset folder is mounted inside the graphrag container at /code/tests/test_questions/
+# Copy the regression code + datasets into the container on demand.
+sync_regression_to_container "${CONTAINER}" "${REG_DIR}"
+
+# The dataset folder is copied into the graphrag container at /code/tests/test_questions/
 EXPORT_ZIP="/code/tests/test_questions/${DATASET}/ExportedGraph/ExportedGraph.zip"
 TG_IMPORT_DIR="/tmp/graphrag_regression_${DATASET}"
 GSQL_SCRIPT="/tmp/graphrag_import_${DATASET}.gsql"

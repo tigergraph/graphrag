@@ -20,5 +20,5 @@ class Groq(LLM_Model):
         self.llm = ChatGroq(temperature=0, model_name=model_name)
         self.prompt_path = config["prompt_path"]
         LogWriter.info(
-            f"request_id={req_id_cv.get()} instantiated OpenAI model_name={model_name}"
+            f"request_id={req_id_cv.get()} instantiated Groq model_name={model_name}"
         )
