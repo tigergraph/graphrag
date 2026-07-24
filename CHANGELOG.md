@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.0.1]
+
+### Changed
+- **License changed from Apache 2.0 to AGPL-3.0.** GraphRAG is now distributed under the GNU Affero General Public License v3.0; releases through v2.0.0 remain under Apache 2.0.
+- **Knowledge-graph rebuild shows per-stage progress and flags incomplete work.** The rebuild dialog now shows a progress bar for document processing and for community summarization, reports the community-detection level as it climbs, and ends with a warning — instead of a plain success — when some community summaries could not be generated.
+
+### Fixed
+- **Chat no longer errors with models that return structured content.** Replies from models that respond in typed content blocks — such as Gemini 3 and reasoning models — are read correctly instead of raising a validation error, so Classic mode works with these models again.
+- **Knowledge-graph rebuild no longer hangs when the language model is unreachable.** Community summarization fails fast on a provider outage and stops calling the model after repeated connection failures, so a rebuild finishes instead of looping indefinitely. Communities left unsummarized are marked with a placeholder so they can be regenerated once connectivity is restored.
+
 ## [2.0.0]
 
 ### Added

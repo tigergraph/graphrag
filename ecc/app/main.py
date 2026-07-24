@@ -1,16 +1,16 @@
 # Copyright (c) 2024-2026 TigerGraph, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program may be redistributed and/or modified under the terms of the GNU
+# Affero General Public License as published by the Free Software Foundation,
+# either version 3 of the License, or (at your option) any later version.
 #
-#    http://www.apache.org/licenses/LICENSE-2.0
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+# details.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import os
 
@@ -226,10 +226,15 @@ def rebuild_status(
             "is_running": task_info.get("status") == "running",
             "status": task_info.get("status"),
             "stage": task_info.get("stage"),
+            "progress_current": task_info.get("progress_current"),
+            "progress_total": task_info.get("progress_total"),
+            "progress_pct": task_info.get("progress_pct"),
             "started_at": task_info.get("started_at"),
             "completed_at": task_info.get("completed_at"),
             "failed_at": task_info.get("failed_at"),
-            "error": task_info.get("error")
+            "error": task_info.get("error"),
+            "warnings": task_info.get("warnings"),
+            "communities_incomplete": task_info.get("communities_incomplete"),
         }
     
     return {
@@ -240,14 +245,33 @@ def rebuild_status(
     }
 
 
-def _set_stage(task_key: str, msg: str) -> None:
+def _set_stage(
+    task_key: str,
+    msg: str,
+    current=None,
+    total=None,
+    clear_progress: bool = False,
+) -> None:
     """Update the human-readable stage label for an in-flight task.
-    Pulled out so individual stage transitions don't have to know
-    about the ``running_tasks`` schema.
+
+    Optional *current*/*total* populate a progress bar. Progress fields
+    are left unchanged unless new values are provided or
+    *clear_progress* is True — otherwise a later stage string (e.g.
+    from stream_docs finishing early) would wipe the chunking bar
+    before the UI can poll it.
     """
     info = running_tasks.get(task_key)
-    if info is not None:
-        info["stage"] = msg
+    if info is None:
+        return
+    info["stage"] = msg
+    if current is not None and total is not None and total > 0:
+        info["progress_current"] = int(current)
+        info["progress_total"] = int(total)
+        info["progress_pct"] = min(100, int(100 * current / total))
+    elif clear_progress:
+        info.pop("progress_current", None)
+        info.pop("progress_total", None)
+        info.pop("progress_pct", None)
 
 
 async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
@@ -304,12 +328,30 @@ async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
         # ``run_func`` may ignore the kwarg (the supportai legacy path
         # does); the call falls back to the no-progress signature on
         # ``TypeError``.
-        progress_cb = lambda msg: _set_stage(task_key, msg)
+        def progress_cb(msg, current=None, total=None, clear_progress=False):
+            _set_stage(
+                task_key,
+                msg,
+                current=current,
+                total=total,
+                clear_progress=clear_progress,
+            )
+
         try:
-            await run_func(graphname, conn, progress=progress_cb)
+            result = await run_func(graphname, conn, progress=progress_cb)
         except TypeError:
-            await run_func(graphname, conn)
-        running_tasks[task_key] = {"status": "completed", "completed_at": time.time()}
+            result = await run_func(graphname, conn)
+        completion = {"status": "completed", "completed_at": time.time()}
+        # Carry any partial-success info (e.g. community summaries left
+        # incomplete) into the completion status so the UI can warn instead of
+        # reporting a flat success.
+        if isinstance(result, dict):
+            warnings = result.get("warnings") or []
+            if warnings:
+                completion["warnings"] = warnings
+            if result.get("communities_incomplete"):
+                completion["communities_incomplete"] = result["communities_incomplete"]
+        running_tasks[task_key] = completion
         LogWriter.info(f"Completed ECC task: {task_key}")
     except Exception as e:
         running_tasks[task_key] = {"status": "failed", "error": str(e), "failed_at": time.time()}

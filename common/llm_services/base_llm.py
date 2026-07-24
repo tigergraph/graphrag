@@ -1,16 +1,16 @@
 # Copyright (c) 2024-2026 TigerGraph, Inc.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# This program may be redistributed and/or modified under the terms of the GNU
+# Affero General Public License as published by the Free Software Foundation,
+# either version 3 of the License, or (at your option) any later version.
 #
-#    http://www.apache.org/licenses/LICENSE-2.0
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+# details.
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import os
 import re
@@ -22,6 +22,56 @@ from langchain_community.callbacks.manager import get_openai_callback
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+import asyncio as _asyncio
+
+# HTTP statuses that mean "provider-side / transient" rather than a problem with
+# our request — retrying the same call won't help and, in bulk, signals an
+# outage. 4xx like 400/401/404 are our fault and stay "content".
+_TRANSIENT_HTTP_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
+def classify_llm_error(exc, _depth: int = 0) -> str:
+    """Classify an LLM call failure as ``"connectivity"`` or ``"content"``.
+
+    ``"connectivity"`` = provider unreachable, timed out, or a transient
+    server-side status — do NOT retry (it will just fail again) and count it
+    toward the summarization circuit breaker. ``"content"`` = a response-level
+    problem (bad JSON, an invalid request) that may succeed on a retry and is
+    specific to one call, so it must not trip the breaker.
+
+    Detection is by exception type and HTTP status code (what the SDKs already
+    give us), not by matching free-form error-message text.
+    """
+    # Our own summarization timeout and stdlib timeouts.
+    if isinstance(exc, (_asyncio.TimeoutError, TimeoutError)):
+        return "connectivity"
+
+    # HTTP status, when the provider SDK exposes one (openai, google, anthropic
+    # all surface .status_code, or .response.status_code).
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int) and status in _TRANSIENT_HTTP_STATUS:
+        return "connectivity"
+
+    # Exception class name — covers ConnectError/ConnectTimeout/ReadTimeout
+    # (httpx), APIConnectionError/APITimeoutError (openai),
+    # ServiceUnavailable/DeadlineExceeded (google) etc. without importing every
+    # provider SDK. The class name is SDK-controlled, unlike the message text.
+    name = type(exc).__name__.lower()
+    if any(t in name for t in ("timeout", "connect", "unavailable", "deadline")):
+        return "connectivity"
+
+    # SDKs often wrap the transport error as __cause__ (e.g. openai wraps httpx);
+    # inspect one level down before giving up.
+    if _depth < 3:
+        for nested in (getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+            if nested is not None and nested is not exc:
+                if classify_llm_error(nested, _depth + 1) == "connectivity":
+                    return "connectivity"
+
+    return "content"
 
 
 class UserPortionConflictReview(BaseModel):
@@ -292,6 +342,39 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             flags=re.DOTALL,
         )
 
+    @staticmethod
+    def _message_text(raw) -> str:
+        """Plain text from a model response, normalized across providers.
+
+        LangChain returns ``AIMessage.content`` as a **list of typed content
+        blocks** (not a string) whenever a provider emits reasoning / thinking:
+        Anthropic and Bedrock Claude with extended thinking return
+        ``[{"type": "thinking", "signature": ...}, {"type": "text", "text": ...}]``,
+        and OpenAI reasoning models do the same via the Responses API. (OpenAI on
+        the default Chat Completions path returns a plain string, which is why
+        string-content models never hit this.) Downstream string parsers
+        (``PydanticOutputParser`` -> ``Generation(text=...)``) require a string.
+
+        This mirrors langchain-core's own ``.text`` accessor — keep ``type ==
+        "text"`` blocks and bare strings, drop reasoning / thinking — but is
+        inlined because that accessor's shape differs across our
+        ``langchain-core>=0.3.26`` range (a method in 0.3.x, a property in 1.x),
+        so calling it directly isn't version-portable. Reading ``.content``
+        (stable: str or list) is.
+        """
+        content = raw.content if hasattr(raw, "content") else raw
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, str):
+                    parts.append(b)
+                elif isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+                    parts.append(b["text"])
+            return "".join(parts)
+        return str(content)
+
     def _parse_or_repair(self, parser, text, caller_name):
         """Parse LLM output with a shared fallback: extract the JSON object,
         then (if it still fails) repair invalid escapes. Used by every
@@ -420,7 +503,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             logger.info(f"{caller_name} usage: {usage_data}")
             _record_usage(caller_name, usage_data)
 
-        raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
+        raw_text = self._message_text(raw_output)
 
         try:
             return self._parse_or_repair(parser, raw_text, caller_name)
@@ -490,7 +573,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
                 )
                 parser = PydanticOutputParser(pydantic_object=schema)
                 raw = self.llm.invoke(messages)
-                raw_text = raw.content if hasattr(raw, "content") else str(raw)
+                raw_text = self._message_text(raw)
                 result = self._parse_or_repair(parser, raw_text, caller_name)
             usage_data["input_tokens"] = cb.prompt_tokens
             usage_data["output_tokens"] = cb.completion_tokens
@@ -528,7 +611,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             logger.info(f"{caller_name} usage: {usage_data}")
             _record_usage(caller_name, usage_data)
 
-        raw_text = raw_output.content if hasattr(raw_output, "content") else str(raw_output)
+        raw_text = self._message_text(raw_output)
 
         try:
             return self._parse_or_repair(parser, raw_text, caller_name)

@@ -67,6 +67,7 @@
 ---
 
 ## Releases
+* **7/22/2026**: GraphRAG v2.0.1 released. Fixed a chat error with models that return structured content (such as Gemini 3), and hardened knowledge-graph rebuild so it no longer hangs when the language model is unreachable. Relicensed from Apache 2.0 to AGPL-3.0. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.1) for details.
 * **7/1/2026**: GraphRAG v2.0.0 released. Added an agentic chat engine that plans and runs its own retrieval (Planner and Reactive styles), external MCP tools, and structure-aware document chunking, along with additive prompt customization and many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.0) for details.
 * **6/23/2026**: GraphRAG v1.4.2 released. Added a knowledge graph compatibility check and repair tool to pick up shipped query fixes on existing graphs, along with more reliable ingestion for documents with spaces in their filenames and other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.2) for details.
 * **5/30/2026**: GraphRAG v1.4.1 released. Added token-based login and a pre-flight upload conflict check, along with more resilient chat when vector search is unavailable and other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.1) for details.
@@ -509,7 +510,7 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `ecc` | string | `"http://graphrag-ecc:8001"` | URL of the knowledge graph build service. No change needed when using the provided Docker Compose file. |
 | `chat_history_api` | string | `"http://chat-history:8002"` | URL of the chat history service. No change needed when using the provided Docker Compose file. |
 | `chunker` | string | `"semantic"` | Default document chunker. Options: `semantic`, `character`, `regex`, `markdown`, `html`, `recursive`. |
-| `extractor` | string | `"llm"` | Entity extraction method. Options: `llm`, `graphrag`. |
+| `extractor` | string | `"llm"` | Entity extraction method. Use `llm` (schema-aware, recommended). `graphrag` is **deprecated** and will be removed in a future release. |
 | `strict_mode` | bool | `false` | Dynamic-schema enforcement during extraction. When `true`, entities and relationships that don't match the domain schema are dropped. When `false` (default), unmatched nodes fall back to generic `Entity` vertices. |
 | `retrieval_include_entity` | bool \| null | `null` (auto) | Whether retriever queries include the generic `Entity` vertex alongside domain types. When unset, the server uses `false` if a domain schema exists and `true` otherwise. Set explicitly to override. |
 | `schema_max_sample_files` | int | `5` | Maximum number of sample documents accepted by the *Generate from sample documents* path on the *Initialize Knowledge Graph* dialog. |
@@ -1142,3 +1143,7 @@ docker compose up -d --build
 
 For adding a new test suite and the broader developer workflow — extending the service with different LLM providers, embedding services, or tools — see the [Developer Guide](./docs/DeveloperGuide.md).
 
+
+## License
+
+GraphRAG is licensed under the [GNU Affero General Public License v3.0](./LICENSE) (AGPL-3.0). Prior releases through v2.0.0 were distributed under the Apache License 2.0.
