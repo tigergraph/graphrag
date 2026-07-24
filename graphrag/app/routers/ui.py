@@ -4756,6 +4756,9 @@ async def get_prompts(
             # Front-desk triage / routing gate — runs through the chat service.
             "agentic_triage":
                 (chat_llm, "agentic_triage_prompt"),
+            # Classic datasource router (functions / vectorstore / history).
+            "route_response":
+                (chat_llm, "route_response_prompt"),
         }
 
         # Split prompts expose ONLY the user portion; the system prompt (rules
@@ -4768,6 +4771,7 @@ async def get_prompts(
             "agentic_agent": "agentic_agent.txt",
             "agentic_planner": "agentic_planner.txt",
             "agentic_triage": "agentic_triage.txt",
+            "route_response": "route_response.txt",
         }
 
         def _get_prompt(prompt_type: str) -> dict:
@@ -4830,7 +4834,7 @@ async def save_prompts(
     """
     Save customized prompts.
     Expects: {
-        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation|schema_extraction|query_guidance",
+        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation|schema_extraction|query_guidance|route_response|agentic_agent|agentic_planner|agentic_triage",
         "editable_content": "...",
         "graphname": "..."  (optional - graph-admin users must supply this)
     }
@@ -4930,6 +4934,7 @@ async def save_prompts(
             "agentic_agent": "agentic_agent.txt",
             "agentic_planner": "agentic_planner.txt",
             "agentic_triage": "agentic_triage.txt",
+            "route_response": "route_response.txt",
         }
 
         if prompt_type not in prompt_type_to_file:
@@ -5000,6 +5005,10 @@ async def save_prompts(
             "query_generation": "Question-to-schema mapping prompt saved successfully",
             "schema_extraction": "Schema extraction prompt saved successfully",
             "query_guidance": "Query guidance saved successfully",
+            "agentic_agent": "React agent prompt saved successfully",
+            "agentic_planner": "Agentic planner prompt saved successfully",
+            "agentic_triage": "Agent routing prompt saved successfully",
+            "route_response": "Question routing prompt saved successfully",
         }
         resp = {"status": "success", "message": messages.get(prompt_type, "Prompt saved successfully")}
         # Heads-up (non-blocking) for split prompts: (1) which placeholder tokens
