@@ -657,11 +657,20 @@ async def check_embedding_rebuilt(conn, v_type: str):
                 }
             )
     except Exception as e:
-        logger.error(f"Check embedding rebuilt err:\n{e}")
+        logger.error(
+            f"Check embedding rebuilt err: {e!r}\n{traceback.format_exc()}"
+        )
+        return False
 
-    res = resp[0]["all_have_embedding"]
+    try:
+        res = resp[0]["all_have_embedding"]
+    except (IndexError, KeyError, TypeError) as e:
+        logger.error(
+            f"Check embedding rebuilt unexpected response {resp!r}: {e!r}"
+        )
+        return False
+
     logger.info(resp)
-
     return res
 
 
