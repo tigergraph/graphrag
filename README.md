@@ -510,7 +510,7 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `ecc` | string | `"http://graphrag-ecc:8001"` | URL of the knowledge graph build service. No change needed when using the provided Docker Compose file. |
 | `chat_history_api` | string | `"http://chat-history:8002"` | URL of the chat history service. No change needed when using the provided Docker Compose file. |
 | `chunker` | string | `"semantic"` | Default document chunker. Options: `semantic`, `character`, `regex`, `markdown`, `html`, `recursive`. |
-| `extractor` | string | `"llm"` | Entity extraction method. Options: `llm`, `graphrag`. |
+| `extractor` | string | `"llm"` | Entity extraction method. Use `llm` (schema-aware, recommended). `graphrag` is **deprecated** and will be removed in a future release. |
 | `strict_mode` | bool | `false` | Dynamic-schema enforcement during extraction. When `true`, entities and relationships that don't match the domain schema are dropped. When `false` (default), unmatched nodes fall back to generic `Entity` vertices. |
 | `retrieval_include_entity` | bool \| null | `null` (auto) | Whether retriever queries include the generic `Entity` vertex alongside domain types. When unset, the server uses `false` if a domain schema exists and `true` otherwise. Set explicitly to override. |
 | `schema_max_sample_files` | int | `5` | Maximum number of sample documents accepted by the *Generate from sample documents* path on the *Initialize Knowledge Graph* dialog. |
