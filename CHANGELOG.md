@@ -2,8 +2,13 @@
 
 ## [2.0.2]
 
+### Changed
+- **Clearer message when an answer can't be generated.** When the assistant is unable to produce an answer, it now suggests rephrasing the question to be more specific and contacting an administrator if the problem continues, instead of a bare failure notice.
+
 ### Fixed
 - **Knowledge-graph rebuild no longer fails on document names containing parentheses.** Document names with `(` or `)` are normalized without dropping the rest of the name, so rebuilds complete instead of erroring while creating chunks.
+- **Newer Gemini models are available in agentic chat.** Gemini 3.x and later families are recognized as tool-calling models, so agentic mode works with them instead of silently falling back to classic chat.
+- **Chat Stop button behaves correctly.** Stopping a response just as it finishes no longer sends a stray empty message, and the Stop button is the right size in the light theme.
 
 ## [2.0.1]
 
