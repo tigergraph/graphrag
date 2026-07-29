@@ -109,7 +109,17 @@ def openai_rejects_temperature(model: str) -> bool:
 
 def _gemini_tool_calling(model: str) -> bool:
     # Gemini 1.5+ and 2.x support function calling.
-    return "gemini-1.5" in model or "gemini-2" in model or "gemini-exp" in model
+    # Every Gemini family from 1.5 onward supports function/tool calling, and
+    # future families (4.x, 5.x, ...) will too. Use a denylist instead of an
+    # allowlist so new models work without a code change: any Gemini is capable
+    # except the legacy 1.0-era models that predate function calling.
+    if "gemini" not in model:
+        return False
+    if "gemini-1.0" in model or "gemini-pro-vision" in model:
+        return False
+    if model.strip() == "gemini-pro":  # bare 1.0 alias (versioned ids are fine)
+        return False
+    return True
 
 
 def _gemini_thinking(model: str) -> bool:
