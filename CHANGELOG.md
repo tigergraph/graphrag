@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.0.2]
+
+### Fixed
+- **Knowledge-graph rebuild no longer fails on document names containing parentheses.** Document names with `(` or `)` are normalized without dropping the rest of the name, so rebuilds complete instead of erroring while creating chunks.
+
 ## [2.0.1]
 
 ### Changed

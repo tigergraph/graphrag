@@ -173,7 +173,7 @@ async def chunk_doc(
 
             # send chunks to be upserted (func, args)
             logger.debug("chunk writes to upsert_chan")
-            await upsert_chan.put((upsert_chunk, (conn, v_id, chunk_id, chunk)))
+            await upsert_chan.put((upsert_chunk, (conn, v_id, chunk_id, chunk, i)))
 
             # send chunks to have entities extracted
             logger.debug("chunk writes to extract_chan")
@@ -208,7 +208,7 @@ async def upsert_doc(conn: AsyncTigerGraphConnection, doc_id, ctype, content_tex
         conn, "Document", doc_id, "HAS_CONTENT", "Content", doc_id
     )
 
-async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk):
+async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk, idx):
     logger.debug(f"Upserting chunk {chunk_id}")
     date_added = int(time.time())
     # Build the chunk's full vertex + edge bundle and enqueue atomically.
@@ -220,7 +220,7 @@ async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk)
         ("DocumentChunk", chunk_id, {
             "epoch_added": date_added,
             "epoch_processed": date_added,
-            "idx": int(chunk_id.split("_")[-1]),
+            "idx": idx,
         }),
         ("Content", chunk_id, {"text": chunk, "epoch_added": date_added}),
     ]
@@ -228,7 +228,6 @@ async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk)
         ("DocumentChunk", chunk_id, "HAS_CONTENT", "Content", chunk_id, None),
         ("Document", doc_id, "HAS_CHILD", "DocumentChunk", chunk_id, None),
     ]
-    idx = int(chunk_id.split("_")[-1])
     if idx > 0:
         edges.append((
             "DocumentChunk", chunk_id, "IS_AFTER",

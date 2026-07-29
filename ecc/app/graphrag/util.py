@@ -220,9 +220,12 @@ def map_attrs(attributes: dict):
 
 
 def process_id(v_id: str):
-    has_func = re.compile(r"(.*)\(").findall(v_id)
-    if len(has_func) > 0:
-        v_id = has_func[0]
+    # Strip parentheses in place — do NOT truncate at "(". The old `(.*)\(`
+    # truncation dropped everything from the first "(" onward, which mangled
+    # ids for document names containing parentheses (e.g. "Q3 (2026) report"):
+    # the "_chunk_{i}" suffix was lost, so chunk ids no longer ended in an
+    # integer and the rebuild crashed on int(chunk_id.split("_")[-1]). The
+    # replace() below removes the parens without dropping the rest. (GML-2173)
     v_id = v_id.replace(" ", "_").lower().replace("/", "_").replace("(", "").replace(")", "")
     if v_id == "''" or v_id == '""':
         return ""
