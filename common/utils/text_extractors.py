@@ -45,12 +45,12 @@ _coln_pattern = re.compile(r'\bCol\d+\b')
 # (U+FF10-U+FF19). Collapsing digit runs would glue distinct chart
 # values such as 767 and 808 into ``767808``.
 # One CJK char excluding fullwidth digits (U+FF10-U+FF19).
-_CJK_CHAR = r"(?:[　-鿿]|[＀-／]|[：-￯])"
+_CJK_CHAR_CLASS = r"(?:[　-鿿]|[＀-／]|[：-￯])"
 _VERTICAL_BOLD_CJK = re.compile(
-    rf"(?:\*\*{_CJK_CHAR}\*\*(?:<br\s*/?>)){{2,}}\*\*{_CJK_CHAR}\*\*"
+    rf"(?:\*\*{_CJK_CHAR_CLASS}\*\*(?:<br\s*/?>)){{2,}}\*\*{_CJK_CHAR_CLASS}\*\*"
 )
 _VERTICAL_CJK = re.compile(
-    rf"(?:{_CJK_CHAR}<br\s*/?>){{2,}}{_CJK_CHAR}"
+    rf"(?:{_CJK_CHAR_CLASS}<br\s*/?>){{2,}}{_CJK_CHAR_CLASS}"
 )
 
 # Within-cell <br> tags inside markdown table rows. pymupdf4llm uses these
@@ -303,7 +303,7 @@ def _collapse_vertical_cjk(text: str) -> str:
     pairs aren't matched so we don't disturb legitimate inline content.
     """
     def _fix_bold(m: re.Match) -> str:
-        chars = re.findall(rf"\*\*({_CJK_CHAR})\*\*", m.group(0))
+        chars = re.findall(rf"\*\*({_CJK_CHAR_CLASS})\*\*", m.group(0))
         return f"**{''.join(chars)}**" if chars else m.group(0)
 
     def _fix_plain(m: re.Match) -> str:
