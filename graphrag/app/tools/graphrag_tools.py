@@ -216,6 +216,11 @@ def hybrid_search(
     retriever = HybridRetriever(
         ctx.embedding_model, ctx.embedding_store, ctx.llm_provider, ctx.conn
     )
+    # Pass through existing HybridRetriever knobs from graphrag_config.
+    # expand/method already exist on HybridRetriever.search (LLM keywords /
+    # paraphrases) — agent tools previously ignored them.
+    expand = bool(cfg.get("hybrid_expand", False))
+    method = str(cfg.get("hybrid_method", "similarity") or "similarity")
     step = retriever.search(
         question,
         indices=["DocumentChunk"],
@@ -225,8 +230,18 @@ def hybrid_search(
         chunk_only=cfg.get("chunk_only", True) if chunk_only is None else chunk_only,
         doc_only=cfg.get("doc_only", False),
         max_results=max_results or 0,  # 0 -> retriever resolves from graphrag_config
+        similarity_threshold=(
+            similarity_threshold
+            if similarity_threshold is not None
+            else cfg.get("similarity_threshold", 0.90)
+        ),
+        expand=expand,
+        method=method,
     )
-    return _unstructured_result("GraphRAG_Hybrid_Vector_Search", step)
+    query_name = (
+        "GraphRAG_Hybrid_Search" if expand else "GraphRAG_Hybrid_Vector_Search"
+    )
+    return _unstructured_result(query_name, step)
 
 
 def similarity_search(

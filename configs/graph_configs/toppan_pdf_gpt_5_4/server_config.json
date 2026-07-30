@@ -1,0 +1,7 @@
+{
+  "graphrag_config": {
+    "num_seen_min": 1,
+    "hybrid_expand": true,
+    "hybrid_method": "both"
+  }
+}

@@ -566,13 +566,14 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
             logger.info(f"Fetch {top_k} similar entries from {vertex_types} with filter {filter_expr}")
 
             start_time = time()
+            # GSQL declares STRING expr=""; pyTigerGraph rejects null.
             verts = self.conn.runInstalledQuery(
                 "get_topk_similar",
                 params={
                     "vertex_types": vertex_types,
                     "query_vector": query_embedding,
                     "top_k": top_k*2,
-                    "expr": filter_expr,
+                    "expr": filter_expr or "",
                 }
             )
             end_time = time()
