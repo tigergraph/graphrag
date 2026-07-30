@@ -1,0 +1,20 @@
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Get_My_Trace(
+    STRING principal_id,
+    STRING graph_name,
+    STRING message_id
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    owner_seed = {ChatUser.*};
+    trace = SELECT t
+        FROM owner_seed:u -(OWNS_CONVERSATION>:e1)- ChatConversation:c
+             -(HAS_MESSAGE>:e2)- ChatMessage:m
+             -(HAS_TRACE>:e3)- ChatTrace:t
+        WHERE u.user_id == principal_id
+          AND c.graph_name == graph_name
+          AND c.status != "deleted"
+          AND m.message_id == message_id;
+    steps = SELECT s
+        FROM trace:t -(HAS_STEP>:e)- ChatTraceStep:s
+        ORDER BY s.ordinal ASC;
+    PRINT trace AS trace;
+    PRINT steps AS steps;
+}

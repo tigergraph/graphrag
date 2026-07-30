@@ -1,0 +1,22 @@
+
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Delete_My_Conversation(
+    STRING principal_id,
+    STRING graph_name,
+    STRING conversation_id,
+    UINT event_time
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    SumAccum<INT> @@deleted;
+    owner_seed = {ChatUser.*};
+    owned = SELECT c
+        FROM owner_seed:u -(OWNS_CONVERSATION>:e)- ChatConversation:c
+        WHERE u.user_id == principal_id
+          AND c.conversation_id == conversation_id
+          AND c.graph_name == graph_name
+          AND c.status != "deleted"
+        POST-ACCUM
+          c.status = "deleted",
+          c.deleted_at = event_time,
+          c.updated_at = event_time,
+          @@deleted += 1;
+    PRINT @@deleted AS deleted;
+}

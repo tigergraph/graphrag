@@ -24,8 +24,14 @@ fi
 
 root_dir=${1:-./graphrag}
 llm_provider=${2:-openai}
-tg_username=$(echo ${3:-tigergraph} | sed 's/[][\/.^$*+?|(){}]/\\&/g')
-tg_password=$(echo ${4:-tigergraph} | sed 's/[][\/.^$*+?|(){}]/\\&/g')
+tg_username_raw=${3:-tigergraph}
+tg_password_raw=${4:-tigergraph}
+tg_username=$(echo "$tg_username_raw" | sed 's/[][\/.^$*+?|(){}]/\\&/g')
+tg_password=$(echo "$tg_password_raw" | sed 's/[][\/.^$*+?|(){}]/\\&/g')
+export TIGERGRAPH_USERNAME="$tg_username_raw"
+export TIGERGRAPH_PASSWORD="$tg_password_raw"
+export CHAT_HISTORY_RUNTIME_USERNAME="$tg_username_raw"
+export CHAT_HISTORY_RUNTIME_PASSWORD="$tg_password_raw"
 
 if [[ -z $LLM_API_KEY ]]; then
   echo "Warning: LLM_API_KEY is not found in current environment, please set it using 'export LLM_API_KEY=xxx'."
@@ -81,4 +87,3 @@ else
   echo "Visit http://localhost to access the chatbot."
 fi
 cd - >/dev/null
-

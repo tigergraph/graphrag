@@ -1,0 +1,18 @@
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Expire_Traces_Admin(
+    UINT cutoff_epoch,
+    INT batch_size
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    SumAccum<INT> @@expired;
+    all_traces = {ChatTrace.*};
+    expired = SELECT t
+        FROM all_traces:t
+        WHERE t.expires_at > 0 AND t.expires_at <= cutoff_epoch
+        LIMIT batch_size;
+    steps = SELECT s
+        FROM expired:t -(HAS_STEP>:e)- ChatTraceStep:s;
+    remove_steps = SELECT s FROM steps:s
+        POST-ACCUM DELETE(s);
+    remove_traces = SELECT t FROM expired:t
+        POST-ACCUM DELETE(t), @@expired += 1;
+    PRINT @@expired AS expired;
+}

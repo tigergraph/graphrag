@@ -1,0 +1,8 @@
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_History_Health()
+FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    SumAccum<INT> @@users;
+    all_users = {ChatUser.*};
+    counted = SELECT u FROM all_users:u ACCUM @@users += 1;
+    PRINT "ok" AS status;
+    PRINT @@users AS users;
+}

@@ -1,0 +1,31 @@
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Search_My_Messages(
+    STRING principal_id,
+    STRING graph_name,
+    STRING search_text,
+    UINT before_created_at,
+    STRING before_id,
+    INT page_size
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    STRING pattern = "%" + lower(search_text) + "%";
+    owner_seed = {ChatUser.*};
+    owned = SELECT c
+        FROM owner_seed:u -(OWNS_CONVERSATION>:e)- ChatConversation:c
+        WHERE u.user_id == principal_id
+          AND c.graph_name == graph_name
+          AND c.status != "deleted";
+
+    rows = SELECT m
+        FROM owned:c -(HAS_MESSAGE>:e)- ChatMessage:m
+        WHERE lower(m.content) LIKE pattern
+          AND (
+              before_created_at == 0
+              OR m.created_at < before_created_at
+              OR (
+                  m.created_at == before_created_at
+                  AND m.message_id < before_id
+              )
+          )
+        ORDER BY m.created_at DESC, m.message_id DESC
+        LIMIT page_size;
+    PRINT rows AS rows;
+}

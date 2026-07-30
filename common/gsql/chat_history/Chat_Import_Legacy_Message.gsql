@@ -1,0 +1,123 @@
+/*
+ * Administrative, idempotent import used only by the SQLite migration CLI.
+ * It is not exposed by the user or agent repositories.
+ */
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Import_Legacy_Message(
+    STRING principal_id,
+    STRING graph_name,
+    STRING conversation_id,
+    STRING conversation_title,
+    STRING conversation_hash,
+    STRING message_id,
+    STRING parent_message_id,
+    STRING role_name,
+    STRING model_name,
+    STRING content,
+    DOUBLE response_time,
+    INT feedback,
+    STRING comment,
+    UINT sequence_no,
+    UINT created_at,
+    UINT updated_at,
+    STRING payload_hash
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    SumAccum<INT> @@conversation_count;
+    SumAccum<INT> @@owned_count;
+    SumAccum<INT> @@message_count;
+    SumAccum<INT> @@user_count;
+    STRING status = "ok";
+
+    all_conversations = {ChatConversation.*};
+    matching = SELECT c
+        FROM all_conversations:c
+        WHERE c.conversation_id == conversation_id
+        ACCUM @@conversation_count += 1;
+
+    owner_seed = {ChatUser.*};
+    owned = SELECT c
+        FROM owner_seed:u -(OWNS_CONVERSATION>:e)- ChatConversation:c
+        WHERE u.user_id == principal_id
+          AND c.conversation_id == conversation_id
+          AND c.graph_name == graph_name
+        ACCUM @@owned_count += 1;
+
+    all_messages = {ChatMessage.*};
+    existing = SELECT m
+        FROM all_messages:m
+        WHERE m.message_id == message_id
+        ACCUM @@message_count += 1;
+
+    all_users = {ChatUser.*};
+    principal_user = SELECT u
+        FROM all_users:u
+        WHERE u.user_id == principal_id
+        ACCUM @@user_count += 1;
+
+    IF @@conversation_count == 0 AND @@message_count == 0 THEN
+        IF @@user_count == 0 THEN
+            INSERT INTO ChatUser VALUES (
+                principal_id, created_at, updated_at
+            );
+        ELSE
+            refresh_user = SELECT u FROM principal_user:u
+                POST-ACCUM
+                    IF u.updated_at < updated_at THEN
+                        u.updated_at = updated_at
+                    END;
+        END;
+        INSERT INTO ChatConversation VALUES (
+            conversation_id, graph_name, conversation_title, "active",
+            sequence_no + 1, message_id, created_at, updated_at, 0,
+            conversation_hash
+        );
+        INSERT INTO OWNS_CONVERSATION VALUES (principal_id, conversation_id);
+    ELSE IF @@conversation_count == 0 AND @@message_count > 0 THEN
+        status = "conflict";
+    ELSE IF @@owned_count == 0 THEN
+        status = "conflict";
+    END;
+
+    IF status == "ok" THEN
+        IF @@message_count == 0 THEN
+            INSERT INTO ChatMessage VALUES (
+                message_id, conversation_id, message_id, sequence_no,
+                parent_message_id, role_name, content, model_name,
+                response_time, false, "", "", feedback, comment,
+                created_at, updated_at, payload_hash
+            );
+            INSERT INTO HAS_MESSAGE VALUES (conversation_id, message_id);
+            IF parent_message_id != "" THEN
+                INSERT INTO REPLIES_TO VALUES (
+                    message_id, parent_message_id
+                );
+            END;
+            status = "created";
+        ELSE
+            replay = SELECT m FROM existing:m
+                POST-ACCUM
+                    IF m.conversation_id == conversation_id
+                       AND m.payload_hash == payload_hash THEN
+                        status = "replayed"
+                    ELSE
+                        status = "conflict"
+                    END;
+        END;
+    END;
+
+    IF status == "created" OR status == "replayed" THEN
+        conversations = {ChatConversation.*};
+        advance = SELECT c
+            FROM conversations:c
+            WHERE c.conversation_id == conversation_id
+            POST-ACCUM
+                IF c.next_sequence <= sequence_no THEN
+                    c.next_sequence = sequence_no + 1,
+                    c.last_message_id = message_id
+                END,
+                IF c.updated_at < updated_at THEN
+                    c.updated_at = updated_at
+                END;
+    END;
+
+    PRINT status AS status;
+}

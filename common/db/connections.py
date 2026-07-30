@@ -26,6 +26,7 @@ from common.config import (
     db_config,
     security,
 )
+from common.db.connection_utils import normalize_restpp_url
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.logs.logwriter import LogWriter
 
@@ -39,24 +40,24 @@ def get_db_connection_id_token(
     async_conn: bool = False
 ) -> TigerGraphConnectionProxy:
     if async_conn:
-        conn = AsyncTigerGraphConnection(
+        conn = normalize_restpp_url(AsyncTigerGraphConnection(
             host=db_config["hostname"],
             graphname=graphname,
             apiToken=credentials,
             tgCloud=True,
             sslPort=14240,
-        )
+        ))
         asyncio.run(conn.customizeHeader(
             timeout=db_config["default_timeout"] * 1000, responseSize=5000000
         ))
     else:
-        conn = TigerGraphConnection(
+        conn = normalize_restpp_url(TigerGraphConnection(
             host=db_config["hostname"],
             graphname=graphname,
             apiToken=credentials,
             tgCloud=True,
             sslPort=14240,
-        )
+        ))
         conn.customizeHeader(
             timeout=db_config["default_timeout"] * 1000, responseSize=5000000
         )
@@ -133,9 +134,6 @@ def elevate_db_connection_to_token(host, username, password, graphname, async_co
             gsPort=db_config.get("gsPort", "14240")
         )
 
-        # temp fix for path
-        if conn.restppPort == conn.gsPort and "/restpp" not in conn.restppUrl:
-            conn.restppUrl = conn.restppUrl+"/restpp"
     else:
         conn = TigerGraphConnection(
             host=host,
@@ -146,7 +144,7 @@ def elevate_db_connection_to_token(host, username, password, graphname, async_co
             gsPort=db_config.get("gsPort", "14240")
         )
 
-    return conn
+    return normalize_restpp_url(conn)
 
 
 def get_schema_ver(conn: TigerGraphConnectionProxy) -> int:

@@ -15,7 +15,7 @@
 import enum
 from typing import Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class NaturalLanguageQuery(BaseModel):
@@ -78,6 +78,45 @@ class PlanStep(BaseModel):
     arg_bindings: Dict[str, str] = {}
     depends_on: List[str] = []
     rationale: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_model_plan_step(cls, value):
+        """Accept common, semantically equivalent planner output shapes.
+
+        Provider text fallbacks sometimes call a step identifier ``name`` and
+        put tool arguments either under ``input`` or directly on the step.
+        Normalize those variants before validation so a usable structural plan
+        does not collapse to the generic vector-search fallback.
+        """
+        if not isinstance(value, dict):
+            return value
+
+        normalized = dict(value)
+        if not normalized.get("id") and normalized.get("name"):
+            normalized["id"] = normalized["name"]
+        normalized.pop("name", None)
+
+        args = normalized.get("args")
+        args = dict(args) if isinstance(args, dict) else {}
+        tool_input = normalized.pop("input", None)
+        if isinstance(tool_input, dict):
+            args = {**tool_input, **args}
+
+        step_fields = {
+            "id",
+            "kind",
+            "tool",
+            "args",
+            "arg_bindings",
+            "depends_on",
+            "rationale",
+        }
+        for key in list(normalized):
+            if key not in step_fields:
+                args.setdefault(key, normalized.pop(key))
+        normalized["args"] = args
+        return normalized
 
 
 class Plan(BaseModel):

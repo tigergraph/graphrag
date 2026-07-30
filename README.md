@@ -34,7 +34,7 @@
 - [More Detailed Configurations](#more-detailed-configurations)
   - [DB configuration](#db-configuration)
   - [GraphRAG configuration](#graphrag-configuration)
-  - [Chat History Configuration](#chat-history-configuration)
+  - [TigerGraph Chat History](#tigergraph-chat-history)
   - [MCP servers (agentic tools)](#mcp-servers-agentic-tools)
   - [LLM provider configuration](#llm-provider-configuration)
     - [Supported parameters](#supported-parameters)
@@ -260,7 +260,26 @@ gadmin stop all
 ##### Step 5: Start all services
   Replace `/path/to/graphrag/configs` with the absolute path of the `configs` folder inside `graphrag-k8s.yml`, and update the TigerGraph database information and other configs accordingly.
 
-  Now, simply run `kubectl apply -f graphrag-k8s.yml` and wait for all the services to start.
+  Create the environment-backed chat-history Secret referenced by the
+  manifest, then apply it and wait for the idempotent bootstrap Job:
+
+  ```bash
+  kubectl create namespace graphrag \
+    --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n graphrag create secret generic graphrag-chat-history \
+    --from-literal=bootstrap-username='tigergraph' \
+    --from-literal=bootstrap-password='...' \
+    --from-literal=runtime-username='graphrag_history' \
+    --from-literal=runtime-password='...' \
+    --dry-run=client -o yaml | kubectl apply -f -
+  kubectl apply -f graphrag-k8s.yml
+  kubectl -n graphrag wait \
+    --for=condition=complete job/graphrag-history-bootstrap \
+    --timeout=30m
+  ```
+
+  The runtime TigerGraph user must exist before bootstrap. Wait for all
+  deployments to become ready after the Job succeeds.
 
 ##### Step 6: Stop all services (Optional)
   Run kubectl delete -f graphrag-k8s.yml and wait for all the services in the deployment to be deleted.
@@ -487,14 +506,13 @@ Copy the below into `configs/server_config.json` and edit the `hostname` to matc
 | `default_thread_limit` | int | `8` | Max threads for query execution. |
 
 ### GraphRAG configuration
-Copy the below code into `configs/server_config.json`. You shouldn’t need to change anything unless you change the port of the chat history service in the Docker Compose file.
+Copy the below code into `configs/server_config.json`.
 
 ```json
 {
     "graphrag_config": {
         "reuse_embedding": false,
         "ecc": "http://graphrag-ecc:8001",
-        "chat_history_api": "http://chat-history:8002",
         "chunker": "semantic",
         "extractor": "llm",
         "top_k": 5,
@@ -508,7 +526,6 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | --- | --- | --- | --- |
 | `reuse_embedding` | bool | `true` | Reuse existing embeddings instead of regenerating them. |
 | `ecc` | string | `"http://graphrag-ecc:8001"` | URL of the knowledge graph build service. No change needed when using the provided Docker Compose file. |
-| `chat_history_api` | string | `"http://chat-history:8002"` | URL of the chat history service. No change needed when using the provided Docker Compose file. |
 | `chunker` | string | `"semantic"` | Default document chunker. Options: `semantic`, `character`, `regex`, `markdown`, `html`, `recursive`. |
 | `extractor` | string | `"llm"` | Entity extraction method. Use `llm` (schema-aware, recommended). `graphrag` is **deprecated** and will be removed in a future release. |
 | `strict_mode` | bool | `false` | Dynamic-schema enforcement during extraction. When `true`, entities and relationships that don't match the domain schema are dropped. When `false` (default), unmatched nodes fall back to generic `Entity` vertices. |
@@ -548,20 +565,25 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `enable_consistency_checker` | bool | `false` | Enable the background consistency checker. |
 | `graph_names` | list | `[]` | Graphs to monitor when consistency checker is enabled. |
 
-### Chat History Configuration
-Copy the below code into `configs/server_config.json`. You shouldn’t need to change anything unless you change the port of the chat history service in the Docker Compose file.
+### TigerGraph Chat History
 
-```json
-{
-    "chat-history": {
-        "apiPort":"8002",
-        "dbPath": "chats.db",
-        "dbLogPath": "db.log",
-        "logPath": "requestLogs.jsonl",
-        "conversationAccessRoles": ["superuser", "globaldesigner"]
-    }
-}
+Chat history and redacted execution traces are stored in the dedicated
+`GraphRAGChatHistory` graph. Bootstrap it once before starting the API:
+
+```bash
+export CHAT_HISTORY_BOOTSTRAP_USERNAME=tigergraph
+export CHAT_HISTORY_BOOTSTRAP_PASSWORD='...'
+export CHAT_HISTORY_RUNTIME_USERNAME=graphrag_history
+python -m common.chat_history.bootstrap
 ```
+
+The GraphRAG API reads its runtime credential only from
+`CHAT_HISTORY_TG_TOKEN`, or from `CHAT_HISTORY_TG_USERNAME` and
+`CHAT_HISTORY_TG_PASSWORD`. Do not put these secrets in
+`server_config.json`. The supplied Compose and Kubernetes manifests run the
+idempotent bootstrap and retention utilities. For setup, migration, security,
+API compatibility, rollback, and demo instructions, see
+[`docs/tigergraph-chat-history.md`](docs/tigergraph-chat-history.md).
 
 [Go back to top](#top)
 

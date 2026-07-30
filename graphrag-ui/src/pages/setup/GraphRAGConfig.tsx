@@ -16,7 +16,6 @@ const GraphRAGConfig = () => {
   const [availableGraphs, setAvailableGraphs] = useState<string[]>([]);
   const [reuseEmbedding, setReuseEmbedding] = useState(true);
   const [eccUrl, setEccUrl] = useState("http://graphrag-ecc:8001");
-  const [chatHistoryUrl, setChatHistoryUrl] = useState("http://chat-history:8002");
 
   // Default chunker (used when no chunker specified in document)
   const [defaultChunker, setDefaultChunker] = useState("semantic");
@@ -92,7 +91,6 @@ const GraphRAGConfig = () => {
     if (!graphragConfig) return;
     setReuseEmbedding(graphragConfig.reuse_embedding ?? true);
     setEccUrl(graphragConfig.ecc || "http://graphrag-ecc:8001");
-    setChatHistoryUrl(graphragConfig.chat_history_api || "http://chat-history:8002");
     setDefaultChunker(graphragConfig.chunker || "semantic");
     setTopK(String(graphragConfig.top_k ?? 5));
     setNumHops(String(graphragConfig.num_hops ?? 2));
@@ -246,7 +244,6 @@ const GraphRAGConfig = () => {
       const currentConfig: any = {
         reuse_embedding: reuseEmbedding,
         ecc: eccUrl,
-        chat_history_api: chatHistoryUrl,
         chunker: defaultChunker,
         chunker_config: currentChunkerConfig,
         top_k: parseInt(topK),
@@ -281,7 +278,6 @@ const GraphRAGConfig = () => {
       const displayDefaults: Record<string, any> = {
         reuse_embedding: true,
         ecc: "http://graphrag-ecc:8001",
-        chat_history_api: "http://chat-history:8002",
         chunker: "semantic",
         top_k: 5,
         num_hops: 2,
@@ -1103,21 +1099,6 @@ const GraphRAGConfig = () => {
                   </p>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                    Chat History API URL
-                  </label>
-                  <Input
-                    type="text"
-                    className="dark:border-[#3D3D3D] dark:bg-background"
-                    placeholder="http://chat-history:8002"
-                    value={chatHistoryUrl}
-                    onChange={(e) => setChatHistoryUrl(e.target.value)}
-                  />
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Chat history service endpoint
-                  </p>
-                </div>
               </div>
               )}
             </div>
@@ -1144,4 +1125,3 @@ const GraphRAGConfig = () => {
 };
 
 export default GraphRAGConfig;
-

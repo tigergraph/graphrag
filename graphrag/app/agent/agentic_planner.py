@@ -30,6 +30,31 @@ from tools import tool_registry as registry
 
 logger = logging.getLogger(__name__)
 
+
+_QUESTION_RETRIEVAL_TOOLS = {
+    "graphrag__structural_retrieve",
+    "graphrag__hybrid_search",
+    "graphrag__similarity_search",
+    "graphrag__contextual_search",
+    "graphrag__community_search",
+}
+
+
+def _bind_implicit_question(plan: Plan, question: str) -> Plan:
+    """Fill the request question for retrieval steps when the model omits it.
+
+    The planner already sees the question as global context and some providers
+    therefore select the correct tool but leave its required ``question``
+    argument empty. The executor cannot infer that argument and otherwise
+    rejects the step before it reaches TigerGraph.
+    """
+    for step in plan.steps or []:
+        if step.tool in _QUESTION_RETRIEVAL_TOOLS:
+            step.args = dict(step.args or {})
+            step.args.setdefault("question", question)
+    return plan
+
+
 def _param_type(pinfo: dict) -> str:
     """Render a JSON-schema property's type for the catalog. Falls back through
     enum / anyOf (common in external MCP tool schemas) to ``any``."""
@@ -139,4 +164,4 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
                          rationale="Answer from retrieved context."),
             ],
         )
-    return _sanitize(plan, ctx)
+    return _bind_implicit_question(_sanitize(plan, ctx), question)

@@ -114,16 +114,30 @@ const SideMenu = ({
     const creds = sessionStorage.getItem("auth");
     const username = sessionStorage.getItem("username");
     if (!username || !creds) return [];
+    const selectedGraph = sessionStorage.getItem("selectedGraph") || "";
     const settings = {
       method: "GET",
       headers: { Authorization: creds, "Content-Type": "application/json" },
     };
-    const response = await fetch(`${WS_HISTORY_URL}/${username}`, settings);
-    if (!response.ok) return [];
-    const data = await safeJson(response);
-    if (!Array.isArray(data) || data.length === 0) return [];
+    const items: any[] = [];
+    let cursor = "";
+    do {
+      const params = new URLSearchParams({ limit: "50" });
+      if (selectedGraph) params.set("graph_name", selectedGraph);
+      if (cursor) params.set("cursor", cursor);
+      const response = await fetch(
+        `${WS_HISTORY_URL}/${encodeURIComponent(username)}?${params.toString()}`,
+        settings,
+      );
+      if (!response.ok) return [];
+      const page = await safeJson(response);
+      if (!Array.isArray(page)) return [];
+      items.push(...page);
+      cursor = response.headers.get("X-Next-Cursor") || "";
+    } while (cursor);
+    if (items.length === 0) return [];
     // Most recently updated first (falls back to create_ts).
-    return [...data].sort((a: any, b: any) => {
+    return items.sort((a: any, b: any) => {
       const timeA = new Date(a.update_ts || a.create_ts).getTime();
       const timeB = new Date(b.update_ts || b.create_ts).getTime();
       return timeB - timeA;
@@ -134,6 +148,7 @@ const SideMenu = ({
   // hits /ui/conversation/<id>) — bounded to PAGE_SIZE so it can't flood.
   const loadDetails = useCallback(async (items: any[]) => {
     const creds = sessionStorage.getItem("auth");
+    const selectedGraph = sessionStorage.getItem("selectedGraph") || "";
     const settings = {
       method: "GET",
       headers: { Authorization: creds!, "Content-Type": "application/json" },
@@ -141,9 +156,22 @@ const SideMenu = ({
     const results = await Promise.all(
       items.map(async (item: any) => {
         try {
-          const r = await fetch(`${WS_CONVO_URL}/${item.conversation_id}`, settings);
-          if (!r.ok) return null;
-          const content = await safeJson(r);
+          const content: any[] = [];
+          let cursor = "";
+          do {
+            const params = new URLSearchParams({ limit: "200" });
+            if (selectedGraph) params.set("graph_name", selectedGraph);
+            if (cursor) params.set("cursor", cursor);
+            const r = await fetch(
+              `${WS_CONVO_URL}/${encodeURIComponent(item.conversation_id)}?${params.toString()}`,
+              settings,
+            );
+            if (!r.ok) return null;
+            const page = await safeJson(r);
+            if (!Array.isArray(page)) return null;
+            content.push(...page);
+            cursor = r.headers.get("X-Next-Cursor") || "";
+          } while (cursor);
           let lastUpdateTime = item.update_ts || item.create_ts;
           if (Array.isArray(content) && content.length > 0) {
             const times = content
@@ -267,12 +295,27 @@ const SideMenu = ({
         }
       }
 
-      const response = await fetch(`${WS_CONVO_URL}/${id}`, settings);
-      if (!response.ok) {
-        return;
-      }
-
-      const data = await safeJson(response);
+      const selectedGraph = sessionStorage.getItem("selectedGraph") || "";
+      const data: any[] = [];
+      let cursor = "";
+      do {
+        const params = new URLSearchParams({ limit: "200" });
+        if (selectedGraph) params.set("graph_name", selectedGraph);
+        if (cursor) params.set("cursor", cursor);
+        const response = await fetch(
+          `${WS_CONVO_URL}/${encodeURIComponent(id)}?${params.toString()}`,
+          settings,
+        );
+        if (!response.ok) {
+          return;
+        }
+        const page = await safeJson(response);
+        if (!Array.isArray(page)) {
+          return;
+        }
+        data.push(...page);
+        cursor = response.headers.get("X-Next-Cursor") || "";
+      } while (cursor);
       setConversationId2(data);
 
       // Store the conversation data in sessionStorage for the chat component
@@ -427,6 +470,23 @@ const SideMenu = ({
 
   useEffect(() => {
     fetchHistory2();
+  }, [fetchHistory2]);
+
+  // Conversation history is graph-bound, so switching the selected graph
+  // immediately replaces the visible history instead of mixing graph scopes.
+  useEffect(() => {
+    const handleGraphChange = () => {
+      setActiveConversationId(null);
+      setExpandedConversations(new Set());
+      fetchHistory2();
+    };
+    window.addEventListener("graphrag:selectedGraph", handleGraphChange);
+    return () => {
+      window.removeEventListener(
+        "graphrag:selectedGraph",
+        handleGraphChange,
+      );
+    };
   }, [fetchHistory2]);
 
   // Refresh history when component becomes visible (user returns to chat page)

@@ -1,0 +1,119 @@
+/*
+ * Create a conversation (when absent) or append an owned user message.
+ * Authorization and mutation are deliberately performed in one query.
+ */
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Begin_Turn(
+    STRING principal_id,
+    STRING graph_name,
+    STRING conversation_id,
+    STRING conversation_title,
+    STRING conversation_hash,
+    STRING turn_id,
+    STRING message_id,
+    STRING parent_message_id,
+    STRING model_name,
+    STRING content,
+    STRING payload_hash,
+    UINT event_time,
+    BOOL create_if_missing
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    SumAccum<INT> @@owned_count;
+    SumAccum<INT> @@conversation_count;
+    SumAccum<INT> @@message_count;
+    SumAccum<INT> @@global_message_count;
+    SumAccum<INT> @@user_count;
+    STRING status = "not_found";
+
+    owner_seed = {ChatUser.*};
+    owned = SELECT c
+            FROM owner_seed:u -(OWNS_CONVERSATION>:e)- ChatConversation:c
+            WHERE u.user_id == principal_id
+              AND c.conversation_id == conversation_id
+              AND c.graph_name == graph_name
+              AND c.status != "deleted"
+            ACCUM @@owned_count += 1;
+
+    all_conversations = {ChatConversation.*};
+    matching_conversations = SELECT c
+            FROM all_conversations:c
+            WHERE c.conversation_id == conversation_id
+            ACCUM @@conversation_count += 1;
+
+    all_messages = {ChatMessage.*};
+    matching_messages = SELECT m
+            FROM all_messages:m
+            WHERE m.message_id == message_id
+            ACCUM @@global_message_count += 1;
+
+    all_users = {ChatUser.*};
+    principal_user = SELECT u
+            FROM all_users:u
+            WHERE u.user_id == principal_id
+            ACCUM @@user_count += 1;
+
+    IF @@owned_count == 0
+       AND @@conversation_count == 0
+       AND @@global_message_count == 0
+       AND create_if_missing THEN
+        IF @@user_count == 0 THEN
+            INSERT INTO ChatUser VALUES (principal_id, event_time, event_time);
+        ELSE
+            refresh_user = SELECT u FROM principal_user:u
+                POST-ACCUM u.updated_at = event_time;
+        END;
+        INSERT INTO ChatConversation VALUES (
+            conversation_id, graph_name, conversation_title, "active", 1,
+            message_id, event_time, event_time, 0, conversation_hash
+        );
+        INSERT INTO OWNS_CONVERSATION VALUES (principal_id, conversation_id);
+        INSERT INTO ChatMessage VALUES (
+            message_id, conversation_id, turn_id, 0, parent_message_id,
+            "user", content, model_name, 0.0, false, "", "", 0, "",
+            event_time, event_time, payload_hash
+        );
+        INSERT INTO HAS_MESSAGE VALUES (conversation_id, message_id);
+        status = "created";
+    ELSE IF @@owned_count > 0 THEN
+        owned_messages = SELECT m
+            FROM owned:c -(HAS_MESSAGE>:e)- ChatMessage:m
+            WHERE m.message_id == message_id
+            ACCUM @@message_count += 1;
+
+        IF @@message_count == 0 AND @@global_message_count == 0 THEN
+            append_message = SELECT c FROM owned:c
+                POST-ACCUM
+                    INSERT INTO ChatMessage VALUES (
+                        message_id, conversation_id, turn_id, c.next_sequence,
+                        c.last_message_id, "user", content, model_name, 0.0,
+                        false, "", "", 0, "", event_time, event_time,
+                        payload_hash
+                    ),
+                    INSERT INTO HAS_MESSAGE VALUES (conversation_id, message_id),
+                    IF c.last_message_id != "" THEN
+                        INSERT INTO REPLIES_TO VALUES (
+                            message_id, c.last_message_id
+                        )
+                    END,
+                    c.next_sequence = c.next_sequence + 1,
+                    c.last_message_id = message_id,
+                    c.updated_at = event_time;
+            status = "created";
+        ELSE IF @@message_count > 0 THEN
+            replay = SELECT m FROM owned_messages:m
+                POST-ACCUM
+                    IF m.payload_hash == payload_hash THEN
+                        status = "replayed"
+                    ELSE
+                        status = "conflict"
+                    END;
+        ELSE
+            status = "conflict";
+        END;
+    ELSE IF @@global_message_count > 0 THEN
+        status = "conflict";
+    END;
+
+    PRINT status AS status;
+    PRINT conversation_id AS conversation_id;
+    PRINT message_id AS message_id;
+}

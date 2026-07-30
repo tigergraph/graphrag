@@ -14,8 +14,10 @@
 
 import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Optional, Type, Union
 
+from langchain_core.documents import Document
 from langchain_core.language_models.llms import LLM
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -38,6 +40,36 @@ from .validation_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _load_local_function_docs() -> tuple[list[Document], list[str]]:
+    """Load the bundled pyTigerGraph references without a vector index.
+
+    Structured-only graphs do not necessarily contain the SupportAI document
+    schema or its ``get_topk_similar`` query. These references ship with the
+    service, so native function generation must remain available without
+    querying the user's graph for documentation.
+    """
+    documents: list[Document] = []
+    function_headers: list[str] = []
+    docs_dir = Path("common/tg_documents")
+    for path in sorted(docs_dir.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Unable to load bundled function doc %s: %s", path, exc)
+            continue
+        function_header = payload.get("function_header")
+        if not function_header:
+            continue
+        function_headers.append(function_header)
+        documents.append(
+            Document(
+                page_content=json.dumps(payload, ensure_ascii=False),
+                metadata={"source": str(path), "function_header": function_header},
+            )
+        )
+    return documents, function_headers
 
 
 class GenerateFunction(BaseTool):
@@ -101,6 +133,15 @@ class GenerateFunction(BaseTool):
         """
         LogWriter.info(f"request_id={req_id_cv.get()} ENTRY GenerateFunction._run()")
 
+        # Mapping models may explicitly emit null for unused schema categories.
+        # Treat those values like the method defaults so structured-only
+        # questions can continue to native function selection.
+        target_vertex_types = target_vertex_types or []
+        target_vertex_attributes = target_vertex_attributes or {}
+        target_vertex_ids = target_vertex_ids or {}
+        target_edge_types = target_edge_types or []
+        target_edge_attributes = target_edge_attributes or {}
+
         if target_vertex_types == [] and target_edge_types == []:
             return {
                 "error": "No vertex or edge types recognized. MapQuestionToSchema and then try again."
@@ -156,27 +197,40 @@ class GenerateFunction(BaseTool):
             },
         )
 
-        pytg_docs = self.embedding_store.retrieve_similar(
-            self.embedding_model.embed_query(lookup_question),
-            top_k=5,
-            filter_expr="graphname == 'all'",
-        )
-
-        custom_docs = self.embedding_store.retrieve_similar(
-            self.embedding_model.embed_query(lookup_question),
-            top_k=3,
-            filter_expr="graphname == '{}'".format(self.conn.graphname),
-        )
-
-        # Prioritize pyTigerGraph docs over custom docs
-        docs = pytg_docs + custom_docs
-
-        valid_function_calls = [
-            x["function_header"]
-            for x in self.embedding_store.list_registered_documents(
-                output_fields=["function_header"]
+        docs = []
+        valid_function_calls = []
+        try:
+            pytg_docs = self.embedding_store.retrieve_similar(
+                self.embedding_model.embed_query(lookup_question),
+                top_k=5,
+                filter_expr="graphname == 'all'",
             )
-        ]
+            custom_docs = self.embedding_store.retrieve_similar(
+                self.embedding_model.embed_query(lookup_question),
+                top_k=3,
+                filter_expr="graphname == '{}'".format(self.conn.graphname),
+            )
+            # Prioritize pyTigerGraph docs over custom docs.
+            docs = pytg_docs + custom_docs
+            valid_function_calls = [
+                x["function_header"]
+                for x in self.embedding_store.list_registered_documents(
+                    output_fields=["function_header"]
+                )
+            ]
+        except Exception as exc:
+            logger.warning(
+                "Function-document vector lookup unavailable; using bundled "
+                "pyTigerGraph references: %s",
+                exc,
+            )
+
+        local_docs, local_function_calls = _load_local_function_docs()
+        valid_function_calls = list(
+            dict.fromkeys(valid_function_calls + local_function_calls)
+        )
+        if not docs:
+            docs = local_docs[:8]
 
         if len(docs) == 0:
             LogWriter.warning(f"request_id={req_id_cv.get()} WARN no documents found")

@@ -216,7 +216,7 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
 
   const handleShowTable = () => {
     // Allow opening the table view on history messages too — the
-    // chat-history backend preserves ``query_sources.result``, so
+    // TigerGraph history preserves ``query_sources.result``, so
     // there's no reason to deny it just because the message arrived
     // from a reload rather than a fresh answer.
     if (!message.query_sources?.result) {
@@ -284,9 +284,8 @@ export const CustomChatMessage: FC<IChatbotMessageProps> = ({
                   await alert("Your session has expired. Please log in again.");
                   return;
                 }
-                // Trace JSON lives under /code/trace_logs inside the
-                // graphrag container and is wiped on container recreate.
-                // Probe first so we never open an empty dialog when the file is gone.
+                // Probe the owner-scoped TigerGraph trace endpoint before
+                // opening the dialog.
                 try {
                   const probe = await fetch(`/ui/trace/${messageId}`, {
                     method: "GET",

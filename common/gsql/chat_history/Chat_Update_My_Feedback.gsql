@@ -1,0 +1,27 @@
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Update_My_Feedback(
+    STRING principal_id,
+    STRING graph_name,
+    STRING conversation_id,
+    STRING message_id,
+    INT feedback,
+    STRING comment,
+    UINT event_time
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    SumAccum<INT> @@updated;
+    owner_seed = {ChatUser.*};
+    messages = SELECT m
+        FROM owner_seed:u -(OWNS_CONVERSATION>:e1)- ChatConversation:c
+             -(HAS_MESSAGE>:e2)- ChatMessage:m
+        WHERE u.user_id == principal_id
+          AND c.conversation_id == conversation_id
+          AND c.graph_name == graph_name
+          AND c.status != "deleted"
+          AND m.message_id == message_id
+          AND m.role == "system"
+        POST-ACCUM
+          m.feedback = feedback,
+          m.comment = comment,
+          m.updated_at = event_time,
+          @@updated += 1;
+    PRINT @@updated AS updated;
+}

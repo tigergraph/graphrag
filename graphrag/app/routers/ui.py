@@ -42,6 +42,7 @@ from fastapi import (
     HTTPException,
     Path,
     Request,
+    Response,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -53,6 +54,7 @@ from pyTigerGraph.common.exception import TigerGraphException
 from tools.validation_utils import MapQuestionToSchemaException
 
 from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
+from common.db.connection_utils import normalize_restpp_url
 from common.db.connections import get_db_connection_pwd_manual
 from common.db import schema_utils as schema_utils_mod
 from common.db import schema_extraction as schema_extraction_mod
@@ -62,6 +64,22 @@ from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.utils.graph_locks import acquire_graph_lock, release_graph_lock, acquire_rebuild_lock, release_rebuild_lock, get_rebuilding_graph, get_current_operation
+from common.chat_history import (
+    HistoryConflictError,
+    HistoryConfigurationError,
+    HistoryMessage,
+    HistoryNotFoundError,
+    HistoryPayloadTooLargeError,
+    HistoryPrincipal,
+    HistoryRepositoryError,
+    HistoryUnavailableError,
+    TraceEnvelope,
+    create_admin_history_repository,
+    create_history_repository,
+)
+from common.chat_history.models import epoch_now
+from common.chat_history.redaction import build_trace_steps
+from common.chat_history.settings import HistorySettings
 
 # Cache the last successful ECC status response per graph so the UI
 # still sees started_at and stage when ECC is too busy to respond.
@@ -78,67 +96,6 @@ from common.py_schemas.schemas import (
 )
 
 logger = logging.getLogger(__name__)
-
-TRACE_LOGS_DIR = os.environ.get("TRACE_LOGS_DIR", "/code/trace_logs")
-
-
-def _cleanup_old_traces(max_age_days: int = 30):
-    """Delete trace log files older than max_age_days."""
-    try:
-        cutoff = time.time() - (max_age_days * 86400)
-        for filename in os.listdir(TRACE_LOGS_DIR):
-            if not filename.endswith(".json"):
-                continue
-            filepath = os.path.join(TRACE_LOGS_DIR, filename)
-            if os.path.getmtime(filepath) < cutoff:
-                os.remove(filepath)
-    except Exception:
-        logger.warning("Failed to clean up old trace logs", exc_info=True)
-
-
-def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp: GraphRAGResponse, elapsed: float, username: str):
-    try:
-        if not isinstance(message_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", message_id):
-            logger.warning("Refusing to save trace log: invalid message_id %r", message_id)
-            return
-        if not isinstance(username, str) or not username:
-            # Without an owner we cannot enforce per-user access on read, so refuse to save.
-            logger.warning("Refusing to save trace log for %r: missing username", message_id)
-            return
-
-        os.makedirs(TRACE_LOGS_DIR, exist_ok=True)
-        base_dir = os.path.abspath(TRACE_LOGS_DIR)
-        filepath = os.path.abspath(os.path.join(base_dir, f"{message_id}.json"))
-        if os.path.commonpath([base_dir, filepath]) != base_dir:
-            logger.warning("Refusing to save trace log: path escapes TRACE_LOGS_DIR for %r", message_id)
-            return
-
-        _cleanup_old_traces()
-
-        # Strip chunk text from query_sources to keep trace files small.
-        # final_retrieval contains the full text of every retrieved chunk.
-        query_sources = dict(resp.query_sources) if resp.query_sources else {}
-        result = query_sources.get("result")
-        if isinstance(result, dict) and "final_retrieval" in result:
-            result = {k: v for k, v in result.items() if k != "final_retrieval"}
-            query_sources = {**query_sources, "result": result}
-
-        trace_data = {
-            "message_id": message_id,
-            "conversation_id": conversation_id,
-            "username": username,
-            "user_query": user_query,
-            "response_time": elapsed,
-            "response_type": resp.response_type,
-            "answered_question": resp.answered_question,
-            "query_sources": query_sources,
-            "natural_language_response": resp.natural_language_response,
-            "timestamp": time.time(),
-        }
-        with open(filepath, "w") as f:
-            json.dump(trace_data, f, default=str)
-    except Exception:
-        logger.warning(f"Failed to save trace log for message {message_id}", exc_info=True)
 
 # Validated graph name path parameter — rejects path traversal characters
 ValidGraphName = Annotated[str, Path(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
@@ -273,16 +230,16 @@ def _get_user_role_details(
         connection_kwargs["restppPort"] = db_config["restppPort"]
 
     if username == _UI_TOKEN_SENTINEL:
-        conn = TigerGraphConnection(
+        conn = normalize_restpp_url(TigerGraphConnection(
             **connection_kwargs,
             apiToken=password,
-        )
+        ))
     else:
-        conn = TigerGraphConnection(
+        conn = normalize_restpp_url(TigerGraphConnection(
             **connection_kwargs,
             username=username,
             password=password,
-        )
+        ))
 
     # Transient GSQL hiccups when the role-cache TTL expires were
     # surfacing as 403 "Unable to verify user roles" banners on the
@@ -457,24 +414,6 @@ def _parse_auth_header(authorization: str | None) -> HTTPBasicCredentials:
     )
 
 
-def _chat_history_auth_header(creds: HTTPBasicCredentials) -> str:
-    """Build the Basic-auth header used when proxying to chat-history.
-
-    Chat-history identifies the caller by the Basic-auth username only
-    (it ignores the password). For sentinel logins
-    (``__graphrag_token__`` / ``__GSQL__secret``) we substitute the
-    TG-resolved username so conversations get stored / fetched under
-    the user's real identity instead of the sentinel string.
-    """
-    try:
-        _, _, resolved = _get_user_role_details(creds.username, creds.password)
-    except Exception:
-        resolved = creds.username
-    username = resolved or creds.username
-    encoded = base64.b64encode(f"{username}:{creds.password}".encode()).decode()
-    return f"Basic {encoded}"
-
-
 def _ecc_auth_header(creds: HTTPBasicCredentials) -> str:
     """Build the Authorization header used when forwarding to ECC.
 
@@ -510,20 +449,27 @@ def auth(usr: str, password: str, conn=None) -> tuple[list[str], TigerGraphConne
             connection_kwargs["restppPort"] = db_config["restppPort"]
 
         if usr == _UI_TOKEN_SENTINEL:
-            conn = TigerGraphConnection(
+            conn = normalize_restpp_url(TigerGraphConnection(
                 **connection_kwargs,
                 apiToken=password,
-            )
+            ))
         else:
-            conn = TigerGraphConnection(
+            conn = normalize_restpp_url(TigerGraphConnection(
                 **connection_kwargs,
                 username=usr,
                 password=password,
-            )
+            ))
 
     try:
         graph_list = conn.listGraphs()
-        graphs = [g["graphName"] for g in graph_list if "graphName" in g]
+        history_graph = os.getenv(
+            "CHAT_HISTORY_GRAPH", "GraphRAGChatHistory"
+        )
+        graphs = [
+            g["graphName"]
+            for g in graph_list
+            if "graphName" in g and g["graphName"] != history_graph
+        ]
 
     except requests.exceptions.HTTPError as e:
         raise HTTPException(
@@ -559,13 +505,13 @@ def ws_basic_auth(auth_info: str, graphname=None):
         # used by the password path so downstream code that depends on
         # proxy-only attributes (e.g. version checks) works the same
         # for token logins.
-        raw_conn = TigerGraphConnection(
+        raw_conn = normalize_restpp_url(TigerGraphConnection(
             host=db_config["hostname"],
             graphname=graphname or "",
             apiToken=creds.password,
             restppPort=db_config.get("restppPort", "9000"),
             gsPort=db_config.get("gsPort", "14240"),
-        )
+        ))
         raw_conn.customizeHeader(
             timeout=db_config.get("default_timeout", 60) * 1000,
             responseSize=5000000,
@@ -597,6 +543,131 @@ def ui_basic_auth(
     """
     graphs = auth(creds.username, creds.password)[0]
     return graphs, creds
+
+
+def _history_principal(
+    auth_context: tuple[list[str], HTTPBasicCredentials],
+) -> HistoryPrincipal:
+    """Resolve one canonical, immutable principal after TG authentication."""
+    graphs, credentials = auth_context
+    try:
+        global_roles, graph_roles, resolved = _get_user_role_details(
+            credentials.username, credentials.password
+        )
+    except Exception as exc:
+        logger.warning("Unable to resolve canonical history principal: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Authenticated identity could not be resolved",
+        ) from exc
+    if not resolved:
+        raise HTTPException(
+            status_code=503,
+            detail="Authenticated identity could not be resolved",
+        )
+    try:
+        settings = HistorySettings.from_env()
+    except ValueError as exc:
+        logger.error("Invalid chat history environment configuration: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Chat history persistence is misconfigured",
+        ) from exc
+    return HistoryPrincipal.create(
+        user_id=resolved,
+        accessible_graphs=graphs,
+        global_roles=global_roles,
+        graph_roles=graph_roles,
+        operational_graph=settings.graph_name,
+    )
+
+
+def _history_repository(
+    auth_context: tuple[list[str], HTTPBasicCredentials],
+    *,
+    current_graph: str | None = None,
+):
+    return create_history_repository(
+        _history_principal(auth_context),
+        current_graph=current_graph,
+    )
+
+
+def _raise_history_http(exc: Exception) -> None:
+    if isinstance(exc, HistoryNotFoundError):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if isinstance(exc, HistoryConflictError):
+        raise HTTPException(status_code=409, detail=str(exc))
+    if isinstance(exc, HistoryPayloadTooLargeError):
+        raise HTTPException(status_code=413, detail=str(exc))
+    if isinstance(
+        exc, (HistoryConfigurationError, HistoryUnavailableError)
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Chat history persistence is unavailable",
+                "request_id": req_id_cv.get(),
+            },
+        )
+    if isinstance(exc, PermissionError):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if isinstance(exc, ValueError):
+        raise HTTPException(status_code=422, detail=str(exc))
+    raise exc
+
+
+def _trace_envelope(
+    *,
+    principal: HistoryPrincipal,
+    graph_name: str,
+    message_id: str,
+    conversation_id: str,
+    user_query: str,
+    response: GraphRAGResponse,
+    elapsed: float,
+) -> TraceEnvelope:
+    settings = HistorySettings.from_env()
+    query_sources = response.query_sources or {}
+    trace_id = message_id
+    steps, steps_truncated = build_trace_steps(
+        trace_id, query_sources, settings
+    )
+    created_at = epoch_now()
+    trace_data = {
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "username": principal.user_id,
+        "user_query": user_query,
+        "response_time": elapsed,
+        "response_type": response.response_type,
+        "answered_question": response.answered_question,
+        "query_sources": query_sources,
+        "natural_language_response": response.natural_language_response,
+        "timestamp": time.time(),
+        "request_id": req_id_cv.get() or "",
+        "status": "completed",
+    }
+    provenance = {
+        "graph_name": graph_name,
+        "citations": query_sources.get("citations", []),
+        "reasoning": query_sources.get("reasoning", []),
+    }
+    return TraceEnvelope(
+        trace_id=trace_id,
+        message_id=message_id,
+        conversation_id=conversation_id,
+        request_id=req_id_cv.get() or "",
+        status="completed",
+        response_type=response.response_type or "",
+        elapsed=elapsed,
+        trace_data=trace_data,
+        provenance=provenance,
+        steps=steps,
+        truncated=steps_truncated,
+        created_at=created_at,
+        expires_at=created_at + settings.retention_days * 86400,
+    )
 
 
 @router.post(f"{route_prefix}/ui-login")
@@ -774,32 +845,36 @@ def schema_reserved_names(
 
 
 @router.post(f"{route_prefix}/feedback")
-def add_feedback(
+async def add_feedback(
     message: Message,
-    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    auth_context: Annotated[
+        tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)
+    ],
 ):
-    creds = creds[1]
     try:
-        res = httpx.post(
-            f"{graphrag_config['chat_history_api']}/conversation",
-            json=message.model_dump(),
-            headers={"Authorization": _chat_history_auth_header(creds)},
+        repository = _history_repository(auth_context)
+        await repository.update_feedback(
+            conversation_id=message.conversation_id,
+            message_id=message.message_id,
+            feedback=int(message.feedback or 0),
+            comment=message.comment or "",
         )
-        res.raise_for_status()
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/ui/feedback request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise e
+        _raise_history_http(e)
 
     return {"message": "feedback saved", "message_id": message.message_id}
 
 
 @router.get(route_prefix + "/trace/{message_id}")
-def get_trace_log(
+async def get_trace_log(
     message_id: str,
-    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    auth_context: Annotated[
+        tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)
+    ],
 ):
     # Trace logs contain user queries (potentially PII), full LLM responses,
     # internal cypher, schema mappings, and per-call cost.
@@ -807,42 +882,18 @@ def get_trace_log(
     #   1. Role: must be a superuser.
     #   2. Ownership: must be the user who originated the trace.
     # This prevents cross-user disclosure even between superusers.
-    _require_roles(creds[1], {"superuser"})
-
     if not re.fullmatch(r"[A-Za-z0-9_-]+", message_id):
         raise HTTPException(status_code=400, detail="Invalid message_id")
-    base_dir = os.path.abspath(TRACE_LOGS_DIR)
-    filepath = os.path.abspath(os.path.join(base_dir, f"{message_id}.json"))
-    if os.path.commonpath([base_dir, filepath]) != base_dir:
-        raise HTTPException(status_code=400, detail="Invalid message_id")
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="Trace log not found")
-
     try:
-        with open(filepath, "r") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        logger.warning("Failed to read trace log %r", message_id, exc_info=True)
-        raise HTTPException(status_code=404, detail="Trace log not found")
-
-    # Per-user segregation. Legacy files (saved before this fix) have no
-    # "username" field and therefore can't pass this check — they will 404
-    # for everyone and age out via the existing 30-day cleanup.
-    # Compare against the TG-resolved username so sentinel logins (e.g.
-    # ``__GSQL__secret``) can still read their own traces.
-    owner = data.get("username")
-    try:
-        _, _, resolved = _get_user_role_details(creds[1].username, creds[1].password)
-    except Exception:
-        resolved = creds[1].username
-    if owner != (resolved or creds[1].username):
-        logger.warning(
-            "User %r (resolved=%r) attempted to read trace owned by %r (message_id=%s)",
-            creds[1].username, resolved, owner, message_id,
-        )
-        raise HTTPException(status_code=404, detail="Trace log not found")
-
-    return data
+        principal = _history_principal(auth_context)
+        if not principal.is_trace_reader():
+            raise PermissionError("Trace access requires superuser")
+        repository = create_history_repository(principal)
+        return await repository.get_trace(message_id)
+    except Exception as exc:
+        if isinstance(exc, HistoryNotFoundError):
+            raise HTTPException(status_code=404, detail="Trace log not found")
+        _raise_history_http(exc)
 
 
 
@@ -2548,24 +2599,38 @@ async def serve_image_from_vertex(
 @router.get(route_prefix + "/user/{user_id}")
 async def get_user_conversations(
     user_id: str,
-    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    response: Response,
+    auth_context: Annotated[
+        tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)
+    ],
+    graph_name: str | None = None,
+    cursor: str | None = None,
+    limit: int | None = None,
 ):
-    creds = creds[1]
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(
-                f"{graphrag_config['chat_history_api']}/user/{user_id}",
-                headers={"Authorization": _chat_history_auth_header(creds)},
+        principal = _history_principal(auth_context)
+        if user_id != principal.user_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Cannot list another user's conversations",
             )
-            res.raise_for_status()
+        repository = create_history_repository(principal)
+        page = await repository.list_conversations(
+            graph_name=graph_name,
+            cursor=cursor,
+            limit=limit,
+        )
+        if page.next_cursor:
+            response.headers["X-Next-Cursor"] = page.next_cursor
+        return page.items
+    except HTTPException:
+        raise
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/ui/user/{user_id} request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise e
-
-    return res.json()
+        _raise_history_http(e)
 
 
 @router.get(route_prefix + "/roles")
@@ -2581,73 +2646,78 @@ async def get_user_roles(
 @router.get(route_prefix + "/conversation/{conversation_id}")
 async def get_conversation_contents(
     conversation_id: str,
-    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    response: Response,
+    auth_context: Annotated[
+        tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)
+    ],
+    graph_name: str | None = None,
+    cursor: str | None = None,
+    limit: int | None = None,
 ):
-    creds = creds[1]
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(
-                f"{graphrag_config['chat_history_api']}/conversation/{conversation_id}",
-                headers={"Authorization": _chat_history_auth_header(creds)},
-            )
-            res.raise_for_status()
+        repository = _history_repository(
+            auth_context, current_graph=graph_name
+        )
+        messages, next_cursor, _ = await repository.get_conversation(
+            conversation_id,
+            cursor=cursor,
+            limit=limit,
+        )
+        if next_cursor:
+            response.headers["X-Next-Cursor"] = next_cursor
+        return messages
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/conversation/{conversation_id} request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise e
-
-    return res.json()
+        _raise_history_http(e)
 
 @router.get(route_prefix + "/get_feedback")
 async def get_conversation_feedback(
-    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    response: Response,
+    auth_context: Annotated[
+        tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)
+    ],
+    cursor: str | None = None,
+    limit: int | None = None,
 ):
-    creds = creds[1]
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(
-                f"{graphrag_config['chat_history_api']}/get_feedback",
-                headers={"Authorization": _chat_history_auth_header(creds)},
-            )
-            res.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error occurred: {e}")
-        raise HTTPException(status_code=e.response.status_code, detail="Failed to fetch feedback")
+        principal = _history_principal(auth_context)
+        repository = (
+            create_admin_history_repository(principal)
+            if principal.is_history_admin()
+            else create_history_repository(principal)
+        )
+        page = await repository.list_feedback(cursor=cursor, limit=limit)
+        if page.next_cursor:
+            response.headers["X-Next-Cursor"] = page.next_cursor
+        return page.items
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/get_feedback request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise HTTPException(status_code=500, detail="Internal server error")
-
-    return res.json()
+        _raise_history_http(e)
 
 
 @router.delete(route_prefix + "/conversation/{conversation_id}")
 async def delete_conversation(
     conversation_id: str,
-    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    auth_context: Annotated[
+        tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)
+    ],
 ):
     """Delete a conversation and all its messages."""
-    creds = creds[1]
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.delete(
-                f"{graphrag_config['chat_history_api']}/conversation/{conversation_id}",
-                headers={"Authorization": _chat_history_auth_header(creds)},
-            )
-            res.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP error occurred: {e}")
-        raise HTTPException(status_code=e.response.status_code, detail="Failed to delete conversation")
+        repository = _history_repository(auth_context)
+        await repository.delete_conversation(conversation_id)
     except Exception as e:
         exc = traceback.format_exc()
         logger.debug_pii(
             f"/conversation/{conversation_id} DELETE request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise HTTPException(status_code=500, detail="Internal server error")
+        _raise_history_http(e)
 
     return {"message": "Conversation deleted successfully"}
 
@@ -2774,73 +2844,29 @@ async def run_agent(
 
 
 async def load_conversation_history(
-    conversation_id: str, usr_creds: HTTPBasicCredentials
+    conversation_id: str,
+    repository,
 ) -> list[dict[str, str]]:
-    """
-    Load conversation history from the chat history service.
-    Returns a list of dicts with 'query', 'response', 'create_ts', and 'update_ts' keys.
-    """
+    """Load one owned, graph-bound conversation or fail closed."""
     if not conversation_id or conversation_id == "new":
         return []
-
-    ch = graphrag_config.get("chat_history_api")
-    if ch is None:
-        LogWriter.info("chat-history not enabled, returning empty history")
-        return []
-
-    headers = {"Authorization": _chat_history_auth_header(usr_creds)}
     try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(
-                f"{ch}/conversation/{conversation_id}",
-                headers=headers,
-            )
-            res.raise_for_status()
-            conversation_data = res.json()
-            # Convert conversation messages to the format expected by the agent
-            history = []
-            for msg in conversation_data:
-                if msg.get("role") == "user":
-                    # Find the corresponding system response
-                    for response_msg in conversation_data:
-                        if (response_msg.get("role") == "system" and 
-                            response_msg.get("parent_id") == msg.get("message_id")):
-                            history.append({
-                                "query": msg.get("content", ""),
-                                "response": response_msg.get("content", ""),
-                                "create_ts": response_msg.get("create_ts"),
-                                "update_ts": response_msg.get("update_ts"),
-                            })
-                            break
-            
-            LogWriter.info(f"Loaded {len(history)} conversation history entries for conversation {conversation_id}")
-            return history
-            
+        history = await repository.load_agent_history(conversation_id)
+        LogWriter.info(
+            f"Loaded {len(history)} conversation history entries for "
+            f"conversation {conversation_id}"
+        )
+        return history
     except Exception as e:
         exc = traceback.format_exc()
-        logger.debug_pii(f"Error loading conversation history for {conversation_id}\nException Trace:\n{exc}")
-        LogWriter.warning(f"Failed to load conversation history for {conversation_id}: {e}")
-        return []
-
-
-async def write_message_to_history(
-    message: Message, usr_creds: HTTPBasicCredentials
-):
-    ch = graphrag_config.get("chat_history_api")
-    if ch is not None:
-        headers = {"Authorization": _chat_history_auth_header(usr_creds)}
-        try:
-            async with httpx.AsyncClient() as client:
-                res = await client.post(
-                    f"{ch}/conversation", headers=headers, json=message.model_dump()
-                )
-                res.raise_for_status()
-        except Exception:  # catch all exceptions to log them, but don't raise
-            exc = traceback.format_exc()
-            logger.debug_pii(f"Error writing chat history\nException Trace:\n{exc}")
-
-    else:
-        LogWriter.info(f"chat-history not enabled. chat-history url: {ch}")
+        logger.debug_pii(
+            f"Error loading conversation history for {conversation_id}\n"
+            f"Exception Trace:\n{exc}"
+        )
+        LogWriter.warning(
+            f"Failed to load conversation history for {conversation_id}: {e}"
+        )
+        raise
 
 # Recognized agentic orchestrator styles. A value routed to the agentic engine
 # that is not one of these (e.g. a classic retriever name like "hybrid") would
@@ -2848,7 +2874,15 @@ async def write_message_to_history(
 _AGENT_STYLES = {"auto", "planned", "reactive", "react"}
 
 
-def _chat_agent(graphname, conn, use_cypher, mode, value, ws=None):
+def _chat_agent(
+    graphname,
+    conn,
+    use_cypher,
+    mode,
+    value,
+    ws=None,
+    history_repository=None,
+):
     """Build the chat agent from one menu selection.
 
     ``mode`` (``"agentic"`` | ``"classic"`` | ``None`` → graph config) picks the
@@ -2886,6 +2920,7 @@ def _chat_agent(graphname, conn, use_cypher, mode, value, ws=None):
     return make_agent(
         graphname, conn, use_cypher, ws=ws, mode=resolved_mode,
         supportai_retriever=retriever, agent_style=style,
+        history_repository=history_repository,
     )
 
 
@@ -2916,42 +2951,65 @@ async def graph_query(
     conversation_id: str | None = None,
     include_fields: str | None = None,
 ):
-    is_superadmin = _is_superadmin(creds[0])
-    creds = creds[1]
+    auth_context = creds
+    principal = _history_principal(auth_context)
+    try:
+        repository = create_history_repository(
+            principal, current_graph=graphname
+        )
+    except HistoryRepositoryError as exc:
+        _raise_history_http(exc)
+    is_superadmin = principal.is_trace_reader()
+    user_credentials = auth_context[1]
     auth_header = "Basic " + base64.b64encode(
-        f"{creds.username}:{creds.password}".encode()
+        f"{user_credentials.username}:{user_credentials.password}".encode()
     ).decode()
     _, conn = ws_basic_auth(auth_header, graphname)
     try:
-        # Load conversation history if conversation_id is provided
-        conversation_history = await load_conversation_history(conversation_id, creds) if conversation_id else []
-
-        # Use provided conversation ID or generate new one
-        if not conversation_id or conversation_id == "new":
+        is_new_conversation = not conversation_id or conversation_id == "new"
+        if is_new_conversation:
+            conversation_history = []
             convo_id = str(uuid.uuid4())
             LogWriter.info(f"Starting new conversation with ID: {convo_id}")
         else:
+            conversation_history = await load_conversation_history(
+                conversation_id, repository
+            )
             convo_id = conversation_id
             LogWriter.info(f"Continuing conversation with ID: {convo_id}")
 
         # create agent from the menu selection (engine + style/retriever)
-        agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern)
+        agent = _chat_agent(
+            graphname,
+            conn,
+            use_cypher,
+            mode,
+            rag_pattern,
+            history_repository=repository,
+        )
 
-        prev_id = None
-        data = q
+        data = q or ""
+        turn_id = str(uuid.uuid4())
+        user_message_id = str(uuid.uuid4())
 
-        # make message from data
-        message = Message(
+        user_message = Message(
             conversation_id=convo_id,
-            message_id=str(uuid.uuid4()),
-            parent_id=prev_id,
+            message_id=user_message_id,
+            parent_id=None,
             model=get_chat_config(graphname).get("llm_model", "unknown"),
             content=data,
             role=Role.USER,
         )
-        # save message
-        await write_message_to_history(message, creds)
-        prev_id = message.message_id
+        await repository.begin_turn(
+            HistoryMessage(
+                **{
+                    **user_message.model_dump(),
+                    "turn_id": turn_id,
+                    "role": "user",
+                }
+            ),
+            create_if_missing=is_new_conversation,
+        )
 
         # generate response and keep track of response time
         start = time.monotonic()
@@ -2961,11 +3019,11 @@ async def graph_query(
         )
         elapsed = time.monotonic() - start
 
-        # save message
+        assistant_message_id = str(uuid.uuid4())
         message = Message(
             conversation_id=convo_id,
-            message_id=str(uuid.uuid4()),
-            parent_id=prev_id,
+            message_id=assistant_message_id,
+            parent_id=user_message_id,
             model=get_chat_config(graphname).get("llm_model", "unknown"),
             content=resp.natural_language_response,
             role=Role.SYSTEM,
@@ -2974,9 +3032,26 @@ async def graph_query(
             response_type=resp.response_type,
             query_sources=resp.query_sources,
         )
-        await write_message_to_history(message, creds)
-        await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, creds.username)
-        prev_id = message.message_id
+        trace = _trace_envelope(
+            principal=principal,
+            graph_name=graphname,
+            message_id=assistant_message_id,
+            conversation_id=convo_id,
+            user_query=data or "",
+            response=resp,
+            elapsed=elapsed,
+        )
+        await repository.complete_turn(
+            user_message_id=user_message_id,
+            assistant_message=HistoryMessage(
+                **{
+                    **message.model_dump(),
+                    "turn_id": turn_id,
+                    "role": "system",
+                }
+            ),
+            trace=trace,
+        )
 
         # reply — trim to the answer envelope unless extra fields were requested
         return _select_message_fields(message, include_fields).model_dump_json()
@@ -2985,7 +3060,18 @@ async def graph_query(
         logger.debug_pii(
             f"/ui/{graphname}/query request_id={req_id_cv.get()} Exception Trace:\n{exc}"
         )
-        raise e
+        if isinstance(
+            e,
+            (
+                HistoryNotFoundError,
+                HistoryConflictError,
+                HistoryPayloadTooLargeError,
+                HistoryConfigurationError,
+                HistoryUnavailableError,
+            ),
+        ):
+            _raise_history_http(e)
+        raise
 
 @router.websocket(route_prefix + "/{graphname}/chat")
 async def chat(
@@ -3014,7 +3100,7 @@ async def chat(
         logger.info(f"WebSocket connected, waiting for authentication for graph: {graphname}")
         usr_auth = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         logger.info(f"Received authentication data, length: {len(usr_auth)}")
-        _, conn = ws_basic_auth(usr_auth, graphname)
+        accessible_graphs, conn = ws_basic_auth(usr_auth, graphname)
 
         # If the embedding store is currently unavailable, advise the
         # client now that the caller is authenticated. The chat still
@@ -3037,19 +3123,24 @@ async def chat(
                 })
             except Exception:
                 pass
-        # Extract the authenticated username for trace-log ownership
-        # tracking. For sentinel logins (API token / secret) this is
-        # the sentinel itself; we resolve to the real TG identity below.
         usr_creds = _parse_auth_header(usr_auth)
-        ws_is_superadmin = False
-        try:
-            ws_global_roles, _, ws_username = _get_user_role_details(
-                usr_creds.username, usr_creds.password
-            )
-            ws_is_superadmin = _is_superadmin(ws_global_roles)
-        except Exception:
-            ws_username = usr_creds.username
-        ws_username = ws_username or usr_creds.username
+        ws_global_roles, ws_graph_roles, ws_username = _get_user_role_details(
+            usr_creds.username, usr_creds.password
+        )
+        if not ws_username:
+            raise RuntimeError("Canonical TigerGraph identity is unavailable")
+        history_settings = HistorySettings.from_env()
+        ws_principal = HistoryPrincipal.create(
+            user_id=ws_username,
+            accessible_graphs=accessible_graphs,
+            global_roles=ws_global_roles,
+            graph_roles=ws_graph_roles,
+            operational_graph=history_settings.graph_name,
+        )
+        history_repository = create_history_repository(
+            ws_principal, current_graph=graphname
+        )
+        ws_is_superadmin = ws_principal.is_trace_reader()
         logger.info("Authentication successful")
     except asyncio.TimeoutError:
         logger.error("WebSocket authentication timeout - no credentials received")
@@ -3057,6 +3148,15 @@ async def chat(
         return
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected during authentication")
+        return
+    except (HistoryConfigurationError, HistoryUnavailableError, ValueError) as e:
+        logger.error("WebSocket history setup failed: %s", e)
+        try:
+            await websocket.close(
+                code=1011, reason="Chat history persistence unavailable"
+            )
+        except Exception:
+            pass
         return
     except Exception as e:
         logger.error(f"Authentication failed: {e}")
@@ -3080,11 +3180,27 @@ async def chat(
         f"(graph={graphname}, mode={mode or 'config'}, selection={rag_pattern})"
     )
     
-    # Load conversation history if not a new conversation
-    conversation_history = await load_conversation_history(conversation_id, usr_creds)
-    
-    # Use provided conversation ID or generate new one
-    if conversation_id == "new" or not conversation_id:
+    is_new_conversation = conversation_id == "new" or not conversation_id
+    try:
+        if is_new_conversation:
+            conversation_history = []
+        else:
+            conversation_history = await load_conversation_history(
+                conversation_id, history_repository
+            )
+    except HistoryNotFoundError:
+        await websocket.close(code=1008, reason="Conversation not found")
+        return
+    except Exception:
+        logger.warning(
+            "Unable to load WebSocket conversation history", exc_info=True
+        )
+        await websocket.close(
+            code=1011, reason="Chat history persistence unavailable"
+        )
+        return
+
+    if is_new_conversation:
         convo_id = str(uuid.uuid4())
         LogWriter.info(f"Starting new conversation with ID: {convo_id}")
     else:
@@ -3095,29 +3211,45 @@ async def chat(
     await websocket.send_text(json.dumps({"conversation_id": convo_id}))
 
     # create agent from the menu selection (engine + style/retriever)
-    agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern, ws=websocket)
+    agent = _chat_agent(
+        graphname,
+        conn,
+        use_cypher,
+        mode,
+        rag_pattern,
+        ws=websocket,
+        history_repository=history_repository,
+    )
     # If Agent mode was requested but the model can't tool-call, make_agent
     # downgraded to the Classic engine — tell the user once.
     if getattr(agent, "engine_note", None):
         await websocket.send_text(json.dumps({"system_note": agent.engine_note}))
 
-    prev_id = None
     try:
         while True:
             data = await websocket.receive_text()
+            turn_id = str(uuid.uuid4())
+            user_message_id = str(uuid.uuid4())
 
-            # make message from data
-            message = Message(
+            user_message = Message(
                 conversation_id=convo_id,
-                message_id=str(uuid.uuid4()),
-                parent_id=prev_id,
+                message_id=user_message_id,
+                parent_id=None,
                 model=get_chat_config(graphname).get("llm_model", "unknown"),
                 content=data,
                 role=Role.USER,
             )
-            # save message
-            await write_message_to_history(message, usr_creds)
-            prev_id = message.message_id
+            await history_repository.begin_turn(
+                HistoryMessage(
+                    **{
+                        **user_message.model_dump(),
+                        "turn_id": turn_id,
+                        "role": "user",
+                    }
+                ),
+                create_if_missing=is_new_conversation,
+            )
+            is_new_conversation = False
 
             # generate response and keep track of response time
             start = time.monotonic()
@@ -3127,11 +3259,11 @@ async def chat(
             )
             elapsed = time.monotonic() - start
 
-            # save message
+            assistant_message_id = str(uuid.uuid4())
             message = Message(
                 conversation_id=convo_id,
-                message_id=str(uuid.uuid4()),
-                parent_id=prev_id,
+                message_id=assistant_message_id,
+                parent_id=user_message_id,
                 model=get_chat_config(graphname).get("llm_model", "unknown"),
                 content=resp.natural_language_response,
                 role=Role.SYSTEM,
@@ -3140,9 +3272,26 @@ async def chat(
                 response_type=resp.response_type,
                 query_sources=resp.query_sources,
             )
-            await write_message_to_history(message, usr_creds)
-            await asyncio.to_thread(_save_trace_log, message.message_id, convo_id, data, resp, elapsed, ws_username)
-            prev_id = message.message_id
+            trace = _trace_envelope(
+                principal=ws_principal,
+                graph_name=graphname,
+                message_id=assistant_message_id,
+                conversation_id=convo_id,
+                user_query=data,
+                response=resp,
+                elapsed=elapsed,
+            )
+            await history_repository.complete_turn(
+                user_message_id=user_message_id,
+                assistant_message=HistoryMessage(
+                    **{
+                        **message.model_dump(),
+                        "turn_id": turn_id,
+                        "role": "system",
+                    }
+                ),
+                trace=trace,
+            )
 
             # reply
             await websocket.send_text(message.model_dump_json())
@@ -3162,7 +3311,31 @@ async def chat(
         logger.error(
             f"Websocket error (graph={graphname}, conversation_id={convo_id}): {e}\n{exc}"
         )
-        await websocket.close()
+        close_reason = (
+            "Conversation not found"
+            if isinstance(e, HistoryNotFoundError)
+            else "History idempotency conflict"
+            if isinstance(e, HistoryConflictError)
+            else "Chat message is too large"
+            if isinstance(e, HistoryPayloadTooLargeError)
+            else "Chat history persistence unavailable"
+            if isinstance(
+                e,
+                (
+                    HistoryConfigurationError,
+                    HistoryUnavailableError,
+                ),
+            )
+            else "Chat processing failed"
+        )
+        close_code = (
+            1009
+            if isinstance(e, HistoryPayloadTooLargeError)
+            else 1008
+            if isinstance(e, (HistoryNotFoundError, HistoryConflictError))
+            else 1011
+        )
+        await websocket.close(code=close_code, reason=close_reason)
 
 
 # =====================================================
@@ -4445,14 +4618,14 @@ async def test_db_connection(
             db_test_config["password"] = db_config.get("password", "")
         if db_test_config.get("apiToken") == MASKED_SECRET:
             db_test_config["apiToken"] = db_config.get("apiToken", "")
-        test_conn = TigerGraphConnection(
+        test_conn = normalize_restpp_url(TigerGraphConnection(
             host=db_test_config["hostname"],
             username=db_test_config["username"],
             password=db_test_config["password"],
             gsPort=db_test_config["gsPort"],
             restppPort=db_test_config["restppPort"],
             graphname="",
-        )
+        ))
 
         # listGraphs() exercises the credentials; pyTigerGraph mints a
         # REST++ token on demand if the instance requires one.

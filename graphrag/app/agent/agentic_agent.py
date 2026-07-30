@@ -24,6 +24,7 @@ GraphRAG tool layer instead of the fixed classic LangGraph.
 
 import logging
 import json
+import re
 import time
 from typing import Dict, List
 
@@ -45,6 +46,15 @@ from common.metrics.prometheus_metrics import metrics
 from common.py_schemas import GraphRAGResponse
 
 logger = logging.getLogger(__name__)
+
+_HISTORY_INTENT_RE = re.compile(
+    r"\b(chat|conversation|message|question)\s+histor(?:y|ies)\b"
+    r"|\b(my|our)\s+(previous|past|earlier)\s+"
+    r"(chat|conversation|message|question)s?\b"
+    r"|\b(list|show|search|find|open|load)\s+"
+    r"(my\s+)?(chat|conversation|message)s?\b",
+    re.IGNORECASE,
+)
 
 
 class _Triage(BaseModel):
@@ -105,10 +115,12 @@ class AgenticAgent:
         ws=None,
         supportai_retriever="auto",   # accepted for API parity; agentic plans dynamically
         agent_style="auto",           # "auto" (per config) | "planned" | "reactive"
+        history_repository=None,
     ):
         # Per-request orchestrator override. "auto" defers to the graph's
         # configured agent_style; "planned"/"reactive" force a style.
         self.agent_style = (agent_style or "auto").lower()
+        self.history_repository = history_repository
         self.conn = db_connection
         self.llm = llm_provider
         self.model_name = embedding_model.model_name
@@ -153,7 +165,11 @@ class AgenticAgent:
             # assistant itself directly, before any schema read, MCP discovery,
             # or retrieval. Only short-circuits when the model is confident no
             # knowledge-graph lookup is needed AND produced an answer.
-            triage = _triage_question(self.llm, question, convo)
+            triage = (
+                None
+                if _HISTORY_INTENT_RE.search(question or "")
+                else _triage_question(self.llm, question, convo)
+            )
             if triage is not None and not triage.needs_retrieval and triage.answer.strip():
                 self.emit_progress(DONE)
                 LogWriter.info(
@@ -228,6 +244,7 @@ class AgenticAgent:
                 external_tools=external_tools,
                 mcp_manager=mcp_manager,
                 user=user,
+                history_repository=self.history_repository,
             )
             # agent_style picks the orchestrator: "planned" (planner ->
             # executor DAG) vs the free tool-calling loop ("autonomous",

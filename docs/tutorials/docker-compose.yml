@@ -9,13 +9,17 @@ services:
     ports:
       - 8000:8000
     depends_on:
-      - graphrag-ecc
-      - chat-history
-      - tigergraph
+      graphrag-ecc:
+        condition: service_started
+      history-bootstrap:
+        condition: service_completed_successfully
     environment:
       SERVER_CONFIG: "/code/configs/server_config.json"
       LOGLEVEL: "INFO"
       USE_CYPHER: "true"
+      CHAT_HISTORY_GRAPH: "${CHAT_HISTORY_GRAPH:-GraphRAGChatHistory}"
+      CHAT_HISTORY_TG_USERNAME: "${CHAT_HISTORY_RUNTIME_USERNAME:-tigergraph}"
+      CHAT_HISTORY_TG_PASSWORD: "${CHAT_HISTORY_RUNTIME_PASSWORD:-tigergraph}"
     volumes:
       - ./configs/:/code/configs
 
@@ -35,20 +39,40 @@ services:
     volumes:
       - ./configs/:/code/configs
 
-  chat-history:
-    image: tigergraph/chat-history:latest
+  history-bootstrap:
+    image: tigergraph/graphrag:latest
     platform: linux/amd64
-    container_name: chat-history
     build:
-      context: chat-history/
-      dockerfile: Dockerfile
-    ports:
-      - 8002:8002
+      context: .
+      dockerfile: graphrag/Dockerfile
+    depends_on:
+      tigergraph:
+        condition: service_healthy
+    command: ["python", "-m", "common.chat_history.bootstrap"]
     environment:
-      CONFIG_FILES: "/configs/server_config.json"
-      LOGLEVEL: "INFO"
+      SERVER_CONFIG: "/code/configs/server_config.json"
+      CHAT_HISTORY_GRAPH: "${CHAT_HISTORY_GRAPH:-GraphRAGChatHistory}"
+      CHAT_HISTORY_BOOTSTRAP_USERNAME: "${TIGERGRAPH_USERNAME:-tigergraph}"
+      CHAT_HISTORY_BOOTSTRAP_PASSWORD: "${TIGERGRAPH_PASSWORD:-tigergraph}"
+      CHAT_HISTORY_RUNTIME_USERNAME: "${CHAT_HISTORY_RUNTIME_USERNAME:-tigergraph}"
     volumes:
-      - ./configs/:/configs
+      - ./configs/:/code/configs
+
+  history-retention:
+    image: tigergraph/graphrag:latest
+    platform: linux/amd64
+    profiles: ["maintenance"]
+    command: ["python", "-m", "common.chat_history.retention"]
+    depends_on:
+      history-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SERVER_CONFIG: "/code/configs/server_config.json"
+      CHAT_HISTORY_GRAPH: "${CHAT_HISTORY_GRAPH:-GraphRAGChatHistory}"
+      CHAT_HISTORY_TG_USERNAME: "${CHAT_HISTORY_RUNTIME_USERNAME:-tigergraph}"
+      CHAT_HISTORY_TG_PASSWORD: "${CHAT_HISTORY_RUNTIME_PASSWORD:-tigergraph}"
+    volumes:
+      - ./configs/:/code/configs
 
   graphrag-ui:
     image: tigergraph/graphrag-ui:latest 
@@ -79,8 +103,21 @@ services:
     platform: linux/amd64
     ports:
       - "14240:14240"
+    environment:
+      TG_HEALTHCHECK_USERNAME: "${TIGERGRAPH_USERNAME:-tigergraph}"
+      TG_HEALTHCHECK_PASSWORD: "${TIGERGRAPH_PASSWORD:-tigergraph}"
     volumes:
       - tigergraph_data:/home/tigergraph/tigergraph/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -u \"$${TG_HEALTHCHECK_USERNAME}:$${TG_HEALTHCHECK_PASSWORD}\" http://localhost:14240/gsql/v1/schema/graphs >/dev/null",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 10m
 
 volumes:
   tigergraph_data:

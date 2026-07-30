@@ -10,7 +10,6 @@
   "graphrag_config": {
     "reuse_embedding": true,
     "ecc": "http://graphrag-ecc:8001",
-    "chat_history_api": "http://chat-history:8002",
     "chunker_config": {}
   },
   "llm_config": {
@@ -37,15 +36,5 @@
         "temperature": 0
       }
     }
-  },
-  "chat_config": {
-    "apiPort": "8002",
-    "dbPath": "chats.db",
-    "dbLogPath": "db.log",
-    "logPath": "requestLogs.jsonl",
-    "conversationAccessRoles": [
-      "superuser",
-      "globaldesigner"
-    ]
   }
 }

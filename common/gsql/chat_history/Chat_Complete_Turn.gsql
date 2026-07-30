@@ -1,0 +1,168 @@
+/*
+ * Persist the assistant response and its trace after verifying that the
+ * principal owns the graph-bound conversation and originating user message.
+ */
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Complete_Turn(
+    STRING principal_id,
+    STRING graph_name,
+    STRING conversation_id,
+    STRING turn_id,
+    STRING user_message_id,
+    STRING assistant_message_id,
+    STRING model_name,
+    STRING content,
+    DOUBLE response_time,
+    BOOL answered_question,
+    STRING response_type,
+    STRING query_sources_json,
+    STRING message_payload_hash,
+    STRING trace_id,
+    STRING request_id,
+    STRING trace_status,
+    STRING trace_json,
+    STRING provenance_json,
+    STRING steps_json,
+    BOOL trace_truncated,
+    STRING trace_payload_hash,
+    UINT event_time,
+    UINT expires_at
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    SumAccum<INT> @@owned_count;
+    SumAccum<INT> @@user_message_count;
+    SumAccum<INT> @@assistant_count;
+    SumAccum<INT> @@trace_count;
+    SumAccum<INT> @@global_assistant_count;
+    SumAccum<INT> @@global_trace_count;
+    STRING status = "not_found";
+
+    owner_seed = {ChatUser.*};
+    owned = SELECT c
+            FROM owner_seed:u -(OWNS_CONVERSATION>:e)- ChatConversation:c
+            WHERE u.user_id == principal_id
+              AND c.conversation_id == conversation_id
+              AND c.graph_name == graph_name
+              AND c.status != "deleted"
+            ACCUM @@owned_count += 1;
+
+    user_message = SELECT m
+            FROM owned:c -(HAS_MESSAGE>:e)- ChatMessage:m
+            WHERE m.message_id == user_message_id
+              AND m.turn_id == turn_id
+              AND m.role == "user"
+            ACCUM @@user_message_count += 1;
+
+    assistant_message = SELECT m
+            FROM owned:c -(HAS_MESSAGE>:e)- ChatMessage:m
+            WHERE m.message_id == assistant_message_id
+            ACCUM @@assistant_count += 1;
+
+    all_messages = {ChatMessage.*};
+    global_assistant = SELECT m
+            FROM all_messages:m
+            WHERE m.message_id == assistant_message_id
+            ACCUM @@global_assistant_count += 1;
+
+    all_traces = {ChatTrace.*};
+    global_trace = SELECT t
+            FROM all_traces:t
+            WHERE t.trace_id == trace_id
+            ACCUM @@global_trace_count += 1;
+
+    IF @@owned_count > 0 AND @@user_message_count > 0 THEN
+        IF @@assistant_count == 0
+           AND @@global_assistant_count == 0
+           AND @@global_trace_count == 0 THEN
+            append_response = SELECT c FROM owned:c
+                POST-ACCUM
+                    INSERT INTO ChatMessage VALUES (
+                        assistant_message_id, conversation_id, turn_id,
+                        c.next_sequence, user_message_id, "system", content,
+                        model_name, response_time, answered_question,
+                        response_type, query_sources_json, 0, "", event_time,
+                        event_time, message_payload_hash
+                    ),
+                    INSERT INTO HAS_MESSAGE VALUES (
+                        conversation_id, assistant_message_id
+                    ),
+                    INSERT INTO REPLIES_TO VALUES (
+                        assistant_message_id, user_message_id
+                    ),
+                    INSERT INTO ChatTrace VALUES (
+                        trace_id, conversation_id, assistant_message_id,
+                        request_id, trace_status, response_type, response_time,
+                        trace_json, provenance_json, trace_truncated, event_time,
+                        expires_at, trace_payload_hash
+                    ),
+                    INSERT INTO HAS_TRACE VALUES (
+                        assistant_message_id, trace_id
+                    ),
+                    c.next_sequence = c.next_sequence + 1,
+                    c.last_message_id = assistant_message_id,
+                    c.updated_at = event_time;
+            status = "created";
+        ELSE IF @@assistant_count > 0 THEN
+            existing_trace = SELECT t
+                FROM assistant_message:m -(HAS_TRACE>:e)- ChatTrace:t
+                WHERE t.trace_id == trace_id
+                ACCUM @@trace_count += 1;
+            replay = SELECT m FROM assistant_message:m
+                POST-ACCUM
+                    IF m.payload_hash == message_payload_hash
+                       AND @@trace_count == 1 THEN
+                        status = "replayed"
+                    ELSE
+                        status = "conflict"
+                    END;
+            trace_replay = SELECT t FROM existing_trace:t
+                POST-ACCUM
+                    IF t.payload_hash != trace_payload_hash THEN
+                        status = "conflict"
+                    END;
+        ELSE
+            status = "conflict";
+        END;
+    END;
+
+    IF (status == "created" OR status == "replayed") AND steps_json != "" THEN
+        JSONARRAY steps = parse_json_array(steps_json);
+        FOREACH i IN RANGE[0, steps.size() - 1] DO
+            JSONOBJECT step = steps.getJsonObject(i);
+            STRING step_id = step.getString("step_id");
+            INSERT INTO ChatTraceStep VALUES (
+                step_id,
+                trace_id,
+                step.getInt("ordinal"),
+                step.getString("step_type"),
+                step.getString("tool_name"),
+                step.getString("status"),
+                step.getDouble("duration"),
+                step.getString("input_summary"),
+                step.getString("output_summary"),
+                step.getString("error_summary"),
+                step.getString("depends_on_json"),
+                event_time
+            );
+            INSERT INTO HAS_STEP VALUES (trace_id, step_id);
+        END;
+
+        FOREACH i IN RANGE[0, steps.size() - 1] DO
+            JSONOBJECT step = steps.getJsonObject(i);
+            STRING step_id = step.getString("step_id");
+            JSONARRAY dependencies = parse_json_array(
+                step.getString("depends_on_json")
+            );
+            IF dependencies.size() > 0 THEN
+                FOREACH j IN RANGE[0, dependencies.size() - 1] DO
+                    INSERT INTO DEPENDS_ON VALUES (
+                        step_id, dependencies.getString(j)
+                    );
+                END;
+            END;
+        END;
+    END;
+
+    PRINT status AS status;
+    PRINT conversation_id AS conversation_id;
+    PRINT assistant_message_id AS message_id;
+    PRINT trace_id AS trace_id;
+}

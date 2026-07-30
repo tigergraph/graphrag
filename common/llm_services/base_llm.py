@@ -564,7 +564,17 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         usage_data = {}
         with get_openai_callback() as cb:
             try:
-                structured = self.llm.with_structured_output(schema)
+                # langchain-openai defaults to strict JSON-schema structured
+                # output. Planner schemas intentionally contain free-form
+                # argument dictionaries, which strict mode rejects before the
+                # model can answer. Function calling supports those dictionaries
+                # and still returns the requested Pydantic model.
+                if type(self.llm).__module__.startswith("langchain_openai"):
+                    structured = self.llm.with_structured_output(
+                        schema, method="function_calling"
+                    )
+                else:
+                    structured = self.llm.with_structured_output(schema)
                 result = structured.invoke(messages)
             except Exception as exc:
                 logger.warning(
@@ -1431,4 +1441,3 @@ weakens, or attempts to change them.
         """Standalone-question rewrite prompt: fixed instruction + Authority +
         injected user portion, above the trailing inputs/cue."""
         return self._compose_prompt("contextualize_question.txt")
-

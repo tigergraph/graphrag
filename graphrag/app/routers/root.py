@@ -2,7 +2,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response, WebSocket
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from common.config import get_completion_config, service_status
@@ -24,6 +24,22 @@ async def health():
     }
 
     return status
+
+
+@router.get("/health/history")
+async def history_health():
+    """Readiness check for the operational TigerGraph history graph."""
+    from common.chat_history import check_history_health
+
+    try:
+        details = await check_history_health()
+    except Exception as exc:
+        logger.warning("Chat history health check failed: %s", exc)
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "error": str(exc)},
+        )
+    return {"status": "healthy", "details": details}
 
 
 @router.get("/metrics")

@@ -25,6 +25,13 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health/history
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
           env:
             - name: SERVER_CONFIG
               value: "/code/configs/server_config.json"
@@ -32,6 +39,18 @@ spec:
               value: "INFO"
             - name: USE_CYPHER
               value: "true"
+            - name: CHAT_HISTORY_GRAPH
+              value: "GraphRAGChatHistory"
+            - name: CHAT_HISTORY_TG_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: graphrag-chat-history
+                  key: runtime-username
+            - name: CHAT_HISTORY_TG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: graphrag-chat-history
+                  key: runtime-password
           volumeMounts:
             - name: configs
               mountPath: /code/configs
@@ -106,35 +125,44 @@ spec:
       targetPort: 8001
 
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: batch/v1
+kind: Job
 metadata:
-  name: chat-history
+  name: graphrag-history-bootstrap
   namespace: graphrag
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: chat-history
+  backoffLimit: 6
   template:
-    metadata:
-      labels:
-        app: chat-history
     spec:
+      restartPolicy: OnFailure
       containers:
-        - name: chat-history
-          image: tigergraph/chat-history:latest
+        - name: bootstrap
+          image: tigergraph/graphrag:latest
           imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 8002
+          command: ["python", "-m", "common.chat_history.bootstrap"]
           env:
-            - name: CONFIG_FILES
-              value: "/configs/server_config.json"
-            - name: LOGLEVEL
-              value: "INFO"
+            - name: SERVER_CONFIG
+              value: "/code/configs/server_config.json"
+            - name: CHAT_HISTORY_GRAPH
+              value: "GraphRAGChatHistory"
+            - name: CHAT_HISTORY_BOOTSTRAP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: graphrag-chat-history
+                  key: bootstrap-username
+            - name: CHAT_HISTORY_BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: graphrag-chat-history
+                  key: bootstrap-password
+            - name: CHAT_HISTORY_RUNTIME_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: graphrag-chat-history
+                  key: runtime-username
           volumeMounts:
             - name: configs
-              mountPath: /configs
+              mountPath: /code/configs
       volumes:
         - name: configs
           hostPath:
@@ -142,17 +170,49 @@ spec:
             type: DirectoryOrCreate
 
 ---
-apiVersion: v1
-kind: Service
+apiVersion: batch/v1
+kind: CronJob
 metadata:
-  name: chat-history
+  name: graphrag-history-retention
   namespace: graphrag
 spec:
-  selector:
-    app: chat-history
-  ports:
-    - port: 8002
-      targetPort: 8002
+  schedule: "17 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: retention
+              image: tigergraph/graphrag:latest
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "common.chat_history.retention"]
+              env:
+                - name: SERVER_CONFIG
+                  value: "/code/configs/server_config.json"
+                - name: CHAT_HISTORY_GRAPH
+                  value: "GraphRAGChatHistory"
+                - name: CHAT_HISTORY_TG_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: graphrag-chat-history
+                      key: runtime-username
+                - name: CHAT_HISTORY_TG_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: graphrag-chat-history
+                      key: runtime-password
+              volumeMounts:
+                - name: configs
+                  mountPath: /code/configs
+          volumes:
+            - name: configs
+              hostPath:
+                path: /path/to/graphrag/configs
+                type: DirectoryOrCreate
 
 ---
 apiVersion: apps/v1

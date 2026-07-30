@@ -21,6 +21,9 @@ import threading
 
 from fastapi.security import HTTPBasic
 
+from common.config_env import resolve_environment_placeholders
+from common.db.connection_utils import normalize_restpp_url
+
 logger = logging.getLogger(__name__)
 
 # Lock for all reads/writes to SERVER_CONFIG to prevent concurrent modifications
@@ -87,7 +90,7 @@ def _load_graph_config(graphname):
     if not os.path.exists(graph_path):
         return {}
     with open(graph_path, "r") as f:
-        return json.load(f)
+        return resolve_environment_placeholders(json.load(f))
 
 
 def _load_graph_llm_config(graphname):
@@ -386,6 +389,7 @@ else:
     with open(SERVER_CONFIG, "r") as f:
         server_config = json.load(f)
 
+server_config = resolve_environment_placeholders(server_config)
 db_config = server_config.get("db_config")
 llm_config = server_config.get("llm_config")
 graphrag_config = server_config.get("graphrag_config")
@@ -578,15 +582,23 @@ def _build_embedding_store(graphname: str = "") -> TigerGraphEmbeddingStore:
     # A static apiToken stays a service-side credential here; otherwise
     # pyTigerGraph mints a REST++ token from the service username/password
     # on demand, so no explicit getToken() is needed.
-    conn = TigerGraphConnection(
+    conn = normalize_restpp_url(TigerGraphConnection(
         host=db_config.get("hostname", "http://tigergraph"),
-        username=db_config.get("username", "tigergraph"),
-        password=db_config.get("password", "tigergraph"),
+        username=os.getenv(
+            "TIGERGRAPH_SERVICE_USERNAME",
+            db_config.get("username", "tigergraph"),
+        ),
+        password=os.getenv(
+            "TIGERGRAPH_SERVICE_PASSWORD",
+            db_config.get("password", "tigergraph"),
+        ),
         gsPort=db_config.get("gsPort", "14240"),
         restppPort=db_config.get("restppPort", "9000"),
         graphname=graphname or db_config.get("graphname", ""),
-        apiToken=db_config.get("apiToken", ""),
-    )
+        apiToken=os.getenv(
+            "TIGERGRAPH_SERVICE_TOKEN", db_config.get("apiToken", "")
+        ),
+    ))
 
     store = TigerGraphEmbeddingStore(
         conn,
@@ -751,7 +763,9 @@ def reload_llm_config(new_llm_config: dict = None):
                 server_config = json.load(f)
 
         # Validate before updating
-        new_llm_config = server_config.get("llm_config")
+        new_llm_config = resolve_environment_placeholders(
+            server_config.get("llm_config")
+        )
         if new_llm_config is None:
             raise Exception("llm_config is not found in SERVER_CONFIG")
 
@@ -872,7 +886,9 @@ def reload_db_config(new_db_config: dict = None):
             with open(SERVER_CONFIG, "r") as f:
                 server_config = json.load(f)
 
-        new_db_config = server_config.get("db_config")
+        new_db_config = resolve_environment_placeholders(
+            server_config.get("db_config")
+        )
         if new_db_config is None:
             raise Exception("db_config is not found in SERVER_CONFIG")
 
@@ -911,7 +927,9 @@ def reload_graphrag_config():
             with open(SERVER_CONFIG, "r") as f:
                 server_config = json.load(f)
 
-        new_graphrag_config = server_config.get("graphrag_config")
+        new_graphrag_config = resolve_environment_placeholders(
+            server_config.get("graphrag_config")
+        )
         if new_graphrag_config is None:
             new_graphrag_config = {"reuse_embedding": True}
         

@@ -1,0 +1,26 @@
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Get_My_Feedback(
+    STRING principal_id,
+    STRING graph_name,
+    UINT cursor_updated_at,
+    STRING cursor_id,
+    INT page_size
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    owner_seed = {ChatUser.*};
+    rows = SELECT m
+        FROM owner_seed:u -(OWNS_CONVERSATION>:e1)- ChatConversation:c
+             -(HAS_MESSAGE>:e2)- ChatMessage:m
+        WHERE u.user_id == principal_id
+          AND c.graph_name == graph_name
+          AND c.status != "deleted"
+          AND (
+              cursor_updated_at == 0
+              OR m.updated_at < cursor_updated_at
+              OR (
+                  m.updated_at == cursor_updated_at
+                  AND m.message_id < cursor_id
+              )
+          )
+        ORDER BY m.updated_at DESC, m.message_id DESC
+        LIMIT page_size;
+    PRINT rows AS rows;
+}

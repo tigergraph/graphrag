@@ -122,10 +122,39 @@ const ActionProvider: React.FC<ActionProviderProps> = ({
     },
     onClose: (event) => {
       console.log("WebSocket closed:", event.code, event.reason);
+
+      const terminalClose = [1008, 1009, 1011].includes(event.code);
+      if (!terminalClose || abortedRef.current) return;
+
+      if (event.code === 1008 && event.reason === "Conversation not found") {
+        // The selected conversation may have been removed or may never have
+        // persisted after a prior failed request. Reset it so a reconnect
+        // cannot loop forever with the same unusable ID.
+        conversationManager.startNewConversation();
+      }
+
+      if (document.body.classList.contains("chat-streaming")) {
+        const errorMessage = createChatBotMessage({
+          content: event.reason || "The chat request failed. Please try again.",
+          response_type: "system",
+        });
+        setState((prev: any) => {
+          const messages = prev.messages.length
+            ? prev.messages.slice(0, -1)
+            : prev.messages;
+          return { ...prev, messages: [...messages, errorMessage] };
+        });
+      }
+      document.body.classList.remove("chat-streaming");
+      window.dispatchEvent(new Event("chat:streaming-end"));
     },
     shouldReconnect: (closeEvent) => {
-      console.log("WebSocket should reconnect:", closeEvent.code !== 1000);
-      return closeEvent.code !== 1000; // Don't reconnect on normal closure
+      // Policy, payload and server-processing failures require a deliberate
+      // retry. Reconnecting automatically only repeats the failed request or
+      // stale conversation forever.
+      const shouldReconnect = ![1000, 1008, 1009, 1011].includes(closeEvent.code);
+      console.log("WebSocket should reconnect:", shouldReconnect);
+      return shouldReconnect;
     },
   });
 

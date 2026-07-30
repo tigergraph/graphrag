@@ -1,0 +1,124 @@
+services:
+  graphrag:
+    image: tigergraph/graphrag:latest
+    platform: linux/amd64
+    container_name: graphrag
+    build:
+      context: .
+      dockerfile: graphrag/Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      graphrag-ecc:
+        condition: service_started
+      history-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SERVER_CONFIG: "/code/configs/server_config.json"
+      LOGLEVEL: "INFO"
+      USE_CYPHER: "true"
+      TIGERGRAPH_URL: "https://${TIGERGRAPH_HOSTNAME:?Set TIGERGRAPH_HOSTNAME}"
+      TIGERGRAPH_SERVICE_USERNAME: "${TIGERGRAPH_SERVICE_USERNAME:?Set TIGERGRAPH_SERVICE_USERNAME}"
+      TIGERGRAPH_SERVICE_PASSWORD: "${TIGERGRAPH_SERVICE_PASSWORD:?Set TIGERGRAPH_SERVICE_PASSWORD}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:?Set OPENAI_API_KEY}"
+      CHAT_HISTORY_GRAPH: "${CHAT_HISTORY_GRAPH:-GraphRAGChatHistory}"
+      CHAT_HISTORY_TG_USERNAME: "${CHAT_HISTORY_RUNTIME_USERNAME:?Set CHAT_HISTORY_RUNTIME_USERNAME}"
+      CHAT_HISTORY_TG_PASSWORD: "${CHAT_HISTORY_RUNTIME_PASSWORD:?Set CHAT_HISTORY_RUNTIME_PASSWORD}"
+    volumes:
+      - ./configs/:/code/configs
+      - ./docs/tutorials/configs/server_config.savanna.json:/code/configs/server_config.json:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/history', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  graphrag-ecc:
+    image: tigergraph/graphrag-ecc:latest
+    platform: linux/amd64
+    container_name: graphrag-ecc
+    build:
+      context: .
+      dockerfile: ecc/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      SERVER_CONFIG: "/code/configs/server_config.json"
+      LOGLEVEL: "INFO"
+      INIT_EMBED_STORE: "false"
+      TIGERGRAPH_URL: "https://${TIGERGRAPH_HOSTNAME:?Set TIGERGRAPH_HOSTNAME}"
+      TIGERGRAPH_SERVICE_USERNAME: "${TIGERGRAPH_SERVICE_USERNAME:?Set TIGERGRAPH_SERVICE_USERNAME}"
+      TIGERGRAPH_SERVICE_PASSWORD: "${TIGERGRAPH_SERVICE_PASSWORD:?Set TIGERGRAPH_SERVICE_PASSWORD}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:?Set OPENAI_API_KEY}"
+    volumes:
+      - ./configs/:/code/configs
+      - ./docs/tutorials/configs/server_config.savanna.json:/code/configs/server_config.json:ro
+
+  history-bootstrap:
+    image: tigergraph/graphrag:latest
+    platform: linux/amd64
+    container_name: history-bootstrap
+    build:
+      context: .
+      dockerfile: graphrag/Dockerfile
+    command: ["python", "-m", "common.chat_history.bootstrap"]
+    environment:
+      SERVER_CONFIG: "/code/configs/server_config.json"
+      LOGLEVEL: "INFO"
+      TIGERGRAPH_URL: "https://${TIGERGRAPH_HOSTNAME:?Set TIGERGRAPH_HOSTNAME}"
+      CHAT_HISTORY_GRAPH: "${CHAT_HISTORY_GRAPH:-GraphRAGChatHistory}"
+      CHAT_HISTORY_BOOTSTRAP_USERNAME: "${TIGERGRAPH_BOOTSTRAP_USERNAME:?Set TIGERGRAPH_BOOTSTRAP_USERNAME}"
+      CHAT_HISTORY_BOOTSTRAP_PASSWORD: "${TIGERGRAPH_BOOTSTRAP_PASSWORD:?Set TIGERGRAPH_BOOTSTRAP_PASSWORD}"
+      CHAT_HISTORY_RUNTIME_USERNAME: "${CHAT_HISTORY_RUNTIME_USERNAME:?Set CHAT_HISTORY_RUNTIME_USERNAME}"
+    volumes:
+      - ./configs/:/code/configs
+      - ./docs/tutorials/configs/server_config.savanna.json:/code/configs/server_config.json:ro
+
+  history-retention:
+    image: tigergraph/graphrag:latest
+    platform: linux/amd64
+    profiles: ["maintenance"]
+    command: ["python", "-m", "common.chat_history.retention"]
+    depends_on:
+      history-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SERVER_CONFIG: "/code/configs/server_config.json"
+      TIGERGRAPH_URL: "https://${TIGERGRAPH_HOSTNAME:?Set TIGERGRAPH_HOSTNAME}"
+      CHAT_HISTORY_GRAPH: "${CHAT_HISTORY_GRAPH:-GraphRAGChatHistory}"
+      CHAT_HISTORY_TG_USERNAME: "${CHAT_HISTORY_RUNTIME_USERNAME:?Set CHAT_HISTORY_RUNTIME_USERNAME}"
+      CHAT_HISTORY_TG_PASSWORD: "${CHAT_HISTORY_RUNTIME_PASSWORD:?Set CHAT_HISTORY_RUNTIME_PASSWORD}"
+    volumes:
+      - ./configs/:/code/configs
+      - ./docs/tutorials/configs/server_config.savanna.json:/code/configs/server_config.json:ro
+
+  graphrag-ui:
+    image: tigergraph/graphrag-ui:latest
+    platform: linux/amd64
+    container_name: graphrag-ui
+    build:
+      context: graphrag-ui
+      dockerfile: Dockerfile
+      additional_contexts:
+        repo: .
+    ports:
+      - "3000:3000"
+    depends_on:
+      - graphrag
+
+  nginx:
+    container_name: nginx
+    image: nginx
+    volumes:
+      - ./configs/nginx.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "80:80"
+    depends_on:
+      - graphrag-ui
+      - graphrag

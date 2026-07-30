@@ -35,8 +35,8 @@ export const Interactions: FC<Interactions> = ({
   const [feedback, setFeedback] = useState<Feedback>(
     (message?.feedback as Feedback) ?? Feedback.NoFeedback
   );
-  const { isSuperuser, isGlobalDesigner, isGraphAdmin } = useRoles();
-  const canViewTrace = isSuperuser || isGlobalDesigner || isGraphAdmin;
+  const { isSuperuser } = useRoles();
+  const canViewTrace = isSuperuser;
 
   const sendFeedback = async (action: Feedback, message: Message) => {
     const creds = sessionStorage.getItem("auth");

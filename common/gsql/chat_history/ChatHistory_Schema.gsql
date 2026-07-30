@@ -1,0 +1,115 @@
+/*
+ * Dedicated operational graph for GraphRAG chat history and execution traces.
+ *
+ * The schema is intentionally local to GraphRAGChatHistory. End users are not
+ * granted a role on this graph; the GraphRAG service invokes the installed
+ * queries with a least-privilege service identity.
+ */
+
+CREATE GRAPH GraphRAGChatHistory()
+USE GRAPH GraphRAGChatHistory
+
+CREATE SCHEMA_CHANGE JOB add_graphrag_chat_history_schema FOR GRAPH GraphRAGChatHistory {
+    ADD VERTEX ChatUser(
+        PRIMARY_ID user_id STRING,
+        created_at UINT,
+        updated_at UINT
+    ) WITH PRIMARY_ID_AS_ATTRIBUTE="true";
+
+    ADD VERTEX ChatConversation(
+        PRIMARY_ID conversation_id STRING,
+        graph_name STRING,
+        title STRING,
+        status STRING,
+        next_sequence UINT,
+        last_message_id STRING,
+        created_at UINT,
+        updated_at UINT,
+        deleted_at UINT,
+        payload_hash STRING
+    ) WITH PRIMARY_ID_AS_ATTRIBUTE="true";
+
+    ADD VERTEX ChatMessage(
+        PRIMARY_ID message_id STRING,
+        conversation_id STRING,
+        turn_id STRING,
+        sequence_no UINT,
+        parent_message_id STRING,
+        role STRING,
+        content STRING,
+        model STRING,
+        response_time DOUBLE,
+        answered_question BOOL,
+        response_type STRING,
+        query_sources_json STRING,
+        feedback INT,
+        comment STRING,
+        created_at UINT,
+        updated_at UINT,
+        payload_hash STRING
+    ) WITH PRIMARY_ID_AS_ATTRIBUTE="true";
+
+    ADD VERTEX ChatTrace(
+        PRIMARY_ID trace_id STRING,
+        conversation_id STRING,
+        message_id STRING,
+        request_id STRING,
+        status STRING,
+        response_type STRING,
+        elapsed DOUBLE,
+        trace_json STRING,
+        provenance_json STRING,
+        truncated BOOL,
+        created_at UINT,
+        expires_at UINT,
+        payload_hash STRING
+    ) WITH PRIMARY_ID_AS_ATTRIBUTE="true";
+
+    ADD VERTEX ChatTraceStep(
+        PRIMARY_ID step_id STRING,
+        trace_id STRING,
+        ordinal UINT,
+        step_type STRING,
+        tool_name STRING,
+        status STRING,
+        duration DOUBLE,
+        input_summary STRING,
+        output_summary STRING,
+        error_summary STRING,
+        depends_on_json STRING,
+        created_at UINT
+    ) WITH PRIMARY_ID_AS_ATTRIBUTE="true";
+
+    ADD DIRECTED EDGE OWNS_CONVERSATION(
+        FROM ChatUser,
+        TO ChatConversation
+    ) WITH REVERSE_EDGE="OWNED_BY_USER";
+
+    ADD DIRECTED EDGE HAS_MESSAGE(
+        FROM ChatConversation,
+        TO ChatMessage
+    ) WITH REVERSE_EDGE="MESSAGE_OF_CONVERSATION";
+
+    ADD DIRECTED EDGE REPLIES_TO(
+        FROM ChatMessage,
+        TO ChatMessage
+    );
+
+    ADD DIRECTED EDGE HAS_TRACE(
+        FROM ChatMessage,
+        TO ChatTrace
+    ) WITH REVERSE_EDGE="TRACE_OF_MESSAGE";
+
+    ADD DIRECTED EDGE HAS_STEP(
+        FROM ChatTrace,
+        TO ChatTraceStep
+    ) WITH REVERSE_EDGE="STEP_OF_TRACE";
+
+    ADD DIRECTED EDGE DEPENDS_ON(
+        FROM ChatTraceStep,
+        TO ChatTraceStep
+    );
+}
+
+RUN SCHEMA_CHANGE JOB add_graphrag_chat_history_schema
+DROP JOB add_graphrag_chat_history_schema

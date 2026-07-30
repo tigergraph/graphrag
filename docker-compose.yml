@@ -9,15 +9,31 @@ services:
     ports:
       - 8000:8000
     depends_on:
-      - graphrag-ecc
-      - chat-history
-#      - tigergraph
+      graphrag-ecc:
+        condition: service_started
+      history-bootstrap:
+        condition: service_completed_successfully
     environment:
       SERVER_CONFIG: "/code/configs/server_config.json"
       LOGLEVEL: "INFO"
       USE_CYPHER: "true"
+      CHAT_HISTORY_GRAPH: "${CHAT_HISTORY_GRAPH:-GraphRAGChatHistory}"
+      CHAT_HISTORY_TG_USERNAME: "${CHAT_HISTORY_RUNTIME_USERNAME:-tigergraph}"
+      CHAT_HISTORY_TG_PASSWORD: "${CHAT_HISTORY_RUNTIME_PASSWORD:-tigergraph}"
     volumes:
       - ./configs/:/code/configs
+      - ./docs/tutorials/configs/server_config.json:/code/configs/server_config.json:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/history', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   graphrag-ecc:
     image: tigergraph/graphrag-ecc:latest
@@ -34,21 +50,46 @@ services:
       INIT_EMBED_STORE: "false"
     volumes:
       - ./configs/:/code/configs
+      - ./docs/tutorials/configs/server_config.json:/code/configs/server_config.json:ro
 
-  chat-history:
-    image: tigergraph/chat-history:latest
+  history-bootstrap:
+    image: tigergraph/graphrag:latest
     platform: linux/amd64
-    container_name: chat-history
+    container_name: history-bootstrap
     build:
-      context: chat-history/
-      dockerfile: Dockerfile
-    ports:
-      - 8002:8002
+      context: .
+      dockerfile: graphrag/Dockerfile
+    depends_on:
+      tigergraph:
+        condition: service_healthy
+    command: ["python", "-m", "common.chat_history.bootstrap"]
     environment:
-      CONFIG_FILES: "/configs/server_config.json"
+      SERVER_CONFIG: "/code/configs/server_config.json"
       LOGLEVEL: "INFO"
+      CHAT_HISTORY_GRAPH: "${CHAT_HISTORY_GRAPH:-GraphRAGChatHistory}"
+      CHAT_HISTORY_BOOTSTRAP_USERNAME: "${TIGERGRAPH_USERNAME:-tigergraph}"
+      CHAT_HISTORY_BOOTSTRAP_PASSWORD: "${TIGERGRAPH_PASSWORD:-tigergraph}"
+      CHAT_HISTORY_RUNTIME_USERNAME: "${CHAT_HISTORY_RUNTIME_USERNAME:-tigergraph}"
     volumes:
-      - ./configs/:/configs
+      - ./configs/:/code/configs
+      - ./docs/tutorials/configs/server_config.json:/code/configs/server_config.json:ro
+
+  history-retention:
+    image: tigergraph/graphrag:latest
+    platform: linux/amd64
+    profiles: ["maintenance"]
+    command: ["python", "-m", "common.chat_history.retention"]
+    depends_on:
+      history-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SERVER_CONFIG: "/code/configs/server_config.json"
+      CHAT_HISTORY_GRAPH: "${CHAT_HISTORY_GRAPH:-GraphRAGChatHistory}"
+      CHAT_HISTORY_TG_USERNAME: "${CHAT_HISTORY_RUNTIME_USERNAME:-tigergraph}"
+      CHAT_HISTORY_TG_PASSWORD: "${CHAT_HISTORY_RUNTIME_PASSWORD:-tigergraph}"
+    volumes:
+      - ./configs/:/code/configs
+      - ./docs/tutorials/configs/server_config.json:/code/configs/server_config.json:ro
 
   graphrag-ui:
     image: tigergraph/graphrag-ui:latest
@@ -75,14 +116,27 @@ services:
       - graphrag-ui
       - graphrag
 
-#   tigergraph:
-#     image: tigergraph/community:4.2.2
-#     container_name: tigergraph
-#     platform: linux/amd64
-#     ports:
-#       - "14240:14240"
-#     volumes:
-#       - tigergraph_data:/home/tigergraph/tigergraph/data
-# 
-# volumes:
-#   tigergraph_data:
+  tigergraph:
+    image: tigergraph/community:4.2.2
+    container_name: tigergraph
+    platform: linux/amd64
+    ports:
+      - "14240:14240"
+    environment:
+      TG_HEALTHCHECK_USERNAME: "${TIGERGRAPH_USERNAME:-tigergraph}"
+      TG_HEALTHCHECK_PASSWORD: "${TIGERGRAPH_PASSWORD:-tigergraph}"
+    volumes:
+      - tigergraph_data:/home/tigergraph/tigergraph/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS -u \"$${TG_HEALTHCHECK_USERNAME}:$${TG_HEALTHCHECK_PASSWORD}\" http://localhost:14240/gsql/v1/schema/graphs >/dev/null",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 10m
+
+volumes:
+  tigergraph_data:

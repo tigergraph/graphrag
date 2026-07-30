@@ -1,0 +1,24 @@
+CREATE OR REPLACE DISTRIBUTED QUERY Chat_Get_My_Conversation(
+    STRING principal_id,
+    STRING graph_name,
+    STRING conversation_id,
+    UINT after_sequence,
+    INT page_size
+) FOR GRAPH GraphRAGChatHistory SYNTAX v2 {
+    owner_seed = {ChatUser.*};
+    owned = SELECT c
+        FROM owner_seed:u -(OWNS_CONVERSATION>:e)- ChatConversation:c
+        WHERE u.user_id == principal_id
+          AND c.conversation_id == conversation_id
+          AND c.graph_name == graph_name
+          AND c.status != "deleted";
+
+    rows = SELECT m
+        FROM owned:c -(HAS_MESSAGE>:e)- ChatMessage:m
+        WHERE m.sequence_no >= after_sequence
+        ORDER BY m.sequence_no ASC, m.message_id ASC
+        LIMIT page_size;
+
+    PRINT owned AS conversation;
+    PRINT rows AS rows;
+}
