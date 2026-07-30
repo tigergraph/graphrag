@@ -40,17 +40,7 @@ class HybridRetriever(BaseRetriever):
                         start_set += res[1]["selected_set"]
                 self.logger.info(f"Got start_set from keywords {keywords}: {str(start_set)}")
                 if not method == "keywords":
-                    # Keep keyword seeds even if vector seeding fails — otherwise
-                    # expand/both degrades to an empty/error path and misses
-                    # literal matches already found via Keyword_Search.
-                    try:
-                        start_set += self._generate_start_set(
-                            questions, indices, top_k, similarity_threshold, verbose=verbose
-                        )
-                    except Exception as e:
-                        self.logger.warning(
-                            f"Vector start_set failed; continuing with keyword seeds: {e}"
-                        )
+                    start_set += self._generate_start_set(questions, indices, top_k, similarity_threshold, verbose=verbose)
             else:
                 start_set = self._generate_start_set(questions, indices, top_k, similarity_threshold, verbose=verbose)
 

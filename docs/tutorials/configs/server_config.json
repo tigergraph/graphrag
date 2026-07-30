@@ -11,10 +11,7 @@
     "reuse_embedding": true,
     "ecc": "http://graphrag-ecc:8001",
     "chat_history_api": "http://chat-history:8002",
-    "chunker_config": {},
-    "num_seen_min": 2,
-    "hybrid_expand": false,
-    "hybrid_method": "similarity"
+    "chunker_config": {}
   },
   "llm_config": {
     "token_limit": 0,
