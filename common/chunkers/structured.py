@@ -366,7 +366,7 @@ def markdown_to_elements(md: str, page: Optional[int] = None) -> List[Element]:
                 out[-1].text = f"{out[-1].text}\n\n{body}"
             else:
                 # No preceding figure — emit as a standalone figure element
-                # (picture-text body with no image URL).
+                # (treating the OCR'd image content as a figure with no URL).
                 out.append(Element(kind="figure", text=body, heading=heading, page=page))
             continue
 
