@@ -35,26 +35,68 @@ _URL = (
 )
 _TTL_S = 24 * 60 * 60
 
+# Our ``llm_service`` values -> LiteLLM catalog key prefix.
+_PROVIDER_PREFIX = {
+    "openai": "openai",
+    "azure": "azure",
+    "bedrock": "bedrock",
+    "genai": "gemini",
+    "vertexai": "vertex_ai",
+    "groq": "groq",
+    "ollama": "ollama",
+    "watsonx": "watsonx",
+    "huggingface": "huggingface",
+    "sagemaker": "sagemaker",
+}
+
 _lock = threading.Lock()
-# configured model -> (input, output, cache_read) per-token USD, or None if unknown
+# cache_key -> (input, output, cache_read) per-token USD, or None if unknown
 _rates: Dict[str, Optional[Tuple[float, float, float]]] = {}
 _fetched_at = 0.0
 
 
-def _lookup(catalog: dict, model: str) -> Optional[Tuple[float, float, float]]:
-    m = model.strip().lower()
-    for key in (m, f"openai/{m}", f"gemini/{m}", f"azure/{m}", f"bedrock/{m}"):
-        entry = catalog.get(key) or catalog.get(model)
-        if not isinstance(entry, dict):
+def _cache_key(model: str, provider: str = "") -> str:
+    p = (provider or "").strip().lower()
+    m = (model or "").strip()
+    return f"{p}:{m}" if p else m
+
+
+def _rates_from_entry(entry: object) -> Optional[Tuple[float, float, float]]:
+    if not isinstance(entry, dict):
+        return None
+    try:
+        return (
+            float(entry["input_cost_per_token"]),
+            float(entry["output_cost_per_token"]),
+            float(entry.get("cache_read_input_token_cost") or 0.0),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _lookup(
+    catalog: dict, model: str, provider: str = ""
+) -> Optional[Tuple[float, float, float]]:
+    """Resolve rates using configured provider prefix, then bare model id."""
+    m = model.strip()
+    if not m:
+        return None
+    m_lower = m.lower()
+    prefix = _PROVIDER_PREFIX.get((provider or "").strip().lower())
+
+    keys = []
+    if prefix:
+        keys.extend((f"{prefix}/{m_lower}", f"{prefix}/{m}"))
+    keys.extend((m_lower, m))
+
+    seen = set()
+    for key in keys:
+        if key in seen:
             continue
-        try:
-            return (
-                float(entry["input_cost_per_token"]),
-                float(entry["output_cost_per_token"]),
-                float(entry.get("cache_read_input_token_cost") or 0.0),
-            )
-        except (KeyError, TypeError, ValueError):
-            continue
+        seen.add(key)
+        rates = _rates_from_entry(catalog.get(key))
+        if rates is not None:
+            return rates
     return None
 
 
@@ -67,6 +109,7 @@ def _fetch() -> dict:
 def ensure_model_rates(
     models: Iterable[str],
     *,
+    provider: str = "",
     catalog: Optional[dict] = None,
 ) -> None:
     """Load/cache rates for the given configured model ids only."""
@@ -74,10 +117,11 @@ def ensure_model_rates(
     wanted = [m.strip() for m in models if m and str(m).strip()]
     if not wanted:
         return
+    keys = [_cache_key(m, provider) for m in wanted]
 
     with _lock:
         stale = _fetched_at <= 0 or (time.time() - _fetched_at) > _TTL_S
-        if not stale and all(m in _rates for m in wanted):
+        if not stale and all(k in _rates for k in keys):
             return
 
     try:
@@ -85,11 +129,11 @@ def ensure_model_rates(
     except Exception as exc:
         logger.warning("LiteLLM pricing fetch failed: %s", exc)
         with _lock:
-            for m in wanted:
-                _rates.setdefault(m, None)
+            for k in keys:
+                _rates.setdefault(k, None)
         return
 
-    resolved = {m: _lookup(data, m) for m in wanted}
+    resolved = {_cache_key(m, provider): _lookup(data, m, provider) for m in wanted}
     with _lock:
         _rates.update(resolved)
         _fetched_at = time.time()
@@ -100,13 +144,14 @@ def estimate_cost(
     input_tokens: int,
     output_tokens: int,
     *,
+    provider: str = "",
     cached_input_tokens: int = 0,
 ) -> Optional[float]:
     if not model:
         return None
-    ensure_model_rates([model])
+    ensure_model_rates([model], provider=provider)
     with _lock:
-        rates = _rates.get(model)
+        rates = _rates.get(_cache_key(model, provider))
     if not rates:
         return None
     inp, out, cache = rates
@@ -124,6 +169,7 @@ def resolve_usage_cost(
     output_tokens: int,
     langchain_cost: float = 0.0,
     *,
+    provider: str = "",
     cached_input_tokens: int = 0,
 ) -> float:
     """LangChain cost if > 0; otherwise LiteLLM estimate for ``model``."""
@@ -135,6 +181,7 @@ def resolve_usage_cost(
             model,
             input_tokens,
             output_tokens,
+            provider=provider,
             cached_input_tokens=cached_input_tokens,
         )
         or 0.0
