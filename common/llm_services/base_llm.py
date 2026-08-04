@@ -126,7 +126,24 @@ def reset_usage_collection():
     _usage_collector.set(None)
 
 
-def _record_usage(caller_name: str, usage_data: dict):
+def _record_usage(caller_name: str, usage_data: dict, model: str = ""):
+    # LangChain cost first; LiteLLM catalog only when cost is 0.
+    langchain_cost = float(usage_data.get("cost") or 0)
+    if model and not langchain_cost:
+        from common.llm_services.model_pricing import resolve_usage_cost
+        litellm_cost = resolve_usage_cost(
+            model,
+            usage_data.get("input_tokens", 0),
+            usage_data.get("output_tokens", 0),
+            0.0,
+        )
+        usage_data["cost"] = litellm_cost
+        logger.info(
+            f"{caller_name} usage: {usage_data} "
+            f"(langchain_cost=0, litellm_fallback={litellm_cost})"
+        )
+    else:
+        logger.info(f"{caller_name} usage: {usage_data}")
     bucket = _usage_collector.get()
     if bucket is not None:
         bucket.append({"caller_name": caller_name, **usage_data})
@@ -144,6 +161,9 @@ class LLM_Model:
         from common.config import validate_graphname
         self._graphname = validate_graphname(config.get("graphname"))
         self.prompt_path = config.get("prompt_path", "")
+
+    def _pricing_model(self) -> str:
+        return self.config.get("llm_model") or self.config.get("model_name") or ""
 
     def _read_prompt_file(self, path):
         """Read a prompt file with per-graph override support.
@@ -500,8 +520,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-            logger.info(f"{caller_name} usage: {usage_data}")
-            _record_usage(caller_name, usage_data)
+            _record_usage(caller_name, usage_data, self._pricing_model())
 
         raw_text = self._message_text(raw_output)
 
@@ -545,8 +564,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-            logger.info(f"{caller_name} usage: {usage_data}")
-            _record_usage(caller_name, usage_data)
+            _record_usage(caller_name, usage_data, self._pricing_model())
         return resp
 
     def invoke_structured(
@@ -579,8 +597,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-            logger.info(f"{caller_name} usage: {usage_data}")
-            _record_usage(caller_name, usage_data)
+            _record_usage(caller_name, usage_data, self._pricing_model())
         return result
 
     async def ainvoke_with_parser(
@@ -608,8 +625,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-            logger.info(f"{caller_name} usage: {usage_data}")
-            _record_usage(caller_name, usage_data)
+            _record_usage(caller_name, usage_data, self._pricing_model())
 
         raw_text = self._message_text(raw_output)
 

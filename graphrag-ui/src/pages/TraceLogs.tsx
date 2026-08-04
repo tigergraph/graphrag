@@ -750,7 +750,7 @@ const TokenOverviewPanel: FC<{ trace: TraceData }> = ({ trace }) => {
                     {formatNumber(usage.total_tokens)}
                   </td>
                   <td className="px-4 py-2 text-right tabular-nums">
-                    <span title="Estimated — calculated by LangChain based on model pricing">
+                    <span title="Estimated — LangChain pricing when available, otherwise LiteLLM catalog rates">
                       {formatCost(usage.cost)}
                     </span>
                   </td>
