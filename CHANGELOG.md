@@ -4,9 +4,11 @@
 
 ### Changed
 - **Clearer message when an answer can't be generated.** When the assistant is unable to produce an answer, it now suggests rephrasing the question to be more specific and contacting an administrator if the problem continues, instead of a bare failure notice.
+- **Token cost rates can be set per service.** LLM Config accepts optional input/output USD-per-1M-token rates for the completion, chatbot, and multimodal services; when set, Est. Cost uses them so cost is accurate for models the pricing library doesn't recognize (otherwise it keeps the library's pricing).
 
 ### Fixed
 - **Knowledge-graph rebuild no longer fails on document names containing parentheses.** Document names with `(` or `)` are normalized without dropping the rest of the name, so rebuilds complete instead of erroring while creating chunks.
+- **PDF chart labels and table numbers survive extraction.** Picture-text blocks are kept intact, stacked and comma-grouped chart values are no longer glued together, and pages with unreadable embedded fonts are recovered from a page image — so figures and tables reach the graph with their numbers intact.
 - **Newer Gemini models are available in agentic chat.** Gemini 3.x and later families are recognized as tool-calling models, so agentic mode works with them instead of silently falling back to classic chat.
 - **Chat Stop button behaves correctly.** Stopping a response just as it finishes no longer sends a stray empty message, and the Stop button is the right size in the light theme.
 
