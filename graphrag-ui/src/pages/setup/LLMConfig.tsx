@@ -140,6 +140,9 @@ const LLMConfig = () => {
   const [completionProvider, setCompletionProvider] = useState("openai");
   const [completionConfig, setCompletionConfig] = useState<Record<string, string>>({});
   const [completionDefaultModel, setCompletionDefaultModel] = useState("");
+  // Optional USD per 1M tokens — when both set, override LangChain cost
+  const [completionInputCostPer1m, setCompletionInputCostPer1m] = useState("");
+  const [completionOutputCostPer1m, setCompletionOutputCostPer1m] = useState("");
   
   const [embeddingProvider, setEmbeddingProvider] = useState("openai");
   const [embeddingConfig, setEmbeddingConfig] = useState<Record<string, string>>({});
@@ -148,6 +151,8 @@ const LLMConfig = () => {
   const [multimodalProvider, setMultimodalProvider] = useState("openai");
   const [multimodalConfig, setMultimodalConfig] = useState<Record<string, string>>({});
   const [multimodalModelName, setMultimodalModelName] = useState("");
+  const [multimodalInputCostPer1m, setMultimodalInputCostPer1m] = useState("");
+  const [multimodalOutputCostPer1m, setMultimodalOutputCostPer1m] = useState("");
   const isChatbotOnlyMode = llmConfigAccess === "chatbot_only";
 
   // Per-graph chatbot config state (chatbot_only mode)
@@ -156,6 +161,8 @@ const LLMConfig = () => {
   const [chatbotProviderConfig, setChatbotProviderConfig] = useState<Record<string, string>>({});
   const [chatbotModelName, setChatbotModelName] = useState("");
   const [chatbotTemperature, setChatbotTemperature] = useState("0");
+  const [chatbotInputCostPer1m, setChatbotInputCostPer1m] = useState("");
+  const [chatbotOutputCostPer1m, setChatbotOutputCostPer1m] = useState("");
   const [globalChatInfo, setGlobalChatInfo] = useState({ llm_service: "", llm_model: "" });
 
   // Superadmin scope: "global" edits global config, "graph" edits per-graph overrides
@@ -274,6 +281,16 @@ const LLMConfig = () => {
         setChatbotProvider(data.chatbot_config.llm_service?.toLowerCase() || defaultProv);
         setChatbotModelName(data.chatbot_config.llm_model || "");
         setChatbotTemperature(String(data.chatbot_config.model_kwargs?.temperature ?? "0"));
+        setChatbotInputCostPer1m(
+          data.chatbot_config.input_cost_per_1m != null
+            ? String(data.chatbot_config.input_cost_per_1m)
+            : ""
+        );
+        setChatbotOutputCostPer1m(
+          data.chatbot_config.output_cost_per_1m != null
+            ? String(data.chatbot_config.output_cost_per_1m)
+            : ""
+        );
         // Resolve chatbot config: base config + chatbot overrides
         setChatbotProviderConfig(loadServiceConfigResolved(data.chatbot_config));
       } else {
@@ -297,18 +314,40 @@ const LLMConfig = () => {
         setChatbotProvider(chatProv || defaultProv);
         setChatbotModelName(llmConfig.chat_service.llm_model || "");
         setChatbotTemperature(String(llmConfig.chat_service.model_kwargs?.temperature ?? "0"));
+        setChatbotInputCostPer1m(
+          llmConfig.chat_service.input_cost_per_1m != null
+            ? String(llmConfig.chat_service.input_cost_per_1m)
+            : ""
+        );
+        setChatbotOutputCostPer1m(
+          llmConfig.chat_service.output_cost_per_1m != null
+            ? String(llmConfig.chat_service.output_cost_per_1m)
+            : ""
+        );
         setChatbotProviderConfig(loadServiceConfigResolved(llmConfig.chat_service));
       } else {
         setUseCustomChatbot(false);
         setChatbotProvider(defaultProv);
         setChatbotModelName("");
         setChatbotTemperature("0");
+        setChatbotInputCostPer1m("");
+        setChatbotOutputCostPer1m("");
         setChatbotProviderConfig({ ...baseConfig });
       }
 
       // Canonical per-service state — both single and multi-provider UIs read these
       setCompletionProvider(completionProv || "openai");
       setCompletionDefaultModel(llmConfig.completion_service?.llm_model || "");
+      setCompletionInputCostPer1m(
+        llmConfig.completion_service?.input_cost_per_1m != null
+          ? String(llmConfig.completion_service.input_cost_per_1m)
+          : ""
+      );
+      setCompletionOutputCostPer1m(
+        llmConfig.completion_service?.output_cost_per_1m != null
+          ? String(llmConfig.completion_service.output_cost_per_1m)
+          : ""
+      );
       setCompletionConfig(loadServiceConfigResolved(llmConfig.completion_service));
 
       setEmbeddingProvider(embeddingProv || completionProv || "openai");
@@ -318,6 +357,16 @@ const LLMConfig = () => {
       setMultimodalProvider(multimodalProv || completionProv || "openai");
       const mmModel = llmConfig.multimodal_service?.llm_model || "";
       setMultimodalModelName(mmModel);
+      setMultimodalInputCostPer1m(
+        llmConfig.multimodal_service?.input_cost_per_1m != null
+          ? String(llmConfig.multimodal_service.input_cost_per_1m)
+          : ""
+      );
+      setMultimodalOutputCostPer1m(
+        llmConfig.multimodal_service?.output_cost_per_1m != null
+          ? String(llmConfig.multimodal_service.output_cost_per_1m)
+          : ""
+      );
       setMultimodalConfig(loadServiceConfigResolved(llmConfig.multimodal_service));
       setUseCustomMultimodal(!!mmModel || !!multimodalProv);
     } catch (error: any) {
@@ -393,6 +442,70 @@ const LLMConfig = () => {
     return serviceConfig;
   };
 
+  /** Attach optional USD-per-1M rates when both fields are filled. */
+  const attachTokenCosts = (svc: Record<string, any>, input: string, output: string) => {
+    const inp = input.trim();
+    const out = output.trim();
+    if (inp === "" || out === "") return;
+    const inpN = Number(inp);
+    const outN = Number(out);
+    if (Number.isNaN(inpN) || Number.isNaN(outN) || inpN < 0 || outN < 0) return;
+    svc.input_cost_per_1m = inpN;
+    svc.output_cost_per_1m = outN;
+  };
+
+  const renderTokenCostFields = (
+    inputValue: string,
+    outputValue: string,
+    setInput: (v: string) => void,
+    setOutput: (v: string) => void,
+  ) => (
+    <div className="space-y-2">
+      <label className="block text-sm font-medium text-black dark:text-white">
+        Token Cost (optional)
+      </label>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+            Input USD / 1M tokens
+          </label>
+          <Input
+            type="number"
+            min="0"
+            step="any"
+            className="dark:border-[#3D3D3D] dark:bg-background"
+            placeholder="e.g. 2.50"
+            value={inputValue}
+            onChange={(e) => {
+              setInput(e.target.value);
+              clearTestResults();
+            }}
+          />
+        </div>
+        <div>
+          <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+            Output USD / 1M tokens
+          </label>
+          <Input
+            type="number"
+            min="0"
+            step="any"
+            className="dark:border-[#3D3D3D] dark:bg-background"
+            placeholder="e.g. 15.00"
+            value={outputValue}
+            onChange={(e) => {
+              setOutput(e.target.value);
+              clearTestResults();
+            }}
+          />
+        </div>
+      </div>
+      <p className="text-xs text-gray-500 dark:text-gray-400">
+        When both are set, Est. Cost always uses these rates (overrides LangChain). Leave empty to use LangChain pricing.
+      </p>
+    </div>
+  );
+
   /**
    * Build the candidate LLM config payload.
    * Used by both test-connection and save — same structure, single source of truth.
@@ -410,6 +523,11 @@ const LLMConfig = () => {
         prompt_path: `./common/prompts/${getPromptPath(completionProvider)}/`,
         ...buildServiceConfig(completionProvider, completionConfig)
       };
+      attachTokenCosts(
+        completionServiceConfig,
+        completionInputCostPer1m,
+        completionOutputCostPer1m,
+      );
 
       llmConfigData = {
         graphname: selectedGraph || undefined,
@@ -430,6 +548,11 @@ const LLMConfig = () => {
           model_kwargs: { temperature: 0 },
           ...buildServiceConfig(multimodalProvider, multimodalConfig)
         };
+        attachTokenCosts(
+          llmConfigData.multimodal_service,
+          multimodalInputCostPer1m,
+          multimodalOutputCostPer1m,
+        );
       } else {
         llmConfigData.multimodal_service = null;
       }
@@ -442,6 +565,11 @@ const LLMConfig = () => {
           model_kwargs: { temperature: parseFloat(chatbotTemperature) || 0 },
           ...buildServiceConfig(chatbotProvider, chatbotProviderConfig),
         };
+        attachTokenCosts(
+          llmConfigData.chat_service,
+          chatbotInputCostPer1m,
+          chatbotOutputCostPer1m,
+        );
       } else {
         llmConfigData.chat_service = null;
       }
@@ -453,6 +581,11 @@ const LLMConfig = () => {
         prompt_path: `./common/prompts/${getPromptPath(completionProvider)}/`,
         ...buildServiceConfig(completionProvider, completionConfig)
       };
+      attachTokenCosts(
+        completionServiceConfig,
+        completionInputCostPer1m,
+        completionOutputCostPer1m,
+      );
 
       llmConfigData = {
         graphname: selectedGraph || undefined,
@@ -468,6 +601,11 @@ const LLMConfig = () => {
         llmConfigData.multimodal_service = {
           llm_model: multimodalModelName,
         };
+        attachTokenCosts(
+          llmConfigData.multimodal_service,
+          multimodalInputCostPer1m,
+          multimodalOutputCostPer1m,
+        );
       } else {
         llmConfigData.multimodal_service = null;
       }
@@ -478,6 +616,11 @@ const LLMConfig = () => {
           ...(chatbotModelName.trim() ? { llm_model: chatbotModelName } : {}),
           model_kwargs: { temperature: chatTemp },
         };
+        attachTokenCosts(
+          llmConfigData.chat_service,
+          chatbotInputCostPer1m,
+          chatbotOutputCostPer1m,
+        );
       } else {
         llmConfigData.chat_service = null;
       }
@@ -509,6 +652,7 @@ const LLMConfig = () => {
             model_kwargs: { temperature: parseFloat(chatbotTemperature) || 0 },
             ...buildServiceConfig(chatbotProvider, chatbotProviderConfig),
           };
+          attachTokenCosts(chatService, chatbotInputCostPer1m, chatbotOutputCostPer1m);
           llmConfigData = { graphname: selectedGraph || undefined, chat_service: chatService };
         } else {
           // Revert to inherit: send null chat_service
@@ -916,6 +1060,13 @@ const LLMConfig = () => {
                     />
                   </div>
 
+                  {renderTokenCostFields(
+                    chatbotInputCostPer1m,
+                    chatbotOutputCostPer1m,
+                    setChatbotInputCostPer1m,
+                    setChatbotOutputCostPer1m,
+                  )}
+
                   <div>
                     <label className="block text-sm font-medium mb-2 text-black dark:text-white">
                       Temperature
@@ -1149,6 +1300,13 @@ const LLMConfig = () => {
                       </p>
                     </div>
 
+                    {renderTokenCostFields(
+                      completionInputCostPer1m,
+                      completionOutputCostPer1m,
+                      setCompletionInputCostPer1m,
+                      setCompletionOutputCostPer1m,
+                    )}
+
                     <hr className="border-gray-200 dark:border-[#3D3D3D]" />
 
                     <div>
@@ -1171,16 +1329,26 @@ const LLMConfig = () => {
                         </label>
                       </div>
                       {useCustomChatbot && (
-                        <Input
-                          type="text"
-                          className="dark:border-[#3D3D3D] dark:bg-background"
-                          placeholder={getModelPlaceholder(completionProvider, 'llm')}
-                          value={chatbotModelName}
-                          onChange={(e) => {
-                            setChatbotModelName(e.target.value);
-                            clearTestResults();
-                          }}
-                        />
+                        <>
+                          <Input
+                            type="text"
+                            className="dark:border-[#3D3D3D] dark:bg-background"
+                            placeholder={getModelPlaceholder(completionProvider, 'llm')}
+                            value={chatbotModelName}
+                            onChange={(e) => {
+                              setChatbotModelName(e.target.value);
+                              clearTestResults();
+                            }}
+                          />
+                          <div className="mt-3">
+                            {renderTokenCostFields(
+                              chatbotInputCostPer1m,
+                              chatbotOutputCostPer1m,
+                              setChatbotInputCostPer1m,
+                              setChatbotOutputCostPer1m,
+                            )}
+                          </div>
+                        </>
                       )}
                       <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                         Used by the chatbot for answering user questions
@@ -1233,16 +1401,26 @@ const LLMConfig = () => {
                         </p>
                       )}
                       {useCustomMultimodal && (
-                        <Input
-                          type="text"
-                          className="dark:border-[#3D3D3D] dark:bg-background"
-                          placeholder={getModelPlaceholder(completionProvider, 'multimodal')}
-                          value={multimodalModelName}
-                          onChange={(e) => {
-                            setMultimodalModelName(e.target.value);
-                            clearTestResults();
-                          }}
-                        />
+                        <>
+                          <Input
+                            type="text"
+                            className="dark:border-[#3D3D3D] dark:bg-background"
+                            placeholder={getModelPlaceholder(completionProvider, 'multimodal')}
+                            value={multimodalModelName}
+                            onChange={(e) => {
+                              setMultimodalModelName(e.target.value);
+                              clearTestResults();
+                            }}
+                          />
+                          <div className="mt-3">
+                            {renderTokenCostFields(
+                              multimodalInputCostPer1m,
+                              multimodalOutputCostPer1m,
+                              setMultimodalInputCostPer1m,
+                              setMultimodalOutputCostPer1m,
+                            )}
+                          </div>
+                        </>
                       )}
                       <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                         Used for processing images and multimodal content
@@ -1324,6 +1502,13 @@ const LLMConfig = () => {
                       Model for entity extraction and community summarization.
                     </p>
                   </div>
+
+                  {renderTokenCostFields(
+                    completionInputCostPer1m,
+                    completionOutputCostPer1m,
+                    setCompletionInputCostPer1m,
+                    setCompletionOutputCostPer1m,
+                  )}
                 </div>
               </div>
 
@@ -1393,6 +1578,13 @@ const LLMConfig = () => {
                           onChange={(e) => { setChatbotModelName(e.target.value); clearTestResults(); }}
                         />
                       </div>
+
+                      {renderTokenCostFields(
+                        chatbotInputCostPer1m,
+                        chatbotOutputCostPer1m,
+                        setChatbotInputCostPer1m,
+                        setChatbotOutputCostPer1m,
+                      )}
 
                       <div>
                         <label className="block text-sm font-medium mb-2 text-black dark:text-white">
@@ -1480,6 +1672,13 @@ const LLMConfig = () => {
                           }}
                         />
                       </div>
+
+                      {renderTokenCostFields(
+                        multimodalInputCostPer1m,
+                        multimodalOutputCostPer1m,
+                        setMultimodalInputCostPer1m,
+                        setMultimodalOutputCostPer1m,
+                      )}
                     </>
                   )}
                 </div>
