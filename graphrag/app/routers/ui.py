@@ -1431,6 +1431,44 @@ def migration_status(
     }
 
 
+async def _proxy_regen(graphname, creds, action):
+    """Forward a targeted regenerate action to ECC (synchronous) and return its
+    counts. Refuses while a rebuild is in flight (both write embeddings)."""
+    if get_rebuilding_graph() == graphname:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is being rebuilt; retry after it completes.",
+        )
+    auth_header = _ecc_auth_header(creds[1])
+    ecc_base = graphrag_config.get("ecc", "http://graphrag-ecc:8001")
+    url = f"{ecc_base}/{graphname}/graphrag/{action}"
+    async with httpx.AsyncClient(timeout=None) as client:
+        resp = await client.get(url, headers={"Authorization": auth_header})
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
+    return resp.json()
+
+
+@router.post(route_prefix + "/{graphname}/migration/regenerate_embeddings")
+async def migration_regenerate_embeddings(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Re-embed vertices missing an embedding (GML-2175). Targeted — not a full
+    rebuild. Returns {regenerated, skipped}."""
+    return await _proxy_regen(graphname, creds, "regenerate_embeddings")
+
+
+@router.post(route_prefix + "/{graphname}/migration/regenerate_summaries")
+async def migration_regenerate_summaries(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Re-summarize communities with placeholder/empty summaries and re-embed
+    (GML-2176). Targeted — not a full rebuild. Returns {resummarized, skipped}."""
+    return await _proxy_regen(graphname, creds, "regenerate_summaries")
+
+
 @router.post(route_prefix + "/{graphname}/migration/apply")
 def migration_apply(
     graphname: ValidGraphName,
