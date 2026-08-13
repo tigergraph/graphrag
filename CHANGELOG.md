@@ -2,6 +2,10 @@
 
 ## [2.0.2]
 
+### Added
+- **The Migration Assistant reports graph data-integrity health.** Alongside the query check, it now shows how many vertices are missing embeddings (by type) and how many communities have a placeholder or empty summary.
+- **Targeted regeneration from the Migration Assistant.** Missing embeddings can be re-embedded, and communities with placeholder/empty summaries can be re-summarized, for just the affected items — without running a full rebuild. Items whose source content is unusable are reported as needing a rebuild.
+
 ### Changed
 - **Clearer message when an answer can't be generated.** When the assistant is unable to produce an answer, it now suggests rephrasing the question to be more specific and contacting an administrator if the problem continues, instead of a bare failure notice.
 - **Token cost rates can be set per service.** LLM Config accepts optional input/output USD-per-1M-token rates for the completion, chatbot, and multimodal services; when set, Est. Cost uses them so cost is accurate for models the pricing library doesn't recognize (otherwise it keeps the library's pricing).
