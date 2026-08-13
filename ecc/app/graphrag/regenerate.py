@@ -20,10 +20,11 @@ from common.config import (
 )
 from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
 from common.utils.summary_placeholders import PLACEHOLDER_MARKERS, is_placeholder_summary
-from common.db.health import embeddable_types
 from graphrag import util, community_summarizer
 
 logger = logging.getLogger(__name__)
+
+_VECTOR_ATTR = "embedding"
 
 
 def _make_store(conn, graphname):
@@ -32,6 +33,25 @@ def _make_store(conn, graphname):
     )
     store.set_graphname(graphname)
     return store
+
+
+async def _embeddable_types(conn) -> list[str]:
+    """Vertex types carrying the embedding attribute (async connection)."""
+    try:
+        types = await conn.getVertexTypes()
+    except Exception as e:
+        logger.warning(f"regen: getVertexTypes failed: {e}")
+        return []
+    out = []
+    for vt in types:
+        try:
+            attrs = await conn.getVertexAttrs(vt)
+            names = [a[0] if isinstance(a, (list, tuple)) else a for a in attrs]
+            if _VECTOR_ATTR in names:
+                out.append(vt)
+        except Exception:
+            continue
+    return out
 
 
 def _row_id(r):
@@ -75,7 +95,7 @@ async def regenerate_embeddings(graphname, conn):
     store = _make_store(conn, graphname)
     regenerated = 0
     skipped = 0
-    for vt in embeddable_types(store):
+    for vt in await _embeddable_types(conn):
         try:
             res = await conn.runInstalledQuery(
                 "vertices_have_embedding",

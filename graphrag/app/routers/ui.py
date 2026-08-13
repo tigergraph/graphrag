@@ -52,7 +52,7 @@ from pyTigerGraph import TigerGraphConnection
 from pyTigerGraph.common.exception import TigerGraphException
 from tools.validation_utils import MapQuestionToSchemaException
 
-from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_embedding_service, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
+from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
 from common.db.connections import get_db_connection_pwd_manual
 from common.db import schema_utils as schema_utils_mod
 from common.db import schema_extraction as schema_extraction_mod
@@ -1386,14 +1386,9 @@ def migration_status(
             embedding_coverage,
             community_summary_health,
         )
-        from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
 
-        store = TigerGraphEmbeddingStore(
-            conn, get_embedding_service(), support_ai_instance=True
-        )
-        store.set_graphname(graphname)
-        for vt in embeddable_types(store):
-            cov = embedding_coverage(store, vt)
+        for vt in embeddable_types(conn):
+            cov = embedding_coverage(conn, vt)
             if cov is not None:
                 embeddings_by_type[vt] = cov
                 embeddings_total_missing += cov["missing"]
