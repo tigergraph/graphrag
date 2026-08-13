@@ -37,6 +37,7 @@ GRAPHRAG_COMMUNITY_QUERIES = [
     "common/gsql/graphrag/louvain/stream_community",
     "common/gsql/graphrag/get_community_children",
     "common/gsql/graphrag/communities_have_desc",
+    "common/gsql/graphrag/communities_need_resummarize",
     "common/gsql/graphrag/graphrag_delete_all_communities",
     "common/gsql/graphrag/graphrag_stream_entity_community_pairs",
     "common/gsql/graphrag/graphrag_stream_all_ids",
@@ -69,6 +70,13 @@ ECC_CHECKER_QUERIES = [
     "common/gsql/supportai/Check_Nonexistent_Vertices",
 ]
 
+# Data-integrity health-check queries used by the Migration Assistant panel.
+# vertices_have_embedding is also installed by the embedding store; listing it
+# here lets the Migration Assistant verify/repair it too.
+HEALTH_QUERIES = [
+    "common/gsql/vector/vertices_have_embedding",
+]
+
 # What the Migration Assistant verifies for a GraphRAG graph: everything a
 # GraphRAG graph actually installs. Excludes the opt-in ECC-checker queries.
 MIGRATION_QUERIES = (
@@ -76,6 +84,7 @@ MIGRATION_QUERIES = (
     + GRAPHRAG_COMMUNITY_QUERIES
     + SUPPORTAI_INIT_QUERIES
     + SUPPORTAI_RETRIEVER_QUERIES
+    + HEALTH_QUERIES
 )
 
 

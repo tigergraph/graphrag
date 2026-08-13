@@ -52,7 +52,7 @@ from pyTigerGraph import TigerGraphConnection
 from pyTigerGraph.common.exception import TigerGraphException
 from tools.validation_utils import MapQuestionToSchemaException
 
-from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
+from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_embedding_service, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
 from common.db.connections import get_db_connection_pwd_manual
 from common.db import schema_utils as schema_utils_mod
 from common.db import schema_extraction as schema_extraction_mod
@@ -1372,6 +1372,37 @@ def migration_status(
     except Exception as e:
         logger.warning(f"migration_status prompt check failed: {e}")
 
+    # Data-integrity health: embedding coverage and community-summary
+    # completeness. DETERMINISTIC, read-only, NO LLM calls — same contract as
+    # the query/prompt checks. Reported separately from ``needs_repair`` because
+    # neither is fixed by a query reinstall (they have their own regenerate
+    # actions). Best-effort, never fatal.
+    embeddings_by_type: dict = {}
+    embeddings_total_missing = 0
+    community_summaries: dict = {}
+    try:
+        from common.db.health import (
+            embeddable_types,
+            embedding_coverage,
+            community_summary_health,
+        )
+        from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStore
+
+        store = TigerGraphEmbeddingStore(
+            conn, get_embedding_service(), support_ai_instance=True
+        )
+        store.set_graphname(graphname)
+        for vt in embeddable_types(store):
+            cov = embedding_coverage(store, vt)
+            if cov is not None:
+                embeddings_by_type[vt] = cov
+                embeddings_total_missing += cov["missing"]
+        csh = community_summary_health(conn)
+        if csh is not None:
+            community_summaries = csh
+    except Exception as e:
+        logger.warning(f"migration_status health check failed: {e}")
+
     return {
         "graphname": graphname,
         "queries": {
@@ -1387,6 +1418,15 @@ def migration_status(
             "schema_change_required": False,
         },
         "prompts": prompt_issues,
+        "embeddings": {
+            "by_type": embeddings_by_type,
+            "total_missing": embeddings_total_missing,
+        },
+        "embeddings_incomplete": embeddings_total_missing > 0,
+        "community_summaries": community_summaries,
+        "community_summaries_incomplete": bool(
+            community_summaries.get("needs_resummarize", 0)
+        ),
         "needs_repair": bool(outdated) or bool(not_installed) or bool(prompt_issues),
     }
 
