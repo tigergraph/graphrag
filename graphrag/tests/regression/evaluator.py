@@ -595,6 +595,44 @@ def _print_detailed(r: EvalResult, total: int) -> None:
         print(f"     reason: {r.hallucination_reason}", flush=True)
 
 
+def _parse_mode(mode_str: str) -> tuple:
+    """Parse --mode into (api_mode, rag_pattern).
+
+    Agentic styles  (mode=agentic, rag_pattern=<style>):
+      planned                  → ("agentic", "planned")
+      reactive                 → ("agentic", "reactive")
+      auto                     → ("agentic", "auto")   ← graph config picks the style
+
+    Classic retrievers  (mode=classic, rag_pattern=<retriever>):
+      classic                  → ("classic", "auto")
+      classic/auto             → ("classic", "auto")
+      classic/similaritysearch → ("classic", "similaritysearch")
+      classic/hybridsearch     → ("classic", "hybridsearch")
+      classic/contextualsearch → ("classic", "contextualsearch")
+      classic/communitysearch  → ("classic", "communitysearch")
+    """
+    import sys as _sys
+    s = mode_str.strip().lower()
+    agent, _, retriever = s.partition("/")
+    retriever = retriever or None
+
+    if agent == "planned":
+        return "agentic", "planned"
+    if agent == "reactive":
+        return "agentic", "reactive"
+    if agent == "auto":
+        return "agentic", "auto"
+    if agent == "agentic":
+        return "agentic", retriever or "auto"
+    if agent == "classic":
+        return "classic", retriever or "auto"
+
+    _sys.exit(
+        f"ERROR: unrecognised --mode '{mode_str}'. "
+        "Use: auto | planned | reactive | classic | classic/<retriever>"
+    )
+
+
 def run_eval(
     questions: List[EvalQuestion],
     graphname: str,
@@ -701,18 +739,11 @@ if __name__ == "__main__":
                         help="Path to server_config.json")
     parser.add_argument("--url",         default=None,
                         help="GraphRAG base URL (overrides server_config.json graphrag_config.query_url)")
-    parser.add_argument("--agent", default="planned",
-                        choices=["planned", "reactive", "classic"],
+    parser.add_argument("--mode", default="planned",
                         help=(
-                            "Agent to use: 'planned' (Planned Agent, default), "
-                            "'reactive' (ReAct Agent), or 'classic' (Classic engine). "
-                            "Use --search-type to override the Classic retriever."
-                        ))
-    parser.add_argument("--search-type", default="auto",
-                        help=(
-                            "Classic retriever override when --agent classic is set. "
-                            "Values: auto, similaritysearch, contextualsearch, "
-                            "hybridsearch, communitysearch (default: auto)"
+                            "Query mode as <agent>[/<retriever>]. Default: planned. "
+                            "Examples: planned  reactive  classic/auto  "
+                            "classic/similaritysearch  classic/hybridsearch"
                         ))
     parser.add_argument("--output",      default=None,
                         help="Output directory for result CSV/JSON")
@@ -755,21 +786,14 @@ if __name__ == "__main__":
 
     output_dir = args.output or os.path.join(os.path.dirname(__file__), "results")
 
-    # Map --agent choice to (mode, rag_pattern) for the /query endpoint
-    _AGENT_MAP = {
-        "planned":  ("agentic", "planned"),
-        "reactive": ("agentic", "reactive"),
-        "classic":  ("classic", args.search_type.lower()),
-    }
-    mode, rag_pattern = _AGENT_MAP[args.agent]
+    mode, rag_pattern = _parse_mode(args.mode)
 
     questions = load_questions(dataset_dir)
     if args.limit:
         questions = questions[:args.limit]
 
     print(f"\n{_B}GraphRAG Evaluation{_X}  dataset={args.dataset}  "
-          f"graph={args.graphname}  agent={args.agent}  "
-          + (f"retriever={args.search_type}  " if args.agent == "classic" else "")
+          f"graph={args.graphname}  mode={args.mode}  "
           + f"questions={len(questions)}"
           + (f"  {_Y}(limit={args.limit}){_X}" if args.limit else "")
           + "\n", flush=True)

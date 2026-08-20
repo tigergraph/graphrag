@@ -29,5 +29,5 @@ source "${REG_DIR}/_container_sync.sh"
 
 sync_regression_to_container "${CONTAINER}" "${REG_DIR}"
 
-docker exec -e PYTHONUNBUFFERED=1 "${CONTAINER}" \
+docker exec -w /code -e PYTHONUNBUFFERED=1 "${CONTAINER}" \
     python /code/tests/regression/setup_graph.py "$@"
