@@ -187,8 +187,12 @@ async def regenerate_summaries(graphname, conn):
             continue
         pid = util.process_id(cid)
         try:
-            await util.upsert_vertex(
-                conn, "Community", pid, {"description": summary, "iteration": i}
+            # Direct upsert (not util.upsert_vertex, which only enqueues to the
+            # rebuild loader queue that isn't running in a standalone regenerate
+            # action — the description write would be silently dropped).
+            await conn.upsertVertex(
+                "Community", pid,
+                attributes={"description": summary, "iteration": i},
             )
             await store.aadd_embeddings(
                 [(summary, [])], [{"vertex_id": (pid, "Community")}]
