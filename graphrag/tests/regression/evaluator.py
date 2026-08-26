@@ -434,7 +434,7 @@ def _query_graphrag(
             "include_fields": "query_sources",
         },
         auth=(username, password),
-        timeout=120.0,
+        timeout=600.0,  # agentic planned mode can take >120s on complex multi-hop questions
     )
     resp.raise_for_status()
     data = resp.json()
