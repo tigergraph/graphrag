@@ -24,11 +24,11 @@ adopt LangGraph later if checkpointing/streaming-graph features are needed.
 import logging
 import time
 
-from agent.agentic_executor import cap_for_trace, execute_plan, _usage_since
+from agent.agentic_executor import cap_for_trace, execute_plan, _run_step, _usage_since
 from agent.agentic_planner import plan_question
 from agent.agentic_synthesizer import _gather, has_context, synthesize
 from common.llm_services.base_llm import get_collected_usage
-from common.py_schemas import GraphRAGResponse
+from common.py_schemas import GraphRAGResponse, PlanStep
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,22 @@ MAX_TOTAL_STEPS = 20     # hard cap on executed retrieval steps across replans
 # Both are overridable per-graph via ``graphrag_config`` keys
 # ``agent_max_replans`` and ``agent_max_total_steps``. Raise them for
 # complex-system graphs (e.g. multi-hop what-if simulation).
+
+# Deterministic fallback: a structural query that returns no rows leaves the
+# answer with nothing to stand on. Rather than depend on the LLM planner to
+# add an unstructured step on replan (it does so inconsistently), we guarantee
+# a hybrid search runs before giving up.
+_STRUCTURAL_TOOL = "graphrag__structural_retrieve"
+_HYBRID_TOOL = "graphrag__hybrid_search"
+
+
+def _hybrid_fallback_step() -> PlanStep:
+    return PlanStep(
+        id="fallback_hybrid",
+        kind="unstructured",
+        tool=_HYBRID_TOOL,
+        rationale="Structural query returned no rows; falling back to hybrid search",
+    )
 
 
 def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
@@ -79,6 +95,22 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
         new_results, step_traces = execute_plan(plan, ctx)
         results.update(new_results)
         agent_steps.extend(step_traces)
+
+        # Deterministic safety net: if a structural retrieve was attempted and
+        # produced no context, fall back to a hybrid search directly rather
+        # than relying on the planner to add one on replan. Runs at most once.
+        # Shares the classic engine's ``enable_router_fallback`` knob (default
+        # True) so both engines fall back — or don't — consistently.
+        used = {t.get("tool") for t in agent_steps}
+        if (_cfg.get("enable_router_fallback", True)
+                and not has_context(results)
+                and _STRUCTURAL_TOOL in used
+                and _HYBRID_TOOL not in used):
+            emit("No structured results; falling back to hybrid search")
+            fb_traces: list = []
+            _run_step(_hybrid_fallback_step(), {"question": question},
+                      ctx, results, fb_traces)
+            agent_steps.extend(fb_traces)
 
         if has_context(results) or replans >= max_replans or len(results) >= max_total_steps:
             break

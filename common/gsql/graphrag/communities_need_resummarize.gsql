@@ -1,0 +1,24 @@
+CREATE OR REPLACE DISTRIBUTED QUERY communities_need_resummarize(SET<STRING> markers, BOOL p=False) SYNTAX V2{
+    // A community needs re-summarization when its description is empty or is a
+    // known placeholder marker (old or new). ``markers`` is passed in so the
+    // set of placeholders stays defined in one place in Python.
+    SumAccum<INT> @@needs;
+    SumAccum<INT> @@total;
+    Comms = {Community.*};
+    Comms = SELECT c FROM Comms:c
+            POST-ACCUM
+                @@total += 1,
+                IF length(c.description) == 0 OR (c.description IN markers) THEN
+                    @@needs += 1
+                END;
+
+    PRINT @@needs AS needs_resummarize, @@total AS total;
+
+    // p=true streams the affected community ids + their Louvain layer so the
+    // regenerate action can re-summarize exactly those.
+    IF p THEN
+        bad = SELECT c FROM Comms:c
+              WHERE length(c.description) == 0 OR (c.description IN markers);
+        PRINT bad[bad.iteration AS iteration] AS results;
+    END;
+}

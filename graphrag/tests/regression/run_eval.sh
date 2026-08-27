@@ -19,22 +19,22 @@
 # Usage (from repo root, on the host):
 #
 #   Planned Agent (default):
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --mode planned
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode planned
 #
 #   ReAct Agent:
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --mode reactive
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode reactive
 #
 #   Classic engine (auto retriever):
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --mode classic/auto
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode classic/auto
 #
 #   Classic with specific retriever:
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --mode classic/hybridsearch
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode classic/hybridsearch
 #
 #   Detailed per-question output:
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --mode planned --detailed
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode planned --detailed
 #
 #   Limit to first N questions (quick smoke test):
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --mode planned --limit 5
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode planned --limit 5
 #
 # Override the container name with GRAPHRAG_CONTAINER if needed.
 # Results are written to graphrag/tests/regression/results/ on the host.

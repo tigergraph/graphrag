@@ -435,3 +435,63 @@ def consistency_update(
             return f"Method unsupported, must be {SupportAIMethod.SUPPORTAI}, {SupportAIMethod.GRAPHRAG}"
 
     return {"status": "submitted", "message": ecc_status}
+
+
+def _regen_build_conn(graphname, credentials):
+    """Async DB connection for a regenerate action (mirrors consistency_update
+    auth handling)."""
+    reload_db_config()
+    if isinstance(credentials, HTTPBasicCredentials):
+        conn = elevate_db_connection_to_token(
+            db_config.get("hostname"), credentials.username, credentials.password,
+            graphname, async_conn=True,
+        )
+    elif isinstance(credentials, HTTPAuthorizationCredentials):
+        conn = get_db_connection_id_token(
+            graphname, credentials.credentials, async_conn=True
+        )
+    else:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+    asyncio.run(conn.customizeHeader(
+        timeout=db_config.get("default_timeout", 300) * 1000, responseSize=5000000
+    ))
+    return conn
+
+
+def _run_regen(graphname, credentials, task_suffix, run_func):
+    """Run a targeted regenerate action synchronously, returning its counts.
+    Refuses while a rebuild or the same action is already in flight (they both
+    write embeddings)."""
+    rebuild_key = f"{graphname}:graphrag"
+    if rebuild_key in running_tasks and running_tasks[rebuild_key].get("status") == "running":
+        raise HTTPException(
+            status_code=409,
+            detail=f"A rebuild is in progress for {graphname}; retry after it completes.",
+        )
+    task_key = f"{graphname}:{task_suffix}"
+    if task_key in running_tasks and running_tasks[task_key].get("status") == "running":
+        raise HTTPException(status_code=409, detail=f"{task_suffix} already running for {graphname}")
+    conn = _regen_build_conn(graphname, credentials)
+    running_tasks[task_key] = {"status": "running", "started_at": time.time()}
+    try:
+        result = asyncio.run(run_func(graphname, conn))
+        LogWriter.info(f"Completed ECC task: {task_key} -> {result}")
+        return {"status": "completed", **result}
+    finally:
+        running_tasks.pop(task_key, None)
+
+
+@app.get("/{graphname}/graphrag/regenerate_embeddings")
+def regenerate_embeddings_endpoint(graphname: str, credentials=Depends(auth_credentials)):
+    """Re-embed vertices missing an embedding (GML-2175). Targeted, not a full
+    rebuild. Runs synchronously and returns {regenerated, skipped}."""
+    from graphrag.regenerate import regenerate_embeddings
+    return _run_regen(graphname, credentials, "regenerate_embeddings", regenerate_embeddings)
+
+
+@app.get("/{graphname}/graphrag/regenerate_summaries")
+def regenerate_summaries_endpoint(graphname: str, credentials=Depends(auth_credentials)):
+    """Re-summarize communities with placeholder/empty descriptions and re-embed
+    (GML-2176). Targeted, not a full rebuild. Returns {resummarized, skipped}."""
+    from graphrag.regenerate import regenerate_summaries
+    return _run_regen(graphname, credentials, "regenerate_summaries", regenerate_summaries)

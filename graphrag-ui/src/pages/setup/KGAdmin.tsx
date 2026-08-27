@@ -79,9 +79,18 @@ const KGAdmin = () => {
       missing_files: string[];
     };
     needs_repair?: boolean;
+    embeddings?: {
+      by_type: Record<string, { total: number; missing: number }>;
+      total_missing: number;
+    };
+    embeddings_incomplete?: boolean;
+    community_summaries?: { total: number; needs_resummarize: number };
+    community_summaries_incomplete?: boolean;
   } | null>(null);
   const [migrationChecking, setMigrationChecking] = useState(false);
   const [migrationApplying, setMigrationApplying] = useState(false);
+  // "" | "regenerate_embeddings" | "regenerate_summaries" — which regen is running
+  const [migrationRegenerating, setMigrationRegenerating] = useState("");
   const [migrationMessage, setMigrationMessage] = useState("");
   // Reset states when dialogs close
   const handleInitializeDialogChange = (open: boolean) => {
@@ -145,14 +154,27 @@ const KGAdmin = () => {
         return;
       }
       setMigrationStatus(data);
-      if (!data.needs_repair) {
+      if (
+        !data.needs_repair &&
+        !data.embeddings_incomplete &&
+        !data.community_summaries_incomplete
+      ) {
         setMigrationMessage("✅ Graph is up to date — no repairs needed.");
       } else {
+        const parts: string[] = [];
         const out = data.queries?.outdated?.length || 0;
         const miss = data.queries?.not_installed?.length || 0;
-        setMigrationMessage(
-          `Found ${out} outdated query(s) and ${miss} not installed.`
-        );
+        if (out || miss)
+          parts.push(`${out} outdated query(s), ${miss} not installed`);
+        if (data.embeddings_incomplete)
+          parts.push(
+            `${data.embeddings?.total_missing ?? 0} vertices missing embeddings`
+          );
+        if (data.community_summaries_incomplete)
+          parts.push(
+            `${data.community_summaries?.needs_resummarize ?? 0} communities need re-summarization`
+          );
+        setMigrationMessage(`Found: ${parts.join("; ")}.`);
       }
     } catch (err: any) {
       setMigrationMessage(`Check failed: ${err.message || err}`);
@@ -223,6 +245,49 @@ const KGAdmin = () => {
       setMigrationMessage(`Apply failed: ${err.message || err}`);
     } finally {
       setMigrationApplying(false);
+    }
+  };
+
+  // Targeted data-integrity regeneration (not a full rebuild). action is
+  // "regenerate_embeddings" or "regenerate_summaries".
+  const runRegenerate = async (
+    action: "regenerate_embeddings" | "regenerate_summaries"
+  ) => {
+    const auth = sessionStorage.getItem("auth");
+    if (!auth) {
+      setMigrationMessage("Not authenticated.");
+      return;
+    }
+    const isEmb = action === "regenerate_embeddings";
+    setMigrationRegenerating(action);
+    setMigrationMessage(
+      isEmb ? "Regenerating embeddings…" : "Regenerating community summaries…"
+    );
+    try {
+      const resp = await fetch(`/ui/${migrationGraph}/migration/${action}`, {
+        method: "POST",
+        headers: { Authorization: auth },
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setMigrationMessage(
+          `Regenerate failed: ${data.detail || resp.statusText}`
+        );
+        return;
+      }
+      const done = isEmb ? data.regenerated ?? 0 : data.resummarized ?? 0;
+      const skipped = data.skipped ?? 0;
+      const verb = isEmb ? "Re-embedded" : "Re-summarized";
+      setMigrationMessage(
+        `✅ ${verb} ${done}` +
+          (skipped ? `; ${skipped} skipped (need a rebuild).` : ".")
+      );
+      // Refresh so the counts reflect the regenerated state.
+      await runMigrationCheck(migrationGraph);
+    } catch (err: any) {
+      setMigrationMessage(`Regenerate failed: ${err.message || err}`);
+    } finally {
+      setMigrationRegenerating("");
     }
   };
 
@@ -2888,6 +2953,97 @@ const KGAdmin = () => {
                       </div>
                     </div>
                   )}
+
+                  {/* Data-integrity health: embedding coverage */}
+                  {migrationStatus.embeddings &&
+                    Object.keys(migrationStatus.embeddings.by_type).length > 0 && (
+                      <div
+                        className={`p-3 rounded border ${
+                          migrationStatus.embeddings_incomplete
+                            ? "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800"
+                            : "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="font-medium text-black dark:text-white">
+                            Embedding health
+                            {migrationStatus.embeddings.total_missing > 0
+                              ? ` — ${migrationStatus.embeddings.total_missing} missing`
+                              : " — all embedded"}
+                          </div>
+                          {migrationStatus.embeddings_incomplete && (
+                            <Button
+                              onClick={() => runRegenerate("regenerate_embeddings")}
+                              disabled={
+                                !!migrationRegenerating ||
+                                migrationApplying ||
+                                migrationChecking ||
+                                isRebuildRunning
+                              }
+                              className="gradient text-white h-7 text-xs whitespace-nowrap"
+                            >
+                              {migrationRegenerating === "regenerate_embeddings" ? (
+                                <>
+                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                  Regenerating…
+                                </>
+                              ) : (
+                                "Regenerate embeddings"
+                              )}
+                            </Button>
+                          )}
+                        </div>
+                        <div className="mt-1 font-mono text-xs text-gray-600 dark:text-gray-400">
+                          {Object.entries(migrationStatus.embeddings.by_type)
+                            .map(
+                              ([t, c]) => `${t}: ${c.missing}/${c.total} missing`
+                            )
+                            .join("  ·  ")}
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Data-integrity health: community summaries */}
+                  {migrationStatus.community_summaries &&
+                    (migrationStatus.community_summaries.total ?? 0) > 0 && (
+                      <div
+                        className={`p-3 rounded border ${
+                          migrationStatus.community_summaries_incomplete
+                            ? "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800"
+                            : "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="font-medium text-black dark:text-white">
+                            Community summaries —{" "}
+                            {migrationStatus.community_summaries.needs_resummarize}/
+                            {migrationStatus.community_summaries.total} need
+                            re-summarization
+                          </div>
+                          {migrationStatus.community_summaries_incomplete && (
+                            <Button
+                              onClick={() => runRegenerate("regenerate_summaries")}
+                              disabled={
+                                !!migrationRegenerating ||
+                                migrationApplying ||
+                                migrationChecking ||
+                                isRebuildRunning
+                              }
+                              className="gradient text-white h-7 text-xs whitespace-nowrap"
+                            >
+                              {migrationRegenerating === "regenerate_summaries" ? (
+                                <>
+                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                  Regenerating…
+                                </>
+                              ) : (
+                                "Regenerate summaries"
+                              )}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                 </div>
               )}
 
