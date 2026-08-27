@@ -9,8 +9,8 @@
 # (no bind mount needed).
 #
 # Usage (from repo root, on the host):
-#   ./graphrag/tests/regression/run_setup.sh --dataset Toppan
-#   ./graphrag/tests/regression/run_setup.sh --dataset Toppan --skip-rebuild
+#   ./graphrag/tests/regression/run_setup.sh --dataset MyDataset
+#   ./graphrag/tests/regression/run_setup.sh --dataset MyDataset --skip-rebuild
 #
 # Override the container name with GRAPHRAG_CONTAINER if needed.
 # All arguments are forwarded to setup_graph.py.
