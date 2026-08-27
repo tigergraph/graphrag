@@ -26,6 +26,7 @@ and ``llm_model`` (model id), matching the shapes produced by
 """
 
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -172,3 +173,101 @@ def model_supports_agentic(config: dict) -> bool:
             (config or {}).get("llm_model"),
         )
     return caps["supports_tool_calling"]
+
+
+# ---------------------------------------------------------------------------
+# Runtime tool-calling probe (GML-2169)
+#
+# The per-vendor heuristics above are a *default only*. The authoritative
+# signal is a one-time runtime probe: bind a trivial tool to the chat model and
+# make a minimal call. The result is cached in memory (per process), keyed by
+# service:model — never persisted to config, and re-probed after a restart. A
+# model that fails the probe with a real (non-transient) error is cached as
+# unsupported until its config changes (new key) or the container restarts.
+# ---------------------------------------------------------------------------
+
+_probe_cache: dict = {}
+_probe_lock = threading.Lock()
+
+
+def _probe_key(config: dict) -> str:
+    service = (config.get("llm_service") or "").strip().lower()
+    model = (config.get("llm_model") or "").strip().lower()
+    return f"{service}:{model}"
+
+
+def _run_tool_calling_probe(llm_provider):
+    """Bind a trivial tool and make a minimal call.
+
+    Returns ``True`` when the model accepts tool binding and completes the call,
+    ``False`` when it rejects tool-calling (a non-transient/content error), and
+    ``None`` when the attempt failed transiently (connectivity) — the caller
+    should then not cache the outcome.
+    """
+    from pydantic import BaseModel, Field
+    from common.llm_services.base_llm import classify_llm_error
+
+    class _ProbePing(BaseModel):
+        """Acknowledge readiness by calling this tool."""
+        ok: bool = Field(default=True, description="always true")
+
+    llm = getattr(llm_provider, "llm", None)
+    if llm is None or not hasattr(llm, "bind_tools"):
+        return False
+    try:
+        bound = llm.bind_tools([_ProbePing])
+        bound.invoke([
+            ("system", "You can call tools."),
+            ("user", "Call the ProbePing tool with ok set to true."),
+        ])
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if classify_llm_error(exc) == "connectivity":
+            logger.warning("tool-calling probe: transient failure (%s)", str(exc)[:200])
+            return None
+        logger.info(
+            "tool-calling probe: model does not support tool-calling (%s)",
+            str(exc)[:200],
+        )
+        return False
+
+
+def supports_tool_calling(config: dict, llm_provider=None) -> bool:
+    """Authoritative tool-calling check for the resolved chat model.
+
+    Uses a cached in-memory runtime probe; falls back to the static per-vendor
+    heuristic before the first probe, when no provider is available to probe,
+    or on a transient probe failure. Never writes to config.
+    """
+    if not isinstance(config, dict):
+        return False
+    key = _probe_key(config)
+    with _probe_lock:
+        if key in _probe_cache:
+            return _probe_cache[key]
+
+    heuristic = model_capabilities(config).get("supports_tool_calling", False)
+    if llm_provider is None:
+        return heuristic  # cannot probe yet; best-effort default, not cached
+
+    result = _run_tool_calling_probe(llm_provider)
+    if result is None:
+        return heuristic  # transient; retry next time, don't cache
+    with _probe_lock:
+        _probe_cache[key] = result
+    return result
+
+
+def mark_tool_calling_unsupported(config: dict) -> None:
+    """Record that the chat model failed tool-calling at runtime, so later
+    requests downgrade to the classic engine until the model config changes or
+    the container restarts."""
+    if isinstance(config, dict):
+        with _probe_lock:
+            _probe_cache[_probe_key(config)] = False
+
+
+def reset_tool_calling_cache() -> None:
+    """Clear the in-memory probe cache (test hook / manual reset)."""
+    with _probe_lock:
+        _probe_cache.clear()

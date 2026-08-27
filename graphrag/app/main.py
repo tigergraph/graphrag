@@ -47,18 +47,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger(__name__).warning(f"mcp library install failed: {e}")
 
-    # Warn if the configured chat model can't tool-call, so operators know the
-    # agentic engine will fall back to the classic engine.
+    # Advisory only: the static heuristic may not know a chat model, but the
+    # authoritative check is a runtime probe on first Agentic use. Log a hint so
+    # operators aren't surprised if a downgrade to classic happens.
     try:
         from common.config import get_chat_config
         from common.llm_services.capabilities import model_capabilities
         cfg = get_chat_config()
         if not model_capabilities(cfg).get("supports_tool_calling"):
-            logging.getLogger(__name__).warning(
-                "Chat model llm_service=%r llm_model=%r does not support "
-                "tool-calling; the agentic chat engine is unavailable and "
-                "requests will use the classic engine. Configure a "
-                "tool-calling model to enable Agentic mode.",
+            logging.getLogger(__name__).info(
+                "Chat model llm_service=%r llm_model=%r is not in the known "
+                "tool-calling list; a runtime probe on first Agentic use will "
+                "confirm. If it can't tool-call, requests use the classic engine.",
                 (cfg or {}).get("llm_service"), (cfg or {}).get("llm_model"),
             )
     except Exception as e:

@@ -292,14 +292,14 @@ def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retr
     caller can surface it to the user.
     """
     from common.config import get_agent_mode
-    from common.llm_services.capabilities import model_supports_agentic
+    from common.llm_services.capabilities import supports_tool_calling
 
     llm_provider = get_llm_service(get_chat_config(graphname))
     chat_config = llm_provider.config
 
     resolved_mode = (mode or get_agent_mode(graphname)).lower()
     want_agentic = resolved_mode == "agentic"
-    agentic = want_agentic and model_supports_agentic(chat_config)
+    agentic = want_agentic and supports_tool_calling(chat_config, llm_provider)
 
     logger.info(
         f"[CHATBOT] graph={graphname} model={chat_config['llm_model']} "
