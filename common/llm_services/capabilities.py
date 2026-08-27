@@ -178,16 +178,33 @@ def model_supports_agentic(config: dict) -> bool:
 # ---------------------------------------------------------------------------
 # Runtime tool-calling probe (GML-2169)
 #
-# The per-vendor heuristics above are a *default only*. The authoritative
-# signal is a one-time runtime probe: bind a trivial tool to the chat model and
-# make a minimal call. The result is cached in memory (per process), keyed by
-# service:model — never persisted to config, and re-probed after a restart. A
-# model that fails the probe with a real (non-transient) error is cached as
-# unsupported until its config changes (new key) or the container restarts.
+# Policy: Agentic mode is ON by default. We only DISABLE it when we are sure
+# the model can't tool-call — a known-legacy model, an explicit "tools not
+# supported" error from the probe, or a real tool-calling failure at query
+# time (mark_tool_calling_unsupported). Anything uncertain (transient error,
+# ambiguous failure, timeout, no provider yet) stays ENABLED and is not cached,
+# so a flaky probe never disables a capable model. Results are cached in memory
+# (per process), keyed by service:model — never persisted to config, re-probed
+# after a restart, and sticky until the model config changes (new key).
 # ---------------------------------------------------------------------------
 
 _probe_cache: dict = {}
 _probe_lock = threading.Lock()
+
+_PROBE_TIMEOUT_S = 20
+
+# Error text that positively indicates the model rejects tool/function calling.
+_NO_TOOL_SUPPORT_MARKERS = (
+    "does not support tool",
+    "not support tools",
+    "tools are not supported",
+    "tool use is not supported",
+    "tool calling is not supported",
+    "function calling is not supported",
+    "does not support function",
+    "tool_choice is not supported",
+    "tools is not supported",
+)
 
 
 def _probe_key(config: dict) -> str:
@@ -196,48 +213,86 @@ def _probe_key(config: dict) -> str:
     return f"{service}:{model}"
 
 
-def _run_tool_calling_probe(llm_provider):
-    """Bind a trivial tool and make a minimal call.
+def _known_no_tool_calling(config: dict) -> bool:
+    """True only for models we are *sure* predate tool/function calling."""
+    service = (config.get("llm_service") or "").strip().lower()
+    model = _strip_region((config.get("llm_model") or "").strip().lower())
+    if "gemini-1.0" in model or "gemini-pro-vision" in model or model == "gemini-pro":
+        return True
+    if service in ("openai", "azure", "azure_openai", "azureopenai"):
+        if model.startswith(("text-davinci", "davinci", "curie", "babbage", "ada",
+                             "text-ada", "text-babbage", "text-curie")):
+            return True
+    if service in ("bedrock", "aws_bedrock", "awsbedrock"):
+        if ("amazon.titan" in model
+                or "meta.llama2" in model
+                or "ai21.j2" in model
+                or "ai21.jurassic" in model
+                or "anthropic.claude-instant" in model
+                or "anthropic.claude-v2" in model
+                or model.startswith("anthropic.claude-2")
+                or ("cohere.command" in model and "command-r" not in model)):
+            return True
+    return False
 
-    Returns ``True`` when the model accepts tool binding and completes the call,
-    ``False`` when it rejects tool-calling (a non-transient/content error), and
-    ``None`` when the attempt failed transiently (connectivity) — the caller
-    should then not cache the outcome.
-    """
+
+def _looks_like_no_tool_support(exc) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _NO_TOOL_SUPPORT_MARKERS)
+
+
+def _invoke_probe(llm):
     from pydantic import BaseModel, Field
-    from common.llm_services.base_llm import classify_llm_error
 
     class _ProbePing(BaseModel):
         """Acknowledge readiness by calling this tool."""
         ok: bool = Field(default=True, description="always true")
 
+    bound = llm.bind_tools([_ProbePing])
+    bound.invoke([
+        ("system", "You can call tools."),
+        ("user", "Call the ProbePing tool with ok set to true."),
+    ])
+
+
+def _run_tool_calling_probe(llm_provider):
+    """Bind a trivial tool and make a minimal, time-bounded call.
+
+    Returns ``True`` (confirmed tool-calling), ``False`` (the model explicitly
+    rejects tools — a *confident* no-support signal), or ``None`` (unknown:
+    transient, ambiguous, timeout, or no usable provider). ``None`` must not
+    disable Agentic mode.
+    """
+    import concurrent.futures
+
     llm = getattr(llm_provider, "llm", None)
     if llm is None or not hasattr(llm, "bind_tools"):
-        return False
+        return None
     try:
-        bound = llm.bind_tools([_ProbePing])
-        bound.invoke([
-            ("system", "You can call tools."),
-            ("user", "Call the ProbePing tool with ok set to true."),
-        ])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            ex.submit(_invoke_probe, llm).result(timeout=_PROBE_TIMEOUT_S)
         return True
+    except concurrent.futures.TimeoutError:
+        logger.warning("tool-calling probe timed out; leaving Agentic enabled")
+        return None
     except Exception as exc:  # noqa: BLE001
-        if classify_llm_error(exc) == "connectivity":
-            logger.warning("tool-calling probe: transient failure (%s)", str(exc)[:200])
-            return None
-        logger.info(
-            "tool-calling probe: model does not support tool-calling (%s)",
+        if _looks_like_no_tool_support(exc):
+            logger.info("tool-calling probe: model rejects tools (%s)", str(exc)[:200])
+            return False
+        logger.warning(
+            "tool-calling probe inconclusive (%s); leaving Agentic enabled",
             str(exc)[:200],
         )
-        return False
+        return None
 
 
 def supports_tool_calling(config: dict, llm_provider=None) -> bool:
-    """Authoritative tool-calling check for the resolved chat model.
+    """Whether the resolved chat model can drive Agentic mode.
 
-    Uses a cached in-memory runtime probe; falls back to the static per-vendor
-    heuristic before the first probe, when no provider is available to probe,
-    or on a transient probe failure. Never writes to config.
+    Optimistic: enabled unless we are sure it can't tool-call. Uses a cached
+    in-memory runtime probe; a cached result wins, a known-legacy model is
+    disabled, a confident probe/runtime failure disables, and everything else
+    stays enabled. Never writes to config.
     """
     if not isinstance(config, dict):
         return False
@@ -246,16 +301,24 @@ def supports_tool_calling(config: dict, llm_provider=None) -> bool:
         if key in _probe_cache:
             return _probe_cache[key]
 
-    heuristic = model_capabilities(config).get("supports_tool_calling", False)
+    if _known_no_tool_calling(config):
+        with _probe_lock:
+            _probe_cache[key] = False
+        return False
+
     if llm_provider is None:
-        return heuristic  # cannot probe yet; best-effort default, not cached
+        return True  # optimistic; can't probe yet, don't cache
 
     result = _run_tool_calling_probe(llm_provider)
-    if result is None:
-        return heuristic  # transient; retry next time, don't cache
-    with _probe_lock:
-        _probe_cache[key] = result
-    return result
+    if result is True:
+        with _probe_lock:
+            _probe_cache[key] = True
+        return True
+    if result is False:  # confident no-support
+        with _probe_lock:
+            _probe_cache[key] = False
+        return False
+    return True  # unknown -> stay enabled, don't cache
 
 
 def mark_tool_calling_unsupported(config: dict) -> None:
