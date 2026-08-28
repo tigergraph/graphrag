@@ -67,6 +67,7 @@
 ---
 
 ## Releases
+* **8/28/2026**: GraphRAG v2.0.2 released. Added Migration Assistant data-integrity checks with targeted re-embedding of missing embeddings and re-summarization of incomplete community summaries, made agentic chat work with current and future tool-calling models automatically, and fixed rebuild, PDF extraction, and chat issues. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.2) for details.
 * **7/22/2026**: GraphRAG v2.0.1 released. Fixed a chat error with models that return structured content (such as Gemini 3), and hardened knowledge-graph rebuild so it no longer hangs when the language model is unreachable. Relicensed from Apache 2.0 to AGPL-3.0. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.1) for details.
 * **7/1/2026**: GraphRAG v2.0.0 released. Added an agentic chat engine that plans and runs its own retrieval (Planner and Reactive styles), external MCP tools, and structure-aware document chunking, along with additive prompt customization and many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.0) for details.
 * **6/23/2026**: GraphRAG v1.4.2 released. Added a knowledge graph compatibility check and repair tool to pick up shipped query fixes on existing graphs, along with more reliable ingestion for documents with spaces in their filenames and other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v1.4.2) for details.
