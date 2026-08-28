@@ -187,8 +187,13 @@ def resolve_llm_services(llm_cfg: dict) -> dict:
     embedding_provider = embedding.get("embedding_model_service", "").lower()
     completion_provider = completion.get("llm_service", "").lower()
     if embedding_provider and embedding_provider == completion_provider:
-        # Identity/schema keys that belong to the embedding service itself
-        embedding_own_keys = {"embedding_model_service", "model_name", "authentication_configuration", "token_limit"}
+        # Identity/schema keys that belong to the embedding service itself.
+        # Token-cost rates stay per-service too — completion's per-1M rates
+        # must not be applied to embedding usage, which is priced separately.
+        embedding_own_keys = {
+            "embedding_model_service", "model_name", "authentication_configuration",
+            "token_limit", "input_cost_per_1m", "output_cost_per_1m",
+        }
         for k, v in completion.items():
             if k not in embedding_own_keys and k not in embedding:
                 embedding[k] = v

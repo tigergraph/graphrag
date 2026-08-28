@@ -140,15 +140,28 @@ _MD_PAGE_MARKER = re.compile(r"^\s*<!--\s*PAGE\s+(\d+)\s*-->\s*$")
 # pymupdf4llm artifacts:
 #  • "==> picture [WxH] intentionally omitted <==" — image dropped (skip line)
 #  • "----- Start of picture text -----" / "----- End of picture text -----"
-#    bracket OCR'd content inside an image; we fold the body into the figure
-#    so chart-internal labels stay with the image chunk.
+#    (markdown) or ``<!-- Start of picture text -->`` (HTML-comment form)
+#    bracket pymupdf4llm picture-text inside a figure; we fold the body into
+#    the figure so chart-internal labels stay with the image chunk.
 _MD_PICTURE_OMITTED = re.compile(r"^\s*\*+\s*==>\s*picture\b.*intentionally omitted\s*<==\s*\*+.*$", re.IGNORECASE)
-_MD_PICTURE_TEXT_START = re.compile(r"^\s*\*+\s*-+\s*Start of picture text\s*-+\s*\*+\s*(<br\s*/?>)?\s*$", re.IGNORECASE)
-_MD_PICTURE_TEXT_END = re.compile(r"^\s*\*+\s*-+\s*End of picture text\s*-+\s*\*+\s*(<br\s*/?>)?\s*$", re.IGNORECASE)
+_MD_PICTURE_TEXT_START = re.compile(
+    r"^\s*(?:\*+\s*-+\s*Start of picture text\s*-+\s*\*+|"
+    r"<!--\s*Start of picture text\s*-->)\s*(?:<br\s*/?>)?\s*$",
+    re.IGNORECASE,
+)
+_MD_PICTURE_TEXT_END = re.compile(
+    r"^\s*(?:\*+\s*-+\s*End of picture text\s*-+\s*\*+|"
+    r"<!--\s*End of picture text\s*-->)\s*(?:<br\s*/?>)?\s*$",
+    re.IGNORECASE,
+)
 # Inline variant of the End marker: the picture-text body can arrive as a
 # single <br>-joined line with the marker on its tail, so it is not always
 # line-anchored. Searched anywhere in a line to terminate the block.
-_MD_PICTURE_TEXT_END_INLINE = re.compile(r"\*+\s*-+\s*End of picture text\s*-+\s*\*+\s*(?:<br\s*/?>)?", re.IGNORECASE)
+_MD_PICTURE_TEXT_END_INLINE = re.compile(
+    r"(?:\*+\s*-+\s*End of picture text\s*-+\s*\*+|"
+    r"<!--\s*End of picture text\s*-->)\s*(?:<br\s*/?>)?",
+    re.IGNORECASE,
+)
 
 
 def _flush_prose(buf: List[str], heading: Optional[str], page: Optional[int], out: List[Element]) -> None:
@@ -312,18 +325,14 @@ def markdown_to_elements(md: str, page: Optional[int] = None) -> List[Element]:
             i += 1
             continue
 
-        # 5b. Other HTML comments (chunk markers etc.) — skip.
-        if _MD_HTML_COMMENT.match(line):
-            i += 1
-            continue
-
         # 5c. pymupdf4llm "==> picture ... intentionally omitted <==" — drop.
         if _MD_PICTURE_OMITTED.match(line):
             i += 1
             continue
 
-        # 5d. pymupdf4llm picture-text block: ----- Start ... End of picture
-        #     text ----- wraps OCR'd content (chart axis labels, legends).
+        # 5d. pymupdf4llm picture-text block (markdown dash markers OR HTML
+        #     comments). Must run before the generic HTML-comment skip so
+        #     ``<!-- Start of picture text -->`` is not dropped.
         #     Fold the body into the immediately preceding figure when
         #     present so chart-internal text travels with the image.
         if _MD_PICTURE_TEXT_START.match(line):
@@ -359,6 +368,12 @@ def markdown_to_elements(md: str, page: Optional[int] = None) -> List[Element]:
                 # No preceding figure — emit as a standalone figure element
                 # (treating the OCR'd image content as a figure with no URL).
                 out.append(Element(kind="figure", text=body, heading=heading, page=page))
+            continue
+
+        # 5b. Other HTML comments (chunk markers etc.) — skip.
+        #     Picture-text comments are handled above.
+        if _MD_HTML_COMMENT.match(line):
+            i += 1
             continue
 
         # 6. Blank line — flush current prose paragraph.

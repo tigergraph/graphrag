@@ -2,7 +2,6 @@ import asyncio
 import base64
 import json
 import logging
-import re
 import traceback
 from glob import glob
 from typing import Callable
@@ -182,9 +181,10 @@ def map_attrs(attributes: dict):
 
 
 def process_id(v_id: str):
-    has_func = re.compile(r"(.*)\(").findall(v_id)
-    if len(has_func) > 0:
-        v_id = has_func[0]
+    # Strip parentheses in place — do NOT truncate at "(". Truncating dropped
+    # the "_chunk_{i}" suffix for ids containing parentheses, corrupting chunk
+    # ids. The replace() below removes the parens without dropping the rest.
+    # (GML-2173)
     v_id = v_id.replace(" ", "_").lower().replace("/", "_").replace("(", "").replace(")", "")
     if v_id == "''" or v_id == '""':
         return ""

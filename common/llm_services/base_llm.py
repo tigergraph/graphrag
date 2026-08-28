@@ -15,6 +15,7 @@
 import os
 import re
 import logging
+from typing import Optional
 from langchain_core.output_parsers import BaseOutputParser, PydanticOutputParser
 from langchain_core.exceptions import OutputParserException
 from langchain_core.prompts import BasePromptTemplate
@@ -126,7 +127,53 @@ def reset_usage_collection():
     _usage_collector.set(None)
 
 
-def _record_usage(caller_name: str, usage_data: dict):
+def _parse_cost_rate(value) -> Optional[float]:
+    """Return a non-negative float rate, or None if unset/invalid."""
+    if value is None or value == "":
+        return None
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        return None
+    if rate < 0:
+        return None
+    return rate
+
+
+def estimate_cost_from_config(
+    config: Optional[dict],
+    input_tokens: int,
+    output_tokens: int,
+) -> Optional[float]:
+    """USD cost from user-configured per-1M rates, or None if not configured.
+
+    Both ``input_cost_per_1m`` and ``output_cost_per_1m`` must be set on
+    ``config`` (USD per 1M tokens). When present they always override
+    LangChain's built-in cost.
+    """
+    if not config:
+        return None
+    inp_rate = _parse_cost_rate(config.get("input_cost_per_1m"))
+    out_rate = _parse_cost_rate(config.get("output_cost_per_1m"))
+    if inp_rate is None or out_rate is None:
+        return None
+    return (
+        max(0, int(input_tokens or 0)) * inp_rate / 1_000_000.0
+        + max(0, int(output_tokens or 0)) * out_rate / 1_000_000.0
+    )
+
+
+def _record_usage(caller_name: str, usage_data: dict, config: Optional[dict] = None):
+    # User-configured rates replace LangChain cost entirely; otherwise keep
+    # whatever LangChain reported (may be 0 for unknown models).
+    user_cost = estimate_cost_from_config(
+        config,
+        usage_data.get("input_tokens", 0),
+        usage_data.get("output_tokens", 0),
+    )
+    if user_cost is not None:
+        usage_data["cost"] = user_cost
+    logger.info(f"{caller_name} usage: {usage_data}")
     bucket = _usage_collector.get()
     if bucket is not None:
         bucket.append({"caller_name": caller_name, **usage_data})
@@ -500,8 +547,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-            logger.info(f"{caller_name} usage: {usage_data}")
-            _record_usage(caller_name, usage_data)
+            _record_usage(caller_name, usage_data, self.config)
 
         raw_text = self._message_text(raw_output)
 
@@ -545,8 +591,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-            logger.info(f"{caller_name} usage: {usage_data}")
-            _record_usage(caller_name, usage_data)
+            _record_usage(caller_name, usage_data, self.config)
         return resp
 
     def invoke_structured(
@@ -579,8 +624,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-            logger.info(f"{caller_name} usage: {usage_data}")
-            _record_usage(caller_name, usage_data)
+            _record_usage(caller_name, usage_data, self.config)
         return result
 
     async def ainvoke_with_parser(
@@ -608,8 +652,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             usage_data["output_tokens"] = cb.completion_tokens
             usage_data["total_tokens"] = cb.total_tokens
             usage_data["cost"] = cb.total_cost
-            logger.info(f"{caller_name} usage: {usage_data}")
-            _record_usage(caller_name, usage_data)
+            _record_usage(caller_name, usage_data, self.config)
 
         raw_text = self._message_text(raw_output)
 

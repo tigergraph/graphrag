@@ -5,7 +5,8 @@ CREATE OR REPLACE DISTRIBUTED QUERY vertices_have_embedding(String vertex_type, 
   
     PRINT (results.size() == 0) as all_have_embedding;
     PRINT results.size() as size;
-  
+    PRINT vset.size() as total;
+
     IF verbose THEN
         PRINT results[results.id as id] as results; 
     END;

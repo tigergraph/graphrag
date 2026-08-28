@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.0.2]
+
+### Added
+- **The Migration Assistant reports graph data-integrity health.** Alongside the query check, it now shows how many vertices are missing embeddings (by type) and how many communities have a placeholder or empty summary.
+- **Targeted regeneration from the Migration Assistant.** Missing embeddings can be re-embedded, and communities with placeholder/empty summaries can be re-summarized, for just the affected items — without running a full rebuild. Items whose source content is unusable are reported as needing a rebuild.
+
+### Changed
+- **Agentic tool-calling support is detected at runtime.** Whether the chat model can drive Agentic mode is now confirmed by a lightweight runtime probe (checked once and cached in memory, re-checked after a restart) instead of a fixed model list, so current and future tool-calling models — including new providers — enable Agentic mode automatically, and a model that can't tool-call falls back to the classic engine until its configuration changes.
+- **The planned agent falls back to document search when a structured query returns nothing.** If the planned agent's structured query returns no rows, it now runs a hybrid document search before answering, so an empty structured result no longer produces a non-answer; it follows the same fallback setting as the classic engine.
+- **Clearer message when an answer can't be generated.** When the assistant is unable to produce an answer, it now suggests rephrasing the question to be more specific and contacting an administrator if the problem continues, instead of a bare failure notice.
+- **Token cost rates can be set per service.** LLM Config accepts optional input/output USD-per-1M-token rates for the completion, chatbot, and multimodal services; when set, Est. Cost uses them so cost is accurate for models the pricing library doesn't recognize (otherwise it keeps the library's pricing).
+
+### Fixed
+- **Knowledge-graph rebuild no longer fails on document names containing parentheses.** Document names with `(` or `)` are normalized without dropping the rest of the name, so rebuilds complete instead of erroring while creating chunks.
+- **PDF chart labels and table numbers survive extraction.** Picture-text blocks are kept intact, stacked and comma-grouped chart values are no longer glued together, and pages with unreadable embedded fonts are recovered from a page image — so figures and tables reach the graph with their numbers intact.
+- **Newer Gemini models are available in agentic chat.** Gemini 3.x and later families are recognized as tool-calling models, so agentic mode works with them instead of silently falling back to classic chat.
+- **Chat Stop button behaves correctly.** Stopping a response just as it finishes no longer sends a stray empty message, and the Stop button is the right size in the light theme.
+
 ## [2.0.1]
 
 ### Changed

@@ -128,6 +128,7 @@ class AgenticAgent:
         self.cypher_gen = GenerateCypher(self.conn, self.llm) if use_cypher else None
 
         self.q = Q() if ws is not None else None
+        self._ws = ws
 
         logger.debug(f"request_id={req_id_cv.get()} agentic agent initialized")
 
@@ -235,11 +236,35 @@ class AgenticAgent:
             # config; "auto" defers to the configured default.
             config_style = (ctx.graphrag_cfg or {}).get("agent_style", "planned")
             style = _resolve_style(self.agent_style, config_style)
-            if style == "planned":
-                answer = run_agentic(ctx, self.llm, question, convo)
-            else:
-                # "reactive" (UI) / "react" (config) -> free tool-calling loop
-                answer = run_react(ctx, self.llm, question, convo)
+            try:
+                if style == "planned":
+                    answer = run_agentic(ctx, self.llm, question, convo)
+                else:
+                    # "reactive" (UI) / "react" (config) -> free tool-calling loop
+                    answer = run_react(ctx, self.llm, question, convo)
+            except Exception as run_exc:
+                # Runtime backstop (GML-2169): if the model turns out not to
+                # support tool-calling, disable Agentic for it and answer via the
+                # classic engine. Only trigger on a confident tool-support signal;
+                # any other error propagates to the normal handler.
+                from common.llm_services.capabilities import (
+                    _looks_like_no_tool_support,
+                    mark_tool_calling_unsupported,
+                )
+                if not _looks_like_no_tool_support(run_exc):
+                    raise
+                logger.warning(
+                    f"request_id={req_id_cv.get()} agentic run hit a tool-calling "
+                    f"failure ({str(run_exc)[:200]}); disabling Agentic for this "
+                    "model and falling back to the classic engine"
+                )
+                mark_tool_calling_unsupported(self.llm.config)
+                from agent.agent import make_agent
+                classic = make_agent(
+                    self.conn.graphname, self.conn, self.use_cypher,
+                    ws=self._ws, mode="classic",
+                )
+                return classic.question_for_agent(question, conversation)
 
             # Aggregate usage across all LLM calls in this run for the UI.
             usage = get_collected_usage() or []

@@ -1372,6 +1372,32 @@ def migration_status(
     except Exception as e:
         logger.warning(f"migration_status prompt check failed: {e}")
 
+    # Data-integrity health: embedding coverage and community-summary
+    # completeness. DETERMINISTIC, read-only, NO LLM calls — same contract as
+    # the query/prompt checks. Reported separately from ``needs_repair`` because
+    # neither is fixed by a query reinstall (they have their own regenerate
+    # actions). Best-effort, never fatal.
+    embeddings_by_type: dict = {}
+    embeddings_total_missing = 0
+    community_summaries: dict = {}
+    try:
+        from common.db.health import (
+            embeddable_types,
+            embedding_coverage,
+            community_summary_health,
+        )
+
+        for vt in embeddable_types(conn):
+            cov = embedding_coverage(conn, vt)
+            if cov is not None:
+                embeddings_by_type[vt] = cov
+                embeddings_total_missing += cov["missing"]
+        csh = community_summary_health(conn)
+        if csh is not None:
+            community_summaries = csh
+    except Exception as e:
+        logger.warning(f"migration_status health check failed: {e}")
+
     return {
         "graphname": graphname,
         "queries": {
@@ -1387,8 +1413,55 @@ def migration_status(
             "schema_change_required": False,
         },
         "prompts": prompt_issues,
+        "embeddings": {
+            "by_type": embeddings_by_type,
+            "total_missing": embeddings_total_missing,
+        },
+        "embeddings_incomplete": embeddings_total_missing > 0,
+        "community_summaries": community_summaries,
+        "community_summaries_incomplete": bool(
+            community_summaries.get("needs_resummarize", 0)
+        ),
         "needs_repair": bool(outdated) or bool(not_installed) or bool(prompt_issues),
     }
+
+
+async def _proxy_regen(graphname, creds, action):
+    """Forward a targeted regenerate action to ECC (synchronous) and return its
+    counts. Refuses while a rebuild is in flight (both write embeddings)."""
+    if get_rebuilding_graph() == graphname:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is being rebuilt; retry after it completes.",
+        )
+    auth_header = _ecc_auth_header(creds[1])
+    ecc_base = graphrag_config.get("ecc", "http://graphrag-ecc:8001")
+    url = f"{ecc_base}/{graphname}/graphrag/{action}"
+    async with httpx.AsyncClient(timeout=None) as client:
+        resp = await client.get(url, headers={"Authorization": auth_header})
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text[:300])
+    return resp.json()
+
+
+@router.post(route_prefix + "/{graphname}/migration/regenerate_embeddings")
+async def migration_regenerate_embeddings(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Re-embed vertices missing an embedding (GML-2175). Targeted — not a full
+    rebuild. Returns {regenerated, skipped}."""
+    return await _proxy_regen(graphname, creds, "regenerate_embeddings")
+
+
+@router.post(route_prefix + "/{graphname}/migration/regenerate_summaries")
+async def migration_regenerate_summaries(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Re-summarize communities with placeholder/empty summaries and re-embed
+    (GML-2176). Targeted — not a full rebuild. Returns {resummarized, skipped}."""
+    return await _proxy_regen(graphname, creds, "regenerate_summaries")
 
 
 @router.post(route_prefix + "/{graphname}/migration/apply")

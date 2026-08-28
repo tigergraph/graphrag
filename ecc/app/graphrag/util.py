@@ -65,19 +65,15 @@ load_q = reusable_channel.ReuseableChannel()
 loading_event = asyncio.Event()
 loading_event.set() # set the event to true to allow the workers to run
 
-# Written as a community's description when summarization can't produce a real
-# one. Non-empty so the layer-completion check passes and the rebuild finishes,
-# and stable so it can be found and regenerated later.
-COMMUNITY_SUMMARY_PLACEHOLDER = "[summary unavailable - regenerate]"
-# Placeholder written by pre-2.0.1 builds; kept so re-summarization and progress
-# checks recognize communities left behind by older graphs too.
-LEGACY_SUMMARY_PLACEHOLDER = "Should ignore due to summary error."
-
-def is_placeholder_summary(text: str) -> bool:
-    """True if a community description is a placeholder needing regeneration:
-    the current or legacy sentinel, or empty."""
-    t = (text or "").strip()
-    return t in ("", COMMUNITY_SUMMARY_PLACEHOLDER, LEGACY_SUMMARY_PLACEHOLDER)
+# Community-summary placeholder markers now live in a shared module so the
+# graphrag app / Migration Assistant detect exactly what ECC writes. Re-exported
+# here for the existing ECC callers.
+from common.utils.summary_placeholders import (  # noqa: E402,F401
+    COMMUNITY_SUMMARY_PLACEHOLDER,
+    LEGACY_SUMMARY_PLACEHOLDER,
+    PLACEHOLDER_MARKERS,
+    is_placeholder_summary,
+)
 
 async def install_queries(
     requried_queries: list[str],
@@ -220,9 +216,12 @@ def map_attrs(attributes: dict):
 
 
 def process_id(v_id: str):
-    has_func = re.compile(r"(.*)\(").findall(v_id)
-    if len(has_func) > 0:
-        v_id = has_func[0]
+    # Strip parentheses in place — do NOT truncate at "(". The old `(.*)\(`
+    # truncation dropped everything from the first "(" onward, which mangled
+    # ids for document names containing parentheses (e.g. "Q3 (2026) report"):
+    # the "_chunk_{i}" suffix was lost, so chunk ids no longer ended in an
+    # integer and the rebuild crashed on int(chunk_id.split("_")[-1]). The
+    # replace() below removes the parens without dropping the rest. (GML-2173)
     v_id = v_id.replace(" ", "_").lower().replace("/", "_").replace("(", "").replace(")", "")
     if v_id == "''" or v_id == '""':
         return ""

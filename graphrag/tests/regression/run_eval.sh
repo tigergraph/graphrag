@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# GraphRAG Regression — Evaluation
+# GraphRAG Regression — Answer Correctness + Hallucination Evaluation
 #
-# Runs the evaluation INSIDE the graphrag container via docker exec, so it
+# Runs evaluator.py INSIDE the graphrag container via docker exec, so it
 # reuses the container's Python environment (deepeval, langchain,
 # common.config, the agent code) — nothing is installed locally.
+#
+# Metrics run by this script:
+#   - Answer Correctness (DeepEval GEval) — requires answers.csv
+#   - Hallucination Check                 — always runs
+#
+# For the Recall@K retrieval metric (requires ground_truth_contexts.csv),
+# use run_recall.sh instead:
+#   ./graphrag/tests/regression/run_recall.sh --dataset Multihop30 --graphname <name>
 #
 # The regression code + test_questions are copied into the container on demand
 # (no bind mount needed); results are copied back to results/ afterward.
@@ -11,26 +19,25 @@
 # Usage (from repo root, on the host):
 #
 #   Planned Agent (default):
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --agent planned
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode planned
 #
 #   ReAct Agent:
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --agent reactive
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode reactive
 #
 #   Classic engine (auto retriever):
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --agent classic
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode classic/auto
 #
 #   Classic with specific retriever:
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --agent classic --search-type hybridsearch
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode classic/hybridsearch
 #
 #   Detailed per-question output:
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --agent planned --detailed
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode planned --detailed
 #
 #   Limit to first N questions (quick smoke test):
-#     ./graphrag/tests/regression/run_eval.sh --dataset Toppan --graphname toppan_html --agent planned --limit 5
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode planned --limit 5
 #
 # Override the container name with GRAPHRAG_CONTAINER if needed.
-# Results are written to graphrag/tests/regression/results/ on the host
-# (the directory is mounted into the container).
+# Results are written to graphrag/tests/regression/results/ on the host.
 # All arguments are forwarded to evaluator.py.
 
 set -euo pipefail
@@ -51,6 +58,7 @@ sync_regression_to_container "${CONTAINER}" "${REG_DIR}"
 # piped (no TTY). Set NO_COLOR=1 in your shell to turn colours off.
 set +e
 docker exec \
+    -w /code \
     -e PYTHONUNBUFFERED=1 \
     -e PYTHONWARNINGS=ignore \
     -e FORCE_COLOR="${FORCE_COLOR:-1}" \

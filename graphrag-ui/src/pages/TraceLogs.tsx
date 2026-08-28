@@ -669,7 +669,7 @@ const TokenOverviewPanel: FC<{ trace: TraceData }> = ({ trace }) => {
             <span className="relative group inline-flex">
               <LuInfo className="w-3.5 h-3.5 cursor-help text-muted-foreground hover:text-foreground transition-colors" />
               <span className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 rounded-lg bg-popover border border-border text-popover-foreground text-xs font-normal normal-case tracking-normal shadow-lg px-3 py-2 opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-50 leading-relaxed">
-                Cost is estimated based on the model's published per-token pricing. Actual billing may differ.
+                Cost uses rates from LLM Config when set; otherwise LangChain pricing. Actual billing may differ.
                 <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-border" />
               </span>
             </span>
@@ -705,7 +705,7 @@ const TokenOverviewPanel: FC<{ trace: TraceData }> = ({ trace }) => {
                       <span className="relative group inline-flex">
                         <LuInfo className="w-3.5 h-3.5 cursor-help text-muted-foreground hover:text-foreground transition-colors" />
                         <span className="pointer-events-none absolute bottom-full right-0 mb-2 w-56 rounded-lg bg-popover border border-border text-popover-foreground text-xs font-normal normal-case tracking-normal shadow-lg px-3 py-2 opacity-0 group-hover:opacity-100 transition-opacity duration-150 z-50 leading-relaxed">
-                          Cost is estimated based on the model's published per-token pricing. Actual billing may differ.
+                          Cost uses rates from LLM Config when set; otherwise LangChain pricing. Actual billing may differ.
                         </span>
                       </span>
                     </span>
@@ -750,7 +750,7 @@ const TokenOverviewPanel: FC<{ trace: TraceData }> = ({ trace }) => {
                     {formatNumber(usage.total_tokens)}
                   </td>
                   <td className="px-4 py-2 text-right tabular-nums">
-                    <span title="Estimated — calculated by LangChain based on model pricing">
+                    <span title="Estimated — user-configured rates from LLM Config when set, otherwise LangChain pricing">
                       {formatCost(usage.cost)}
                     </span>
                   </td>

@@ -263,8 +263,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GraphRAG Regression — Graph Setup")
     parser.add_argument("--dataset",       required=True,
                         help="Dataset name (folder under graphrag/tests/test_questions/)")
-    parser.add_argument("--config",        default="configs/server_config.json",
-                        help="Path to server_config.json")
     parser.add_argument("--url",           default=None,
                         help="GraphRAG base URL (overrides server_config.json)")
     parser.add_argument("--graphname",     default=None,
@@ -273,9 +271,9 @@ if __name__ == "__main__":
                         help="Skip ECC rebuild step (useful when testing setup only)")
     args = parser.parse_args()
 
-    config_path = os.path.abspath(args.config)
-    if not os.path.exists(config_path):
-        sys.exit(f"ERROR: config not found: {config_path}")
+    config_path = os.environ.get("SERVER_CONFIG", "/code/configs/server_config.json")
+    if not os.path.isfile(config_path):
+        sys.exit(f"ERROR: SERVER_CONFIG not found: {config_path}")
 
     with open(config_path) as f:
         server_cfg = json.load(f)
@@ -313,12 +311,24 @@ if __name__ == "__main__":
     data_dir = os.path.join(dataset_dir, "data")
     doc_files = []
     if os.path.isdir(data_dir):
-        doc_files = [
+        # Prefer pre-built corpus files (*_corpus.txt) when they exist — these
+        # are the combined per-dataset documents produced by build_corpus.py.
+        # Fall back to all files in data/ if no corpus files are present.
+        corpus_files = sorted(
             os.path.join(data_dir, f)
-            for f in sorted(os.listdir(data_dir))
-            if os.path.isfile(os.path.join(data_dir, f))
-        ]
-        print(f"  Documents : {len(doc_files)} file(s)")
+            for f in os.listdir(data_dir)
+            if f.endswith("_corpus.txt") and os.path.isfile(os.path.join(data_dir, f))
+        )
+        if corpus_files:
+            doc_files = corpus_files
+            print(f"  Documents : {len(doc_files)} corpus file(s) (pre-built)")
+        else:
+            doc_files = [
+                os.path.join(data_dir, f)
+                for f in sorted(os.listdir(data_dir))
+                if os.path.isfile(os.path.join(data_dir, f))
+            ]
+            print(f"  Documents : {len(doc_files)} file(s)")
         for fp in doc_files:
             print(f"              - {os.path.basename(fp)}")
     else:

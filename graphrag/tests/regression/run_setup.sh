@@ -9,8 +9,8 @@
 # (no bind mount needed).
 #
 # Usage (from repo root, on the host):
-#   ./graphrag/tests/regression/run_setup.sh --dataset Toppan
-#   ./graphrag/tests/regression/run_setup.sh --dataset Toppan --skip-rebuild
+#   ./graphrag/tests/regression/run_setup.sh --dataset MyDataset
+#   ./graphrag/tests/regression/run_setup.sh --dataset MyDataset --skip-rebuild
 #
 # Override the container name with GRAPHRAG_CONTAINER if needed.
 # All arguments are forwarded to setup_graph.py.
@@ -29,5 +29,5 @@ source "${REG_DIR}/_container_sync.sh"
 
 sync_regression_to_container "${CONTAINER}" "${REG_DIR}"
 
-docker exec -e PYTHONUNBUFFERED=1 "${CONTAINER}" \
+docker exec -w /code -e PYTHONUNBUFFERED=1 "${CONTAINER}" \
     python /code/tests/regression/setup_graph.py "$@"

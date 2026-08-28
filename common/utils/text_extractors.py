@@ -41,8 +41,11 @@ _coln_pattern = re.compile(r'\bCol\d+\b')
 # which bloat tokens 3-5x and confuse retrieval embeddings. The CJK
 # Unicode ranges below cover CJK Unified Ideographs (U+4E00-U+9FFF),
 # Hiragana / Katakana / CJK Symbols (U+3000-U+30FF), and full-width
-# / half-width forms (U+FF00-U+FFEF).
-_CJK_CHAR_CLASS = r"[　-鿿＀-￯]"
+# / half-width forms (U+FF00-U+FFEF) excluding fullwidth digits
+# (U+FF10-U+FF19). Collapsing digit runs would glue distinct chart
+# values such as 767 and 808 into ``767808``.
+# One CJK char excluding fullwidth digits (U+FF10-U+FF19).
+_CJK_CHAR_CLASS = r"(?:[　-鿿]|[＀-／]|[：-￯])"
 _VERTICAL_BOLD_CJK = re.compile(
     rf"(?:\*\*{_CJK_CHAR_CLASS}\*\*(?:<br\s*/?>)){{2,}}\*\*{_CJK_CHAR_CLASS}\*\*"
 )
@@ -59,6 +62,20 @@ _VERTICAL_CJK = re.compile(
 # rows is left alone since it usually marks an intentional break.
 _TABLE_LINE_RE = re.compile(r"^\s*\|")
 _BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+
+# pymupdf4llm picture-text blocks (HTML-comment or markdown-dash markers).
+# These are figure-associated text from pymupdf4llm, not a separate OCR engine.
+_PICTURE_TEXT_BLOCK_RE = re.compile(
+    r"(?:<!--\s*Start of picture text\s*-->|\*{0,3}\s*-+\s*Start of picture text\s*-+\s*\*{0,3})"
+    r"(.*?)"
+    r"(?:<!--\s*End of picture text\s*-->|\*{0,3}\s*-+\s*End of picture text\s*-+\s*\*{0,3})",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Adjacent comma-grouped numbers glued with no separator, e.g. ``1,5461,518``.
+_GLUED_COMMA_NUMBERS_RE = re.compile(
+    r"(?<!\d)(\d{1,3}(?:,\d{3})+)(\d{1,3}(?:,\d{3})+)"
+)
 
 # Mojibake detection: PDFs whose embedded font CMap can't be resolved
 # emit runs of Latin-1 supplement characters (À-ÿ, ¡-¿), control glyphs,
@@ -103,16 +120,177 @@ def _detect_mojibake(text: str, source_hint: str = "") -> list[dict]:
 
 
 def _strip_br_in_table_rows(text: str) -> str:
-    """Remove ``<br>`` tags inside markdown table rows.
+    """Replace ``<br>`` tags inside markdown table rows with spaces.
 
-    Rationale documented at _TABLE_LINE_RE.
+    Using a space (not empty string) keeps stacked chart values distinct
+    — ``|767<br>808|`` becomes ``|767 808|``, never ``|767808|``.
     """
     out: list[str] = []
     for line in text.split("\n"):
         if _TABLE_LINE_RE.match(line):
             line = _BR_TAG_RE.sub(" ", line)
+            # Collapse runs of whitespace left by consecutive <br> tags.
+            line = re.sub(r"[ \t]{2,}", " ", line)
         out.append(line)
     return "\n".join(out)
+
+
+def _split_glued_comma_numbers(text: str) -> str:
+    """Insert a space between adjacent comma-grouped numbers.
+
+    pymupdf4llm / chart extraction sometimes emits ``1,5461,518`` instead of
+    ``1,546 1,518``. Repeat until stable for longer glued runs.
+    """
+    prev = None
+    while prev != text:
+        prev = text
+        text = _GLUED_COMMA_NUMBERS_RE.sub(r"\1 \2", text)
+    return text
+
+
+def _normalize_picture_text_blocks(text: str) -> str:
+    """Normalize pymupdf4llm picture-text blocks for chunking + retrieval.
+
+    - Rewrite HTML-comment markers to the markdown form StructuredChunker
+      already recognizes.
+    - Turn in-block ``<br>`` into newlines (not empty joins) so values like
+      ``767`` and ``808`` stay separable.
+    - Split glued comma-numbers inside the block.
+    """
+
+    def _rewrite(match: re.Match) -> str:
+        body = match.group(1) or ""
+        body = _BR_TAG_RE.sub("\n", body)
+        body = _split_glued_comma_numbers(body)
+        # Trim excess blank lines inside the block.
+        body = re.sub(r"\n{3,}", "\n\n", body).strip("\n")
+        return (
+            "***----- Start of picture text -----***\n"
+            f"{body}\n"
+            "***----- End of picture text -----***"
+        )
+
+    return _PICTURE_TEXT_BLOCK_RE.sub(_rewrite, text)
+
+
+_PAGE_MARKER_RE = re.compile(r"<!--\s*PAGE\s+(\d+)\s*-->")
+
+
+def _recover_mojibake_pages(
+    file_path,
+    markdown: str,
+    graphname=None,
+    max_pages: int = 3,
+) -> str:
+    """Recover table/chart text from PDF pages with broken ToUnicode CMaps.
+
+    When glyph mapping fails, embedded text often keeps numbers but corrupts
+    labels. Drawn (non-embedded) figures also skip the normal image-describe
+    pass. For page sections that look both corrupted and table-like, render
+    the page and multimodal-transcribe it, then append the result next to the
+    original page body. Capped by ``max_pages`` to bound cost.
+    """
+    if not markdown or max_pages <= 0:
+        return markdown
+
+    # Collect page numbers whose section text looks corrupted.
+    parts = _PAGE_MARKER_RE.split(markdown)
+    # parts: [pre, pageNo, body, pageNo, body, ...]
+    bad_pages: list[int] = []
+    if len(parts) >= 3:
+        for i in range(1, len(parts), 2):
+            try:
+                page_no = int(parts[i])
+            except (TypeError, ValueError):
+                continue
+            body = parts[i + 1] if i + 1 < len(parts) else ""
+            findings = _detect_mojibake(body, source_hint=f"{file_path}:p{page_no}")
+            # Prefer pages that look like broken tables (pipe rows + mojibake).
+            pipe_rows = sum(1 for ln in body.splitlines() if ln.strip().startswith("|"))
+            if len(findings) >= 3 and pipe_rows >= 3:
+                bad_pages.append(page_no)
+    if not bad_pages:
+        return markdown
+
+    try:
+        import pymupdf
+        from common.utils.image_data_extractor import (
+            describe_image_with_llm,
+            should_extract_images,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("mojibake page recovery unavailable: %s", e)
+        return markdown
+
+    if not should_extract_images(graphname):
+        return markdown
+
+    recovered: dict[int, str] = {}
+    try:
+        doc = pymupdf.open(str(file_path))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("mojibake recovery: cannot open %s: %s", file_path, e)
+        return markdown
+
+    try:
+        for page_no in bad_pages[:max_pages]:
+            idx = page_no - 1
+            if idx < 0 or idx >= doc.page_count:
+                continue
+            try:
+                page = doc[idx]
+                # ~150 dpi — enough to read table cells without huge payloads.
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(2.0, 2.0), alpha=False)
+                tmp = Path(tempfile.mkdtemp(prefix="mojibake_page_")) / f"p{page_no}.png"
+                pix.save(str(tmp))
+                desc = describe_image_with_llm(str(tmp))
+                try:
+                    shutil.rmtree(tmp.parent, ignore_errors=True)
+                except Exception:
+                    pass
+                if not desc or "decorative image" in desc.lower():
+                    continue
+                # Skip if the transcription itself looks glyph-broken.
+                if len(_detect_mojibake(desc)) >= 3:
+                    continue
+                recovered[page_no] = desc.strip()
+                logger.info(
+                    "mojibake page recovery: %s page %s recovered %s chars",
+                    file_path,
+                    page_no,
+                    len(desc),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "mojibake page recovery failed for %s p%s: %s",
+                    file_path,
+                    page_no,
+                    e,
+                )
+    finally:
+        doc.close()
+
+    if not recovered:
+        return markdown
+
+    # Append recovered transcription under each page marker body.
+    out_parts: list[str] = [parts[0]]
+    for i in range(1, len(parts), 2):
+        page_no_s = parts[i]
+        body = parts[i + 1] if i + 1 < len(parts) else ""
+        out_parts.append(f"<!-- PAGE {page_no_s} -->")
+        out_parts.append(body)
+        try:
+            page_no = int(page_no_s)
+        except (TypeError, ValueError):
+            continue
+        if page_no in recovered:
+            out_parts.append(
+                "\n\n<!-- recovered-from-page-image -->\n"
+                + recovered[page_no]
+                + "\n"
+            )
+    return "\n".join(out_parts)
 
 
 def _collapse_vertical_cjk(text: str) -> str:
@@ -158,10 +336,20 @@ def _clean_pdf_markdown(markdown: str, source_hint: str = "") -> str:
        with ``<br>`` separators and per-character bold markers. The run is
        collapsed back into a single token so embedding and retrieval see the
        intended word (e.g. ``**個別信用購入あっせん**``) rather than ten
-       fragments.
+       fragments. Fullwidth digits are excluded so chart values are not glued.
+
+    4. **Picture-text blocks** — figure text wrapped in
+       ``<!-- Start of picture text -->`` (or the dash-marker form) by
+       pymupdf4llm is rewritten so StructuredChunker keeps the block atomic,
+       ``<br>`` becomes newlines, and glued comma-numbers like ``1,5461,518``
+       are split.
     """
     # --- Pass 1: remove ColN placeholders ---
     markdown = _coln_pattern.sub('', markdown)
+
+    # --- Pass 1b: normalize pymupdf4llm picture-text blocks before CJK/table
+    # passes so chart <br> stacks become newlines rather than empty joins.
+    markdown = _normalize_picture_text_blocks(markdown)
 
     # --- Pass 2: collapse vertical-CJK runs (do this BEFORE row dedup so
     # rows that differ only by the collapsed form aren't treated as
@@ -171,7 +359,10 @@ def _clean_pdf_markdown(markdown: str, source_hint: str = "") -> str:
     # --- Pass 2b: strip <br> inside markdown table rows ---
     markdown = _strip_br_in_table_rows(markdown)
 
-    # --- Pass 2c: log lines that look like mojibake (failed glyph decode).
+    # --- Pass 2c: split glued comma-grouped numbers globally ---
+    markdown = _split_glued_comma_numbers(markdown)
+
+    # --- Pass 2d: log lines that look like mojibake (failed glyph decode).
     # We don't repair these — the underlying glyphs aren't recoverable
     # from the markdown — but logging gives operators a grep target.
     findings = _detect_mojibake(markdown, source_hint)
@@ -696,6 +887,12 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
 
         # Clean up artefacts common in form PDFs (duplicate rows, ColN headers)
         markdown_content = _clean_pdf_markdown(markdown_content, source_hint=str(file_path))
+
+        # Pages with broken CMaps (mojibake row labels, intact numbers) need a
+        # page-screenshot multimodal pass — embedded images are often absent.
+        markdown_content = _recover_mojibake_pages(
+            file_path, markdown_content, graphname=graphname
+        )
 
         # Rename image files that contain spaces to avoid path-parsing issues
         markdown_content = _sanitize_image_filenames(image_output_folder, markdown_content)

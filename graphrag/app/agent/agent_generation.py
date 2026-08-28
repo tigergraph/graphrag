@@ -83,7 +83,12 @@ class TigerGraphAgentGenerator:
         except Exception:
             logger.warning("generate_answer: generation failed")
             generation = GraphRAGAnswerOutput(
-                generated_answer="I wasn't able to generate an answer for this question.",
+                generated_answer=(
+                    "I wasn't able to generate an answer for this question. "
+                    "Try asking again, or rephrase it to be more specific or "
+                    "focused on a single topic. If the problem continues, "
+                    "contact your administrator for more details."
+                ),
                 citation=[],
             )
 
