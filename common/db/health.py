@@ -19,10 +19,16 @@ _VECTOR_ATTR = "embedding"
 def _has_vector_attr(conn, v_type: str) -> bool:
     """True if *v_type* carries the embedding vector attribute, per the live
     schema. Uses the connection's schema API — no embedding-service init."""
+    # Native vector attributes are exposed under ``EmbeddingAttributes`` in the
+    # schema, not by getVertexAttrs (which omits them).
     try:
-        attrs = conn.getVertexAttrs(v_type)
-        names = [a[0] if isinstance(a, (list, tuple)) else a for a in attrs]
-        return _VECTOR_ATTR in names
+        for v in conn.getSchema().get("VertexTypes", []):
+            if v.get("Name") == v_type:
+                return any(
+                    e.get("Name") == _VECTOR_ATTR
+                    for e in (v.get("EmbeddingAttributes") or [])
+                )
+        return False
     except Exception:
         return False
 
@@ -30,12 +36,18 @@ def _has_vector_attr(conn, v_type: str) -> bool:
 def embeddable_types(conn) -> list[str]:
     """Vertex types that carry the embedding vector attribute. Schema-detected
     (not hardcoded) so it stays correct as the embedded set changes."""
+    # Native vector attributes are NOT returned by getVertexAttrs/getVertexTypes;
+    # they live under each vertex type's ``EmbeddingAttributes`` in the schema.
     try:
-        types = conn.getVertexTypes()
+        schema = conn.getSchema()
     except Exception as e:
-        logger.warning(f"embeddable_types: getVertexTypes failed: {e}")
+        logger.warning(f"embeddable_types: getSchema failed: {e}")
         return []
-    return [vt for vt in types if _has_vector_attr(conn, vt)]
+    out = []
+    for v in schema.get("VertexTypes", []):
+        if any(e.get("Name") == _VECTOR_ATTR for e in (v.get("EmbeddingAttributes") or [])):
+            out.append(v.get("Name"))
+    return out
 
 
 def embedding_coverage(conn, v_type: str) -> dict | None:

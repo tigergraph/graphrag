@@ -37,20 +37,17 @@ def _make_store(conn, graphname):
 
 async def _embeddable_types(conn) -> list[str]:
     """Vertex types carrying the embedding attribute (async connection)."""
+    # Native vector attributes are absent from getVertexAttrs; they live under
+    # each vertex type's ``EmbeddingAttributes`` in the schema.
     try:
-        types = await conn.getVertexTypes()
+        schema = await conn.getSchema()
     except Exception as e:
-        logger.warning(f"regen: getVertexTypes failed: {e}")
+        logger.warning(f"regen: getSchema failed: {e}")
         return []
     out = []
-    for vt in types:
-        try:
-            attrs = await conn.getVertexAttrs(vt)
-            names = [a[0] if isinstance(a, (list, tuple)) else a for a in attrs]
-            if _VECTOR_ATTR in names:
-                out.append(vt)
-        except Exception:
-            continue
+    for v in schema.get("VertexTypes", []):
+        if any(e.get("Name") == _VECTOR_ATTR for e in (v.get("EmbeddingAttributes") or [])):
+            out.append(v.get("Name"))
     return out
 
 
