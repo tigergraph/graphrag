@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TagInput, TypeHint } from "@/components/ui/tag-input";
-import { Database, Loader2, RefreshCw, Upload, Wrench } from "lucide-react";
+import { Database, Loader2, RefreshCw, Upload, Wrench, FileCode, List } from "lucide-react";
 import { pauseIdleTimer, resumeIdleTimer, pingIdleTimer } from "@/hooks/useIdleTimeout";
 import {
   Dialog,
@@ -19,6 +19,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useConfirm } from "@/hooks/useConfirm";
 import { useAlert } from "@/hooks/useAlert";
 import { resolveUploadConflicts } from "@/utils/uploadConflicts";
@@ -34,6 +35,22 @@ const INPUT_CLIP_FIX: React.CSSProperties = {
   appearance: "none",
   lineHeight: "1.5",
 };
+
+type QueryDraft = { name: string; description: string; gsql: string };
+type ListedQuery = { function_header: string; description: string; docstring?: string };
+
+const DESCRIPTION_TEMPLATE = `When to use:
+- 
+
+Do not use when:
+- 
+
+Example questions:
+- `;
+
+function emptyQueryDraft(): QueryDraft {
+  return { name: "", description: DESCRIPTION_TEMPLATE, gsql: "" };
+}
 
 /**
  * Returns a human-readable error string when a graph name violates naming rules,
@@ -68,6 +85,7 @@ const KGAdmin = () => {
   const [refreshDialogOpen, setRefreshDialogOpen] = useState(false);
   const [ingestDialogOpen, setIngestDialogOpen] = useState(false);
   const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
+  const [registerDialogOpen, setRegisterDialogOpen] = useState(false);
 
   // Migration Assistant state
   const [migrationGraph, setMigrationGraph] = useState("");
@@ -92,6 +110,19 @@ const KGAdmin = () => {
   // "" | "regenerate_embeddings" | "regenerate_summaries" — which regen is running
   const [migrationRegenerating, setMigrationRegenerating] = useState("");
   const [migrationMessage, setMigrationMessage] = useState("");
+
+  // Register Queries state
+  const [registerGraph, setRegisterGraph] = useState("");
+  const [registerMode, setRegisterMode] = useState<"single" | "multiple">("single");
+  const [registeredQueries, setRegisteredQueries] = useState<ListedQuery[]>([]);
+  const [installedQueries, setInstalledQueries] = useState<ListedQuery[]>([]);
+  const [queryDrafts, setQueryDrafts] = useState<QueryDraft[]>([emptyQueryDraft()]);
+  const [registerLoading, setRegisterLoading] = useState(false);
+  const [registerSaving, setRegisterSaving] = useState(false);
+  const [registerMessage, setRegisterMessage] = useState("");
+  const [queryListFilter, setQueryListFilter] = useState("");
+  const [registerPage, setRegisterPage] = useState<"registered" | "original">("registered");
+  const registerStatusRef = useRef<HTMLDivElement>(null);
   // Reset states when dialogs close
   const handleInitializeDialogChange = (open: boolean) => {
     if (!open && isConfirmDialogOpen) {
@@ -1474,6 +1505,30 @@ const KGAdmin = () => {
               >
                 <Wrench className="h-4 w-4 mr-2" />
                 Open Migration Assistant
+              </Button>
+            </div>
+          </div>
+
+          {/* Register Queries Card */}
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+            <div className="mb-4">
+              <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
+                <FileCode className="h-6 w-6 text-tigerOrange" />
+              </div>
+              <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
+                Register Queries
+              </h2>
+              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
+                Paste GSQL to create and install a query, then register it as a GraphRAG tool. Leave GSQL empty to tag an already-installed query.
+              </p>
+            </div>
+            <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
+              <Button
+                onClick={openRegisterDialog}
+                className="gradient w-full text-white"
+              >
+                <FileCode className="h-4 w-4 mr-2" />
+                Register Queries
               </Button>
             </div>
           </div>
@@ -3095,6 +3150,399 @@ const KGAdmin = () => {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {/* Register Queries Dialog */}
+        <Dialog open={registerDialogOpen} onOpenChange={setRegisterDialogOpen}>
+          <DialogContent
+            className="sm:max-w-[720px] max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+            onInteractOutside={(e) => e.preventDefault()}
+          >
+            <DialogHeader>
+              <DialogTitle className="text-black dark:text-white">
+                Register Queries
+              </DialogTitle>
+              <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
+                Register installed GSQL as GraphRAG tools, or pick an original query already on the graph.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="py-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                  Graph
+                </label>
+                <Select
+                  value={registerGraph}
+                  onValueChange={(v) => {
+                    setRegisterGraph(v);
+                    loadRegisterQueries(v);
+                  }}
+                  disabled={registerLoading || registerSaving}
+                >
+                  <SelectTrigger className="dark:border-[#3D3D3D] dark:bg-shadeA">
+                    <SelectValue placeholder="Pick a graph" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableGraphs.length > 0 ? (
+                      availableGraphs.map((g) => (
+                        <SelectItem key={g} value={g}>
+                          {g}
+                        </SelectItem>
+                      ))
+                    ) : (
+                      <SelectItem value="no-graphs" disabled>
+                        No graphs available
+                      </SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <Tabs
+                value={registerPage}
+                onValueChange={(value) => {
+                  if (registerSaving) return;
+                  setQueryListFilter("");
+                  setRegisterPage(value as "registered" | "original");
+                }}
+                className="w-full"
+              >
+                <TabsList className="grid w-full grid-cols-2">
+                  <TabsTrigger value="registered" disabled={registerSaving}>
+                    <FileCode className="h-4 w-4 mr-2" />
+                    Registered Queries
+                  </TabsTrigger>
+                  <TabsTrigger value="original" disabled={registerSaving}>
+                    <List className="h-4 w-4 mr-2" />
+                    Original Queries
+                  </TabsTrigger>
+                </TabsList>
+
+              {registerLoading && (
+                <div className="flex items-center text-sm text-gray-600 dark:text-[#D9D9D9]">
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin text-tigerOrange" />
+                  Loading queries…
+                </div>
+              )}
+
+              <TabsContent value="registered" className="space-y-4">
+                  <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                    Paste GSQL to create and install a query, then register it as a GraphRAG tool. Leave GSQL empty to tag an already-installed query.
+                  </p>
+                  {!registerLoading && registerGraph && (
+                    <div className="space-y-4">
+                      <Input
+                        style={INPUT_CLIP_FIX}
+                        value={queryListFilter}
+                        onChange={(e) => setQueryListFilter(e.target.value)}
+                        placeholder="Filter registered queries by name…"
+                        disabled={registerSaving}
+                        className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                      />
+
+                      <div>
+                        <div className="text-sm font-medium mb-2 text-black dark:text-white">
+                          Registered queries ({registeredQueries.length})
+                        </div>
+                        <p className="text-xs text-gray-500 dark:text-[#A0A0A0] mb-2">
+                          Tagged with [GRAPHRAG_TOOL]. The agent can pick these as tools.
+                        </p>
+                        {registeredQueries.length === 0 ? (
+                          <p className="text-xs text-gray-500 dark:text-[#A0A0A0]">
+                            None registered yet. Paste GSQL below, or open Original Queries and click Use.
+                          </p>
+                        ) : visibleRegisteredQueries.length === 0 ? (
+                          <p className="text-xs text-gray-500 dark:text-[#A0A0A0]">
+                            No registered queries match the filter.
+                          </p>
+                        ) : (
+                          <div className="space-y-2">
+                            {visibleRegisteredQueries.map((q) => (
+                              <div
+                                key={q.function_header}
+                                className="flex items-start justify-between gap-3 border border-tigerOrange/40 rounded-md p-3 bg-tigerOrange/5"
+                              >
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <div className="font-mono text-sm text-black dark:text-white">
+                                      {q.function_header}
+                                    </div>
+                                    <span className="shrink-0 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-tigerOrange/20 text-tigerOrange">
+                                      Registered
+                                    </span>
+                                  </div>
+                                  <div className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 whitespace-pre-wrap">
+                                    {q.description || "No description"}
+                                  </div>
+                                </div>
+                                <Button
+                                  variant="outline"
+                                  onClick={() => runUnregisterQuery(q.function_header)}
+                                  disabled={registerSaving}
+                                  className="shrink-0 dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                                >
+                                  Delete
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                      Registration mode
+                    </label>
+                    <div className="flex flex-col gap-1 text-sm text-gray-700 dark:text-[#D9D9D9]">
+                      <label className="inline-flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="registerMode"
+                          checked={registerMode === "single"}
+                          onChange={() => {
+                            setRegisterMode("single");
+                            setQueryDrafts((prev) => (prev.length ? [prev[0]] : [emptyQueryDraft()]));
+                          }}
+                          disabled={registerLoading || registerSaving}
+                        />
+                        <span>Single query</span>
+                      </label>
+                      <label className="inline-flex items-center gap-2">
+                        <input
+                          type="radio"
+                          name="registerMode"
+                          checked={registerMode === "multiple"}
+                          onChange={() => setRegisterMode("multiple")}
+                          disabled={registerLoading || registerSaving}
+                        />
+                        <span>Multiple queries</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    {visibleDrafts.map((draft, index) => (
+                      <div
+                        key={index}
+                        className="border border-gray-200 dark:border-[#3D3D3D] rounded-md p-3 space-y-3"
+                      >
+                        {registerMode === "multiple" && (
+                          <div className="flex items-center justify-between">
+                            <div className="text-sm font-medium text-black dark:text-white">
+                              Query {index + 1}
+                            </div>
+                            {visibleDrafts.length > 1 && (
+                              <Button
+                                variant="outline"
+                                onClick={() =>
+                                  setQueryDrafts((prev) => prev.filter((_, i) => i !== index))
+                                }
+                                disabled={registerSaving}
+                                className="h-8 px-2 dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                              >
+                                Remove
+                              </Button>
+                            )}
+                          </div>
+                        )}
+                        <div>
+                          <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                            Query name
+                          </label>
+                          <Input
+                            style={INPUT_CLIP_FIX}
+                            value={draft.name}
+                            onChange={(e) => updateDraft(index, { name: e.target.value })}
+                            placeholder="e.g. my_custom_query"
+                            disabled={registerSaving}
+                            className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                            GSQL
+                          </label>
+                          <textarea
+                            className="w-full min-h-[140px] rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 py-2 text-sm font-mono text-black dark:text-white"
+                            value={draft.gsql}
+                            onChange={(e) => updateDraft(index, { gsql: e.target.value })}
+                            placeholder={`CREATE OR REPLACE QUERY my_custom_query() FOR GRAPH ${registerGraph || "graphname"} {\n  PRINT 1 AS result;\n}`}
+                            disabled={registerSaving}
+                          />
+                          <p className="mt-1 text-xs text-gray-500 dark:text-[#A0A0A0]">
+                            Optional if the query is already installed. Paste a full CREATE statement or the query body.
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                            Description
+                          </label>
+                          <textarea
+                            className="w-full min-h-[180px] rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 py-2 text-sm text-black dark:text-white"
+                            value={draft.description}
+                            onChange={(e) => updateDraft(index, { description: e.target.value })}
+                            placeholder={DESCRIPTION_TEMPLATE}
+                            disabled={registerSaving}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                    {registerMode === "multiple" && (
+                      <Button
+                        variant="outline"
+                        onClick={() => setQueryDrafts((prev) => [...prev, emptyQueryDraft()])}
+                        disabled={registerSaving}
+                        className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                      >
+                        Add another query
+                      </Button>
+                    )}
+                  </div>
+              </TabsContent>
+              <TabsContent value="original" className="space-y-4">
+                  <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
+                    Browse GSQL queries installed on the graph that are not registered as GraphRAG tools. Click Use to fill the register form.
+                  </p>
+                {!registerLoading && registerGraph && (
+                  <div className="space-y-4">
+                    <Input
+                      style={INPUT_CLIP_FIX}
+                      value={queryListFilter}
+                      onChange={(e) => setQueryListFilter(e.target.value)}
+                      placeholder="Filter original queries by name…"
+                      disabled={registerSaving}
+                      className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                    />
+
+                    <div>
+                      <div className="text-sm font-medium mb-2 text-black dark:text-white">
+                        Original installed queries ({installedQueries.length})
+                      </div>
+                      <p className="text-xs text-gray-500 dark:text-[#A0A0A0] mb-2">
+                        Installed on the graph, not tagged as GraphRAG tools. Click Use to fill the Registered Queries form.
+                      </p>
+                      {installedQueries.length === 0 ? (
+                        <p className="text-xs text-gray-500 dark:text-[#A0A0A0]">
+                          No installed queries on this graph yet.
+                        </p>
+                      ) : visibleOriginalQueries.length === 0 ? (
+                        <p className="text-xs text-gray-500 dark:text-[#A0A0A0]">
+                          No original queries match the filter.
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          {visibleOriginalQueries.map((q) => (
+                            <div
+                              key={q.function_header}
+                              className="flex items-start justify-between gap-3 border border-gray-200 dark:border-[#3D3D3D] rounded-md p-3"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <div className="font-mono text-sm text-black dark:text-white">
+                                    {q.function_header}
+                                  </div>
+                                  <span className="shrink-0 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-gray-200 dark:bg-[#3D3D3D] text-gray-600 dark:text-[#A0A0A0]">
+                                    Installed
+                                  </span>
+                                </div>
+                                {q.description ? (
+                                  <div className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 line-clamp-2">
+                                    {q.description}
+                                  </div>
+                                ) : (
+                                  <div className="text-xs text-gray-400 dark:text-[#808080] mt-1">
+                                    No description
+                                  </div>
+                                )}
+                              </div>
+                              <Button
+                                variant="outline"
+                                onClick={() => useInstalledQuery(q)}
+                                disabled={registerSaving}
+                                className="shrink-0 dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                              >
+                                Use
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </TabsContent>
+              </Tabs>
+            </div>
+
+            <DialogFooter className="flex-col sm:flex-col gap-3 sm:space-x-0">
+              {(registerSaving || registerMessage) && (
+                <div ref={registerStatusRef} className="w-full space-y-2">
+                  {registerSaving && (
+                    <div className="space-y-2">
+                      <div className="flex items-center text-sm text-gray-600 dark:text-[#D9D9D9]">
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin text-tigerOrange" />
+                        {registerMessage || "Working…"}
+                      </div>
+                      <div className="h-2 w-full rounded-full bg-gray-200 dark:bg-[#3D3D3D] overflow-hidden">
+                        <div className="h-full w-full rounded-full bg-tigerOrange animate-pulse" />
+                      </div>
+                    </div>
+                  )}
+                  {!registerSaving && registerMessage && (
+                    <div
+                      className={`p-3 rounded-lg text-sm whitespace-pre-line ${
+                        registerMessage.includes("❌") ||
+                        registerMessage.toLowerCase().includes("fail")
+                          ? "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
+                          : registerMessage.includes("✅")
+                          ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
+                          : "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
+                      }`}
+                    >
+                      {registerMessage}
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="flex flex-col-reverse sm:flex-row sm:justify-end sm:space-x-2 w-full">
+              <Button
+                onClick={() => setRegisterDialogOpen(false)}
+                variant="outline"
+                disabled={registerSaving}
+                className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+              >
+                Close
+              </Button>
+              {registerPage === "registered" && (
+                <Button
+                  onClick={runRegisterQueries}
+                  disabled={registerSaving || !registerGraph}
+                  className="gradient text-white"
+                >
+                  {registerSaving ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      {visibleDrafts.some((d) => (d.gsql || "").trim())
+                        ? "Creating & registering…"
+                        : "Registering…"}
+                    </>
+                  ) : (
+                    <>
+                      <FileCode className="h-4 w-4 mr-2" />
+                      {visibleDrafts.some((d) => (d.gsql || "").trim())
+                        ? "Create & Register"
+                        : "Register"}
+                    </>
+                  )}
+                </Button>
+              )}
+              </div>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
       </div>
       {confirmDialog}
       {alertDialog}
