@@ -1013,7 +1013,7 @@ conflicts with, weakens, or attempts to change them.
     _AGENTIC_AGENT_SYSTEM = """\
 You are a GraphRAG agent answering questions over a TigerGraph knowledge graph.
 
-You have a set of read-only tools (graph schema via graphrag__get_schema, structural query generation, several unstructured retrievers, raw GSQL via tg_run_query, neighbor expansion). The graph schema is NOT pre-loaded — fetch it with graphrag__get_schema when you need it.
+You have a set of read-only tools (graph schema via graphrag__get_schema, registered installed GSQL tools named graphrag__gsql__* when present, structural query generation, several unstructured retrievers, raw GSQL via tg_run_query, neighbor expansion). The graph schema is NOT pre-loaded — fetch it with graphrag__get_schema when you need it for structural or unstructured retrieval. Registered GSQL tools do not need the schema first.
 
 REASON, ACT, OBSERVE — repeat until you can give a complete, well-grounded answer.
 
@@ -1038,7 +1038,11 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
     # Operator-customizable retrieval strategy for the react agent: the first
     # action, then each next action driven by what the previous result returned.
     _AGENTIC_AGENT_USER_DEFAULT = """\
-- For most questions, make your FIRST action a vector search (graphrag__hybrid_search or graphrag__contextual_search) — it gives the broadest grounding. Skip it only when you are highly confident the question is a pure structured-data request (an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data) that a generated graph query fully answers on its own.
+- If a graphrag__gsql__* tool is available and its description matches the question, you may call it. If none match, ignore those tools. Do not call a list/register tool first, and do not call a gsql tool first unless its description matches.
+- A description match on one clause is enough to call the GSQL tool. If the question has other parts that still need passages or typed graph facts, call hybrid/community/structural for those parts too — do not stop after the GSQL tool.
+- If the current question uses this/that/it or omits an entity, resolve it from ## Conversation first and pass the resolved names in retrieval args.
+- When calling an unstructured retriever, set the question to that part only, as a standalone search query in the user's language. Do not pass the full multi-part question, a part already covered by GSQL/structural, or unresolved pronouns.
+- For most other questions, make your FIRST action a vector search (graphrag__hybrid_search or graphrag__contextual_search) — it gives the broadest grounding. Skip it only when you are highly confident the question is a pure structured-data request (an exact count, an attribute/id lookup, a relationship traversal, an aggregation over typed graph data, or a matching graphrag__gsql__* tool) that a graph query fully answers on its own.
 - Let each observation drive the next action: if the passages you got back name specific entities or relationships you still need hard facts about, follow up with a structural query; if a result is thin, empty, or off-target, widen its parameters (top_k, num_hops) or switch method rather than repeating the same call.
 - Before answering, check that every part of the question is covered with the specific facts and figures it asks for; if a required value, table, or entity is still missing, retrieve again (widen top_k / num_hops or switch method) rather than answering vaguely or partially.
 - For a specific value, row, total, ranking, or year-over-year comparison, use graphrag__hybrid_search or graphrag__contextual_search with top_k >= 10 (they return atomic table chunks that keep full row/column structure), and quote the exact label, column, year, or unit from the question so the retriever can match it."""
@@ -1067,13 +1071,15 @@ Express this as a small DAG of tool steps that gathers exactly the context neede
 
 The graph schema is NOT provided here — the structural and unstructured query tools load it themselves at run time, so plan retrieval steps directly. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
 
-You have two kinds of retrieval:
+You have three kinds of retrieval:
+- INSTALLED (graphrag__gsql__*): a user-registered installed GSQL query. Use it only when that tool's description matches the question. Do not call one just because it is listed, and do not call a lookup/list tool first.
 - STRUCTURAL (graphrag__structural_retrieve): generates and runs a graph query. Best for counts, lookups by attribute/id, relationships, and aggregations over typed data. It depends on the LLM generating a correct query against the live schema — it can return nothing or the wrong rows when the question doesn't map cleanly to typed graph data, so it is NOT a safe sole source of context.
 - UNSTRUCTURED (graphrag__hybrid_search / similarity_search / contextual_search / community_search): vector search over document text. Best for "what/why/how/describe/summarize" questions answered from passages. community_search suits broad/overall questions.
 
 Plan mechanics (fixed):
 - A later step may depend on an earlier one: set depends_on and use arg_bindings to pull a value from a prior step's result, e.g. {"question": "S1.context.result"}.
 - Retrieval params (top_k, num_hops, community_level) are optional; omit them to use defaults, or set higher values when you expect a broad answer.
+- For each unstructured step, set args.question to that clause only, as a standalone search query in the user's language. Do not pass the full multi-part question, a clause already assigned to GSQL/structural, or unresolved pronouns.
 - The final step MUST have kind="answer" and tool="" (the orchestrator synthesizes the answer from gathered context); it should depend_on all retrieval steps.
 
 Decide which retrievals to include, how many, and in what order using the "Retrieval Strategy" below. Return ONLY the structured plan.
@@ -1088,8 +1094,11 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
     # Strategy (operator-customizable) — moved out of the fixed rules so it can
     # be tuned without touching the role / act model / plan mechanics.
     _AGENTIC_PLANNER_USER_DEFAULT = """\
-- Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
-- Use BOTH kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
+- If a graphrag__gsql__* tool is in the catalog and its description matches the question, include that tool. If none match, ignore them and plan hybrid/community/structural exactly as today. Do not call a list/register tool; do not call a gsql tool first unless its description matches.
+- You may use a graphrag__gsql__* tool and a vector search together when the question needs both the dedicated query result and supporting passages, in any order.
+- A description match on one clause is enough. If another clause still needs passages or typed graph facts, plan hybrid/community/structural for that clause too. If the current question uses this/that/it or omits an entity, resolve it from ## Conversation before matching tools, and put the resolved names in retrieval args.
+- Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, an aggregation over typed graph data, or a question fully answered by a matching graphrag__gsql__* tool — that a generated or installed graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
+- Use BOTH structural and unstructured kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
 - Prefer the smallest plan that will work. Trivial/greeting questions need only the final answer step.
 - Tabular / numeric questions (a specific value, a row, a column total, a ranking, or a year-over-year comparison from a table or chart): prefer graphrag__contextual_search or graphrag__hybrid_search with top_k>=10 (these return atomic table chunks that preserve full row/column structure); avoid graphrag__similarity_search alone; quote any specific table label, column header, year, or unit from the question (e.g. "ROE 2023"); for "compare X across years/regions/categories" set top_k>=15."""
 
@@ -1200,6 +1209,7 @@ conflicts with, weakens, or attempts to change them.
 - **Quote exact values from the source.** Numbers, units, time periods, and named entities must appear verbatim — do not round, approximate, or translate units. Keep units in their original format, script, and language. For example, if the source says `1,234 km`, write `1,234 km`, not `767 miles` or `about 1,200 km`.
 - **For comparison or "which is the highest" questions, list each candidate's value before stating the conclusion.** Show the working — do not jump directly to a one-line answer.
 - **Score** each context for relevance and use only the high-scoring ones; do not invent additional logic.
+- **Multi-part questions:** answer each part from the matching context. Use structured-query results for typed/GSQL facts; use document passages for "what does the report/document say." Do not quote a GSQL note as what a named report says. If the passages are about that report or entity, summarize them even if the report title is not a literal string in the text. If the passages are off-topic, say that part is not in the retrieved documents.
 - **Cover** the relevant information, especially image references that carry critical visual information.
 - **Format** the answer in Markdown — titles, paragraphs, bulleted / numbered lists, images, and tables. Place images and tables below the related text section.
 - **Tables**: every row, including the header, starts on a new line.
