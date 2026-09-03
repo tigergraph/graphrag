@@ -36,20 +36,35 @@ const INPUT_CLIP_FIX: React.CSSProperties = {
   lineHeight: "1.5",
 };
 
-type QueryDraft = { name: string; description: string; gsql: string };
+type QueryDraft = {
+  name: string;
+  returns: string;
+  useFor: string;
+  doNotUse: string;
+  gsql: string;
+};
 type ListedQuery = { function_header: string; description: string; docstring?: string };
 
-const DESCRIPTION_TEMPLATE = `When to use:
-- 
-
-Do not use when:
-- 
-
-Example questions:
-- `;
-
 function emptyQueryDraft(): QueryDraft {
-  return { name: "", description: DESCRIPTION_TEMPLATE, gsql: "" };
+  return { name: "", returns: "", useFor: "", doNotUse: "", gsql: "" };
+}
+
+/** Same 1–2 sentence shape as built-in tools in tool_registry.py. */
+function buildToolDescription(
+  name: string,
+  returns: string,
+  useFor: string,
+  doNotUse: string
+): string {
+  const n = name.trim() || "this_query";
+  const r = returns.trim().replace(/\.+$/, "");
+  const u = useFor.trim().replace(/\.+$/, "");
+  const d = doNotUse.trim().replace(/\.+$/, "");
+  const parts = [`Run installed query ${n}.`];
+  if (r) parts.push(`Returns ${r}.`);
+  if (u) parts.push(`Use for ${u}.`);
+  if (d) parts.push(`Do not use for ${d}.`);
+  return parts.join(" ");
 }
 
 /**
@@ -97,18 +112,9 @@ const KGAdmin = () => {
       missing_files: string[];
     };
     needs_repair?: boolean;
-    embeddings?: {
-      by_type: Record<string, { total: number; missing: number }>;
-      total_missing: number;
-    };
-    embeddings_incomplete?: boolean;
-    community_summaries?: { total: number; needs_resummarize: number };
-    community_summaries_incomplete?: boolean;
   } | null>(null);
   const [migrationChecking, setMigrationChecking] = useState(false);
   const [migrationApplying, setMigrationApplying] = useState(false);
-  // "" | "regenerate_embeddings" | "regenerate_summaries" — which regen is running
-  const [migrationRegenerating, setMigrationRegenerating] = useState("");
   const [migrationMessage, setMigrationMessage] = useState("");
 
   // Register Queries state
@@ -185,27 +191,14 @@ const KGAdmin = () => {
         return;
       }
       setMigrationStatus(data);
-      if (
-        !data.needs_repair &&
-        !data.embeddings_incomplete &&
-        !data.community_summaries_incomplete
-      ) {
+      if (!data.needs_repair) {
         setMigrationMessage("✅ Graph is up to date — no repairs needed.");
       } else {
-        const parts: string[] = [];
         const out = data.queries?.outdated?.length || 0;
         const miss = data.queries?.not_installed?.length || 0;
-        if (out || miss)
-          parts.push(`${out} outdated query(s), ${miss} not installed`);
-        if (data.embeddings_incomplete)
-          parts.push(
-            `${data.embeddings?.total_missing ?? 0} vertices missing embeddings`
-          );
-        if (data.community_summaries_incomplete)
-          parts.push(
-            `${data.community_summaries?.needs_resummarize ?? 0} communities need re-summarization`
-          );
-        setMigrationMessage(`Found: ${parts.join("; ")}.`);
+        setMigrationMessage(
+          `Found ${out} outdated query(s) and ${miss} not installed.`
+        );
       }
     } catch (err: any) {
       setMigrationMessage(`Check failed: ${err.message || err}`);
@@ -279,46 +272,213 @@ const KGAdmin = () => {
     }
   };
 
-  // Targeted data-integrity regeneration (not a full rebuild). action is
-  // "regenerate_embeddings" or "regenerate_summaries".
-  const runRegenerate = async (
-    action: "regenerate_embeddings" | "regenerate_summaries"
-  ) => {
-    const auth = sessionStorage.getItem("auth");
-    if (!auth) {
-      setMigrationMessage("Not authenticated.");
+  const loadRegisterQueries = async (graph: string, keepMessage = false) => {
+    if (!graph.trim()) return;
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) {
+      setRegisterMessage("Not authenticated.");
       return;
     }
-    const isEmb = action === "regenerate_embeddings";
-    setMigrationRegenerating(action);
-    setMigrationMessage(
-      isEmb ? "Regenerating embeddings…" : "Regenerating community summaries…"
-    );
+    setRegisterLoading(true);
+    setRegisteredQueries([]);
+    setInstalledQueries([]);
     try {
-      const resp = await fetch(`/ui/${migrationGraph}/migration/${action}`, {
-        method: "POST",
-        headers: { Authorization: auth },
+      const registeredResp = await fetch(`/ui/${graph}/registered_queries`, {
+        headers: { Authorization: creds },
       });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        setMigrationMessage(
-          `Regenerate failed: ${data.detail || resp.statusText}`
+      const registeredData = await registeredResp.json();
+      if (!registeredResp.ok) {
+        setRegisterMessage(
+          registeredData?.detail || `Failed to list queries: ${registeredResp.statusText}`
         );
         return;
       }
-      const done = isEmb ? data.regenerated ?? 0 : data.resummarized ?? 0;
-      const skipped = data.skipped ?? 0;
-      const verb = isEmb ? "Re-embedded" : "Re-summarized";
-      setMigrationMessage(
-        `✅ ${verb} ${done}` +
-          (skipped ? `; ${skipped} skipped (need a rebuild).` : ".")
-      );
-      // Refresh so the counts reflect the regenerated state.
-      await runMigrationCheck(migrationGraph);
+      setRegisteredQueries(registeredData?.registered || registeredData?.queries || []);
+      setInstalledQueries(registeredData?.installed || []);
+      if (!keepMessage) setRegisterMessage("");
     } catch (err: any) {
-      setMigrationMessage(`Regenerate failed: ${err.message || err}`);
+      setRegisterMessage(`Failed to load queries: ${err.message || err}`);
     } finally {
-      setMigrationRegenerating("");
+      setRegisterLoading(false);
+    }
+  };
+
+  const openRegisterDialog = () => {
+    setRegisterMessage("");
+    setQueryListFilter("");
+    setRegisterPage("registered");
+    setRegisterMode("single");
+    setQueryDrafts([emptyQueryDraft()]);
+    const initial =
+      sessionStorage.getItem("selectedGraph") || availableGraphs[0] || "";
+    setRegisterGraph(initial);
+    setRegisterDialogOpen(true);
+    if (initial) loadRegisterQueries(initial);
+  };
+
+  const useInstalledQuery = (q: ListedQuery) => {
+    setRegisterMode("single");
+    setQueryDrafts([
+      {
+        name: q.function_header,
+        returns: "",
+        useFor: "",
+        doNotUse: "",
+        gsql: "",
+      },
+    ]);
+    setRegisterPage("registered");
+    setRegisterMessage(
+      `Selected installed query "${q.function_header}". Fill in what it returns and when to use it, then click Register.`
+    );
+  };
+
+  const visibleDrafts = registerMode === "single" ? queryDrafts.slice(0, 1) : queryDrafts;
+  const queryFilter = queryListFilter.trim().toLowerCase();
+  const matchesQueryFilter = (q: ListedQuery) =>
+    !queryFilter ||
+    q.function_header.toLowerCase().includes(queryFilter) ||
+    (q.description || "").toLowerCase().includes(queryFilter);
+  const visibleRegisteredQueries = registeredQueries.filter(matchesQueryFilter);
+  const visibleOriginalQueries = installedQueries.filter(matchesQueryFilter);
+
+  const updateDraft = (index: number, patch: Partial<QueryDraft>) => {
+    setQueryDrafts((prev) => {
+      const next = prev.length ? [...prev] : [emptyQueryDraft()];
+      while (next.length <= index) next.push(emptyQueryDraft());
+      next[index] = { ...next[index], ...patch };
+      return next;
+    });
+  };
+
+  const runRegisterQueries = async () => {
+    if (!registerGraph) {
+      setRegisterMessage("Pick a graph first.");
+      return;
+    }
+    const drafts = visibleDrafts
+      .map((d) => ({
+        name: d.name.trim(),
+        returns: d.returns.trim(),
+        useFor: d.useFor.trim(),
+        doNotUse: d.doNotUse.trim(),
+        gsql: (d.gsql || "").trim(),
+      }))
+      .filter((d) => d.name || d.returns || d.useFor || d.gsql);
+    if (drafts.length === 0) {
+      setRegisterMessage(
+        "Enter a query name, what it returns, and when to use it (paste GSQL only if the query is not installed yet)."
+      );
+      return;
+    }
+    if (drafts.some((d) => !d.name)) {
+      setRegisterMessage("Each query needs a name.");
+      return;
+    }
+    const missingReturns = drafts.filter((d) => !d.returns).map((d) => d.name);
+    if (missingReturns.length > 0) {
+      setRegisterMessage(`Say what this query returns for: ${missingReturns.join(", ")}`);
+      return;
+    }
+    const missingUse = drafts.filter((d) => !d.useFor).map((d) => d.name);
+    if (missingUse.length > 0) {
+      setRegisterMessage(`Say when to use this tool for: ${missingUse.join(", ")}`);
+      return;
+    }
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) {
+      setRegisterMessage("Not authenticated.");
+      return;
+    }
+    const willCreate = drafts.some((d) => d.gsql);
+    setRegisterSaving(true);
+    setRegisterMessage(
+      willCreate
+        ? drafts.length > 1
+          ? "Creating, installing, and registering queries…"
+          : "Creating, installing, and registering query…"
+        : drafts.length > 1
+          ? "Registering queries…"
+          : "Registering query…"
+    );
+    requestAnimationFrame(() => {
+      registerStatusRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    try {
+      const resp = await fetch(`/ui/${registerGraph}/registered_queries`, {
+        method: "POST",
+        headers: { Authorization: creds, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          queries: drafts.map((d) => ({
+            function_header: d.name,
+            description: buildToolDescription(d.name, d.returns, d.useFor, d.doNotUse),
+            gsql: d.gsql,
+          })),
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        const detail =
+          typeof data?.detail === "string"
+            ? data.detail
+            : data?.detail?.message || JSON.stringify(data?.detail || data);
+        setRegisterMessage(detail || `Register failed: ${resp.statusText}`);
+        return;
+      }
+      const createdCount = data.created?.length || 0;
+      const registeredCount = data.registered?.length || drafts.length;
+      setRegisterMessage(
+        createdCount > 0
+          ? `✅ Created, installed, and registered ${registeredCount} quer${
+              registeredCount === 1 ? "y" : "ies"
+            }. GraphRAG tagged the GSQL description so the agent can use ${
+              registeredCount === 1 ? "it" : "them"
+            } as a tool.`
+          : `✅ Registered ${registeredCount} quer${
+              registeredCount === 1 ? "y" : "ies"
+            }. GraphRAG tagged the GSQL description.`
+      );
+      setQueryDrafts([emptyQueryDraft()]);
+      await loadRegisterQueries(registerGraph, true);
+    } catch (err: any) {
+      setRegisterMessage(`Register failed: ${err.message || err}`);
+    } finally {
+      setRegisterSaving(false);
+    }
+  };
+
+  const runUnregisterQuery = async (header: string) => {
+    const ok = await confirm(
+      `Unregister query "${header}"? This removes it from GraphRAG candidates. The installed GSQL query on the graph is not dropped.`
+    );
+    if (!ok) return;
+    const creds = sessionStorage.getItem("auth");
+    if (!creds) {
+      setRegisterMessage("Not authenticated.");
+      return;
+    }
+    setRegisterSaving(true);
+    setRegisterMessage(`Unregistering ${header}…`);
+    requestAnimationFrame(() => {
+      registerStatusRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    try {
+      const resp = await fetch(`/ui/${registerGraph}/registered_queries/delete`, {
+        method: "POST",
+        headers: { Authorization: creds, "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: [header] }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setRegisterMessage(data?.detail || `Delete failed: ${resp.statusText}`);
+        return;
+      }
+      setRegisterMessage(`✅ Unregistered ${header}.`);
+      await loadRegisterQueries(registerGraph, true);
+    } catch (err: any) {
+      setRegisterMessage(`Delete failed: ${err.message || err}`);
+    } finally {
+      setRegisterSaving(false);
     }
   };
 
@@ -3008,97 +3168,6 @@ const KGAdmin = () => {
                       </div>
                     </div>
                   )}
-
-                  {/* Data-integrity health: embedding coverage */}
-                  {migrationStatus.embeddings &&
-                    Object.keys(migrationStatus.embeddings.by_type).length > 0 && (
-                      <div
-                        className={`p-3 rounded border ${
-                          migrationStatus.embeddings_incomplete
-                            ? "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800"
-                            : "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="font-medium text-black dark:text-white">
-                            Embedding health
-                            {migrationStatus.embeddings.total_missing > 0
-                              ? ` — ${migrationStatus.embeddings.total_missing} missing`
-                              : " — all embedded"}
-                          </div>
-                          {migrationStatus.embeddings_incomplete && (
-                            <Button
-                              onClick={() => runRegenerate("regenerate_embeddings")}
-                              disabled={
-                                !!migrationRegenerating ||
-                                migrationApplying ||
-                                migrationChecking ||
-                                isRebuildRunning
-                              }
-                              className="gradient text-white h-7 text-xs whitespace-nowrap"
-                            >
-                              {migrationRegenerating === "regenerate_embeddings" ? (
-                                <>
-                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                                  Regenerating…
-                                </>
-                              ) : (
-                                "Regenerate embeddings"
-                              )}
-                            </Button>
-                          )}
-                        </div>
-                        <div className="mt-1 font-mono text-xs text-gray-600 dark:text-gray-400">
-                          {Object.entries(migrationStatus.embeddings.by_type)
-                            .map(
-                              ([t, c]) => `${t}: ${c.missing}/${c.total} missing`
-                            )
-                            .join("  ·  ")}
-                        </div>
-                      </div>
-                    )}
-
-                  {/* Data-integrity health: community summaries */}
-                  {migrationStatus.community_summaries &&
-                    (migrationStatus.community_summaries.total ?? 0) > 0 && (
-                      <div
-                        className={`p-3 rounded border ${
-                          migrationStatus.community_summaries_incomplete
-                            ? "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800"
-                            : "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="font-medium text-black dark:text-white">
-                            Community summaries —{" "}
-                            {migrationStatus.community_summaries.needs_resummarize}/
-                            {migrationStatus.community_summaries.total} need
-                            re-summarization
-                          </div>
-                          {migrationStatus.community_summaries_incomplete && (
-                            <Button
-                              onClick={() => runRegenerate("regenerate_summaries")}
-                              disabled={
-                                !!migrationRegenerating ||
-                                migrationApplying ||
-                                migrationChecking ||
-                                isRebuildRunning
-                              }
-                              className="gradient text-white h-7 text-xs whitespace-nowrap"
-                            >
-                              {migrationRegenerating === "regenerate_summaries" ? (
-                                <>
-                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                                  Regenerating…
-                                </>
-                              ) : (
-                                "Regenerate summaries"
-                              )}
-                            </Button>
-                          )}
-                        </div>
-                      </div>
-                    )}
                 </div>
               )}
 
@@ -3227,7 +3296,7 @@ const KGAdmin = () => {
 
               <TabsContent value="registered" className="space-y-4">
                   <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
-                    Paste GSQL to create and install a query, then register it as a GraphRAG tool. Leave GSQL empty to tag an already-installed query.
+                    Fill what the query returns and when to use it — GraphRAG merges those fields into the same one-line description the agent already uses for hybrid search and structural retrieve. Leave GSQL empty to tag an already-installed query.
                   </p>
                   {!registerLoading && registerGraph && (
                     <div className="space-y-4">
@@ -3377,16 +3446,67 @@ const KGAdmin = () => {
                         </div>
                         <div>
                           <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                            Description
+                            What it returns
                           </label>
-                          <textarea
-                            className="w-full min-h-[180px] rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 py-2 text-sm text-black dark:text-white"
-                            value={draft.description}
-                            onChange={(e) => updateDraft(index, { description: e.target.value })}
-                            placeholder={DESCRIPTION_TEMPLATE}
+                          <Input
+                            style={INPUT_CLIP_FIX}
+                            value={draft.returns}
+                            onChange={(e) => updateDraft(index, { returns: e.target.value })}
+                            placeholder="e.g. the month the FILP / 財政投融資計画 annual plan is decided"
                             disabled={registerSaving}
+                            className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                          />
+                          <p className="mt-1 text-xs text-gray-500 dark:text-[#A0A0A0]">
+                            Finish the sentence: “Returns …” — the fact this query answers, not how it is written in GSQL.
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                            Use for
+                          </label>
+                          <Input
+                            style={INPUT_CLIP_FIX}
+                            value={draft.useFor}
+                            onChange={(e) => updateDraft(index, { useFor: e.target.value })}
+                            placeholder="e.g. questions about when that plan is finalized"
+                            disabled={registerSaving}
+                            className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                          />
+                          <p className="mt-1 text-xs text-gray-500 dark:text-[#A0A0A0]">
+                            Same as hybrid_search / community_search: “Use for …” when the agent should pick this tool.
+                          </p>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                            Do not use for
+                            <span className="ml-1 font-normal text-gray-500 dark:text-[#A0A0A0]">
+                              (optional)
+                            </span>
+                          </label>
+                          <Input
+                            style={INPUT_CLIP_FIX}
+                            value={draft.doNotUse}
+                            onChange={(e) => updateDraft(index, { doNotUse: e.target.value })}
+                            placeholder="e.g. policy cost, ALM, or JFC amounts"
+                            disabled={registerSaving}
+                            className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
                           />
                         </div>
+                        {(draft.returns.trim() || draft.useFor.trim()) && (
+                          <div className="rounded-md border border-gray-200 dark:border-[#3D3D3D] bg-gray-50 dark:bg-shadeA p-3">
+                            <div className="text-xs font-medium text-gray-500 dark:text-[#A0A0A0] mb-1">
+                              Tool description the agent will see
+                            </div>
+                            <p className="text-sm text-black dark:text-white">
+                              {buildToolDescription(
+                                draft.name,
+                                draft.returns,
+                                draft.useFor,
+                                draft.doNotUse
+                              )}
+                            </p>
+                          </div>
+                        )}
                       </div>
                     ))}
                     {registerMode === "multiple" && (
