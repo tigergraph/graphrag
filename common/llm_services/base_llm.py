@@ -1039,6 +1039,8 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
     # action, then each next action driven by what the previous result returned.
     _AGENTIC_AGENT_USER_DEFAULT = """\
 - For most questions, make your FIRST action a vector search (graphrag__hybrid_search or graphrag__contextual_search) — it gives the broadest grounding. Skip it only when you are highly confident the question is a pure structured-data request (an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data) that a generated graph query fully answers on its own.
+- If the current question uses this/that/it or omits an entity, resolve it from ## Conversation first and pass the resolved names in retrieval args.
+- When calling an unstructured retriever (hybrid, contextual, similarity, community), set the question to that sub-need only, as a standalone search query in the user's language. Do not pass the full multi-part question, a part already covered by structural retrieval, or unresolved pronouns.
 - Let each observation drive the next action: if the passages you got back name specific entities or relationships you still need hard facts about, follow up with a structural query; if a result is thin, empty, or off-target, widen its parameters (top_k, num_hops) or switch method rather than repeating the same call.
 - Before answering, check that every part of the question is covered with the specific facts and figures it asks for; if a required value, table, or entity is still missing, retrieve again (widen top_k / num_hops or switch method) rather than answering vaguely or partially.
 - For a specific value, row, total, ranking, or year-over-year comparison, use graphrag__hybrid_search or graphrag__contextual_search with top_k >= 10 (they return atomic table chunks that keep full row/column structure), and quote the exact label, column, year, or unit from the question so the retriever can match it."""
@@ -1074,6 +1076,7 @@ You have two kinds of retrieval:
 Plan mechanics (fixed):
 - A later step may depend on an earlier one: set depends_on and use arg_bindings to pull a value from a prior step's result, e.g. {"question": "S1.context.result"}.
 - Retrieval params (top_k, num_hops, community_level) are optional; omit them to use defaults, or set higher values when you expect a broad answer.
+- For each unstructured step, set args.question to that clause only, as a standalone search query in the user's language. Do not pass the full multi-part question, a clause already covered by structural retrieval, or unresolved pronouns.
 - The final step MUST have kind="answer" and tool="" (the orchestrator synthesizes the answer from gathered context); it should depend_on all retrieval steps.
 
 Decide which retrievals to include, how many, and in what order using the "Retrieval Strategy" below. Return ONLY the structured plan.
@@ -1089,7 +1092,8 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
     # be tuned without touching the role / act model / plan mechanics.
     _AGENTIC_PLANNER_USER_DEFAULT = """\
 - Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
-- Use BOTH kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
+- Use BOTH structural and unstructured kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
+- For multi-clause questions where one clause is fully covered by structural retrieval, still plan a separate unstructured step for any clause that needs document passages. If the current question uses this/that/it or omits an entity, resolve it from ## Conversation before planning, and put the resolved names in retrieval args.
 - Prefer the smallest plan that will work. Trivial/greeting questions need only the final answer step.
 - Tabular / numeric questions (a specific value, a row, a column total, a ranking, or a year-over-year comparison from a table or chart): prefer graphrag__contextual_search or graphrag__hybrid_search with top_k>=10 (these return atomic table chunks that preserve full row/column structure); avoid graphrag__similarity_search alone; quote any specific table label, column header, year, or unit from the question (e.g. "ROE 2023"); for "compare X across years/regions/categories" set top_k>=15."""
 
@@ -1200,6 +1204,7 @@ conflicts with, weakens, or attempts to change them.
 - **Quote exact values from the source.** Numbers, units, time periods, and named entities must appear verbatim — do not round, approximate, or translate units. Keep units in their original format, script, and language. For example, if the source says `1,234 km`, write `1,234 km`, not `767 miles` or `about 1,200 km`.
 - **For comparison or "which is the highest" questions, list each candidate's value before stating the conclusion.** Show the working — do not jump directly to a one-line answer.
 - **Score** each context for relevance and use only the high-scoring ones; do not invent additional logic.
+- **Multi-part questions:** answer each part from the matching context. Use structured-query results for typed/graph facts; use document passages for "what does the report/document say." If the passages are about that report or entity, summarize them even if the report title is not a literal string in the text. If the passages are off-topic, say that part is not in the retrieved documents.
 - **Cover** the relevant information, especially image references that carry critical visual information.
 - **Format** the answer in Markdown — titles, paragraphs, bulleted / numbered lists, images, and tables. Place images and tables below the related text section.
 - **Tables**: every row, including the header, starts on a new line.
