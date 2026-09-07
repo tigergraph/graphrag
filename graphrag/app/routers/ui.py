@@ -1699,6 +1699,234 @@ def _migration_apply_inner(
     }
 
 
+_CREATE_QUERY_NAME_RE = re.compile(
+    r"(?is)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?QUERY\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def _user_query_gsql(header: str, gsql: str, graphname: str) -> str:
+    """Normalize pasted GSQL into a CREATE OR REPLACE QUERY statement."""
+    text = re.sub(r"(?im)^\s*USE\s+GRAPH\s+\S+\s*;?\s*", "", (gsql or "").strip()).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail=f"GSQL is empty for query '{header}'.")
+    m = _CREATE_QUERY_NAME_RE.match(text)
+    if m:
+        qname = m.group(1)
+        if qname != header:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"GSQL query name '{qname}' does not match the name field "
+                    f"'{header}'."
+                ),
+            )
+        if not re.match(r"(?is)^\s*CREATE\s+OR\s+REPLACE\s+QUERY\b", text):
+            text = re.sub(
+                r"(?is)^\s*CREATE\s+QUERY\b",
+                "CREATE OR REPLACE QUERY",
+                text,
+                count=1,
+            )
+        return text
+    return (
+        f"CREATE OR REPLACE QUERY {header}() FOR GRAPH {graphname} {{\n{text}\n}}\n"
+    )
+
+
+def _create_user_query(conn, graphname: str, header: str, query_body: str) -> None:
+    """CREATE OR REPLACE via createQuery REST, with GSQL fallback."""
+    conn.graphname = graphname
+    tg_err = None
+    try:
+        res = conn.createQuery(query_body)
+        tg_err = create_response_error(res)
+    except Exception as create_exc:
+        tg_err = create_response_error(http_error_response_body(create_exc))
+        if not tg_err:
+            logger.info(
+                "Register: createQuery transport error for '%s'; gsql fallback: %s",
+                header,
+                create_exc,
+            )
+            gres = conn.gsql(f"USE GRAPH {graphname}\nBEGIN\n{query_body}\nEND\n")
+            if gsql_output_error(gres):
+                logger.debug("Register: full gsql result for '%s': %s", header, gres)
+                tg_err = concise_gsql_error(gres)
+    if tg_err:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to create query '{header}': {tg_err}",
+        )
+
+
+def _gsql_desc_quoted(text: str) -> str:
+    escaped = (
+        (text or "")
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+    return f'"{escaped}"'
+
+
+def _gsql_desc_cmd(conn, graphname: str, statement: str) -> str:
+    from common.db.schema_utils import gsql_output_error
+
+    out = conn.gsql(f"USE GRAPH {graphname}\n{statement}\n")
+    text = out if isinstance(out, str) else str(out)
+    err = gsql_output_error(text)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    return text
+
+
+@router.get(route_prefix + "/{graphname}/registered_queries")
+def ui_list_registered_queries(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """List original installed queries and queries tagged with ``[GRAPHRAG_TOOL]``."""
+    from tools.gsql_query_tools import list_query_catalog
+
+    cred_obj = creds[1]
+    conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
+    try:
+        catalog = list_query_catalog(conn, graphname)
+    except Exception as exc:
+        logger.warning("list registered queries failed: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to list queries: {exc}",
+        ) from exc
+    registered = catalog.get("registered") or []
+    installed = catalog.get("installed") or []
+    return {
+        "queries": registered,
+        "registered": registered,
+        "installed": installed,
+    }
+
+
+@router.post(route_prefix + "/{graphname}/registered_queries")
+def ui_register_queries(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict | None, Body()] = None,
+):
+    """Create + install pasted GSQL (when provided), then tag with ``UPDATE DESCRIPTION``.
+
+    Prepends ``[GRAPHRAG_TOOL]`` so ``SHOW DESCRIPTION`` can tell user-registered
+    queries from original installed ones. Empty GSQL tags an already-installed query.
+    """
+    from common.db.migrate import get_installed_query_names
+    from common.db.query_install import install_query_set
+    from tools.gsql_query_tools import TOOL_MARKER
+
+    body = payload or {}
+    raw = body.get("queries", body if isinstance(body, dict) else [])
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not raw:
+        raise HTTPException(status_code=400, detail="Provide at least one query to register.")
+    to_process: list[tuple[str, str, str]] = []
+    for item in raw:
+        header = (item.get("function_header") or item.get("name") or "").strip()
+        if not header:
+            raise HTTPException(status_code=400, detail="Each query needs a name.")
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", header):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid query name '{header}'. Use letters, digits, and "
+                    "underscores; start with a letter or underscore."
+                ),
+            )
+        description = (item.get("description") or "").strip()
+        if not description:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Description is required for query '{header}'.",
+            )
+        gsql = (item.get("gsql") or item.get("query") or "").strip()
+        to_process.append((header, description, gsql))
+    cred_obj = creds[1]
+    conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
+    conn.graphname = graphname
+
+    created: list[str] = []
+    for header, _description, gsql in to_process:
+        if not gsql:
+            continue
+        query_body = _user_query_gsql(header, gsql, graphname)
+        _create_user_query(conn, graphname, header, query_body)
+        created.append(header)
+    if created:
+        try:
+            install_query_set(conn, created)
+        except Exception as exc:
+            logger.error("Register: install failed for %s: %s", created, exc, exc_info=True)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Created but failed to install: {concise_gsql_error(exc)}",
+            ) from exc
+
+    installed = get_installed_query_names(conn, graphname)
+    registered = []
+    for header, description, gsql in to_process:
+        if header not in installed:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Query '{header}' is not installed on graph '{graphname}'. "
+                    "Paste GSQL to create and install it, or install it first."
+                ),
+            )
+        desc = description if TOOL_MARKER in description else f"{TOOL_MARKER}\n{description}"
+        _gsql_desc_cmd(
+            conn,
+            graphname,
+            f"UPDATE DESCRIPTION OF QUERY {header} {_gsql_desc_quoted(desc)}",
+        )
+        registered.append(header)
+    return {"registered": registered, "created": created}
+
+
+@router.post(route_prefix + "/{graphname}/registered_queries/delete")
+def ui_delete_registered_queries(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict | None, Body()] = None,
+):
+    """GSQL ``DROP DESCRIPTION OF QUERY``. The installed query is not dropped."""
+    body = payload or {}
+    ids = body.get("ids") or body.get("function_headers") or []
+    if isinstance(ids, str):
+        ids = [ids]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Provide ids of queries to unregister.")
+    cred_obj = creds[1]
+    conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
+    deleted = []
+    for header in ids:
+        name = str(header).strip()
+        if not name:
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise HTTPException(status_code=400, detail=f"Invalid query name '{name}'.")
+        try:
+            _gsql_desc_cmd(conn, graphname, f"DROP DESCRIPTION OF QUERY {name}")
+        except HTTPException as exc:
+            detail = str(exc.detail).lower()
+            if not any(
+                s in detail
+                for s in ("does not exist", "no description", "not found", "has no description")
+            ):
+                raise
+        deleted.append(name)
+    return {"deleted": deleted}
+
+
 @router.post(route_prefix + "/{graphname}/initialize_graph")
 def init_graph(
     graphname: ValidGraphName,
