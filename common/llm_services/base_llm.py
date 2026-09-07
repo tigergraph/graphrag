@@ -1079,7 +1079,7 @@ You have three kinds of retrieval:
 Plan mechanics (fixed):
 - A later step may depend on an earlier one: set depends_on and use arg_bindings to pull a value from a prior step's result, e.g. {"question": "S1.context.result"}.
 - Retrieval params (top_k, num_hops, community_level) are optional; omit them to use defaults, or set higher values when you expect a broad answer.
-- For each unstructured step, set args.question to that clause only as a standalone search query in the user's language. Do not pass the full multi-part question, a clause already assigned to another step, or an unresolved reference from conversation history.
+- For each unstructured step, set args.question to a natural-language question covering that clause only, in the user's language — phrase it the way a person would ask it, not as a keyword list. Do not include the full multi-part question, any topic or term that belongs to a clause already assigned to another step (INSTALLED, STRUCTURAL, or a prior unstructured step), or an unresolved reference from conversation history.
 - The final step MUST have kind="answer" and tool="" (the orchestrator synthesizes the answer from gathered context); it should depend_on all retrieval steps.
 
 Decide which retrievals to include, how many, and in what order using the "Retrieval Strategy" below. Return ONLY the structured plan.
