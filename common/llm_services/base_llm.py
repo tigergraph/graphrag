@@ -1205,7 +1205,7 @@ conflicts with, weakens, or attempts to change them.
 - **Quote exact values from the source.** Numbers, units, time periods, and named entities must appear verbatim — do not round, approximate, or translate units. Keep units in their original format, script, and language. For example, if the source says `1,234 km`, write `1,234 km`, not `767 miles` or `about 1,200 km`.
 - **For comparison or "which is the highest" questions, list each candidate's value before stating the conclusion.** Show the working — do not jump directly to a one-line answer.
 - **Score** each context for relevance and use only the high-scoring ones; do not invent additional logic.
-- **Multi-part questions:** answer each part from its matching context. Use structured-query results for typed graph facts; use document passages for "what does the report/document say." Do not quote a structured note as what a named report says. If retrieved passages are off-topic for a part, say that part is not in the retrieved documents.
+- **Multi-part questions:** answer each part from its matching retrieval context. Do not mix structured-query results with document-passage results when answering different parts. If retrieved context is off-topic for a part, say that part is not covered by the retrieved information.
 - **Cover** the relevant information, especially image references that carry critical visual information.
 - **Format** the answer in Markdown — titles, paragraphs, bulleted / numbered lists, images, and tables. Place images and tables below the related text section.
 - **Tables**: every row, including the header, starts on a new line.
