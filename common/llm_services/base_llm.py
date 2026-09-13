@@ -13,6 +13,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import os
+import json
 import re
 import logging
 from typing import Optional
@@ -438,6 +439,20 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             if not m:
                 raise
             candidate = m.group()
+            # Some models (e.g. gemini-3.5-flash) echo back the JSON schema
+            # wrapper: {"properties": {"field": value, ...}} instead of just
+            # {"field": value, ...}.  Unwrap one level before retrying.
+            try:
+                parsed_obj = json.loads(candidate)
+                if (
+                    isinstance(parsed_obj, dict)
+                    and set(parsed_obj.keys()) <= {"properties", "required", "title", "type", "description"}
+                    and "properties" in parsed_obj
+                    and isinstance(parsed_obj["properties"], dict)
+                ):
+                    candidate = json.dumps(parsed_obj["properties"])
+            except Exception:
+                pass
             try:
                 return parser.parse(candidate)
             except OutputParserException:
@@ -1095,7 +1110,7 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
     # be tuned without touching the role / act model / plan mechanics.
     _AGENTIC_PLANNER_USER_DEFAULT = """\
 - Before building the plan, check whether the question is self-contained: can it be fully understood without reading ## Conversation? If the subject, entity, or topic is not named explicitly in the question, find the most recent relevant entity from ## Conversation and substitute its full name in every step's args. If ## Conversation has multiple candidates and it is genuinely unclear which one the user means, plan only a final answer step (no retrieval) that asks the user one short clarifying question.
-- When a question has multiple clauses, assign each clause to its own retrieval step. If another clause still needs passages or typed graph facts after one is covered, plan hybrid/community/structural for that clause too.
+- When a question has multiple independent clauses, assign each clause to its own retrieval step. Clauses are independent when each can be answered without the other's result. If answering one sub-question requires the answer to another (a reasoning chain), treat the whole question as a single retrieval — do not decompose a reasoning chain into multiple steps.
 - If a graphrag__gsql__* tool is in the catalog and its description matches the question, include that tool. If none match, ignore them and plan hybrid/community/structural exactly as today. Do not call a list/register tool; do not call a gsql tool first unless its description matches.
 - If the entire question is fully answered by a matching graphrag__gsql__* tool, plan ONLY that tool + the answer step — do not add any vector search step.
 - You may pair a graphrag__gsql__* tool with a vector search step only when the question has a separate clause that requires document passages beyond what the GSQL tool returns.
