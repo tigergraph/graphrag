@@ -210,6 +210,20 @@ class AgenticAgent:
             except Exception as exc:
                 logger.warning(f"agentic: mcp_addons discovery skipped: {exc}")
 
+            try:
+                from tools.gsql_query_tools import discover_tagged_query_tools
+                gsql_tools = discover_tagged_query_tools(
+                    self.conn, self.conn.graphname
+                )
+                if gsql_tools:
+                    external_tools.update(gsql_tools)
+                    logger.info(
+                        f"agentic: {len(gsql_tools)} tagged GSQL tool(s) for "
+                        f"graph={self.conn.graphname}"
+                    )
+            except Exception as exc:
+                logger.warning(f"agentic: tagged GSQL discovery skipped: {exc}")
+
             # Logged-in user, when available (used for per-call _meta on MCP tools).
             user = getattr(self.conn, "username", None)
 

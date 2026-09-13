@@ -56,7 +56,11 @@ _TOOL_LABELS = {
 
 
 def _tool_label(name: str) -> str:
-    return _TOOL_LABELS.get(name, "Gathering information")
+    if name in _TOOL_LABELS:
+        return _TOOL_LABELS[name]
+    if (name or "").startswith("graphrag__gsql__"):
+        return f"Running registered query {name[len('graphrag__gsql__'):]}"
+    return "Gathering information"
 
 def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     """Run the free tool-calling loop for one question and return a response."""
