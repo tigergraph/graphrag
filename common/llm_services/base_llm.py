@@ -13,6 +13,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import os
+import json
 import re
 import logging
 from typing import Optional
@@ -511,6 +512,20 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             if not m:
                 raise
             candidate = m.group()
+            # Some models (e.g. gemini-3.5-flash) echo back the JSON schema
+            # wrapper: {"properties": {"field": value, ...}} instead of just
+            # {"field": value, ...}.  Unwrap one level before retrying.
+            try:
+                parsed_obj = json.loads(candidate)
+                if (
+                    isinstance(parsed_obj, dict)
+                    and set(parsed_obj.keys()) <= {"properties", "required", "title", "type", "description"}
+                    and "properties" in parsed_obj
+                    and isinstance(parsed_obj["properties"], dict)
+                ):
+                    candidate = json.dumps(parsed_obj["properties"])
+            except Exception:
+                pass
             try:
                 return parser.parse(candidate)
             except OutputParserException:
