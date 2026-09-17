@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.3]
+
+### Fixed
+- **Conversation context on the query-with-history endpoint no longer crosses callers.** `/{graphname}/query_with_history` kept a single conversation history for the whole service, so concurrent callers — on the same graph or different ones — had each other's previous questions and answers fed into their prompt. Context is now taken from the request instead of being retained on the server.
+
+### Changed
+- **Callers of `/{graphname}/query_with_history` supply their own conversation context.** The request body accepts an optional `history` list of `{"query", "response"}` turns, oldest first, and the most recent turns are used. A request that omits it is answered without prior context; the endpoint no longer remembers anything between calls. Callers that relied on the server accumulating history must now send the turns they want considered.
+
 ## [2.0.2]
 
 ### Added
