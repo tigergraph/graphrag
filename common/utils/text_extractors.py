@@ -17,6 +17,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
+
+class ExtractionError(Exception):
+    """A file could not be turned into document content.
+
+    Raised instead of returning a document whose text is the error message
+    (GML-2195): a placeholder like that reaches the graph, gets embedded and
+    becomes retrievable, and the agent cannot tell it from real content. The
+    message is surfaced to the caller, so it describes the file and what to do
+    about it — never exception internals or filesystem paths, which belong in
+    the log line at the raise site.
+    """
+
 # Global lock for pymupdf4llm calls (not thread-safe)
 _pymupdf4llm_lock = threading.Lock()
 
@@ -552,12 +564,24 @@ class TextExtractor:
             }
 
         except FileNotFoundError:
-            return {'success': False, 'file_path': str(file_path), 'error': 'File not found'}
+            return {'success': False, 'file_path': str(file_path),
+                    'error': f"{Path(file_path).name} could not be found on the server."}
         except PermissionError:
-            return {'success': False, 'file_path': str(file_path), 'error': 'Permission denied'}
-        except Exception as e:
+            return {'success': False, 'file_path': str(file_path),
+                    'error': f"{Path(file_path).name} could not be opened on the server."}
+        except ExtractionError as e:
+            # Written for the person who uploaded the file.
             logger.warning(f"Failed to process file {file_path}: {e}")
             return {'success': False, 'file_path': str(file_path), 'error': str(e)}
+        except Exception as e:
+            # Anything else can carry paths, URLs or service errors; those stay
+            # in the log, and the caller gets a message about the file.
+            logger.warning(f"Failed to process file {file_path}: {e}", exc_info=True)
+            return {
+                'success': False,
+                'file_path': str(file_path),
+                'error': f"Could not process {Path(file_path).name}.",
+            }
     
     def _write_to_jsonl(self, jsonl_file, doc_entries):
         """
@@ -864,12 +888,14 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
                     # Cleanup folder if it was created
                     if image_output_folder.exists():
                         shutil.rmtree(image_output_folder, ignore_errors=True)
-                    return [{
-                        "doc_id": base_doc_id,
-                        "doc_type": "markdown",
-                        "content": f"[PDF extraction failed: {e}]",
-                        "position": 0
-                    }]
+                    # Surface the failure instead of ingesting the error text as
+                    # the document's content (GML-2195). The raw exception stays
+                    # in the log above; callers get a message safe to display.
+                    raise ExtractionError(
+                        f"Could not read text from {file_path.name}. "
+                        "The file may be corrupt, password-protected or an "
+                        "unsupported PDF variant."
+                    ) from e
 
         if not markdown_content or not markdown_content.strip():
             logger.warning(
@@ -878,12 +904,10 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
             )
             if image_output_folder.exists():
                 shutil.rmtree(image_output_folder, ignore_errors=True)
-            return [{
-                "doc_id": base_doc_id,
-                "doc_type": "markdown",
-                "content": f"[Scanned PDF — no text layer extracted: {file_path.name}]",
-                "position": 0
-            }]
+            raise ExtractionError(
+                f"No text could be extracted from {file_path.name}. If it is a "
+                "scanned document, upload a version with selectable text."
+            )
 
         # Clean up artefacts common in form PDFs (duplicate rows, ColN headers)
         markdown_content = _clean_pdf_markdown(markdown_content, source_hint=str(file_path))
@@ -1036,17 +1060,20 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
         result.extend(image_entries)
         return result
 
+    except ExtractionError:
+        # Already reported at the raise site with a caller-safe message.
+        if image_output_folder.exists():
+            shutil.rmtree(image_output_folder, ignore_errors=True)
+        raise
     except ImportError as import_err:
         logger.error(f"Required library missing: {import_err}")
         # Cleanup on import error
         if image_output_folder.exists():
             shutil.rmtree(image_output_folder, ignore_errors=True)
-        return [{
-            "doc_id": base_doc_id,
-            "doc_type": "markdown",
-            "content": "[PDF extraction requires pymupdf4llm and PyMuPDF]",
-            "position": 0
-        }]
+        raise ExtractionError(
+            f"Could not read {file_path.name}: PDF support is unavailable on "
+            "this server."
+        ) from import_err
     except Exception as e:
         logger.error(f"Error extracting PDF: {e}")
         # Cleanup on any other error
@@ -1112,14 +1139,13 @@ def _extract_standalone_image_as_doc(file_path, base_doc_id, graphname=None):
             }
         ]
 
+    except ExtractionError:
+        raise
     except Exception as e:
         logger.error(f"Error extracting image: {e}")
-        return [{
-            "doc_id": base_doc_id,
-            "doc_type": "markdown",
-            "content": f"[Image extraction failed: {str(e)}]",
-            "position": 0
-        }]
+        # This also covers the image-description service failing, so the
+        # message doesn't blame the file.
+        raise ExtractionError(f"Could not process image {Path(file_path).name}.") from e
 
 
 def extract_text_from_file(file_path, graphname=None):
@@ -1212,6 +1238,30 @@ def extract_text_from_file(file_path, graphname=None):
     except Exception as e:
         logger.error(f"Error extracting text from {file_path}: {e}")
         raise Exception(f"Text extraction failed: {e}")
+
+
+def failed_extractions(result: dict) -> dict:
+    """Map each file that failed in a folder-processing *result* to its reason.
+
+    ``_process_folder_async`` records a failed file as a ``status: failed``
+    entry rather than raising, so the rest of the folder still converts. Its
+    ``error`` is the caller-safe message the extractor raised.
+    """
+    failures = {}
+    for entry in (result or {}).get("files", []):
+        if entry.get("status") == "failed":
+            name = os.path.basename(entry.get("file_path") or "")
+            if name:
+                failures[name] = entry.get("error") or "The file could not be read."
+    return failures
+
+
+def describe_failures(failures: dict) -> str:
+    """One line per failed file, for a message shown to the person uploading."""
+    return " ".join(
+        reason if name in reason else f"{name}: {reason}"
+        for name, reason in sorted(failures.items())
+    )
 
 
 def get_doc_type_from_extension(extension):

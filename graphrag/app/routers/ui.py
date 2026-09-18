@@ -56,7 +56,12 @@ from common.config import db_config, graphrag_config, embedding_service, llm_con
 from common.db.connections import get_db_connection_pwd_manual
 from common.db import schema_utils as schema_utils_mod
 from common.db import schema_extraction as schema_extraction_mod
-from common.utils.text_extractors import TextExtractor
+from common.utils.text_extractors import (
+    ExtractionError,
+    TextExtractor,
+    describe_failures,
+    failed_extractions,
+)
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics as pmetrics
@@ -2116,15 +2121,28 @@ async def convert_sample_files(
                 detail=f"Text extraction failed: {exc}",
             )
 
+        # A file that failed to convert has no JSONL, so naming it in the
+        # schema-extraction step would fail that whole step. Report it here and
+        # hand on only the files that converted.
+        failures = failed_extractions(result)
+        converted = [n for n in saved_basenames if n not in failures]
+        if failures and not converted:
+            raise HTTPException(status_code=400, detail=describe_failures(failures))
+
         LogWriter.info(
             f"Converted sample files for {graphname}: "
-            f"{len(accepted)} uploaded, {result.get('num_documents', 0)} docs in JSONL"
+            f"{len(accepted)} uploaded, {result.get('num_documents', 0)} docs in JSONL, "
+            f"{len(failures)} failed"
         )
         return {
             "status": "success",
             "graphname": graphname,
-            "saved_files": list(saved_basenames),
+            "saved_files": converted,
             "skipped_files": sorted(skip_set),
+            "failed_files": [
+                {"file": name, "error": reason}
+                for name, reason in sorted(failures.items())
+            ],
             "num_documents": result.get("num_documents", 0),
         }
     finally:
@@ -2493,6 +2511,9 @@ def create_ingest(
 
     except HTTPException:
         raise
+    except ExtractionError as e:
+        # None of the uploaded files could be read — a problem with the input.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         LogWriter.error(f"Error creating ingest configuration for graph {graphname}: {str(e)}")
         raise HTTPException(

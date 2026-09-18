@@ -55,6 +55,18 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   );
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Files the last ingest preparation could not read, per tab. They are
+  // skipped, so each success message names them rather than reading as clean.
+  type Unreadable = Array<{ file: string; error: string }>;
+  const unreadableRef = useRef<Record<"uploaded" | "downloaded", Unreadable>>({
+    uploaded: [],
+    downloaded: [],
+  });
+  const unreadableNote = (source: "uploaded" | "downloaded") => {
+    const failed = unreadableRef.current[source];
+    if (!failed.length) return "";
+    return ` ⚠️ ${failed.length} file(s) could not be read and were skipped: ${failed.map((f) => f.error).join(" ")}`;
+  };
   const [uploadedFiles, setUploadedFiles] = useState<any[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
@@ -328,6 +340,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         }
       );
       const data = await safeJson(response);
+      unreadableRef.current.uploaded = unreadableRef.current.uploaded.filter((f) => f.file !== filename);
       setUploadMessage(`✅ ${data.message}`);
       await fetchUploadedFiles();
     } catch (error: any) {
@@ -351,6 +364,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         headers: { Authorization: creds! },
       });
       const data = await safeJson(response);
+      unreadableRef.current.uploaded = [];
       setUploadMessage(`✅ ${data.message}`);
       await fetchUploadedFiles();
     } catch (error: any) {
@@ -488,6 +502,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         }
       );
       const data = await safeJson(response);
+      unreadableRef.current.downloaded = unreadableRef.current.downloaded.filter((f) => f.file !== filename);
       setDownloadMessage(`✅ ${data.message}`);
       await fetchDownloadedFiles();
     } catch (error: any) {
@@ -511,6 +526,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         headers: { Authorization: creds! },
       });
       const data = await safeJson(response);
+      unreadableRef.current.downloaded = [];
       setDownloadMessage(`✅ ${data.message}`);
       await fetchDownloadedFiles();
     } catch (error: any) {
@@ -561,6 +577,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           );
         }
         const createData = await safeJson(createResp);
+        unreadableRef.current[sourceType] = createData.failed_files || [];
         jobData = {
           load_job_id: createData.load_job_id,
           data_source_id: createData.data_source_id,
@@ -591,7 +608,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       const ingestData = await safeJson(ingestResponse);
       console.log("Ingest response:", ingestData);
 
-      setIngestMessage(`✅ Ingestion completed successfully!`);
+      setIngestMessage(`✅ Ingestion completed successfully!${unreadableNote(sourceType)}`);
       setUploadMessage("");
     } catch (error: any) {
       console.error("Error during ingestion:", error);
@@ -642,6 +659,8 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
 
       const createData = await safeJson(createResponse);
       console.log("Create ingest response:", createData);
+      unreadableRef.current[sourceType] = createData.failed_files || [];
+      const readyCount = createData.ready_files ?? fileCount;
 
       // Store ingest job data for later use
       setIngestJobData({
@@ -651,7 +670,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       });
 
       if (!directIngestion) {
-        setIngestMessage(`✅ ${fileCount} file(s) ready for ingestion.`);
+        setIngestMessage(`✅ ${readyCount} file(s) ready for ingestion.${unreadableNote(sourceType)}`);
         setIsIngesting(false);
       } else {
         setIngestMessage("Step 2/2: Running document ingest...");
@@ -678,7 +697,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         const ingestData = await safeJson(ingestResponse);
         console.log("Ingest response:", ingestData);
 
-        setIngestMessage(`✅ Data ingested successfully! Processed documents from ${folderPath}/`);
+        setIngestMessage(`✅ Data ingested successfully! Processed documents from ${folderPath}/${unreadableNote(sourceType)}`);
         setIsIngesting(false);
       }
     } catch (error: any) {
@@ -735,6 +754,8 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
 
       const createData = await safeJson(createResponse);
       console.log("create_ingest response data:", createData);
+      unreadableRef.current[sourceType] = createData.failed_files || [];
+      const readyCount = createData.ready_files ?? fileCount;
 
       setIngestJobData({
         load_job_id: createData.load_job_id,
@@ -753,9 +774,9 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         await handleRunIngest(sourceType);
       } else {
         if (sourceType === "uploaded") {
-          setUploadMessage(`✅ ${fileCount} file(s) ready for ingestion.`);
+          setUploadMessage(`✅ ${readyCount} file(s) ready for ingestion.${unreadableNote(sourceType)}`);
         } else {
-          setDownloadMessage(`✅ ${fileCount} file(s) ready for ingestion.`);
+          setDownloadMessage(`✅ ${readyCount} file(s) ready for ingestion.${unreadableNote(sourceType)}`);
         }
       }
     } catch (error: any) {

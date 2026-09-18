@@ -3,6 +3,8 @@
 ## [2.0.3]
 
 ### Fixed
+- **A document that fails to extract is no longer ingested as its own error message.** When a PDF or image could not be read, the extractor produced a document whose text was the failure notice — which was then chunked, embedded and returned by search like ordinary content. Nothing is ingested for such a file now, so the knowledge graph contains no placeholder text and answers can't be drawn from one.
+- **Files that fail to extract are no longer counted as ingested.** An unreadable PDF or image was previously counted as a successfully ingested document, so the upload looked clean. It is now left out, the rest of the upload still processes, and the file and its reason are returned with the upload result. When none of the files can be read, the upload stops and gives the reasons.
 - **Conversation context on the query-with-history endpoint no longer crosses callers.** `/{graphname}/query_with_history` kept a single conversation history for the whole service, so concurrent callers — on the same graph or different ones — had each other's previous questions and answers fed into their prompt. Context is now taken from the request instead of being retained on the server.
 
 ### Changed
