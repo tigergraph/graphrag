@@ -1209,7 +1209,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     Maximum upload per request: {MAX_UPLOAD_SIZE_MB} MB.
                   </p>
                   {selectedFiles && (() => {
-                    const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".pdf", ".docx", ".doc", ".html", ".htm", ".json", ".csv", ".xlsx", ".xls", ".xml", ".jpeg", ".jpg", ".png", ".gif", ".jsonl"]);
+                    const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".pdf", ".docx", ".html", ".htm", ".json", ".csv", ".xlsx", ".xls", ".xml", ".jpeg", ".jpg", ".png", ".gif", ".jsonl"]);
                     const files = Array.from(selectedFiles);
                     const unsupported = files.filter((f) => !SUPPORTED_EXTENSIONS.has(f.name.slice(f.name.lastIndexOf(".")).toLowerCase()));
                     const hasCsvExcel = files.some((f) => [".csv", ".xlsx", ".xls"].includes(f.name.slice(f.name.lastIndexOf(".")).toLowerCase()));

@@ -37,6 +37,40 @@ class TestNoPlaceholderDocuments(unittest.TestCase):
             "extraction failures must raise, not return placeholder content",
         )
 
+    def test_no_bare_placeholder_string_is_returned(self):
+        """No function returns a bracketed notice as its extracted text.
+
+        GML-2195 caught dict literals carrying a `content` key. Bare returns
+        of the same shape survived it — `[Unsupported file type: .doc]` and
+        `[Excel file is empty or contains no data]` were still ingested as a
+        document's entire text (GML-2196).
+        """
+        def leading_literals(value):
+            """Leading string literal of every branch this expression can yield."""
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                yield value.value
+            elif isinstance(value, ast.JoinedStr) and value.values:
+                first = value.values[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    yield first.value
+            elif isinstance(value, ast.IfExp):
+                # `return x if cond else "[...]"` hides a placeholder in a branch
+                yield from leading_literals(value.body)
+                yield from leading_literals(value.orelse)
+
+        offenders = []
+        for node in ast.walk(ast.parse(_source())):
+            if not isinstance(node, ast.Return) or node.value is None:
+                continue
+            for literal in leading_literals(node.value):
+                if literal.startswith("["):
+                    offenders.append(f"line {node.lineno}: {literal[:50]}")
+        self.assertEqual(
+            offenders,
+            [],
+            "placeholder notices must be raised, not returned as content",
+        )
+
     def test_failure_paths_raise_extraction_error(self):
         """Each failure branch in the PDF/image extractors raises."""
         tree = ast.parse(_source())

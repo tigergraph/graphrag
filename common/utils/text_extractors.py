@@ -506,6 +506,8 @@ class TextExtractor:
             '.md': 'text/markdown',
             '.pdf': 'application/pdf',
             '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            # Listed so a .doc is attempted and reported as unreadable with a
+            # pointer to .docx; unlisted extensions are skipped silently.
             '.doc': 'application/msword',
             '.html': 'text/html',
             '.htm': 'text/html',
@@ -1148,6 +1150,97 @@ def _extract_standalone_image_as_doc(file_path, base_doc_id, graphname=None):
         raise ExtractionError(f"Could not process image {Path(file_path).name}.") from e
 
 
+def _docx_cell_text(cell):
+    """Text of one table cell, including any table nested inside it.
+
+    ``_Cell.text`` joins the cell's paragraphs only, so a nested table would
+    be dropped the same way top-level tables were (GML-2196).
+    """
+    return "\n".join(_docx_blocks_to_text(cell)).strip()
+
+
+def _docx_render_table(table):
+    """Render a Word table as a markdown pipe table.
+
+    Matches the shape the spreadsheet branch emits, so the chunker sees one
+    representation of tabular data. Pipes and newlines inside a cell are
+    neutralised; either would otherwise break the row.
+    """
+    rows = []
+    for row in table.rows:
+        cells = [
+            _docx_cell_text(cell).replace("|", "\\|").replace("\n", " ").strip()
+            for cell in row.cells
+        ]
+        if any(cells):
+            rows.append(cells)
+    if not rows:
+        return ""
+
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    header, body = rows[0], rows[1:]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join("---" for _ in header) + " |",
+    ]
+    lines += ["| " + " | ".join(r) + " |" for r in body]
+    return "\n".join(lines)
+
+
+def _docx_flatten_table(table):
+    """Render a table nested inside a cell as plain text.
+
+    Markdown has no nested tables, and rendering one inside a cell would only
+    escape its pipes into an unreadable line, so the values are joined instead.
+    """
+    rows = []
+    for row in table.rows:
+        cells = [c for c in (_docx_cell_text(cell) for cell in row.cells) if c]
+        if cells:
+            rows.append(" — ".join(cells))
+    return "; ".join(rows)
+
+
+def _docx_blocks_to_text(parent):
+    """Yield the text of ``parent``'s paragraphs and tables, in document order.
+
+    Word stores tables as siblings of paragraphs in the body. Reading
+    ``doc.paragraphs`` alone skips them entirely, so a table's contents never
+    reached the graph while the prose around it did (GML-2196). Walking the
+    XML children keeps each table anchored to the text that introduces it.
+    """
+    from docx.document import Document as _DocxDocument
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table, _Cell
+    from docx.text.paragraph import Paragraph
+
+    if isinstance(parent, _DocxDocument):
+        parent_elm = parent.element.body
+        render = _docx_render_table
+    elif isinstance(parent, _Cell):
+        parent_elm = parent._tc
+        render = _docx_flatten_table
+    else:
+        return
+
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):
+            text = Paragraph(child, parent).text.strip()
+            if text:
+                yield text
+        elif isinstance(child, CT_Tbl):
+            rendered = render(Table(child, parent))
+            if rendered:
+                yield rendered
+
+
+def _docx_to_markdown(doc):
+    """Extract a .docx as text, with tables rendered in place."""
+    return "\n\n".join(_docx_blocks_to_text(doc)).strip()
+
+
 def extract_text_from_file(file_path, graphname=None):
     """
     Extract text content from a file based on its extension.
@@ -1183,8 +1276,13 @@ def extract_text_from_file(file_path, graphname=None):
             return json.dumps(data, indent=2, ensure_ascii=False)
         elif extension == '.docx':
             import docx
-            doc = docx.Document(file_path)
-            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            return _docx_to_markdown(docx.Document(file_path))
+        elif extension == '.doc':
+            # Legacy OLE format; python-docx reads only the OOXML .docx form.
+            raise ExtractionError(
+                f"Could not read {file_path.name}: the legacy .doc format is "
+                "not supported. Save it as .docx and upload it again."
+            )
         elif extension in ['.xlsx', '.xls']:
             import pandas as pd
             engine = 'openpyxl' if extension == '.xlsx' else 'xlrd'
@@ -1215,7 +1313,12 @@ def extract_text_from_file(file_path, graphname=None):
                     df.columns = [f"Column {i + 1}" for i in range(len(df.columns))]
                 sheet_md = df.to_markdown(index=False)
                 sheet_texts.append(f"## Sheet: {sheet_name}\n\n{sheet_md}")
-            return "\n\n".join(sheet_texts) if sheet_texts else "[Excel file is empty or contains no data]"
+            if not sheet_texts:
+                raise ExtractionError(
+                    f"No data found in {file_path.name}. The spreadsheet "
+                    "appears to be empty."
+                )
+            return "\n\n".join(sheet_texts)
         elif extension == '.xml':
             import xml.etree.ElementTree as ET
             tree = ET.parse(file_path)
@@ -1233,11 +1336,21 @@ def extract_text_from_file(file_path, graphname=None):
             import re
             return re.sub(r'\s+', ' ', content).strip()
         else:
-            return f"[Unsupported file type: {extension}]"
+            raise ExtractionError(
+                f"Could not read {file_path.name}: {extension} files are not "
+                "supported."
+            )
 
+    except ExtractionError:
+        # Already carries a caller-safe message; don't re-wrap it with the
+        # raw exception text (GML-2196).
+        raise
     except Exception as e:
         logger.error(f"Error extracting text from {file_path}: {e}")
-        raise Exception(f"Text extraction failed: {e}")
+        raise ExtractionError(
+            f"Could not read {file_path.name}. The file may be corrupt or "
+            "not match its extension."
+        ) from e
 
 
 def failed_extractions(result: dict) -> dict:
@@ -1279,7 +1392,9 @@ def get_doc_type_from_extension(extension):
 
 def get_supported_extensions():
     """Get list of supported file extensions."""
-    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.doc', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls', '.jsonl'}
+    # '.doc' (legacy OLE) is deliberately absent: python-docx reads only the
+    # OOXML '.docx' form, so it was never actually supported (GML-2196).
+    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls', '.jsonl'}
 
 def is_supported_file(file_path):
     """Check if a file is supported for text extraction."""
