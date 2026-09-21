@@ -3,6 +3,7 @@
 ## [2.0.3]
 
 ### Fixed
+- **Document search now requires valid credentials.** The document-retrieval endpoint returned matching content without checking who was asking, and searched the configured default graph rather than the one named in the request. It now rejects callers who cannot access the requested graph, and searches that graph.
 - **Tables in Word documents are no longer dropped on upload.** Only the paragraphs of a `.docx` were read, so every table vanished while the text around it was ingested normally — a document could state that limits are defined below and contain none of them. Tables are now extracted in place, so the figures they hold can be found and cited.
 - **A document that fails to extract is no longer ingested as its own error message.** When a PDF or image could not be read, the extractor produced a document whose text was the failure notice — which was then chunked, embedded and returned by search like ordinary content. Nothing is ingested for such a file now, so the knowledge graph contains no placeholder text and answers can't be drawn from one.
 - **Files that fail to extract are no longer counted as ingested.** An unreadable PDF or image was previously counted as a successfully ingested document, so the upload looked clean. It is now left out, the rest of the upload still processes, and the file and its reason are returned with the upload result. When none of the files can be read, the upload stops and gives the reasons.

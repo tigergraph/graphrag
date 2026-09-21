@@ -5,6 +5,7 @@ import traceback
 from typing import Annotated, List, Union
 
 from agent.agent import make_agent
+import requests
 from fastapi import (APIRouter, Depends, HTTPException, Request, 
                      status)
 from fastapi.security.http import HTTPBase
@@ -40,6 +41,42 @@ def _caller_is_superadmin(credentials) -> bool:
         return _is_superadmin(_get_user_roles(c.username, c.password))
     except Exception:
         return False
+
+
+def _require_graph_access(request: Request, graphname: str):
+    """Return the caller's connection, having proven it can reach *graphname*.
+
+    ``auth_middleware`` builds the connection object lazily: on the Basic-auth
+    path nothing contacts the database, so bad credentials are not rejected
+    until the connection is first used. A route that reads only
+    service-credentialed resources would therefore never authenticate its
+    caller at all (GML-2197).
+
+    Reading the graph's schema forces that check and is scoped to this graph —
+    unlike ``conn.echo()``, which pings ``/echo`` and succeeds for any valid
+    user regardless of which graph the request names.
+    """
+    conn = getattr(request.state, "conn", None)
+    if conn is None:
+        # No Authorization header: the middleware never built a connection.
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    try:
+        conn.getVertexTypes()
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+        # The database is unreachable — not a verdict on the credentials.
+        raise HTTPException(
+            status_code=503, detail="The database is unavailable. Try again shortly."
+        ) from e
+    except requests.exceptions.HTTPError as e:
+        # A 5xx (nginx answers 502/503 while GSQL restarts) is an outage too.
+        if getattr(e.response, "status_code", 0) >= 500:
+            raise HTTPException(
+                status_code=503, detail="The database is unavailable. Try again shortly."
+            ) from e
+        raise HTTPException(status_code=401, detail="Invalid credentials") from e
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid credentials") from e
+    return conn
 
 
 # Response fields returned only when the caller opts in via include_fields.
@@ -511,14 +548,19 @@ def delete_docs(
 def retrieve_docs(
     graphname,
     query: NaturalLanguageQuery,
+    request: Request,
     credentials: Annotated[HTTPBase, Depends(security)],
     top_k: int = 3,
 ):
     logger.debug_pii(
         f"/{graphname}/retrieve_docs request_id={req_id_cv.get()} top_k={top_k} question={query.query}"
     )
+    _require_graph_access(request, graphname)
     check_embedding_store_status()
-    return get_embedding_store().retrieve_similar(
+    # Search the graph named in the path. Without an argument this returns the
+    # default store, so results came from the configured default graph no
+    # matter which graph the caller asked for (GML-2197).
+    return get_embedding_store(graphname).retrieve_similar(
         get_embedding_service().embed_query(query.query), top_k=top_k
     )
 
