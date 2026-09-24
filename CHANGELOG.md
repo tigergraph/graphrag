@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.0.3]
+
+### Fixed
+- **Knowledge-graph rebuild works when signed in with a token.** A rebuild started from a token sign-in could fail at once, reported as the graph not existing or not being accessible. It now runs normally, and an invalid token is rejected as an authentication failure rather than a server error.
+- **Contextual document search honours the search options it was given.** The option to use a hypothetical-answer embedding and the option to expand the question were swapped before reaching contextual (sibling-chunk) search, so asking for one applied the other — and each selects a different search strategy, not a variation of one. Requests that set neither option, including all chat traffic, were unaffected.
+- **Document search now requires valid credentials.** The document-retrieval endpoint returned matching content without checking who was asking, and searched the configured default graph rather than the one named in the request. It now rejects callers who cannot access the requested graph, and searches that graph.
+- **Tables in Word documents are no longer dropped on upload.** Only the paragraphs of a `.docx` were read, so every table vanished while the text around it was ingested normally — a document could state that limits are defined below and contain none of them. Tables are now extracted in place, so the figures they hold can be found and cited.
+- **A document that fails to extract is no longer ingested as its own error message.** When a PDF or image could not be read, the extractor produced a document whose text was the failure notice — which was then chunked, embedded and returned by search like ordinary content. Nothing is ingested for such a file now, so the knowledge graph contains no placeholder text and answers can't be drawn from one.
+- **Files that fail to extract are no longer counted as ingested.** An unreadable PDF or image was previously counted as a successfully ingested document, so the upload looked clean. It is now left out, the rest of the upload still processes, and the file and its reason are returned with the upload result. When none of the files can be read, the upload stops and gives the reasons.
+- **Legacy `.doc` files are no longer accepted as if they could be read.** The format was listed as supported but could never be read, so such a file was ingested as a one-line note saying it was unsupported. The file picker now marks `.doc` as unsupported, and one sent through the API is reported as unreadable, with a pointer to `.docx`.
+- **An empty spreadsheet is reported rather than ingested as a note about itself.**
+- **Conversation context on the query-with-history endpoint no longer crosses callers.** `/{graphname}/query_with_history` kept a single conversation history for the whole service, so concurrent callers — on the same graph or different ones — had each other's previous questions and answers fed into their prompt. Context is now taken from the request instead of being retained on the server.
+
+### Changed
+- **Callers of `/{graphname}/query_with_history` supply their own conversation context.** The request body accepts an optional `history` list of `{"query", "response"}` turns, oldest first, and the most recent turns are used. A request that omits it is answered without prior context; the endpoint no longer remembers anything between calls. Callers that relied on the server accumulating history must now send the turns they want considered.
+
 ## [2.0.2]
 
 ### Added

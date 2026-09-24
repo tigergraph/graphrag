@@ -808,9 +808,15 @@ const KGAdmin = () => {
       // Capture the composite fingerprint (files + hint chips) so the
       // Extract button stays disabled until something changes.
       setExtractedFingerprint(sampleFingerprint);
+      // Samples that could not be read were left out of the draft; say which.
+      const unreadable: Array<{ file: string; error: string }> = convertData.failed_files || [];
+      const skippedNote = unreadable.length
+        ? ` ${unreadable.length} sample file(s) could not be read and were left out: ${unreadable.map((f) => f.error).join(" ")}`
+        : "";
       setStatusMessage(
         `Draft schema ready (${data.summary?.vertex_count ?? "?"} vertex types, ` +
-          `${data.summary?.edge_count ?? "?"} edge types). Review/edit below, then click Initialize.`
+          `${data.summary?.edge_count ?? "?"} edge types). Review/edit below, then click Initialize.` +
+          skippedNote
       );
       setStatusType("success");
     } catch (error: any) {

@@ -17,6 +17,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
+
+class ExtractionError(Exception):
+    """A file could not be turned into document content.
+
+    Raised instead of returning a document whose text is the error message
+    (GML-2195): a placeholder like that reaches the graph, gets embedded and
+    becomes retrievable, and the agent cannot tell it from real content. The
+    message is surfaced to the caller, so it describes the file and what to do
+    about it — never exception internals or filesystem paths, which belong in
+    the log line at the raise site.
+    """
+
 # Global lock for pymupdf4llm calls (not thread-safe)
 _pymupdf4llm_lock = threading.Lock()
 
@@ -494,6 +506,8 @@ class TextExtractor:
             '.md': 'text/markdown',
             '.pdf': 'application/pdf',
             '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            # Listed so a .doc is attempted and reported as unreadable with a
+            # pointer to .docx; unlisted extensions are skipped silently.
             '.doc': 'application/msword',
             '.html': 'text/html',
             '.htm': 'text/html',
@@ -552,12 +566,24 @@ class TextExtractor:
             }
 
         except FileNotFoundError:
-            return {'success': False, 'file_path': str(file_path), 'error': 'File not found'}
+            return {'success': False, 'file_path': str(file_path),
+                    'error': f"{Path(file_path).name} could not be found on the server."}
         except PermissionError:
-            return {'success': False, 'file_path': str(file_path), 'error': 'Permission denied'}
-        except Exception as e:
+            return {'success': False, 'file_path': str(file_path),
+                    'error': f"{Path(file_path).name} could not be opened on the server."}
+        except ExtractionError as e:
+            # Written for the person who uploaded the file.
             logger.warning(f"Failed to process file {file_path}: {e}")
             return {'success': False, 'file_path': str(file_path), 'error': str(e)}
+        except Exception as e:
+            # Anything else can carry paths, URLs or service errors; those stay
+            # in the log, and the caller gets a message about the file.
+            logger.warning(f"Failed to process file {file_path}: {e}", exc_info=True)
+            return {
+                'success': False,
+                'file_path': str(file_path),
+                'error': f"Could not process {Path(file_path).name}.",
+            }
     
     def _write_to_jsonl(self, jsonl_file, doc_entries):
         """
@@ -864,12 +890,14 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
                     # Cleanup folder if it was created
                     if image_output_folder.exists():
                         shutil.rmtree(image_output_folder, ignore_errors=True)
-                    return [{
-                        "doc_id": base_doc_id,
-                        "doc_type": "markdown",
-                        "content": f"[PDF extraction failed: {e}]",
-                        "position": 0
-                    }]
+                    # Surface the failure instead of ingesting the error text as
+                    # the document's content (GML-2195). The raw exception stays
+                    # in the log above; callers get a message safe to display.
+                    raise ExtractionError(
+                        f"Could not read text from {file_path.name}. "
+                        "The file may be corrupt, password-protected or an "
+                        "unsupported PDF variant."
+                    ) from e
 
         if not markdown_content or not markdown_content.strip():
             logger.warning(
@@ -878,12 +906,10 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
             )
             if image_output_folder.exists():
                 shutil.rmtree(image_output_folder, ignore_errors=True)
-            return [{
-                "doc_id": base_doc_id,
-                "doc_type": "markdown",
-                "content": f"[Scanned PDF — no text layer extracted: {file_path.name}]",
-                "position": 0
-            }]
+            raise ExtractionError(
+                f"No text could be extracted from {file_path.name}. If it is a "
+                "scanned document, upload a version with selectable text."
+            )
 
         # Clean up artefacts common in form PDFs (duplicate rows, ColN headers)
         markdown_content = _clean_pdf_markdown(markdown_content, source_hint=str(file_path))
@@ -1036,17 +1062,20 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
         result.extend(image_entries)
         return result
 
+    except ExtractionError:
+        # Already reported at the raise site with a caller-safe message.
+        if image_output_folder.exists():
+            shutil.rmtree(image_output_folder, ignore_errors=True)
+        raise
     except ImportError as import_err:
         logger.error(f"Required library missing: {import_err}")
         # Cleanup on import error
         if image_output_folder.exists():
             shutil.rmtree(image_output_folder, ignore_errors=True)
-        return [{
-            "doc_id": base_doc_id,
-            "doc_type": "markdown",
-            "content": "[PDF extraction requires pymupdf4llm and PyMuPDF]",
-            "position": 0
-        }]
+        raise ExtractionError(
+            f"Could not read {file_path.name}: PDF support is unavailable on "
+            "this server."
+        ) from import_err
     except Exception as e:
         logger.error(f"Error extracting PDF: {e}")
         # Cleanup on any other error
@@ -1112,14 +1141,104 @@ def _extract_standalone_image_as_doc(file_path, base_doc_id, graphname=None):
             }
         ]
 
+    except ExtractionError:
+        raise
     except Exception as e:
         logger.error(f"Error extracting image: {e}")
-        return [{
-            "doc_id": base_doc_id,
-            "doc_type": "markdown",
-            "content": f"[Image extraction failed: {str(e)}]",
-            "position": 0
-        }]
+        # This also covers the image-description service failing, so the
+        # message doesn't blame the file.
+        raise ExtractionError(f"Could not process image {Path(file_path).name}.") from e
+
+
+def _docx_cell_text(cell):
+    """Text of one table cell, including any table nested inside it.
+
+    ``_Cell.text`` joins the cell's paragraphs only, so a nested table would
+    be dropped the same way top-level tables were (GML-2196).
+    """
+    return "\n".join(_docx_blocks_to_text(cell)).strip()
+
+
+def _docx_render_table(table):
+    """Render a Word table as a markdown pipe table.
+
+    Matches the shape the spreadsheet branch emits, so the chunker sees one
+    representation of tabular data. Pipes and newlines inside a cell are
+    neutralised; either would otherwise break the row.
+    """
+    rows = []
+    for row in table.rows:
+        cells = [
+            _docx_cell_text(cell).replace("|", "\\|").replace("\n", " ").strip()
+            for cell in row.cells
+        ]
+        if any(cells):
+            rows.append(cells)
+    if not rows:
+        return ""
+
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    header, body = rows[0], rows[1:]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join("---" for _ in header) + " |",
+    ]
+    lines += ["| " + " | ".join(r) + " |" for r in body]
+    return "\n".join(lines)
+
+
+def _docx_flatten_table(table):
+    """Render a table nested inside a cell as plain text.
+
+    Markdown has no nested tables, and rendering one inside a cell would only
+    escape its pipes into an unreadable line, so the values are joined instead.
+    """
+    rows = []
+    for row in table.rows:
+        cells = [c for c in (_docx_cell_text(cell) for cell in row.cells) if c]
+        if cells:
+            rows.append(" — ".join(cells))
+    return "; ".join(rows)
+
+
+def _docx_blocks_to_text(parent):
+    """Yield the text of ``parent``'s paragraphs and tables, in document order.
+
+    Word stores tables as siblings of paragraphs in the body. Reading
+    ``doc.paragraphs`` alone skips them entirely, so a table's contents never
+    reached the graph while the prose around it did (GML-2196). Walking the
+    XML children keeps each table anchored to the text that introduces it.
+    """
+    from docx.document import Document as _DocxDocument
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table, _Cell
+    from docx.text.paragraph import Paragraph
+
+    if isinstance(parent, _DocxDocument):
+        parent_elm = parent.element.body
+        render = _docx_render_table
+    elif isinstance(parent, _Cell):
+        parent_elm = parent._tc
+        render = _docx_flatten_table
+    else:
+        return
+
+    for child in parent_elm.iterchildren():
+        if isinstance(child, CT_P):
+            text = Paragraph(child, parent).text.strip()
+            if text:
+                yield text
+        elif isinstance(child, CT_Tbl):
+            rendered = render(Table(child, parent))
+            if rendered:
+                yield rendered
+
+
+def _docx_to_markdown(doc):
+    """Extract a .docx as text, with tables rendered in place."""
+    return "\n\n".join(_docx_blocks_to_text(doc)).strip()
 
 
 def extract_text_from_file(file_path, graphname=None):
@@ -1157,8 +1276,13 @@ def extract_text_from_file(file_path, graphname=None):
             return json.dumps(data, indent=2, ensure_ascii=False)
         elif extension == '.docx':
             import docx
-            doc = docx.Document(file_path)
-            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            return _docx_to_markdown(docx.Document(file_path))
+        elif extension == '.doc':
+            # Legacy OLE format; python-docx reads only the OOXML .docx form.
+            raise ExtractionError(
+                f"Could not read {file_path.name}: the legacy .doc format is "
+                "not supported. Save it as .docx and upload it again."
+            )
         elif extension in ['.xlsx', '.xls']:
             import pandas as pd
             engine = 'openpyxl' if extension == '.xlsx' else 'xlrd'
@@ -1189,7 +1313,12 @@ def extract_text_from_file(file_path, graphname=None):
                     df.columns = [f"Column {i + 1}" for i in range(len(df.columns))]
                 sheet_md = df.to_markdown(index=False)
                 sheet_texts.append(f"## Sheet: {sheet_name}\n\n{sheet_md}")
-            return "\n\n".join(sheet_texts) if sheet_texts else "[Excel file is empty or contains no data]"
+            if not sheet_texts:
+                raise ExtractionError(
+                    f"No data found in {file_path.name}. The spreadsheet "
+                    "appears to be empty."
+                )
+            return "\n\n".join(sheet_texts)
         elif extension == '.xml':
             import xml.etree.ElementTree as ET
             tree = ET.parse(file_path)
@@ -1207,11 +1336,45 @@ def extract_text_from_file(file_path, graphname=None):
             import re
             return re.sub(r'\s+', ' ', content).strip()
         else:
-            return f"[Unsupported file type: {extension}]"
+            raise ExtractionError(
+                f"Could not read {file_path.name}: {extension} files are not "
+                "supported."
+            )
 
+    except ExtractionError:
+        # Already carries a caller-safe message; don't re-wrap it with the
+        # raw exception text (GML-2196).
+        raise
     except Exception as e:
         logger.error(f"Error extracting text from {file_path}: {e}")
-        raise Exception(f"Text extraction failed: {e}")
+        raise ExtractionError(
+            f"Could not read {file_path.name}. The file may be corrupt or "
+            "not match its extension."
+        ) from e
+
+
+def failed_extractions(result: dict) -> dict:
+    """Map each file that failed in a folder-processing *result* to its reason.
+
+    ``_process_folder_async`` records a failed file as a ``status: failed``
+    entry rather than raising, so the rest of the folder still converts. Its
+    ``error`` is the caller-safe message the extractor raised.
+    """
+    failures = {}
+    for entry in (result or {}).get("files", []):
+        if entry.get("status") == "failed":
+            name = os.path.basename(entry.get("file_path") or "")
+            if name:
+                failures[name] = entry.get("error") or "The file could not be read."
+    return failures
+
+
+def describe_failures(failures: dict) -> str:
+    """One line per failed file, for a message shown to the person uploading."""
+    return " ".join(
+        reason if name in reason else f"{name}: {reason}"
+        for name, reason in sorted(failures.items())
+    )
 
 
 def get_doc_type_from_extension(extension):
@@ -1229,7 +1392,9 @@ def get_doc_type_from_extension(extension):
 
 def get_supported_extensions():
     """Get list of supported file extensions."""
-    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.doc', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls', '.jsonl'}
+    # '.doc' (legacy OLE) is deliberately absent: python-docx reads only the
+    # OOXML '.docx' form, so it was never actually supported (GML-2196).
+    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls', '.jsonl'}
 
 def is_supported_file(file_path):
     """Check if a file is supported for text extraction."""

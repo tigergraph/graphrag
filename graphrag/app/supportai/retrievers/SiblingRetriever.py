@@ -13,7 +13,11 @@ class SiblingRetriever(BaseRetriever):
     ):
         super().__init__(embedding_service, embedding_store, llm_service, connection)
 
-    def search(self, question, index, top_k=1, lookback=3, lookahead=3, expand=False, withHyDE=False, verbose=False):
+    # Flag order matches SimilarityRetriever.search and retrieve_answer below.
+    # These two were declared reversed here while both positional callers passed
+    # SimilarityRetriever's order, so every call transposed them (GML-2198) —
+    # and they select different installed queries, not just a ranking tweak.
+    def search(self, question, index, top_k=1, lookback=3, lookahead=3, withHyDE=False, expand=False, verbose=False):
         if expand:
             questions = self._expand_question(question, top_k, verbose)
             verbose and self.logger.info(f"Expanded questions to use: {questions}")
