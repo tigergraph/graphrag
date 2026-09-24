@@ -3,6 +3,7 @@
 ## [2.0.3]
 
 ### Fixed
+- **Knowledge-graph rebuild works when signed in with a token.** A rebuild started from a token sign-in could fail at once, reported as the graph not existing or not being accessible. It now runs normally, and an invalid token is rejected as an authentication failure rather than a server error.
 - **Contextual document search honours the search options it was given.** The option to use a hypothetical-answer embedding and the option to expand the question were swapped before reaching contextual (sibling-chunk) search, so asking for one applied the other — and each selects a different search strategy, not a variation of one. Requests that set neither option, including all chat traffic, were unaffected.
 - **Document search now requires valid credentials.** The document-retrieval endpoint returned matching content without checking who was asking, and searched the configured default graph rather than the one named in the request. It now rejects callers who cannot access the requested graph, and searches that graph.
 - **Tables in Word documents are no longer dropped on upload.** Only the paragraphs of a `.docx` were read, so every table vanished while the text around it was ingested normally — a document could state that limits are defined below and contain none of them. Tables are now extracted in place, so the figures they hold can be found and cited.
