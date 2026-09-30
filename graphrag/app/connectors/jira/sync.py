@@ -289,21 +289,26 @@ class JiraSyncService:
         # an initial or incremental ingestion. Read the lightweight hash
         # projection once and filter it in memory.
         #
-        # Paginate in 10 k-vertex pages to stay under TigerGraph's 4 MB REST
-        # response limit (REST-4000).  An unbounded getVertices call will fail
-        # on any graph with a large number of vertices of that type.
+        # getVertices() in this version of pyTigerGraph does not support an
+        # offset parameter, and an unbounded call hits TigerGraph's 4 MB REST
+        # limit (REST-4000) on large vertex sets.  Use a GSQL interpreted query
+        # with LIMIT/OFFSET for proper pagination without that constraint.
         _PAGE = 10_000
         result: dict[str, str] = {}
         offset = 0
         while True:
-            page = self.conn.getVertices(
-                vertex_type,
-                select="content_hash",
-                limit=_PAGE,
-                offset=offset,
-            ) or []
+            query = (
+                f"INTERPRET QUERY() FOR GRAPH {self.graphname} {{\n"
+                f"  verts = {{{vertex_type}.*}};\n"
+                f"  res = SELECT v FROM verts:v\n"
+                f"        LIMIT {_PAGE} OFFSET {offset};\n"
+                f"  PRINT res[res.content_hash];\n"
+                f"}}"
+            )
+            response = self.conn.runInterpretedQuery(query) or []
+            page = response[0].get("res", []) if response else []
             for vertex in page:
-                result[str(vertex.get("v_id"))] = str(
+                result[str(vertex.get("v_id", ""))] = str(
                     (vertex.get("attributes") or {}).get("content_hash") or ""
                 )
             if len(page) < _PAGE:
