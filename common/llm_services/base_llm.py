@@ -681,7 +681,7 @@ Replace each entity in the question with its corresponding **vertex type name**,
 - If an entity maps to a vertex attribute, consider generating a `WHERE` clause.
 - For synonyms, output the canonical form from the schema choices.
 - Generate the **complete** rewritten question. Keep the case of schema elements unchanged.
-- Use `target_vertex_ids` only for explicit primary/vertex IDs; map business or external keys to matching schema attributes even when called an "ID".
+- Do NOT generate `target_vertex_ids` unless the term `id` is explicitly mentioned in the question.
 
 ## Inputs
 - **Vertices**: {vertices}
@@ -712,7 +712,7 @@ Use the schema below to write the pyTigerGraph function call that answers the qu
 - Never pick a function not described in the docstrings below.
 - If entities map to vertex attributes, consider a `WHERE` clause.
 - When constructing `WHERE`, quote string attribute values properly. Example: `('Person', where='name="William Torres"')` — applies to every string attribute (name, email, address, etc.).
-- Use `getVerticesById` only for actual primary IDs; use `getVertices` with `WHERE` for schema-defined business/external-key attributes.
+- Do NOT generate `target_vertex_ids` unless the term `id` is explicitly mentioned in the question.
 - Pick exactly **one** function to execute.
 
 ## Schema
@@ -839,9 +839,8 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
 - Only use attributes that exist in the schema. Pick the closest matching attribute name when multiple candidates exist.
 - Prefer attributes over primary IDs when an attribute name is more similar to the keyword in the question.
 - Keep the query minimal — fewest vertex types, edge types, and attributes possible.
-- Use only schema-defined edge types in relationships, and put vertex labels only in `MATCH`.
-- Use primary IDs only for true vertex-ID lookups. Match complete business keys exactly; for a numeric-only portion use delimiter-aware `ENDS WITH` (e.g. ticket `2192` → `"-2192"`).
-- For descriptive lookups, return relevant scalar attributes and only explicitly requested relationships; do not invent traversal paths.
+- Do NOT return attributes that aren't explicitly mentioned in the question. If only a vertex is mentioned, return only the vertex.
+- For Jira business-key lookups where only the numeric portion is given (e.g. `2192`), use `ENDS WITH "-2192"` on the issue_key attribute rather than an exact match.
 - Always include the entity from the `WHERE` clause in the final `RETURN`. Use vertex name over ID when available.
 - Always use **undirected** edge patterns. Ensure edges connect correct vertex types per schema.
 - Use **double quotes** for strings.
@@ -1041,6 +1040,8 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
     # action, then each next action driven by what the previous result returned.
     _AGENTIC_AGENT_USER_DEFAULT = """\
 - For most questions, make your FIRST action a vector search (graphrag__hybrid_search or graphrag__contextual_search) — it gives the broadest grounding. Skip it only when you are highly confident the question is a pure structured-data request (an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data) that a generated graph query fully answers on its own.
+- If the user refers to a ticket by number only with no project prefix (e.g. "ticket 20012" or "issue 20012"), do NOT guess the project — ask a clarifying question first, e.g. "Are you looking for GML-20012 or TSE-20012?" before making any retrieval.
+- If the user provides a fully qualified Jira ticket ID (e.g. `GML-20012`), ALWAYS use BOTH graphrag__structural_retrieve (to fetch structured fields: status, assignee, priority, reporter, fix version, and recent comments) AND graphrag__hybrid_search or graphrag__contextual_search for broader context; combine both into one comprehensive answer that includes recent activity and comments — do not return a purely structural answer.
 - Route business-key lookups (e.g. ticket `ABC-123` or its numeric portion) to graphrag__structural_retrieve and preserve the user's wording.
 - Let each observation drive the next action: if the passages you got back name specific entities or relationships you still need hard facts about, follow up with a structural query; if a result is thin, empty, or off-target, widen its parameters (top_k, num_hops) or switch method rather than repeating the same call.
 - Before answering, check that every part of the question is covered with the specific facts and figures it asks for; if a required value, table, or entity is still missing, retrieve again (widen top_k / num_hops or switch method) rather than answering vaguely or partially.
@@ -1092,6 +1093,8 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
     # be tuned without touching the role / act model / plan mechanics.
     _AGENTIC_PLANNER_USER_DEFAULT = """\
 - Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
+- If the user refers to a ticket by number only with no project prefix (e.g. "ticket 20012"), plan a single final "answer" step that asks for clarification (e.g. "Are you looking for GML-20012 or TSE-20012?") — do NOT plan any retrieval steps until the project is known.
+- If the user provides a fully qualified Jira ticket ID (e.g. `GML-20012`), plan BOTH a graphrag__structural_retrieve step (for structured fields: status, assignee, priority, reporter, fix version, and recent comments) AND a graphrag__hybrid_search or graphrag__contextual_search step for broader context; the final answer step must depend on both and produce a comprehensive response including recent activity.
 - Route business-key lookups (e.g. ticket `ABC-123` or its numeric portion) to graphrag__structural_retrieve and preserve the user's wording.
 - Use BOTH kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
 - Prefer the smallest plan that will work. Trivial/greeting questions need only the final answer step.
