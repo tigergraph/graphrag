@@ -12,9 +12,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-import asyncio
 import logging
-import random
 import traceback
 import json
 from time import sleep, time
@@ -289,26 +287,18 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         truncation gatekeeper for the rationale."""
         last_err = None
         for i, candidate in enumerate(self._truncation_candidates(text)):
-            for retry in range(4):
-                try:
-                    return self.embedding_service.embed_query(candidate)
-                except Exception as e:
-                    last_err = e
-                    if self._is_embed_overflow(e):
-                        LogWriter.warning(
-                            f"Embed for {v_id} overflowed at len={len(candidate)} "
-                            f"(attempt {i + 1}); retrying with shorter prefix"
-                        )
-                        break
-                    if not self._is_transient_embed_error(e) or retry == 3:
-                        return self._log_embed_failure(v_id, last_err)
-                    delay = (2 ** retry) + random.uniform(0, 0.5)
-                    LogWriter.warning(
-                        f"Transient embedding failure for {v_id}; retrying in "
-                        f"{delay:.1f}s (attempt {retry + 2}/4): {e}"
-                    )
-                    sleep(delay)
-        return self._log_embed_failure(v_id, last_err)
+            try:
+                return self.embedding_service.embed_query(candidate)
+            except Exception as e:
+                last_err = e
+                if not self._is_embed_overflow(e):
+                    break
+                LogWriter.warning(
+                    f"Embed for {v_id} overflowed at len={len(candidate)} "
+                    f"(attempt {i + 1}); retrying with shorter prefix"
+                )
+        LogWriter.error(f"Failed to embed {v_id} after truncation: {last_err}")
+        return None
 
     async def _embed_with_truncation_retry(self, text: str, v_id):
         """Async embed with input-overflow fallback.
@@ -319,60 +309,24 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         counts vary). Rather than abandoning the whole batch on one
         bad chunk, truncate the offending text to progressively
         shorter prefixes until it fits. The persisted chunk text is
-        unchanged; only the embedding represents the prefix. If no
-        truncation level succeeds, the error is propagated so callers
-        cannot report a successful build with a missing embedding.
+        unchanged; only the embedding represents the prefix. A chunk
+        for which no truncation level fits is left without an
+        embedding — the similarity_search GSQL skips empty vectors.
         """
         last_err = None
         for i, candidate in enumerate(self._truncation_candidates(text)):
-            for retry in range(4):
-                try:
-                    return await self.embedding_service.aembed_query(candidate)
-                except Exception as e:
-                    last_err = e
-                    if self._is_embed_overflow(e):
-                        LogWriter.warning(
-                            f"Embed for {v_id} overflowed at len={len(candidate)} "
-                            f"(attempt {i + 1}); retrying with shorter prefix"
-                        )
-                        break
-                    if not self._is_transient_embed_error(e) or retry == 3:
-                        return self._log_embed_failure(v_id, last_err)
-                    delay = (2 ** retry) + random.uniform(0, 0.5)
-                    LogWriter.warning(
-                        f"Transient embedding failure for {v_id}; retrying in "
-                        f"{delay:.1f}s (attempt {retry + 2}/4): {e}"
-                    )
-                    await asyncio.sleep(delay)
-        return self._log_embed_failure(v_id, last_err)
-
-    @staticmethod
-    def _is_transient_embed_error(error: Exception) -> bool:
-        message = str(error).lower()
-        return any(
-            marker in message
-            for marker in (
-                "429",
-                "500",
-                "502",
-                "503",
-                "504",
-                "internal",
-                "rate limit",
-                "resource exhausted",
-                "timeout",
-                "timed out",
-                "connection reset",
-                "temporarily unavailable",
-            )
-        )
-
-    @staticmethod
-    def _log_embed_failure(v_id, error):
-        LogWriter.error(f"Failed to embed {v_id} after retries: {error}")
-        raise RuntimeError(
-            f"Failed to embed {v_id} after retries"
-        ) from error
+            try:
+                return await self.embedding_service.aembed_query(candidate)
+            except Exception as e:
+                last_err = e
+                if not self._is_embed_overflow(e):
+                    break
+                LogWriter.warning(
+                    f"Embed for {v_id} overflowed at len={len(candidate)} "
+                    f"(attempt {i + 1}); retrying with shorter prefix"
+                )
+        LogWriter.error(f"Failed to embed {v_id} after truncation: {last_err}")
+        return None
 
     def add_embeddings(
         self,
@@ -414,9 +368,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                 vec_attrs_used.add(vec_attr)
                 embedding = self._embed_sync_with_truncation_retry(text, v_id)
                 if embedding is None:
-                    raise RuntimeError(
-                        f"Embedding provider returned no vector for {v_id}"
-                    )
+                    continue
                 attr = self.map_attrs([(vec_attr, embedding)])
                 batch["vertices"][v_type][v_id] = attr
 
@@ -450,7 +402,6 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                 f"Ensure these vertex types have the expected vector attribute."
             )
             LogWriter.error(error_message)
-            raise RuntimeError(error_message) from e
 
     async def aadd_embeddings(
         self,
@@ -492,9 +443,11 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                 vec_attrs_used.add(vec_attr)
                 embedding = await self._embed_with_truncation_retry(text, v_id)
                 if embedding is None:
-                    raise RuntimeError(
-                        f"Embedding provider returned no vector for {v_id}"
-                    )
+                    # No truncation level worked. Leave this vertex without an
+                    # embedding so similarity_search can skip it (the GSQL
+                    # query filters on v.embedding.size() > 0) — better than
+                    # abandoning the entire batch on one bad chunk.
+                    continue
                 attr = self.map_attrs([(vec_attr, embedding)])
                 batch["vertices"][v_type][v_id] = attr
 
@@ -528,7 +481,6 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                 f"Ensure these vertex types have the expected vector attribute."
             )
             LogWriter.error(error_message)
-            raise RuntimeError(error_message) from e
 
     def has_embeddings(
         self,
