@@ -289,9 +289,9 @@ class JiraSyncService:
         # an initial or incremental ingestion. Read the lightweight hash
         # projection once and filter it in memory.
         #
-        # Paginate to stay under TigerGraph's 4MB REST response limit — a
-        # single getVertices call over a large vertex set (e.g. JiraComment)
-        # can exceed 4MB and raise REST-4000.
+        # Paginate in 10 k-vertex pages to stay under TigerGraph's 4 MB REST
+        # response limit (REST-4000).  An unbounded getVertices call will fail
+        # on any graph with a large number of vertices of that type.
         _PAGE = 10_000
         result: dict[str, str] = {}
         offset = 0
