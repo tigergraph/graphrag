@@ -28,6 +28,7 @@ clamped by ``tool_guards``. Execution runs through the per-user
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
@@ -85,7 +86,14 @@ def _empty(summary: str) -> dict:
 def _result_is_empty(result: Any) -> bool:
     if result is None:
         return True
-    if isinstance(result, (list, dict, str)) and len(result) == 0:
+    if isinstance(result, str):
+        if not result.strip():
+            return True
+        try:
+            return _result_is_empty(json.loads(result))
+        except (TypeError, ValueError):
+            return False
+    if isinstance(result, (list, dict)) and len(result) == 0:
         return True
     return False
 
@@ -167,7 +175,6 @@ def structural_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
 
 
 def _cypher_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
-    import json
     ctx.emit("Generating a graph query")
     gen_history: list = []
     for i in range(3):
@@ -176,12 +183,21 @@ def _cypher_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
         except ValueError as exc:
             gen_history.append(f"{i}: Error: {exc}\n")
             continue
-        response = ctx.conn.gsql(cypher)
+        try:
+            response = ctx.conn.gsql(cypher)
+        except Exception as exc:
+            logger.warning("openCypher execution failed: %s", exc)
+            gen_history.append(f"{i}: {cypher}\n\tExecution error: {exc}\n")
+            continue
         json_str = "\n".join(response.split("\n")[1:])
         try:
             parsed = json.loads(json_str)
         except Exception:
             gen_history.append(f"{i}: {cypher}\n\tError: {json_str}\n")
+            continue
+        if parsed.get("error"):
+            message = parsed.get("message") or parsed
+            gen_history.append(f"{i}: {cypher}\n\tError: {message}\n")
             continue
         rows = parsed.get("results", [{}])
         first = rows[0] if rows else None

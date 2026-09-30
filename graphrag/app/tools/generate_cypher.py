@@ -13,6 +13,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+import re
 from typing import Iterable
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -25,6 +26,22 @@ from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_cypher_output(value: str) -> str:
+    """Remove an optional Markdown language fence without altering the query."""
+    text = value.strip()
+    fenced = re.fullmatch(
+        r"```(?:open)?cypher\s*\n?(.*?)\n?```",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if fenced:
+        return fenced.group(1).strip()
+    lines = text.splitlines()
+    if lines and lines[0].strip().casefold() in {"cypher", "opencypher"}:
+        return "\n".join(lines[1:]).strip()
+    return text
 
 
 class GenerateCypher(BaseTool):
@@ -94,11 +111,12 @@ class GenerateCypher(BaseTool):
         schema = self._generate_schema_rep()
         logger.debug_pii("Prompt to LLM:\n" + PROMPT.invoke({"question": question, "schema": schema, "history": history}).to_string())
 
-        out = self.llm.invoke_with_parser(
+        raw = self.llm.invoke_with_parser(
             PROMPT, StrOutputParser(),
             {"question": question, "schema": schema, "history": history},
             caller_name="generate_cypher",
-        ).strip("```cypher").strip("```").strip()
+        )
+        out = _clean_cypher_output(raw)
 
         # Validate the LLM output looks like a Cypher query
         out_upper = out.upper()

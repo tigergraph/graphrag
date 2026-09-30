@@ -681,7 +681,7 @@ Replace each entity in the question with its corresponding **vertex type name**,
 - If an entity maps to a vertex attribute, consider generating a `WHERE` clause.
 - For synonyms, output the canonical form from the schema choices.
 - Generate the **complete** rewritten question. Keep the case of schema elements unchanged.
-- Do NOT generate `target_vertex_ids` unless the term `id` is explicitly mentioned in the question.
+- Use `target_vertex_ids` only for explicit primary/vertex IDs; map business or external keys to matching schema attributes even when called an "ID".
 
 ## Inputs
 - **Vertices**: {vertices}
@@ -712,7 +712,7 @@ Use the schema below to write the pyTigerGraph function call that answers the qu
 - Never pick a function not described in the docstrings below.
 - If entities map to vertex attributes, consider a `WHERE` clause.
 - When constructing `WHERE`, quote string attribute values properly. Example: `('Person', where='name="William Torres"')` — applies to every string attribute (name, email, address, etc.).
-- Do NOT generate `target_vertex_ids` unless the term `id` is explicitly mentioned in the question.
+- Use `getVerticesById` only for actual primary IDs; use `getVertices` with `WHERE` for schema-defined business/external-key attributes.
 - Pick exactly **one** function to execute.
 
 ## Schema
@@ -839,7 +839,9 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
 - Only use attributes that exist in the schema. Pick the closest matching attribute name when multiple candidates exist.
 - Prefer attributes over primary IDs when an attribute name is more similar to the keyword in the question.
 - Keep the query minimal — fewest vertex types, edge types, and attributes possible.
-- Do NOT return attributes that aren't explicitly mentioned in the question. If only a vertex is mentioned, return only the vertex.
+- Use only schema-defined edge types in relationships, and put vertex labels only in `MATCH`.
+- Use primary IDs only for true vertex-ID lookups. Match complete business keys exactly; for a numeric-only portion use delimiter-aware `ENDS WITH` (e.g. ticket `2192` → `"-2192"`).
+- For descriptive lookups, return relevant scalar attributes and only explicitly requested relationships; do not invent traversal paths.
 - Always include the entity from the `WHERE` clause in the final `RETURN`. Use vertex name over ID when available.
 - Always use **undirected** edge patterns. Ensure edges connect correct vertex types per schema.
 - Use **double quotes** for strings.
@@ -1039,6 +1041,7 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
     # action, then each next action driven by what the previous result returned.
     _AGENTIC_AGENT_USER_DEFAULT = """\
 - For most questions, make your FIRST action a vector search (graphrag__hybrid_search or graphrag__contextual_search) — it gives the broadest grounding. Skip it only when you are highly confident the question is a pure structured-data request (an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data) that a generated graph query fully answers on its own.
+- Route business-key lookups (e.g. ticket `ABC-123` or its numeric portion) to graphrag__structural_retrieve and preserve the user's wording.
 - Let each observation drive the next action: if the passages you got back name specific entities or relationships you still need hard facts about, follow up with a structural query; if a result is thin, empty, or off-target, widen its parameters (top_k, num_hops) or switch method rather than repeating the same call.
 - Before answering, check that every part of the question is covered with the specific facts and figures it asks for; if a required value, table, or entity is still missing, retrieve again (widen top_k / num_hops or switch method) rather than answering vaguely or partially.
 - For a specific value, row, total, ranking, or year-over-year comparison, use graphrag__hybrid_search or graphrag__contextual_search with top_k >= 10 (they return atomic table chunks that keep full row/column structure), and quote the exact label, column, year, or unit from the question so the retriever can match it."""
@@ -1089,6 +1092,7 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
     # be tuned without touching the role / act model / plan mechanics.
     _AGENTIC_PLANNER_USER_DEFAULT = """\
 - Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
+- Route business-key lookups (e.g. ticket `ABC-123` or its numeric portion) to graphrag__structural_retrieve and preserve the user's wording.
 - Use BOTH kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
 - Prefer the smallest plan that will work. Trivial/greeting questions need only the final answer step.
 - Tabular / numeric questions (a specific value, a row, a column total, a ranking, or a year-over-year comparison from a table or chart): prefer graphrag__contextual_search or graphrag__hybrid_search with top_k>=10 (these return atomic table chunks that preserve full row/column structure); avoid graphrag__similarity_search alone; quote any specific table label, column header, year, or unit from the question (e.g. "ROE 2023"); for "compare X across years/regions/categories" set top_k>=15."""

@@ -2400,11 +2400,17 @@ def get_rebuild_status(
     """
     Check if a GraphRAG rebuild is currently in progress for the specified graph.
     Returns the current status without triggering a new rebuild.
+    Also surfaces any blocking graph-level operation (e.g. jira_sync) so the
+    UI can show a meaningful message before the user attempts a rebuild.
     Uses HTTP Basic Authentication to get credentials.
     """
     # Extract credentials from the dependency
     creds = creds[1]
     auth_header = _ecc_auth_header(creds)
+
+    # Check the graph-level lock first — a jira_sync or other operation may be
+    # in flight and is about to trigger a rebuild even if ECC hasn't started yet.
+    current_op = get_current_operation(graphname)
 
     try:
         ecc_status_url = (
@@ -2420,13 +2426,21 @@ def get_rebuild_status(
         )
         
         if response.status_code == 200:
-            return response.json()
+            payload = response.json()
+            # Merge graph-lock info so the UI can detect a pending rebuild
+            # triggered by a data-source sync that hasn't handed off to ECC yet.
+            payload["current_operation"] = current_op
+            if current_op and not payload.get("is_running"):
+                payload["is_running"] = True
+                payload["status"] = "pending"
+            return payload
         else:
             LogWriter.warning(f"ECC status check returned {response.status_code}")
             return {
                 "graphname": graphname,
-                "is_running": False,
-                "status": "unknown",
+                "is_running": bool(current_op),
+                "status": "pending" if current_op else "unknown",
+                "current_operation": current_op,
                 "error": f"ECC service returned status {response.status_code}"
             }
     except httpx.TimeoutException as e:
@@ -2439,6 +2453,7 @@ def get_rebuild_status(
             "graphname": graphname,
             "is_running": True,
             "status": cached.get("status", "unknown"),
+            "current_operation": current_op,
             "error": "ECC is busy processing, status check timed out. Rebuild likely still in progress."
         }
     except Exception as e:
