@@ -2,6 +2,9 @@
 
 ## [2.0.3]
 
+### Added
+- **Chat conversations can be deleted one at a time, in a selected group, or all at once.** Each conversation in the chat sidebar has a delete button, *Select* lets several conversations be picked (or all shown ones at once) and deleted together, and a new *Clear all* action removes the whole history. The only option before, *Clear older*, always kept the ten most recent conversations and appeared only once there were more than ten.
+
 ### Fixed
 - **Knowledge-graph rebuild works when signed in with a token.** A rebuild started from a token sign-in could fail at once, reported as the graph not existing or not being accessible. It now runs normally, and an invalid token is rejected as an authentication failure rather than a server error.
 - **Contextual document search honours the search options it was given.** The option to use a hypothetical-answer embedding and the option to expand the question were swapped before reaching contextual (sibling-chunk) search, so asking for one applied the other — and each selects a different search strategy, not a variation of one. Requests that set neither option, including all chat traffic, were unaffected.
