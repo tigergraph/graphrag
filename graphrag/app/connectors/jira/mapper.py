@@ -340,9 +340,23 @@ class JiraIssueMapper:
             raw_comment_id = comment.get("id")
             if raw_comment_id is None:
                 continue
+
+            # Skip bot/automation comments — accountType "app" means a Jira
+            # automation rule, CI integration, or service-account bot. These
+            # produce high-volume noise (build status, deploy notifications,
+            # auto-transitions) with no useful search content.
+            author = comment.get("author") or {}
+            if author.get("accountType") == "app":
+                continue
+
+            # Skip empty comments — nothing meaningful to store or search.
+            comment_body = adf_to_markdown(comment.get("body"))
+            if not comment_body or not comment_body.strip():
+                continue
+
             comment_id = str(raw_comment_id)
             comment_vertex_id = self._id("comment", comment_id)
-            author_vertex = self._user_vertex(comment.get("author"))
+            author_vertex = self._user_vertex(author)
             add_vertex(author_vertex)
             visibility = comment.get("visibility")
             if not isinstance(visibility, dict):
@@ -355,7 +369,6 @@ class JiraIssueMapper:
                 )
                 if value
             )
-            comment_body = adf_to_markdown(comment.get("body")) or "(Empty comment)"
             comment_body = _filter_long_log_output(
                 comment_body,
                 self.comment_chunker.chunk_size,
