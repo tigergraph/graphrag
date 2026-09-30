@@ -12,6 +12,8 @@
 - **Legacy `.doc` files are no longer accepted as if they could be read.** The format was listed as supported but could never be read, so such a file was ingested as a one-line note saying it was unsupported. The file picker now marks `.doc` as unsupported, and one sent through the API is reported as unreadable, with a pointer to `.docx`.
 - **An empty spreadsheet is reported rather than ingested as a note about itself.**
 - **Conversation context on the query-with-history endpoint no longer crosses callers.** `/{graphname}/query_with_history` kept a single conversation history for the whole service, so concurrent callers — on the same graph or different ones — had each other's previous questions and answers fed into their prompt. Context is now taken from the request instead of being retained on the server.
+- **Deleting an MCP server takes effect, after a confirmation.** The delete button removed a server only from the page, without asking, and there was no way to save the change, so the server reappeared on reload. Deleting now asks first and is saved immediately.
+- **Cancelling an MCP server edit no longer deletes the server.** Cancel removed an existing server from the list, so the next save of any server deleted it. Cancel now restores the saved settings.
 
 ### Changed
 - **Callers of `/{graphname}/query_with_history` supply their own conversation context.** The request body accepts an optional `history` list of `{"query", "response"}` turns, oldest first, and the most recent turns are used. A request that omits it is answered without prior context; the endpoint no longer remembers anything between calls. Callers that relied on the server accumulating history must now send the turns they want considered.
