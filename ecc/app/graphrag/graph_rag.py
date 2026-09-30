@@ -439,7 +439,9 @@ async def load(conn: AsyncTigerGraphConnection):
 
 
 async def embed(
-    embed_chan: Channel, embedding_store: EmbeddingStore, graphname: str
+    embed_chan: Channel,
+    embedding_store: EmbeddingStore,
+    graphname: str,
 ):
     """
     Creates and starts one worker for each embed job
@@ -457,7 +459,10 @@ async def embed(
                 v_id = (v_id, index_name)
                 # v_id is a per-vertex identifier derived from user content.
                 logger.debug(f"Embed to {graphname}_{index_name}: {v_id}")
-                if get_graphrag_config(graphname).get("reuse_embedding", True) and embedding_store.has_embeddings([v_id]):
+                if get_graphrag_config(graphname).get(
+                    "reuse_embedding",
+                    True,
+                ) and embedding_store.has_embeddings([v_id]):
                     logger.debug(f"Embeddings for {v_id} already exists, skipping to save cost")
                     n_reused += 1
                     continue
@@ -736,7 +741,11 @@ async def summarize_communities(
         )
 
 
-async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
+async def run(
+    graphname: str,
+    conn: AsyncTigerGraphConnection,
+    progress=None,
+):
     """
     Set up GraphRAG:
         - Install necessary queries.
@@ -817,7 +826,8 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
                 total_docs = 0
                 try:
                     count_result = conn.getVertexCount(
-                        "Document", where="epoch_processed=0"
+                        "Document",
+                        where="epoch_processed=0",
                     )
                     if asyncio.iscoroutine(count_result):
                         count_result = await count_result
@@ -851,7 +861,13 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
 
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
-            grp.create_task(embed(embed_chan, embedding_store, graphname))
+            grp.create_task(
+                embed(
+                    embed_chan,
+                    embedding_store,
+                    graphname,
+                )
+            )
             grp.create_task(
                 extract(extract_chan, upsert_chan, embed_chan, extractor, conn, num_chunk_senders, tracker=doc_tracker)
             )
@@ -911,7 +927,13 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
             )
             grp.create_task(upsert(upsert_chan))
             grp.create_task(load(conn))
-            grp.create_task(embed(embed_chan, embedding_store, graphname))
+            grp.create_task(
+                embed(
+                    embed_chan,
+                    embedding_store,
+                    graphname,
+                )
+            )
         logger.info("Join comm_process_chan")
         await comm_process_chan.join()
         logger.info("Join embed_chan")

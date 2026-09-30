@@ -238,7 +238,7 @@ def rebuild_status(
             "communities_incomplete": task_info.get("communities_incomplete"),
             "usage": task_info.get("usage"),
         }
-    
+
     return {
         "graphname": graphname,
         "method": ecc_method,
