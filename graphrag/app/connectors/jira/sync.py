@@ -288,16 +288,28 @@ class JiraSyncService:
         # requested STRING ID does not exist, which is the normal state during
         # an initial or incremental ingestion. Read the lightweight hash
         # projection once and filter it in memory.
-        vertices = self.conn.getVertices(
-            vertex_type,
-            select="content_hash",
-        ) or []
-        return {
-            str(vertex.get("v_id")): str(
-                (vertex.get("attributes") or {}).get("content_hash") or ""
-            )
-            for vertex in vertices
-        }
+        #
+        # Paginate to stay under TigerGraph's 4MB REST response limit — a
+        # single getVertices call over a large vertex set (e.g. JiraComment)
+        # can exceed 4MB and raise REST-4000.
+        _PAGE = 10_000
+        result: dict[str, str] = {}
+        offset = 0
+        while True:
+            page = self.conn.getVertices(
+                vertex_type,
+                select="content_hash",
+                limit=_PAGE,
+                offset=offset,
+            ) or []
+            for vertex in page:
+                result[str(vertex.get("v_id"))] = str(
+                    (vertex.get("attributes") or {}).get("content_hash") or ""
+                )
+            if len(page) < _PAGE:
+                break
+            offset += _PAGE
+        return result
 
     def _all_existing_hashes(self) -> dict[str, str]:
         return self._all_content_hashes("JiraIssue")
