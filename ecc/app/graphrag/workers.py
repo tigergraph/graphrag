@@ -154,6 +154,25 @@ async def chunk_doc(
 
         v_id = doc["v_id"].lower()
 
+        # For Jira issue documents, look up the authoritative JiraIssue vertex ID
+        # from the Document's CONTAINS_ENTITY edge (set by the connector mapper).
+        # workers.py cannot reliably derive the key-based vertex ID from the
+        # numeric issue doc_id alone (e.g. "jira:issue-doc:207120" → wrong
+        # "jira:issue:207120", correct is "jira:gml-2191:issue").
+        jira_issue_vertex_id: str | None = None
+        if chunker_type == "jira" and ":issue-doc:" in v_id:
+            try:
+                edges = await conn.getEdges(
+                    "Document", v_id, "CONTAINS_ENTITY", "JiraIssue"
+                )
+                if edges:
+                    jira_issue_vertex_id = edges[0]["to_id"]
+            except Exception as exc:
+                logger.warning(
+                    f"Could not look up JiraIssue vertex for {v_id}: {exc}; "
+                    "falling back to derived ID"
+                )
+
         # Use get_chunker for all types (including images)
         # For images, get_chunker returns SingleChunker which preserves markdown image references
         chunker = ecc_util.get_chunker(chunker_type, graphname=conn.graphname)
@@ -174,7 +193,7 @@ async def chunk_doc(
             # send chunks to be upserted (func, args)
             logger.debug("chunk writes to upsert_chan")
             await upsert_chan.put(
-                (upsert_chunk, (conn, v_id, chunk_id, chunk, i, chunker_type))
+                (upsert_chunk, (conn, v_id, chunk_id, chunk, i, chunker_type, jira_issue_vertex_id))
             )
 
             # Source-native connectors already write authoritative typed
@@ -220,6 +239,7 @@ async def upsert_chunk(
     chunk,
     idx,
     source_type="",
+    jira_issue_vertex_id: "str | None" = None,
 ):
     logger.debug(f"Upserting chunk {chunk_id}")
     date_added = int(time.time())
@@ -249,7 +269,10 @@ async def upsert_chunk(
         # Jira writes authoritative typed issues before ECC runs. Link each
         # generated chunk to that stable issue vertex so vector hits can
         # traverse into the structured Jira graph without LLM extraction.
-        issue_id = doc_id.replace(":issue-doc:", ":issue:", 1)
+        # Prefer the caller-supplied vertex ID (looked up from the Document's
+        # CONTAINS_ENTITY edge in chunk_doc); fall back to the derived form
+        # only when the lookup failed.
+        issue_id = jira_issue_vertex_id or doc_id.replace(":issue-doc:", ":issue:", 1)
         edges.append((
             "DocumentChunk",
             chunk_id,

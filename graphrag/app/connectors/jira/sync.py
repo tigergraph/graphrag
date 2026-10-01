@@ -165,6 +165,53 @@ class JiraSyncService:
             # pages, ensuring they are re-fetched on the next sync run.
             pending_checkpoint = self.source.sync.checkpoint
 
+            # ── Recovery phase ────────────────────────────────────────────────
+            # If a previous sync wrote structural vertices but failed before
+            # embedding, those vertices have empty content_hash.  Re-fetch only
+            # those specific issues from Jira (targeted key lookup) rather than
+            # re-scanning all issues from the checkpoint.
+            recovery_keys = self._find_recovery_issue_keys()
+            if recovery_keys:
+                recovery_docs: list[MappedIssue] = []
+                recovery_comments: list[MappedComment] = []
+                for issues in self.client.iter_issues_by_keys(recovery_keys):
+                    mapped = [mapper.map(issue) for issue in issues]
+                    changed_docs, changed_comms, deleted = self._upsert_issue_records(
+                        mapped, existing_hashes, existing_comment_hashes
+                    )
+                    recovery_docs.extend(changed_docs)
+                    recovery_comments.extend(changed_comms)
+                    documents_loaded += len(changed_docs)
+                    comments_deleted += deleted
+                    issues_upserted += len(mapped)
+                    for item in mapped:
+                        if item.updated and (
+                            pending_checkpoint is None
+                            or item.updated > pending_checkpoint
+                        ):
+                            pending_checkpoint = item.updated
+
+                if recovery_docs or recovery_comments:
+                    self._finalize_batch(
+                        recovery_docs,
+                        recovery_comments,
+                        existing_hashes,
+                        existing_comment_hashes,
+                    )
+                # Advance checkpoint past the recovered items so the normal
+                # incremental JQL scan starts from after this recovery batch,
+                # not from the old pre-failure checkpoint.
+                if pending_checkpoint != self.source.sync.checkpoint:
+                    self.source.sync.checkpoint = pending_checkpoint
+                    self.store.update_runtime_state(self.graphname, self.source)
+                logger.info(
+                    "Recovery complete: %d doc(s), %d comment(s) re-embedded "
+                    "for graph=%s source=%s",
+                    len(recovery_docs), len(recovery_comments),
+                    self.graphname, self.source.id,
+                )
+            # ── End recovery phase ────────────────────────────────────────────
+
             for issues in self._iter_pages_pipelined():
                 mapped = [mapper.map(issue) for issue in issues]
                 changed_docs, changed_comms, deleted_count = (
@@ -283,6 +330,83 @@ class JiraSyncService:
             if self._owns_client:
                 self.client.close()
 
+    def _find_recovery_issue_keys(self) -> set[str]:
+        """Return issue keys whose embeddings are missing from a previous failed sync.
+
+        When _finalize_batch() fails, strip_content_hash() has already cleared
+        content_hash on the affected JiraIssue and JiraComment vertices.  Those
+        empty-hash vertices are the exact set that needs re-processing — no full
+        Jira re-scan required.
+
+        Uses REST++ getVertices/getEdges (not GSQL interpreted queries) so it
+        works with the app's connection pool authentication.
+        """
+        keys: set[str] = set()
+
+        # 1. JiraIssue vertices with empty content_hash — key is in the v_id.
+        try:
+            issue_verts = self.conn.getVertices(
+                "JiraIssue",
+                where='content_hash=""',
+                select="content_hash",
+                limit=5000,
+            ) or []
+            for v in issue_verts:
+                v_id = str(v.get("v_id", ""))
+                # v_id format: "jira:<issue_key>:issue"
+                key = v_id.removeprefix("jira:").removesuffix(":issue").upper()
+                if key:
+                    keys.add(key)
+        except Exception as exc:
+            logger.warning(
+                "Recovery: could not query empty-hash JiraIssue vertices "
+                "graph=%s: %s", self.graphname, exc,
+            )
+
+        # 2. JiraComment vertices with empty content_hash → walk JIRA_COMMENT_ON
+        #    edge to get the parent JiraIssue key.
+        try:
+            comment_verts = self.conn.getVertices(
+                "JiraComment",
+                where='content_hash=""',
+                select="content_hash",
+                limit=5000,
+            ) or []
+            for cv in comment_verts:
+                comment_v_id = str(cv.get("v_id", ""))
+                try:
+                    edges = self.conn.getEdges(
+                        "JiraComment",
+                        comment_v_id,
+                        JIRA_COMMENT_ISSUE_EDGE,
+                    ) or []
+                    for edge in edges:
+                        parent_v_id = str(edge.get("to_id", ""))
+                        key = (
+                            parent_v_id
+                            .removeprefix("jira:")
+                            .removesuffix(":issue")
+                            .upper()
+                        )
+                        if key:
+                            keys.add(key)
+                except Exception:
+                    pass  # skip individual comment if edge lookup fails
+        except Exception as exc:
+            logger.warning(
+                "Recovery: could not query empty-hash JiraComment vertices "
+                "graph=%s: %s", self.graphname, exc,
+            )
+
+        if keys:
+            logger.info(
+                "Recovery: found %d issue(s) with missing embeddings in "
+                "graph=%s source=%s — re-fetching from Jira instead of "
+                "full scan",
+                len(keys), self.graphname, self.source.id,
+            )
+        return keys
+
     def _all_content_hashes(self, vertex_type: str) -> dict[str, str]:
         # pyTigerGraph's getVerticesById raises error 601 as soon as any
         # requested STRING ID does not exist, which is the normal state during
@@ -301,6 +425,7 @@ class JiraSyncService:
                 f"INTERPRET QUERY() FOR GRAPH {self.graphname} {{\n"
                 f"  verts = {{{vertex_type}.*}};\n"
                 f"  res = SELECT v FROM verts:v\n"
+                f"        ORDER BY v.content_hash ASC\n"
                 f"        LIMIT {_PAGE} OFFSET {offset};\n"
                 f"  PRINT res[res.content_hash];\n"
                 f"}}"
@@ -308,8 +433,10 @@ class JiraSyncService:
             response = self.conn.runInterpretedQuery(query) or []
             page = response[0].get("res", []) if response else []
             for vertex in page:
+                # TG prefixes the attribute with the result-set alias:
+                # "res.content_hash" rather than plain "content_hash".
                 result[str(vertex.get("v_id", ""))] = str(
-                    (vertex.get("attributes") or {}).get("content_hash") or ""
+                    (vertex.get("attributes") or {}).get("res.content_hash") or ""
                 )
             if len(page) < _PAGE:
                 break
@@ -898,20 +1025,32 @@ class JiraSyncService:
         store = get_embedding_store(graphname=self.graphname)
 
         async def embed_batches() -> None:
-            for start in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
-                batch = chunks[start : start + EMBEDDING_BATCH_SIZE]
-                await store.aadd_embeddings(
-                    [(chunk.text, []) for chunk in batch],
-                    [
-                        {
-                            "vertex_id": (
-                                chunk.chunk_id,
-                                "DocumentChunk",
-                            )
-                        }
-                        for chunk in batch
-                    ],
-                )
+            # Cap at 5 concurrent aadd_embeddings calls. Each call makes ~32
+            # sequential Gemini requests; 20 concurrent was causing traffic
+            # spikes that trigger Gemini 500 INTERNAL (server overload).
+            # 5 concurrent × ~32 requests = ~160 in-flight, safe for the API.
+            sem = asyncio.Semaphore(5)
+
+            async def _run_batch(batch: list) -> None:
+                async with sem:
+                    await store.aadd_embeddings(
+                        [(chunk.text, []) for chunk in batch],
+                        [
+                            {
+                                "vertex_id": (
+                                    chunk.chunk_id,
+                                    "DocumentChunk",
+                                )
+                            }
+                            for chunk in batch
+                        ],
+                    )
+
+            tasks = [
+                _run_batch(chunks[s : s + EMBEDDING_BATCH_SIZE])
+                for s in range(0, len(chunks), EMBEDDING_BATCH_SIZE)
+            ]
+            await asyncio.gather(*tasks)
 
         asyncio.run(embed_batches())
         processed_at = int(time.time())

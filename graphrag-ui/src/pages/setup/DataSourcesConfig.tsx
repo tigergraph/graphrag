@@ -612,6 +612,37 @@ const DataSourcesConfig: React.FC = () => {
           );
         }
         buildStarted = true;
+
+        // Poll rebuild_status and show live ECC progress on the Data Sources
+        // page, identical to the progress bar shown on the KGAdmin page.
+        const creds = sessionStorage.getItem("auth")!;
+        const baseMsg =
+          `Jira ingestion complete: ${result.issues_upserted} issues updated, ` +
+          `${result.issues_deleted || 0} removed, and ` +
+          `${result.documents_loaded} changed documents loaded. `;
+        let pollDone = false;
+        while (!pollDone) {
+          await new Promise((r) => setTimeout(r, 3000));
+          try {
+            const statusResp = await fetch(
+              `/ui/${selectedGraph}/rebuild_status`,
+              { headers: { Authorization: creds } }
+            );
+            if (!statusResp.ok) break;
+            const statusData = await statusResp.json();
+            if (statusData.is_running) {
+              const stage = statusData.stage ? ` — ${statusData.stage}` : " — Building…";
+              setSyncFeedback({
+                type: "pending",
+                text: baseMsg + `GraphRAG build in progress${stage}`,
+              });
+            } else {
+              pollDone = true;
+            }
+          } catch {
+            break;
+          }
+        }
       }
       await loadSources();
       setSyncFeedback({
@@ -622,8 +653,8 @@ const DataSourcesConfig: React.FC = () => {
           `${result.documents_loaded} changed documents loaded.` +
           (buildStarted
             ? missingChunkEmbeddings > 0
-              ? ` A GraphRAG recovery build has started for ${missingChunkEmbeddings} chunks missing embeddings.`
-              : " The GraphRAG build for chunking and embedding has started."
+              ? ` GraphRAG recovery build complete.`
+              : " GraphRAG build for chunking and embedding complete."
             : " No Jira changes were detected, so no new build was started."),
       });
     } catch (error: any) {
