@@ -18,3 +18,20 @@ def test_removes_opencypher_markdown_fence():
 def test_does_not_strip_query_characters():
     query = 'MATCH (issue:JiraIssue) WHERE issue.issue_key = "GML-2191" RETURN issue'
     assert _clean_cypher_output(query) == query
+
+
+def test_removes_plain_markdown_fence():
+    assert _clean_cypher_output("```\nMATCH (n) RETURN n\n```") == (
+        "MATCH (n) RETURN n"
+    )
+
+
+def test_removes_uppercase_fence():
+    assert _clean_cypher_output("```CYPHER\nMATCH (n) RETURN n\n```") == (
+        "MATCH (n) RETURN n"
+    )
+
+
+def test_plain_query_unchanged():
+    query = "MATCH (n) RETURN n"
+    assert _clean_cypher_output(query) == query

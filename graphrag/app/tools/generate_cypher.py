@@ -32,7 +32,7 @@ def _clean_cypher_output(value: str) -> str:
     """Remove an optional Markdown language fence without altering the query."""
     text = value.strip()
     fenced = re.fullmatch(
-        r"```(?:open)?cypher\s*\n?(.*?)\n?```",
+        r"```(?:(?:open)?cypher)?\s*\n?(.*?)\n?```",
         text,
         flags=re.IGNORECASE | re.DOTALL,
     )
