@@ -236,7 +236,7 @@ def rebuild_status(
             "warnings": task_info.get("warnings"),
             "communities_incomplete": task_info.get("communities_incomplete"),
         }
-
+    
     return {
         "graphname": graphname,
         "method": ecc_method,
@@ -338,11 +338,7 @@ async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
             )
 
         try:
-            result = await run_func(
-                graphname,
-                conn,
-                progress=progress_cb,
-            )
+            result = await run_func(graphname, conn, progress=progress_cb)
         except TypeError:
             result = await run_func(graphname, conn)
         completion = {"status": "completed", "completed_at": time.time()}

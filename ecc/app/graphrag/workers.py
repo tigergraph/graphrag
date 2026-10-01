@@ -154,11 +154,8 @@ async def chunk_doc(
 
         v_id = doc["v_id"].lower()
 
-        # For Jira issue documents, look up the authoritative JiraIssue vertex ID
-        # from the Document's CONTAINS_ENTITY edge (set by the connector mapper).
-        # workers.py cannot reliably derive the key-based vertex ID from the
-        # numeric issue doc_id alone (e.g. "jira:issue-doc:207120" → wrong
-        # "jira:issue:207120", correct is "jira:gml-2191:issue").
+        # Look up the authoritative JiraIssue vertex ID from the Document's
+        # CONTAINS_ENTITY edge — derived IDs are unreliable for key-based vertices.
         jira_issue_vertex_id: str | None = None
         if chunker_type == "jira" and ":issue-doc:" in v_id:
             try:
@@ -196,10 +193,8 @@ async def chunk_doc(
                 (upsert_chunk, (conn, v_id, chunk_id, chunk, i, chunker_type, jira_issue_vertex_id))
             )
 
-            # Source-native connectors already write authoritative typed
-            # entities and relationships. Their documents still use this
-            # production chunk/embed pipeline, but must not create a second,
-            # LLM-derived copy of the same graph facts.
+            # Skip LLM entity extraction for source-native connectors (jira)
+            # that already write authoritative typed entities.
             from common.config import entity_extraction_switch
             skip_extraction = chunker_type in ("jira", "jira_comment")
             if entity_extraction_switch and not skip_extraction:
@@ -266,12 +261,7 @@ async def upsert_chunk(
             "DocumentChunk", util.process_id(f"{doc_id}_chunk_{idx - 1}"), None,
         ))
     if source_type == "jira" and ":issue-doc:" in doc_id:
-        # Jira writes authoritative typed issues before ECC runs. Link each
-        # generated chunk to that stable issue vertex so vector hits can
-        # traverse into the structured Jira graph without LLM extraction.
-        # Prefer the caller-supplied vertex ID (looked up from the Document's
-        # CONTAINS_ENTITY edge in chunk_doc); fall back to the derived form
-        # only when the lookup failed.
+        # Link chunk to the authoritative JiraIssue vertex for graph traversal.
         issue_id = jira_issue_vertex_id or doc_id.replace(":issue-doc:", ":issue:", 1)
         edges.append((
             "DocumentChunk",
@@ -333,9 +323,7 @@ async def embed(
     async with embed_sem:
         logger.debug(f"Embedding {v_id}")
 
-        # Guard: skip chunks with no text — sending empty content to the
-        # embedding API returns 500 INTERNAL.  Log a warning so the gap
-        # is visible in the logs without crashing the whole rebuild.
+        # Skip empty chunks — embedding API returns 500 on empty content.
         if not content or not content.strip():
             logger.warning(
                 f"Skipping embed for {v_id}: content is empty. "
