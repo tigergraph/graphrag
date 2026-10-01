@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import time
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,8 @@ from urllib.parse import quote
 import httpx
 
 from .config import JiraDataSource
+
+logger = logging.getLogger(__name__)
 
 
 ISSUE_FIELDS = [
@@ -273,11 +276,9 @@ class JiraCloudClient:
     def iter_issue_pages(self) -> Iterator[list[dict[str, Any]]]:
         """Yield complete issue pages for durable page-level synchronization.
 
-        Comment completion is parallelised across issues within each page so
-        that the extra Jira API calls needed for issues with >10 comments are
-        issued concurrently rather than one at a time.  ``_complete_comments``
-        returns immediately when an issue already carries all its comments, so
-        it is safe to submit every issue to the pool.
+        Comment completion and changelog fetching are parallelised / batched
+        across issues within each page so that extra Jira API calls run
+        concurrently rather than one at a time.
         """
         fields = list(ISSUE_FIELDS)
         story_points = self.source.scope.story_points_field
@@ -285,10 +286,6 @@ class JiraCloudClient:
             fields.append(story_points)
         for issues in self._iter_search_pages(fields=fields, incremental=True):
             if self.source.scope.include_comments:
-                # Use up to COMMENT_FETCH_WORKERS threads so that the extra
-                # comment-pagination API calls for issues with >10 comments run
-                # in parallel.  httpx.Client uses httpcore's connection pool
-                # which is thread-safe for concurrent requests.
                 workers = min(len(issues), COMMENT_FETCH_WORKERS)
                 with concurrent.futures.ThreadPoolExecutor(
                     max_workers=workers, thread_name_prefix="jira-comment"
@@ -297,9 +294,58 @@ class JiraCloudClient:
                         pool.submit(self._complete_comments, issue)
                         for issue in issues
                     ]
-                    # Wait for all and propagate any exception immediately.
                     for fut in concurrent.futures.as_completed(futures):
                         fut.result()
+            # Bulk-fetch changelogs for all issues in this page in one POST.
+            self._bulk_fetch_changelogs(issues)
+            yield issues
+
+    def iter_issues_by_keys(self, keys: set[str]) -> Iterator[list[dict[str, Any]]]:
+        """Fetch specific Jira issues by key without a full incremental scan.
+
+        Used for recovery: when a previous sync wrote structural vertices but
+        failed before embedding, this fetches only the failed issues by key
+        (JQL ``key in (...)``), avoiding a full re-scan of all Jira issues.
+        Yields pages of up to 100 issues with comments completed, identical in
+        structure to ``iter_issue_pages()``.
+        """
+        if not keys:
+            return
+        fields = list(ISSUE_FIELDS)
+        story_points = self.source.scope.story_points_field
+        if story_points:
+            fields.append(story_points)
+        keys_sorted = sorted(keys)
+        for i in range(0, len(keys_sorted), 100):
+            batch = keys_sorted[i : i + 100]
+            jql = "key in (" + ", ".join(batch) + ") ORDER BY updated ASC, key ASC"
+            payload = self._request(
+                "POST",
+                "/rest/api/3/search/jql",
+                json={
+                    "jql": jql,
+                    "fields": fields,
+                    "fieldsByKeys": False,
+                    "maxResults": 100,
+                },
+                headers={"Content-Type": "application/json"},
+            )
+            issues = payload.get("issues") or []
+            if not issues:
+                continue
+            if self.source.scope.include_comments:
+                workers = min(len(issues), COMMENT_FETCH_WORKERS)
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix="jira-recovery"
+                ) as pool:
+                    futures = [
+                        pool.submit(self._complete_comments, issue)
+                        for issue in issues
+                    ]
+                    for fut in concurrent.futures.as_completed(futures):
+                        fut.result()
+            # Bulk-fetch changelogs for all issues in this page in one POST.
+            self._bulk_fetch_changelogs(issues)
             yield issues
 
     def iter_issues(self) -> Iterator[dict[str, Any]]:
@@ -333,3 +379,64 @@ class JiraCloudClient:
         page["comments"] = comments
         page["total"] = total
         fields["comment"] = page
+
+    def _bulk_fetch_changelogs(self, issues: list[dict[str, Any]]) -> None:
+        """Bulk-fetch changelogs for up to 1,000 issues in a single POST.
+
+        Uses POST /rest/api/3/changelog/bulkfetch which returns changelogs for
+        all requested issues in one round-trip instead of N individual GETs.
+        Paginates via nextPageToken if the response is truncated.
+        Results are attached at issue["changelog"]["histories"] keyed by
+        Jira issue ID so the mapper can access them as issue.get("changelog").
+        On any error the method returns silently — no issue is blocked.
+        """
+        if not issues:
+            return
+
+        # Build a mapping from Jira numeric id → issue dict for fast lookup.
+        id_to_issue: dict[str, dict[str, Any]] = {
+            str(issue["id"]): issue for issue in issues if issue.get("id")
+        }
+        keys = [issue["key"] for issue in issues if issue.get("key")]
+        if not keys:
+            return
+
+        # Initialise empty changelog on every issue so mapper never sees None.
+        for issue in issues:
+            issue.setdefault("changelog", {"histories": []})
+
+        try:
+            token: str | None = None
+            while True:
+                body: dict[str, Any] = {
+                    "issueIdsOrKeys": keys,
+                    "maxResults": 100,
+                }
+                if token:
+                    body["nextPageToken"] = token
+                payload = self._request(
+                    "POST",
+                    "/rest/api/3/changelog/bulkfetch",
+                    json=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                for entry in payload.get("issueChangeLogs") or []:
+                    issue_id = str(entry.get("issueId") or "")
+                    issue = id_to_issue.get(issue_id)
+                    if issue is None:
+                        continue
+                    histories = issue["changelog"].setdefault("histories", [])
+                    for h in entry.get("changeHistories") or []:
+                        # Normalise ms-epoch timestamp → ISO string for mapper.
+                        created = h.get("created")
+                        if isinstance(created, (int, float)):
+                            created = datetime.fromtimestamp(
+                                created / 1000, tz=timezone.utc
+                            ).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                            h = dict(h, created=created)
+                        histories.append(h)
+                token = payload.get("nextPageToken")
+                if not token:
+                    break
+        except Exception as exc:
+            logger.warning("bulk changelog fetch failed: %s — skipping", exc)

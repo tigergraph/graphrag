@@ -230,6 +230,7 @@ class JiraIssueMapper:
             fields=fields,
             project=project,
             description=description,
+            changelog=issue.get("changelog") or {},
         )
         content_hash = hashlib.sha256(document_text.encode("utf-8")).hexdigest()
 
@@ -602,6 +603,7 @@ class JiraIssueMapper:
         fields: dict[str, Any],
         project: dict[str, Any],
         description: str,
+        changelog: dict[str, Any] | None = None,
     ) -> str:
         status = fields.get("status") or {}
         status_category = status.get("statusCategory") or {}
@@ -640,4 +642,46 @@ class JiraIssueMapper:
                     ),
                 ]
             )
+
+        # Status / assignee / priority change history from the Jira changelog.
+        # Sorted oldest-first so the timeline reads naturally.
+        history_lines = self._changelog_lines(changelog or {})
+        if history_lines:
+            lines.append("")
+            lines.append("## Status History")
+            lines.extend(history_lines)
+
         return "\n".join(lines).strip() + "\n"
+
+    # Fields we care about in the changelog — skip noise (attachment changes,
+    # rank updates, etc.).
+    _CHANGELOG_FIELDS = {"status", "assignee", "priority", "resolution"}
+
+    def _changelog_lines(self, changelog: dict[str, Any]) -> list[str]:
+        """Return formatted history lines for tracked field changes."""
+        histories = changelog.get("histories") or []
+        # Sort oldest-first for a readable timeline
+        histories = sorted(histories, key=lambda h: h.get("created") or "")
+        lines = []
+        for history in histories:
+            author = _display_name(history.get("author")) or "Unknown"
+            created = _datetime(history.get("created")) or history.get("created") or ""
+            items = history.get("items") or []
+            for item in items:
+                field = str(item.get("field") or "").lower()
+                if field not in self._CHANGELOG_FIELDS:
+                    continue
+                from_val = str(item.get("fromString") or "").strip()
+                to_val = str(item.get("toString") or "").strip()
+                if not to_val:
+                    continue
+                if from_val:
+                    lines.append(
+                        f"- {created}: {author} changed {field} from"
+                        f" \"{from_val}\" to \"{to_val}\""
+                    )
+                else:
+                    lines.append(
+                        f"- {created}: {author} set {field} to \"{to_val}\""
+                    )
+        return lines
