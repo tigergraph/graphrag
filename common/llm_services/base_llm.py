@@ -185,6 +185,11 @@ class LLM_Model:
     Used to connect to external LLM API services, and retrieve customized prompts for the tools.
     """
 
+    # Whether the provider's native structured output enforces strict JSON
+    # schema, which rejects free-form maps. True for the OpenAI family
+    # (GML-2302); callers with such maps then ask for tool calling instead.
+    strict_structured_output = False
+
     def __init__(self, config):
         self.llm = None
         self.config = config
@@ -599,17 +604,24 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         messages: list,
         schema,
         caller_name: str = "unknown",
+        method: str = None,
     ):
         """Invoke the chat model with native structured output.
 
         Returns an instance of ``schema`` (a pydantic class). Used by the
         planner to get a typed ``Plan`` back. Falls back to a JSON-extraction
         parse when the provider's structured-output path returns text.
+
+        ``method`` is passed to ``with_structured_output`` when given; ``None``
+        keeps the provider's default.
         """
         usage_data = {}
         with get_openai_callback() as cb:
             try:
-                structured = self.llm.with_structured_output(schema)
+                if method is None:
+                    structured = self.llm.with_structured_output(schema)
+                else:
+                    structured = self.llm.with_structured_output(schema, method=method)
                 result = structured.invoke(messages)
             except Exception as exc:
                 logger.warning(
