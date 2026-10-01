@@ -23,24 +23,6 @@ class InvalidFunctionCallException(Exception):
     pass
 
 
-# Built-in pyTigerGraph reads remain available when an embedding-store backend
-# cannot enumerate its registered function documents. Keep this list read-only:
-# generated calls execute with the request's TigerGraph connection.
-SAFE_READ_FUNCTIONS = frozenset({
-    "getEdgeCount",
-    "getEdgeType",
-    "getEdgeTypes",
-    "getEdges",
-    "getSchema",
-    "getVertexCount",
-    "getVertexStats",
-    "getVertexType",
-    "getVertexTypes",
-    "getVertices",
-    "getVerticesById",
-})
-
-
 def validate_schema(conn, v_types, e_types, v_attrs, e_attrs):
     LogWriter.info(f"request_id={req_id_cv.get()} ENTRY validate_schema()")
     if v_types:

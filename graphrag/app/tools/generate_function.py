@@ -33,7 +33,6 @@ from .validation_utils import (
     InvalidFunctionCallException,
     MapQuestionToSchemaException,
     NoDocumentsFoundException,
-    SAFE_READ_FUNCTIONS,
     validate_function_call,
     validate_schema,
 )
@@ -172,15 +171,12 @@ class GenerateFunction(BaseTool):
         # Prioritize pyTigerGraph docs over custom docs
         docs = pytg_docs + custom_docs
 
-        registered_function_calls = [
+        valid_function_calls = [
             x["function_header"]
             for x in self.embedding_store.list_registered_documents(
                 output_fields=["function_header"]
             )
         ]
-        valid_function_calls = list(
-            set(registered_function_calls) | SAFE_READ_FUNCTIONS
-        )
 
         if len(docs) == 0:
             LogWriter.warning(f"request_id={req_id_cv.get()} WARN no documents found")
