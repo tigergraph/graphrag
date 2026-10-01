@@ -193,15 +193,18 @@ async def chunk_doc(
                 (upsert_chunk, (conn, v_id, chunk_id, chunk, i, chunker_type, jira_issue_vertex_id))
             )
 
-            # Skip LLM entity extraction for source-native connectors (jira)
-            # that already write authoritative typed entities.
-            from common.config import entity_extraction_switch
+            # send chunks to have entities extracted
             skip_extraction = chunker_type in ("jira", "jira_comment")
-            if entity_extraction_switch and not skip_extraction:
+            if not skip_extraction:
                 logger.debug("chunk writes to extract_chan")
                 await extract_chan.put((chunk, chunk_id))
-            else:
-                logger.debug("chunk writes to embed_chan (extraction bypassed)")
+
+            # When extraction is enabled the extract worker pushes the
+            # summary-augmented embed message itself (Contextual Retrieval),
+            # so only embed the raw chunk here when extraction is off.
+            from common.config import entity_extraction_switch
+            if not entity_extraction_switch or skip_extraction:
+                logger.debug("chunk writes to embed_chan (no extraction)")
                 await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
                 if tracker is not None:
                     tracker.chunk_done(chunk_id)
