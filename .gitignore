@@ -18,9 +18,3 @@ __pycache__/
 
 # Release docs
 /RELEASE_NOTES.md
-
-# Jira / graph config files contain real credentials — never commit them.
-# Use docs/tutorials/configs/graph_configs/data_sources.json as the example.
-configs/graph_configs/*/data_sources.json
-configs/graph_configs/*/.DS_Store
-configs/.DS_Store
