@@ -300,6 +300,8 @@ const KGAdmin = () => {
       setRefreshMessage("");
       setPollingActive(false);
       setRebuildProgress(null);
+    } else if (refreshGraphName) {
+      checkRebuildStatus(refreshGraphName);
     }
   };
 
@@ -2734,6 +2736,7 @@ const KGAdmin = () => {
                     setRefreshGraphName(v);
                     sessionStorage.setItem("selectedGraph", v);
                     window.dispatchEvent(new Event("graphrag:selectedGraph"));
+                    checkRebuildStatus(v);
                   }}
                   disabled={isRefreshing || isRebuildRunning || isCheckingStatus}
                 >

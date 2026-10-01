@@ -99,6 +99,7 @@ app.include_router(routers.supportai_router, prefix=PATH_PREFIX)
 app.include_router(routers.queryai_router, prefix=PATH_PREFIX)
 app.include_router(routers.ui_router, prefix=PATH_PREFIX)
 app.include_router(routers.mcp_servers_router, prefix=PATH_PREFIX)
+app.include_router(routers.data_sources_router, prefix=PATH_PREFIX)
 
 
 excluded_metrics_paths = ("/docs", "/openapi.json", "/metrics")
