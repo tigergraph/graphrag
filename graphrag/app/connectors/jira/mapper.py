@@ -17,6 +17,8 @@ from .adf import adf_to_markdown
 from .config import JiraDataSource
 from .schema import (
     JIRA_ASSIGNEE_EDGE,
+    JIRA_CHANGE_AUTHOR_EDGE,
+    JIRA_CHANGE_EDGE,
     JIRA_COMMENT_AFTER_EDGE,
     JIRA_COMMENT_AUTHOR_EDGE,
     JIRA_COMMENT_ISSUE_EDGE,
@@ -62,6 +64,17 @@ class MappedComment:
 
 
 @dataclass
+class MappedFact:
+    """One short searchable fact for an issue.
+
+    entities are extra CONTAINS_ENTITY targets besides the issue itself.
+    """
+
+    chunk: MappedChunk
+    entities: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass
 class MappedIssue:
     issue_id: str
     issue_vertex_id: str
@@ -69,7 +82,9 @@ class MappedIssue:
     content_hash: str
     vertices: list[VertexRecord]
     edges: list[EdgeRecord]
-    document: dict[str, Any]
+    facts: list[MappedFact]
+    legacy_document_id: str
+    change_vertex_ids: list[str]
     comments: list[MappedComment]
 
 
@@ -224,15 +239,6 @@ class JiraIssueMapper:
         issue_url = f"{site_url}/browse/{issue_key}"
 
         description = adf_to_markdown(fields.get("description"))
-        document_text = self._document_text(
-            issue_key=issue_key,
-            issue_url=issue_url,
-            fields=fields,
-            project=project,
-            description=description,
-            changelog=issue.get("changelog") or {},
-        )
-        content_hash = hashlib.sha256(document_text.encode("utf-8")).hexdigest()
 
         status = fields.get("status") or {}
         status_category = status.get("statusCategory") or {}
@@ -257,7 +263,6 @@ class JiraIssueMapper:
             "updated": _datetime(fields.get("updated")),
             "due": _datetime(fields.get("duedate")),
             "url": issue_url,
-            "content_hash": content_hash,
         }
         if story_points is not None:
             try:
@@ -376,13 +381,13 @@ class JiraIssueMapper:
             )
             comment_text = self._comment_document_text(
                 issue_key=issue_key,
-                issue_url=issue_url,
-                issue_summary=str(fields.get("summary") or ""),
                 comment=comment,
-                visibility=visibility_text,
                 body=comment_body,
             )
-            chunks = [str(chunk).strip() for chunk in self.comment_chunker.chunk(comment_text)]
+            chunks = [
+                self._lead_with_issue(issue_key, str(chunk))
+                for chunk in self.comment_chunker.chunk(comment_text)
+            ]
             chunks = [chunk for chunk in chunks if chunk]
             comment_hash = hashlib.sha256(
                 (
@@ -392,6 +397,7 @@ class JiraIssueMapper:
             ).hexdigest()
             comment_attrs = {
                 "comment_id": comment_id,
+                "body": comment_body,
                 "created": _datetime(comment.get("created")),
                 "updated": _datetime(comment.get("updated")),
                 "visibility": visibility_text,
@@ -552,6 +558,42 @@ class JiraIssueMapper:
                 )
             )
 
+        change_vertices, change_edges, change_parts = self._map_changes(
+            issue_id=issue_id,
+            issue_key=issue_key,
+            changelog=issue.get("changelog") or {},
+        )
+        for vertex in change_vertices:
+            add_vertex(vertex)
+        edges.extend(change_edges)
+        facts = self._facts(
+            issue_vertex_id,
+            [
+                (
+                    self._record_text(
+                        issue_key=issue_key,
+                        issue_url=issue_url,
+                        fields=fields,
+                        project=project,
+                    ),
+                    (),
+                ),
+                *self._description_parts(issue_key, description),
+                *change_parts,
+            ],
+        )
+        content_hash = hashlib.sha256(
+            "\0".join(fact.chunk.text for fact in facts).encode("utf-8")
+        ).hexdigest()
+        issue_vertex = vertices[("JiraIssue", issue_vertex_id)]
+        issue_attributes = dict(issue_vertex.attributes)
+        issue_attributes["content_hash"] = content_hash
+        vertices[("JiraIssue", issue_vertex_id)] = VertexRecord(
+            "JiraIssue",
+            issue_vertex_id,
+            issue_attributes,
+        )
+
         return MappedIssue(
             issue_id=issue_id,
             issue_vertex_id=issue_vertex_id,
@@ -559,12 +601,9 @@ class JiraIssueMapper:
             content_hash=content_hash,
             vertices=list(vertices.values()),
             edges=edges,
-            document={
-                "doc_id": self._id("issue-doc", issue_id),
-                "doc_type": "jira",
-                "content": document_text,
-                "position": 0,
-            },
+            facts=facts,
+            legacy_document_id=self._id("issue-doc", issue_id),
+            change_vertex_ids=[vertex.vertex_id for vertex in change_vertices],
             comments=mapped_comments,
         )
 
@@ -572,102 +611,113 @@ class JiraIssueMapper:
         self,
         *,
         issue_key: str,
-        issue_url: str,
-        issue_summary: str,
         comment: dict[str, Any],
-        visibility: str,
         body: str,
     ) -> str:
         author = _display_name(comment.get("author")) or "Unknown user"
-        return "\n".join(
-            [
-                f"# Comment by {author} on {issue_key}: {issue_summary}",
-                f"Issue: {issue_key}",
-                f"URL: {issue_url}",
-                f"Comment ID: {comment.get('id') or ''}",
-                f"Author: {author}",
-                f"Created: {comment.get('created') or ''}",
-                f"Updated: {comment.get('updated') or ''}",
-                f"Visibility: {visibility or 'default'}",
-                "",
-                "## Comment",
-                body,
-            ]
-        ).strip() + "\n"
+        created = _datetime(comment.get("created")) or ""
+        when = f" at {created}" if created else ""
+        return (
+            f"Issue: {issue_key}\n"
+            f"Comment by {author}{when}:\n"
+            f"{body.strip()}"
+        )
 
-    def _document_text(
+    def _lead_with_issue(self, issue_key: str, text: str) -> str:
+        cleaned = text.strip()
+        prefix = f"Issue: {issue_key}"
+        if not cleaned or cleaned.startswith(prefix):
+            return cleaned
+        return f"{prefix}\n{cleaned}"
+
+    def _record_text(
         self,
         *,
         issue_key: str,
         issue_url: str,
         fields: dict[str, Any],
         project: dict[str, Any],
-        description: str,
-        changelog: dict[str, Any] | None = None,
     ) -> str:
         status = fields.get("status") or {}
         status_category = status.get("statusCategory") or {}
         issue_type = fields.get("issuetype") or {}
         priority = fields.get("priority") or {}
-        lines = [
-            f"# {issue_key}: {fields.get('summary') or ''}",
-            f"URL: {issue_url}",
-            f"Project: {project.get('key') or ''} {project.get('name') or ''}".rstrip(),
-            f"Type: {issue_type.get('name') or ''}",
-            (
-                f"Status: {status.get('name') or ''} "
-                f"({status_category.get('key') or ''})"
-            ).rstrip(),
-            f"Priority: {priority.get('name') or ''}",
-            f"Assignee: {_display_name(fields.get('assignee')) or 'Unassigned'}",
-            f"Reporter: {_display_name(fields.get('reporter'))}",
-            f"Labels: {_comma_names(fields.get('labels'))}",
-            f"Components: {_comma_names(fields.get('components'))}",
-            f"Fix versions: {_comma_names(fields.get('fixVersions'))}",
-            f"Updated: {fields.get('updated') or ''}",
-            "",
-            "## Description",
-            description or "(No description)",
+        resolution = fields.get("resolution") or {}
+        project_line = (
+            f"{project.get('key') or ''} {project.get('name') or ''}".strip()
+        )
+        status_name = str(status.get("name") or "")
+        category = str(status_category.get("key") or "")
+        status_line = (
+            f"{status_name} ({category})".strip()
+            if category
+            else status_name
+        )
+        lines = [f"Issue: {issue_key}"]
+        for label, value in (
+            ("Summary", fields.get("summary")),
+            ("URL", issue_url),
+            ("Project", project_line),
+            ("Type", issue_type.get("name")),
+            ("Status", status_line),
+            ("Priority", priority.get("name")),
+            ("Resolution", resolution.get("name")),
+            ("Assignee", _display_name(fields.get("assignee")) or "Unassigned"),
+            ("Reporter", _display_name(fields.get("reporter"))),
+            ("Labels", _comma_names(fields.get("labels"))),
+            ("Components", _comma_names(fields.get("components"))),
+            ("Fix versions", _comma_names(fields.get("fixVersions"))),
+            ("Due", _datetime(fields.get("duedate"))),
+            ("Updated", _datetime(fields.get("updated"))),
+        ):
+            text = str(value or "").strip()
+            if text:
+                lines.append(f"{label}: {text}")
+        return "\n".join(lines)
+
+    def _description_parts(
+        self,
+        issue_key: str,
+        description: str,
+    ) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
+        if not description or not description.strip():
+            return []
+        source_text = f"Issue: {issue_key}\nDescription:\n{description.strip()}"
+        return [
+            (self._lead_with_issue(issue_key, str(piece)), ())
+            for piece in self.comment_chunker.chunk(source_text)
+            if str(piece).strip()
         ]
-        attachments = fields.get("attachment") or []
-        if attachments:
-            lines.extend(
-                [
-                    "",
-                    "## Attachments",
-                    ", ".join(
-                        str(item.get("filename"))
-                        for item in attachments
-                        if item.get("filename")
-                    ),
-                ]
-            )
 
-        # Status / assignee / priority change history from the Jira changelog.
-        # Sorted oldest-first so the timeline reads naturally.
-        history_lines = self._changelog_lines(changelog or {})
-        if history_lines:
-            lines.append("")
-            lines.append("## Status History")
-            lines.extend(history_lines)
-
-        return "\n".join(lines).strip() + "\n"
-
-    # Fields we care about in the changelog — skip noise (attachment changes,
-    # rank updates, etc.).
     _CHANGELOG_FIELDS = {"status", "assignee", "priority", "resolution"}
 
-    def _changelog_lines(self, changelog: dict[str, Any]) -> list[str]:
-        """Return formatted history lines for tracked field changes."""
-        histories = changelog.get("histories") or []
-        # Sort oldest-first for a readable timeline
-        histories = sorted(histories, key=lambda h: h.get("created") or "")
-        lines = []
+    def _map_changes(
+        self,
+        *,
+        issue_id: str,
+        issue_key: str,
+        changelog: dict[str, Any],
+    ) -> tuple[
+        list[VertexRecord],
+        list[EdgeRecord],
+        list[tuple[str, tuple[tuple[str, str], ...]]],
+    ]:
+        """One JiraChange event and one fact per tracked changelog item."""
+        histories = sorted(
+            changelog.get("histories") or [],
+            key=lambda history: history.get("created") or "",
+        )
+        vertices: list[VertexRecord] = []
+        edges: list[EdgeRecord] = []
+        parts: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+        change_index = 0
+        issue_vertex_id = self._issue_id(issue_key)
         for history in histories:
-            author = _display_name(history.get("author")) or "Unknown"
-            created = _datetime(history.get("created")) or history.get("created") or ""
-            items = history.get("items") or []
-            for item in items:
+            author = history.get("author") or {}
+            author_name = _display_name(author) or "Unknown"
+            created = _datetime(history.get("created"))
+            history_id = str(history.get("id") or "")
+            for item in history.get("items") or []:
                 field = str(item.get("field") or "").lower()
                 if field not in self._CHANGELOG_FIELDS:
                     continue
@@ -675,13 +725,90 @@ class JiraIssueMapper:
                 to_val = str(item.get("toString") or "").strip()
                 if not to_val:
                     continue
+                change_index += 1
+                change_key = (
+                    f"{issue_id}:{history_id or change_index}:"
+                    f"{field}:{change_index}"
+                )
+                change_vertex_id = self._id("change", change_key)
+                attributes = {
+                    "change_id": change_key,
+                    "field": field,
+                    "from_value": from_val,
+                    "to_value": to_val,
+                    "created": created,
+                    "ontology_class": "Event",
+                }
+                vertices.append(
+                    VertexRecord(
+                        "JiraChange",
+                        change_vertex_id,
+                        {
+                            key: value
+                            for key, value in attributes.items()
+                            if value not in (None, "")
+                        },
+                    )
+                )
+                edges.append(
+                    EdgeRecord(
+                        "JiraIssue",
+                        issue_vertex_id,
+                        JIRA_CHANGE_EDGE,
+                        "JiraChange",
+                        change_vertex_id,
+                    )
+                )
+                author_vertex = self._user_vertex(author)
+                if author_vertex:
+                    vertices.append(author_vertex)
+                    edges.append(
+                        EdgeRecord(
+                            "JiraChange",
+                            change_vertex_id,
+                            JIRA_CHANGE_AUTHOR_EDGE,
+                            "JiraUser",
+                            author_vertex.vertex_id,
+                        )
+                    )
+                when = f"{created}: " if created else ""
                 if from_val:
-                    lines.append(
-                        f"- {created}: {author} changed {field} from"
-                        f" \"{from_val}\" to \"{to_val}\""
+                    sentence = (
+                        f"{when}{author_name} changed {field} from "
+                        f"\"{from_val}\" to \"{to_val}\""
                     )
                 else:
-                    lines.append(
-                        f"- {created}: {author} set {field} to \"{to_val}\""
+                    sentence = (
+                        f"{when}{author_name} set {field} to \"{to_val}\""
                     )
-        return lines
+                parts.append(
+                    (
+                        f"Issue: {issue_key}\n{sentence}",
+                        (("JiraChange", change_vertex_id),),
+                    )
+                )
+        return vertices, edges, parts
+
+    def _facts(
+        self,
+        issue_vertex_id: str,
+        parts: list[tuple[str, tuple[tuple[str, str], ...]]],
+    ) -> list[MappedFact]:
+        facts: list[MappedFact] = []
+        for text, entities in parts:
+            cleaned = text.strip()
+            if not cleaned:
+                continue
+            digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12]
+            index = len(facts)
+            facts.append(
+                MappedFact(
+                    chunk=MappedChunk(
+                        chunk_id=f"{issue_vertex_id}:fact:{index}:{digest}",
+                        index=index,
+                        text=cleaned + "\n",
+                    ),
+                    entities=entities,
+                )
+            )
+        return facts

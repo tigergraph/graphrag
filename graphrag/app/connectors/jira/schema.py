@@ -16,6 +16,8 @@ JIRA_COMMENT_ISSUE_EDGE = "JIRA_COMMENT_ON"
 JIRA_COMMENT_AUTHOR_EDGE = "JIRA_COMMENTED_BY"
 JIRA_COMMENT_REPLY_EDGE = "JIRA_COMMENT_REPLIES_TO"
 JIRA_COMMENT_AFTER_EDGE = "JIRA_COMMENT_AFTER"
+JIRA_CHANGE_EDGE = "JIRA_HAS_CHANGE"
+JIRA_CHANGE_AUTHOR_EDGE = "JIRA_CHANGE_BY"
 
 
 def _attribute_types(metadata: dict[str, Any]) -> dict[str, str]:
@@ -67,7 +69,8 @@ def jira_schema_proposal() -> SchemaProposal:
             "A Jira work item modeled as a POLE+O Object subtype. Filter using "
             "issue_key, status, status_category (new, indeterminate, or done), "
             "priority, issue_type, resolution, labels, components, "
-            "fix_versions, created, updated, or due."
+            "fix_versions, created, updated, or due. Status, assignee, "
+            "priority, and resolution changes are JiraChange events."
         ),
         [
             ("issue_key", "STRING"),
@@ -103,18 +106,36 @@ def jira_schema_proposal() -> SchemaProposal:
     proposal.add_vertex(
         "JiraComment",
         (
-            "A Jira comment modeled as a POLE+O Event subtype. Its content is "
-            "embedded through deterministic comment-specific document chunks; "
-            "use graph edges for issue, author, ordering, and explicit replies."
+            "A Jira comment modeled as a POLE+O Event subtype. body is the "
+            "comment text. Searchable text is also stored as document chunks. "
+            "Use graph edges for issue, author, ordering, and explicit replies."
         ),
         [
             ("comment_id", "STRING"),
+            ("body", "STRING"),
             ("created", "DATETIME"),
             ("updated", "DATETIME"),
             ("visibility", "STRING"),
             ("is_public", "BOOL"),
             ("ontology_class", "STRING"),
             ("content_hash", "STRING"),
+        ],
+    )
+    proposal.add_vertex(
+        "JiraChange",
+        (
+            "One status, assignee, priority, or resolution change, modeled as "
+            "a POLE+O Event subtype. field is the changed field, from_value "
+            "and to_value are the previous and new values, and created is "
+            "when the change happened. The author is JIRA_CHANGE_BY."
+        ),
+        [
+            ("change_id", "STRING"),
+            ("field", "STRING"),
+            ("from_value", "STRING"),
+            ("to_value", "STRING"),
+            ("created", "DATETIME"),
+            ("ontology_class", "STRING"),
         ],
     )
 
@@ -175,6 +196,18 @@ def jira_schema_proposal() -> SchemaProposal:
         "JiraComment",
         "JiraComment",
         "Chronological order between adjacent comments on one issue.",
+    )
+    proposal.add_edge_pair(
+        JIRA_CHANGE_EDGE,
+        "JiraIssue",
+        "JiraChange",
+        "A status, assignee, priority, or resolution change on this issue.",
+    )
+    proposal.add_edge_pair(
+        JIRA_CHANGE_AUTHOR_EDGE,
+        "JiraChange",
+        "JiraUser",
+        "The Atlassian account that made the change.",
     )
     return proposal
 
@@ -250,6 +283,8 @@ def jira_schema_status(conn) -> dict[str, Any]:
         ("CONTAINS_ENTITY", "DocumentChunk", "JiraIssue"),
         ("CONTAINS_ENTITY", "Document", "JiraComment"),
         ("CONTAINS_ENTITY", "DocumentChunk", "JiraComment"),
+        ("CONTAINS_ENTITY", "Document", "JiraChange"),
+        ("CONTAINS_ENTITY", "DocumentChunk", "JiraChange"),
     )
     for edge, source, target in required_links:
         if not existing.has_edge_pair(edge, source, target):
