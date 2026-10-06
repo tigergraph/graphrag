@@ -12,6 +12,8 @@ from connectors.jira.config import JiraDataSource
 from connectors.jira.mapper import JiraIssueMapper
 from connectors.jira.schema import (
     JIRA_ASSIGNEE_EDGE,
+    JIRA_CHANGE_AUTHOR_EDGE,
+    JIRA_CHANGE_EDGE,
     JIRA_COMMENT_AFTER_EDGE,
     JIRA_COMMENT_AUTHOR_EDGE,
     JIRA_COMMENT_ISSUE_EDGE,
@@ -295,13 +297,18 @@ def test_existing_hash_lookup_treats_new_issue_ids_as_missing(tmp_path):
     existing_id = "jira:cloud-1:issue:existing"
 
     class Connection:
-        def getVertices(self, vertex_type, select=""):
-            assert vertex_type == "JiraIssue"
-            assert select == "content_hash"
+        def runInterpretedQuery(self, query):
+            assert "JiraIssue" in query
             return [
                 {
-                    "v_id": existing_id,
-                    "attributes": {"content_hash": "existing-hash"},
+                    "res": [
+                        {
+                            "v_id": existing_id,
+                            "attributes": {
+                                "res.content_hash": "existing-hash",
+                            },
+                        }
+                    ]
                 }
             ]
 
@@ -342,9 +349,9 @@ def test_comment_reconciliation_deletes_only_removed_comments(
             },
         },
     }
-    mapped = JiraIssueMapper(source(), "cloud-1").map(issue)
-    current_id = "jira:cloud-1:comment:9001"
-    stale_id = "jira:cloud-1:comment:9002"
+    mapped = JiraIssueMapper(source()).map(issue)
+    current_id = mapped.comments[0].comment_vertex_id
+    stale_id = "jira:comment:9002"
 
     class Connection:
         def getEdges(self, vertex_type, vertex_id, edge_type):
@@ -375,7 +382,7 @@ def test_comment_reconciliation_deletes_only_removed_comments(
     assert hashes == {current_id: "current"}
 
 
-def test_sync_persists_checkpoint_after_each_committed_page(
+def test_sync_keeps_checkpoint_when_a_page_batch_is_interrupted(
     tmp_path,
     monkeypatch,
 ):
@@ -399,26 +406,17 @@ def test_sync_persists_checkpoint_after_each_committed_page(
 
         def iter_issue_pages(self):
             yield [issue]
-            assert store.get(
-                "TestGraph",
-                "jira-acme",
-            ).sync.checkpoint == datetime(
-                2026,
-                9,
-                20,
-                14,
-                3,
-                tzinfo=timezone.utc,
-            )
             raise RuntimeError("simulated shutdown")
 
     class Connection:
         def getVertices(self, vertex_type, select=""):
-            assert vertex_type in {"Document", "JiraIssue", "JiraComment"}
-            assert select == (
-                "id" if vertex_type == "Document" else "content_hash"
-            )
+            assert vertex_type == "Document"
+            assert select == "id"
             return []
+
+        def runInterpretedQuery(self, query):
+            assert "JiraIssue" in query or "JiraComment" in query
+            return [{"res": []}]
 
     monkeypatch.setattr(
         sync_module,
@@ -432,22 +430,139 @@ def test_sync_persists_checkpoint_after_each_committed_page(
         store=store,
         client=Client(),
     )
-    monkeypatch.setattr(service, "_upsert_issue_page", lambda *args: (0, 0))
+    monkeypatch.setattr(
+        service,
+        "_upsert_issue_records",
+        lambda *args: ([], [], 0),
+    )
 
     with pytest.raises(RuntimeError, match="simulated shutdown"):
         service.run()
 
     stored = store.get("TestGraph", "jira-acme")
-    assert stored.sync.checkpoint == datetime(
-        2026,
-        9,
-        20,
-        14,
-        3,
-        tzinfo=timezone.utc,
-    )
+    assert stored.sync.checkpoint is None
     assert stored.sync.last_completed_at is None
     assert stored.sync.last_error == "simulated shutdown"
+
+
+def test_recovery_ignores_link_stubs_and_does_not_move_checkpoint(
+    tmp_path,
+    monkeypatch,
+):
+    from connectors.jira import sync as sync_module
+
+    store = JiraSourceStore(str(tmp_path))
+    configured = store.upsert("TestGraph", source())
+    configured.sync.checkpoint = None
+    store.update_runtime_state("TestGraph", configured)
+    recovered: dict = {}
+
+    class Client:
+        def iter_issues_by_keys(self, keys):
+            recovered["keys"] = set(keys)
+            yield [
+                {
+                    "id": "1",
+                    "key": "OLD-1",
+                    "fields": {
+                        "summary": "Already started",
+                        "project": {"id": "1", "key": "PAY", "name": "Payments"},
+                        "status": {"name": "Done"},
+                        "updated": "2099-01-01T00:00:00.000+0000",
+                    },
+                }
+            ]
+
+        def iter_issue_pages(self):
+            yield [
+                {
+                    "id": "2",
+                    "key": "GLE-10",
+                    "fields": {
+                        "summary": "New project ticket",
+                        "project": {"id": "2", "key": "GLE", "name": "GLE"},
+                        "updated": "2024-01-01T00:00:00.000+0000",
+                    },
+                }
+            ]
+
+    class Connection:
+        def getVertices(self, vertex_type, select="", where="", limit=0):
+            if vertex_type == "Document":
+                return []
+            if vertex_type == "JiraIssue":
+                return [
+                    {
+                        "v_id": "jira:gle-stub:issue",
+                        "attributes": {
+                            "content_hash": "",
+                            "status": "",
+                            "updated": "1970-01-01 00:00:00",
+                        },
+                    },
+                    {
+                        "v_id": "jira:old-1:issue",
+                        "attributes": {
+                            "content_hash": "",
+                            "status": "Done",
+                            "updated": "2099-01-01 00:00:00",
+                        },
+                    },
+                ]
+            if vertex_type == "JiraComment":
+                return [
+                    {
+                        "v_id": "jira:comment:parent",
+                        "attributes": {"content_hash": "", "body": "", "created": ""},
+                    },
+                    {
+                        "v_id": "jira:comment:real",
+                        "attributes": {
+                            "content_hash": "",
+                            "body": "A real comment that was not embedded.",
+                            "created": "2024-02-01 00:00:00",
+                        },
+                    },
+                ]
+            return []
+
+        def getEdges(self, vertex_type, vertex_id, edge_type):
+            if vertex_id == "jira:comment:real":
+                return [{"to_id": "jira:pay-9:issue"}]
+            return []
+
+        def runInterpretedQuery(self, query):
+            return [{"res": []}]
+
+    monkeypatch.setattr(
+        sync_module,
+        "jira_schema_status",
+        lambda *args: {"status": "installed"},
+    )
+    monkeypatch.setattr(
+        sync_module,
+        "embedding_coverage",
+        lambda *args: {"total": 1, "missing": 0},
+    )
+    service = JiraSyncService(
+        "TestGraph",
+        store.get("TestGraph", "jira-acme"),
+        Connection(),
+        store=store,
+        client=Client(),
+    )
+    monkeypatch.setattr(
+        service,
+        "_upsert_issue_records",
+        lambda *args: ([], [], 0),
+    )
+
+    result = service.run()
+
+    assert recovered["keys"] == {"OLD-1", "PAY-9"}
+    assert result["status"] == "completed"
+    stored = store.get("TestGraph", "jira-acme")
+    assert stored.sync.checkpoint == datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 
 def test_sync_requires_rebuild_when_existing_chunks_lack_embeddings(
@@ -469,6 +584,9 @@ def test_sync_requires_rebuild_when_existing_chunks_lack_embeddings(
     class Connection:
         def getVertices(self, vertex_type, select=""):
             return []
+
+        def runInterpretedQuery(self, query):
+            return [{"res": []}]
 
     monkeypatch.setattr(
         sync_module,
@@ -546,7 +664,7 @@ def test_mapper_writes_small_schema_and_searchable_document():
             "issuelinks": [],
         },
     }
-    mapped = JiraIssueMapper(source(), "cloud-1").map(issue)
+    mapped = JiraIssueMapper(source()).map(issue)
     assert {vertex.vertex_type for vertex in mapped.vertices} == {
         "JiraComment",
         "JiraIssue",
@@ -562,15 +680,176 @@ def test_mapper_writes_small_schema_and_searchable_document():
         JIRA_COMMENT_REPLY_EDGE,
         JIRA_COMMENT_AFTER_EDGE,
     }
-    assert mapped.document["doc_type"] == "jira"
-    assert "PAY-123" in mapped.document["content"]
-    assert "Increase the gateway timeout." not in mapped.document["content"]
+    fact_text = "\n".join(fact.chunk.text for fact in mapped.facts)
+    assert fact_text.startswith("Issue: PAY-123")
+    assert "Login timeout" in fact_text
+    assert "Increase the gateway timeout." not in fact_text
+    assert "1970" not in fact_text
+    assert "Fix versions" not in fact_text
+    comment_vertex = next(
+        vertex
+        for vertex in mapped.vertices
+        if vertex.vertex_type == "JiraComment"
+        and vertex.attributes.get("comment_id") == "9001"
+    )
+    assert comment_vertex.attributes["body"] == "Increase the gateway timeout."
     assert len(mapped.comments) == 2
     assert len(mapped.comments[0].chunks) == 1
     assert mapped.comments[0].chunks[0].chunk_id.startswith(
-        "jira:cloud-1:comment:9001:chunk:0:"
+        "jira:comment:9001:chunk:0:"
     )
+    assert mapped.comments[0].chunks[0].text.startswith("Issue: PAY-123")
     assert "Increase the gateway timeout." in mapped.comments[0].chunks[0].text
+
+
+def test_issue_changes_are_separate_facts_and_events():
+    issue = {
+        "id": "10422",
+        "key": "GML-2192",
+        "fields": {
+            "summary": "Extend the LLM judge",
+            "project": {"id": "10001", "key": "GML", "name": "GraphRAG"},
+            "status": {"name": "Done", "statusCategory": {"key": "done"}},
+            "assignee": {"accountId": "prins", "displayName": "Prins Kumar"},
+            "updated": "2026-09-24T10:00:00.000+0000",
+            "description": "Judge output now accepts gemini-3.5-flash.",
+        },
+        "changelog": {
+            "histories": [
+                {
+                    "id": "7001",
+                    "created": "2026-09-16T09:00:00.000+0000",
+                    "author": {
+                        "accountId": "prins",
+                        "displayName": "Prins Kumar",
+                    },
+                    "items": [
+                        {
+                            "field": "status",
+                            "fromString": "To Do",
+                            "toString": "In Progress",
+                        },
+                        {
+                            "field": "Rank",
+                            "fromString": "1",
+                            "toString": "2",
+                        },
+                    ],
+                },
+                {
+                    "id": "7002",
+                    "created": "2026-09-24T10:00:00.000+0000",
+                    "author": {
+                        "accountId": "automation",
+                        "displayName": "Automation for Jira",
+                        "accountType": "app",
+                    },
+                    "items": [
+                        {
+                            "field": "status",
+                            "fromString": "In Progress",
+                            "toString": "Done",
+                        }
+                    ],
+                },
+            ]
+        },
+    }
+
+    mapped = JiraIssueMapper(source()).map(issue)
+    changes = [
+        vertex
+        for vertex in mapped.vertices
+        if vertex.vertex_type == "JiraChange"
+    ]
+    assert len(changes) == 2
+    assert {vertex.attributes["field"] for vertex in changes} == {"status"}
+    assert {edge.edge_type for edge in mapped.edges} >= {
+        JIRA_CHANGE_EDGE,
+        JIRA_CHANGE_AUTHOR_EDGE,
+    }
+    fact_text = "\n".join(fact.chunk.text for fact in mapped.facts)
+    assert "Issue: GML-2192" in fact_text
+    assert 'changed status from "To Do" to "In Progress"' in fact_text
+    assert 'changed status from "In Progress" to "Done"' in fact_text
+    assert "Rank" not in fact_text
+    assert "1970" not in fact_text
+    assert "Fix versions" not in fact_text
+    change_facts = [
+        fact for fact in mapped.facts if fact.entities
+    ]
+    assert len(change_facts) == 2
+    assert all(
+        entity[0] == "JiraChange" for fact in change_facts for entity in fact.entities
+    )
+    assert mapped.facts[0].chunk.chunk_id.startswith("jira:gml-2192:issue:fact:0:")
+    assert all(
+        fact.chunk.text.startswith("Issue: GML-2192") for fact in mapped.facts
+    )
+
+
+def test_issue_facts_are_upserted_directly_without_document(tmp_path, monkeypatch):
+    issue = {
+        "id": "10422",
+        "key": "GML-2192",
+        "fields": {
+            "summary": "Extend the LLM judge",
+            "project": {"id": "10001", "key": "GML", "name": "GraphRAG"},
+            "status": {"name": "Done"},
+            "description": "Judge output now accepts gemini-3.5-flash.",
+        },
+        "changelog": {
+            "histories": [
+                {
+                    "id": "7001",
+                    "created": "2026-09-16T09:00:00.000+0000",
+                    "author": {
+                        "accountId": "prins",
+                        "displayName": "Prins Kumar",
+                    },
+                    "items": [
+                        {
+                            "field": "status",
+                            "fromString": "To Do",
+                            "toString": "In Progress",
+                        }
+                    ],
+                }
+            ]
+        },
+    }
+    mapped = JiraIssueMapper(source()).map(issue)
+    service = JiraSyncService(
+        "TestGraph",
+        source(),
+        object(),
+        store=JiraSourceStore(str(tmp_path)),
+        client=object(),
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        service,
+        "_upsert_records",
+        lambda vertices, edges: captured.update(vertices=vertices, edges=edges),
+    )
+
+    service._upsert_issue_facts([mapped])
+
+    assert {vertex.vertex_type for vertex in captured["vertices"]} == {
+        "DocumentChunk",
+        "Content",
+    }
+    edge_types = {
+        (edge.source_type, edge.edge_type, edge.target_type)
+        for edge in captured["edges"]
+    }
+    assert ("DocumentChunk", "CONTAINS_ENTITY", "JiraIssue") in edge_types
+    assert ("DocumentChunk", "CONTAINS_ENTITY", "JiraChange") in edge_types
+    assert ("DocumentChunk", "HAS_CONTENT", "Content") in edge_types
+    assert ("DocumentChunk", "IS_AFTER", "DocumentChunk") in edge_types
+    assert "Document" not in {
+        vertex.vertex_type for vertex in captured["vertices"]
+    }
 
 
 def test_long_jira_comment_drops_log_heavy_blocks_before_chunking():
@@ -603,7 +882,7 @@ def test_long_jira_comment_drops_log_heavy_blocks_before_chunking():
         },
     }
 
-    mapped = JiraIssueMapper(source(), "cloud-1").map(issue)
+    mapped = JiraIssueMapper(source()).map(issue)
     content = "\n".join(
         chunk.text for chunk in mapped.comments[0].chunks
     )
@@ -634,7 +913,7 @@ def test_comment_chunks_are_upserted_directly_without_document(tmp_path, monkeyp
             },
         },
     }
-    comment = JiraIssueMapper(source(), "cloud-1").map(issue).comments[0]
+    comment = JiraIssueMapper(source()).map(issue).comments[0]
     service = JiraSyncService(
         "TestGraph",
         source(),
@@ -696,7 +975,7 @@ def test_comment_chunks_are_embedded_by_existing_store(tmp_path, monkeypatch):
             },
         },
     }
-    comment = JiraIssueMapper(source(), "cloud-1").map(issue).comments[0]
+    comment = JiraIssueMapper(source()).map(issue).comments[0]
     embedded: list[tuple[list, list]] = []
     processed: list[tuple[str, str, dict]] = []
 
@@ -720,7 +999,7 @@ def test_comment_chunks_are_embedded_by_existing_store(tmp_path, monkeypatch):
         client=object(),
     )
 
-    service._embed_comment_chunks([comment])
+    service._embed_chunks(comment.chunks)
 
     assert embedded == [
         (
@@ -843,6 +1122,7 @@ def test_legacy_comment_migration_resets_checkpoint_only_once(tmp_path):
 def test_schema_is_bounded():
     proposal = jira_schema_proposal()
     assert {vertex.name for vertex in proposal.vertices} == {
+        "JiraChange",
         "JiraComment",
         "JiraIssue",
         "JiraProject",
@@ -858,6 +1138,8 @@ def test_schema_is_bounded():
         JIRA_COMMENT_AUTHOR_EDGE,
         JIRA_COMMENT_REPLY_EDGE,
         JIRA_COMMENT_AFTER_EDGE,
+        JIRA_CHANGE_EDGE,
+        JIRA_CHANGE_AUTHOR_EDGE,
     }
 
 
@@ -957,6 +1239,8 @@ class SchemaConnection:
                 {"From": "DocumentChunk", "To": "JiraIssue"},
                 {"From": "Document", "To": "JiraComment"},
                 {"From": "DocumentChunk", "To": "JiraComment"},
+                {"From": "Document", "To": "JiraChange"},
+                {"From": "DocumentChunk", "To": "JiraChange"},
             ],
         }
         self.edges["HAS_CHILD"] = {

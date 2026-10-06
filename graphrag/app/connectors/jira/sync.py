@@ -6,30 +6,29 @@ import asyncio
 import json
 import logging
 import queue
-import tempfile
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Iterator
 
 from common.config import get_embedding_store
 from common.db.health import embedding_coverage
-from common.py_schemas import LoadingInfo
-from supportai import supportai
 
 from .client import JiraCloudClient
 from .config import JiraDataSource
 from .mapper import (
     EdgeRecord,
     JiraIssueMapper,
+    MappedChunk,
     MappedComment,
     MappedIssue,
     VertexRecord,
 )
 from .schema import (
     JIRA_ASSIGNEE_EDGE,
+    JIRA_CHANGE_AUTHOR_EDGE,
+    JIRA_CHANGE_EDGE,
     JIRA_COMMENT_AFTER_EDGE,
     JIRA_COMMENT_AUTHOR_EDGE,
     JIRA_COMMENT_ISSUE_EDGE,
@@ -50,6 +49,7 @@ CURRENT_STATE_EDGES = (
     JIRA_REPORTER_EDGE,
     JIRA_PARENT_EDGE,
     JIRA_LINK_EDGE,
+    JIRA_CHANGE_EDGE,
 )
 COMMENT_STATE_EDGES = (
     JIRA_COMMENT_ISSUE_EDGE,
@@ -166,10 +166,9 @@ class JiraSyncService:
             pending_checkpoint = self.source.sync.checkpoint
 
             # ── Recovery phase ────────────────────────────────────────────────
-            # If a previous sync wrote structural vertices but failed before
-            # embedding, those vertices have empty content_hash.  Re-fetch only
-            # those specific issues from Jira (targeted key lookup) rather than
-            # re-scanning all issues from the checkpoint.
+            # Re-embed ingested issues whose content hash was cleared before
+            # embedding finished. This does not change the checkpoint and does
+            # not replace the project scan below.
             recovery_keys = self._find_recovery_issue_keys()
             if recovery_keys:
                 recovery_docs: list[MappedIssue] = []
@@ -184,12 +183,6 @@ class JiraSyncService:
                     documents_loaded += len(changed_docs)
                     comments_deleted += deleted
                     issues_upserted += len(mapped)
-                    for item in mapped:
-                        if item.updated and (
-                            pending_checkpoint is None
-                            or item.updated > pending_checkpoint
-                        ):
-                            pending_checkpoint = item.updated
 
                 if recovery_docs or recovery_comments:
                     self._finalize_batch(
@@ -198,15 +191,14 @@ class JiraSyncService:
                         existing_hashes,
                         existing_comment_hashes,
                     )
-                # Advance checkpoint past the recovered items so the normal
-                # incremental JQL scan starts from after this recovery batch,
-                # not from the old pre-failure checkpoint.
-                if pending_checkpoint != self.source.sync.checkpoint:
-                    self.source.sync.checkpoint = pending_checkpoint
-                    self.store.update_runtime_state(self.graphname, self.source)
+                # Do not move the checkpoint here. A cleared checkpoint means a
+                # new project must be scanned from the start. Link stubs are
+                # not failed embeddings, and their update times must not become
+                # the checkpoint for that scan.
                 logger.info(
                     "Recovery complete: %d doc(s), %d comment(s) re-embedded "
-                    "for graph=%s source=%s",
+                    "for graph=%s source=%s. The project scan continues from "
+                    "the saved checkpoint.",
                     len(recovery_docs), len(recovery_comments),
                     self.graphname, self.source.id,
                 )
@@ -331,30 +323,26 @@ class JiraSyncService:
                 self.client.close()
 
     def _find_recovery_issue_keys(self) -> set[str]:
-        """Return issue keys whose embeddings are missing from a previous failed sync.
+        """Return issue keys whose own ingest was written but not embedded.
 
-        When _finalize_batch() fails, strip_content_hash() has already cleared
-        content_hash on the affected JiraIssue and JiraComment vertices.  Those
-        empty-hash vertices are the exact set that needs re-processing — no full
-        Jira re-scan required.
-
-        Uses REST++ getVertices/getEdges (not GSQL interpreted queries) so it
-        works with the app's connection pool authentication.
+        Link and parent placeholders also have an empty content_hash. They
+        were never ingested, so they are not failed embeddings. Only a full
+        issue (status or updated set) or a real comment (body or created set)
+        is recovered. This does not replace the project scan.
         """
         keys: set[str] = set()
 
-        # 1. JiraIssue vertices with empty content_hash — key is in the v_id.
         try:
             issue_verts = self.conn.getVertices(
                 "JiraIssue",
                 where='content_hash=""',
-                select="content_hash",
+                select="content_hash,status,updated",
                 limit=5000,
             ) or []
-            for v in issue_verts:
-                v_id = str(v.get("v_id", ""))
-                # v_id format: "jira:<issue_key>:issue"
-                key = v_id.removeprefix("jira:").removesuffix(":issue").upper()
+            for vertex in issue_verts:
+                if not self._issue_embed_incomplete(vertex):
+                    continue
+                key = self._issue_key_from_vertex_id(str(vertex.get("v_id", "")))
                 if key:
                     keys.add(key)
         except Exception as exc:
@@ -363,35 +351,29 @@ class JiraSyncService:
                 "graph=%s: %s", self.graphname, exc,
             )
 
-        # 2. JiraComment vertices with empty content_hash → walk JIRA_COMMENT_ON
-        #    edge to get the parent JiraIssue key.
         try:
             comment_verts = self.conn.getVertices(
                 "JiraComment",
                 where='content_hash=""',
-                select="content_hash",
+                select="content_hash,body,created",
                 limit=5000,
             ) or []
-            for cv in comment_verts:
-                comment_v_id = str(cv.get("v_id", ""))
+            for vertex in comment_verts:
+                if not self._comment_embed_incomplete(vertex):
+                    continue
+                comment_v_id = str(vertex.get("v_id", ""))
                 try:
                     edges = self.conn.getEdges(
                         "JiraComment",
                         comment_v_id,
                         JIRA_COMMENT_ISSUE_EDGE,
                     ) or []
-                    for edge in edges:
-                        parent_v_id = str(edge.get("to_id", ""))
-                        key = (
-                            parent_v_id
-                            .removeprefix("jira:")
-                            .removesuffix(":issue")
-                            .upper()
-                        )
-                        if key:
-                            keys.add(key)
                 except Exception:
-                    pass  # skip individual comment if edge lookup fails
+                    continue
+                for edge in edges:
+                    key = self._issue_key_from_vertex_id(str(edge.get("to_id", "")))
+                    if key:
+                        keys.add(key)
         except Exception as exc:
             logger.warning(
                 "Recovery: could not query empty-hash JiraComment vertices "
@@ -400,12 +382,50 @@ class JiraSyncService:
 
         if keys:
             logger.info(
-                "Recovery: found %d issue(s) with missing embeddings in "
-                "graph=%s source=%s — re-fetching from Jira instead of "
-                "full scan",
+                "Recovery: found %d ingested issue(s) with missing embeddings "
+                "in graph=%s source=%s. Re-embedding them without moving the "
+                "project checkpoint.",
                 len(keys), self.graphname, self.source.id,
             )
         return keys
+
+    @staticmethod
+    def _vertex_attr(vertex: dict, name: str) -> str:
+        attributes = vertex.get("attributes") or {}
+        value = attributes.get(name)
+        if isinstance(value, dict):
+            value = value.get("value")
+        return str(value or "").strip()
+
+    @classmethod
+    def _issue_embed_incomplete(cls, vertex: dict) -> bool:
+        """True for an ingested issue whose content hash was not saved.
+
+        A link placeholder has no status and no real updated time.
+        """
+        status = cls._vertex_attr(vertex, "status")
+        updated = cls._vertex_attr(vertex, "updated")
+        return bool(status) or cls._is_real_timestamp(updated)
+
+    @classmethod
+    def _comment_embed_incomplete(cls, vertex: dict) -> bool:
+        """True for a stored comment whose content hash was not saved.
+
+        A parent-comment placeholder has no body and no created time.
+        """
+        body = cls._vertex_attr(vertex, "body")
+        created = cls._vertex_attr(vertex, "created")
+        return bool(body) or cls._is_real_timestamp(created)
+
+    @staticmethod
+    def _is_real_timestamp(value: str) -> bool:
+        return bool(value) and not value.startswith("1970-01-01")
+
+    @staticmethod
+    def _issue_key_from_vertex_id(vertex_id: str) -> str:
+        if not vertex_id.startswith("jira:") or not vertex_id.endswith(":issue"):
+            return ""
+        return vertex_id.removeprefix("jira:").removesuffix(":issue").upper()
 
     def _all_content_hashes(self, vertex_type: str) -> dict[str, str]:
         # pyTigerGraph's getVerticesById raises error 601 as soon as any
@@ -540,13 +560,10 @@ class JiraSyncService:
         existing_hashes: dict[str, str],
         existing_comment_hashes: dict[str, str],
     ) -> tuple[list[MappedIssue], list[MappedComment], int]:
-        """Write graph vertices/edges for one page; return items to load later.
+        """Write graph vertices/edges for one page; return items to embed later.
 
-        Document loading and comment-chunk embedding are deliberately NOT done
-        here.  The caller accumulates the returned lists across DOC_LOAD_BATCH_PAGES
-        pages and flushes them together via _finalize_batch(), reducing the
-        number of supportai.ingest() round-trips from one-per-page to
-        one-per-batch.
+        Fact chunks and comment chunks are written by the caller in batches
+        via _finalize_batch().
 
         Returns (changed_documents, changed_comments, comments_deleted).
         """
@@ -566,6 +583,7 @@ class JiraSyncService:
                 item,
                 existing_comment_hashes,
             )
+            self._reconcile_issue_changes(item)
 
         all_vertices: dict[tuple[str, str], VertexRecord] = {}
         all_edges: list[EdgeRecord] = []
@@ -584,6 +602,8 @@ class JiraSyncService:
             all_edges.extend(item.edges)
             if item.issue_vertex_id in existing_hashes:
                 self._delete_current_edges(item.issue_vertex_id)
+                for change_vertex_id in item.change_vertex_ids:
+                    self._delete_change_author_edges(change_vertex_id)
             for comment in item.comments:
                 if comment.comment_vertex_id in existing_comment_hashes:
                     self._delete_current_comment_edges(
@@ -619,33 +639,23 @@ class JiraSyncService:
         existing_hashes: dict[str, str],
         existing_comment_hashes: dict[str, str],
     ) -> None:
-        """Load documents and embed comment-chunks for a batch of pages.
+        """Write issue fact chunks and embed comment chunks for a batch.
 
         Called after every DOC_LOAD_BATCH_PAGES pages (and once at the end of
-        the sync).  By batching, we replace N-per-page supportai.ingest calls
-        with one call per batch, cutting fixed HTTP/job-submission overhead by
-        DOC_LOAD_BATCH_PAGES × for a large initial load.
+        the sync). Facts are written by the connector, one short chunk per
+        record, description piece, and change, instead of one document blob.
         """
         if changed_documents:
-            self._load_documents(changed_documents)
-            for item in changed_documents:
-                document_id = item.document["doc_id"].lower()
-                self.conn.upsertEdge(
-                    "Document",
-                    document_id,
-                    "CONTAINS_ENTITY",
-                    "JiraIssue",
-                    item.issue_vertex_id,
-                )
-                self.conn.upsertVertex(
-                    "JiraIssue",
-                    item.issue_vertex_id,
-                    attributes={"content_hash": item.content_hash},
-                )
-                existing_hashes[item.issue_vertex_id] = item.content_hash
+            self._write_issue_facts(changed_documents, existing_hashes)
         if changed_comments:
             self._upsert_comment_chunks(changed_comments)
-            self._embed_comment_chunks(changed_comments)
+            self._embed_chunks(
+                [
+                    chunk
+                    for comment in changed_comments
+                    for chunk in comment.chunks
+                ]
+            )
             for comment in changed_comments:
                 self.conn.upsertVertex(
                     "JiraComment",
@@ -678,6 +688,7 @@ class JiraSyncService:
                 item,
                 existing_comment_hashes,
             )
+            self._reconcile_issue_changes(item)
 
         all_vertices: dict[tuple[str, str], VertexRecord] = {}
         all_edges: list[EdgeRecord] = []
@@ -696,6 +707,8 @@ class JiraSyncService:
             all_edges.extend(item.edges)
             if item.issue_vertex_id in existing_hashes:
                 self._delete_current_edges(item.issue_vertex_id)
+                for change_vertex_id in item.change_vertex_ids:
+                    self._delete_change_author_edges(change_vertex_id)
             for comment in item.comments:
                 if comment.comment_vertex_id in existing_comment_hashes:
                     self._delete_current_comment_edges(
@@ -729,25 +742,16 @@ class JiraSyncService:
         ]
         if documents_to_load:
             if changed_documents:
-                self._load_documents(changed_documents)
+                self._write_issue_facts(changed_documents, existing_hashes)
             if changed_comments:
                 self._upsert_comment_chunks(changed_comments)
-                self._embed_comment_chunks(changed_comments)
-            for item in changed_documents:
-                document_id = item.document["doc_id"].lower()
-                self.conn.upsertEdge(
-                    "Document",
-                    document_id,
-                    "CONTAINS_ENTITY",
-                    "JiraIssue",
-                    item.issue_vertex_id,
+                self._embed_chunks(
+                    [
+                        chunk
+                        for comment in changed_comments
+                        for chunk in comment.chunks
+                    ]
                 )
-                self.conn.upsertVertex(
-                    "JiraIssue",
-                    item.issue_vertex_id,
-                    attributes={"content_hash": item.content_hash},
-                )
-                existing_hashes[item.issue_vertex_id] = item.content_hash
             for comment in changed_comments:
                 self.conn.upsertVertex(
                     "JiraComment",
@@ -792,7 +796,7 @@ class JiraSyncService:
             if existing.get(item.issue_vertex_id) == item.content_hash:
                 continue
             if item.issue_vertex_id in existing:
-                self._delete_document_chunks(item.document["doc_id"].lower())
+                self._delete_issue_search_content(item)
             changed.append(item)
         return changed
 
@@ -846,6 +850,42 @@ class JiraSyncService:
             )
             existing_hashes.pop(comment_vertex_id, None)
         return len(stale_ids)
+
+    def _reconcile_issue_changes(self, issue: MappedIssue) -> None:
+        current_ids = set(issue.change_vertex_ids)
+        for change_vertex_id in (
+            self._issue_change_ids(issue.issue_vertex_id) - current_ids
+        ):
+            self.conn.delVerticesById("JiraChange", [change_vertex_id])
+
+    def _issue_change_ids(self, issue_vertex_id: str) -> set[str]:
+        try:
+            edges = self.conn.getEdges(
+                "JiraIssue",
+                issue_vertex_id,
+                JIRA_CHANGE_EDGE,
+            ) or []
+        except Exception as exc:
+            if "is not a valid vertex id" in str(exc):
+                return set()
+            raise
+        return {
+            str(edge.get("to_id"))
+            for edge in edges
+            if edge.get("to_id") is not None
+        }
+
+    def _delete_change_author_edges(self, change_vertex_id: str) -> None:
+        try:
+            self.conn.delEdges(
+                "JiraChange",
+                change_vertex_id,
+                JIRA_CHANGE_AUTHOR_EDGE,
+            )
+        except Exception as exc:
+            if "is not a valid vertex id" in str(exc):
+                return
+            raise
 
     def _delete_current_edges(self, issue_vertex_id: str) -> None:
         for edge_type in CURRENT_STATE_EDGES:
@@ -922,35 +962,149 @@ class JiraSyncService:
         self.conn.delVerticesById("DocumentChunk", chunk_ids)
         self.conn.delVerticesById("Content", chunk_ids)
 
-    def _load_documents(
+    def _write_issue_facts(
         self,
-        mapped: list[MappedIssue],
+        issues: list[MappedIssue],
+        existing_hashes: dict[str, str],
     ) -> None:
-        with tempfile.TemporaryDirectory(
-            prefix=f"jira-{self.graphname}-{self.source.id}-"
-        ) as directory:
-            path = Path(directory) / "documents.jsonl"
-            with path.open("w", encoding="utf-8") as stream:
-                for item in mapped:
-                    stream.write(json.dumps(item.document, ensure_ascii=False) + "\n")
-            result = supportai.ingest(
-                self.graphname,
-                LoadingInfo(
-                    load_job_id="load_documents_content_json",
-                    data_source_id={
-                        "data_source": "server",
-                        "data_source_id": "DocumentContent",
-                        "data_path": directory,
-                    },
-                    file_path="documents.jsonl",
-                ),
-                self.conn,
+        self._upsert_issue_facts(issues)
+        self._embed_chunks(
+            [fact.chunk for issue in issues for fact in issue.facts]
+        )
+        for issue in issues:
+            self.conn.upsertVertex(
+                "JiraIssue",
+                issue.issue_vertex_id,
+                attributes={"content_hash": issue.content_hash},
             )
-            failed_files = result.get("failed_files") if isinstance(result, dict) else None
-            if failed_files:
-                raise RuntimeError(
-                    "Jira document loading failed; retry the sync to resume"
+            existing_hashes[issue.issue_vertex_id] = issue.content_hash
+
+    def _delete_issue_search_content(self, issue: MappedIssue) -> None:
+        chunk_ids = self._issue_fact_chunk_ids(issue.issue_vertex_id)
+        if chunk_ids:
+            get_embedding_store(
+                graphname=self.graphname
+            ).remove_embeddings(ids=chunk_ids)
+            self.conn.delVerticesById("DocumentChunk", chunk_ids)
+            self.conn.delVerticesById("Content", chunk_ids)
+        document_id = issue.legacy_document_id.lower()
+        self._delete_document_chunks(document_id)
+        self.conn.delVerticesById("Document", [document_id])
+        self.conn.delVerticesById("Content", [document_id])
+
+    def _issue_fact_chunk_ids(self, issue_vertex_id: str) -> list[str]:
+        try:
+            edges = self.conn.getEdges(
+                "JiraIssue",
+                issue_vertex_id,
+                "reverse_CONTAINS_ENTITY",
+            ) or []
+        except Exception as exc:
+            if "is not a valid vertex id" in str(exc):
+                return []
+            raise
+        return [
+            str(edge["to_id"])
+            for edge in edges
+            if edge.get("to_type") == "DocumentChunk"
+            and edge.get("to_id") is not None
+            and ":fact:" in str(edge["to_id"])
+        ]
+
+    def _upsert_issue_facts(self, issues: list[MappedIssue]) -> None:
+        epoch_added = int(time.time())
+        vertices: list[VertexRecord] = []
+        edges: list[EdgeRecord] = []
+        for issue in issues:
+            previous_chunk_id: str | None = None
+            for fact in issue.facts:
+                chunk = fact.chunk
+                vertices.extend(
+                    self._chunk_vertices(chunk, epoch_added, "jira_issue")
                 )
+                edges.extend(
+                    self._chunk_edges(
+                        chunk.chunk_id,
+                        issue.issue_vertex_id,
+                        fact.entities,
+                        previous_chunk_id,
+                    )
+                )
+                previous_chunk_id = chunk.chunk_id
+        self._upsert_records(vertices, edges)
+
+    def _chunk_vertices(
+        self,
+        chunk: MappedChunk,
+        epoch_added: int,
+        ctype: str,
+    ) -> list[VertexRecord]:
+        return [
+            VertexRecord(
+                "DocumentChunk",
+                chunk.chunk_id,
+                {
+                    "idx": chunk.index,
+                    "epoch_added": epoch_added,
+                    "epoch_processing": 0,
+                    "epoch_processed": 0,
+                },
+            ),
+            VertexRecord(
+                "Content",
+                chunk.chunk_id,
+                {
+                    "ctype": ctype,
+                    "text": chunk.text,
+                    "epoch_added": epoch_added,
+                },
+            ),
+        ]
+
+    def _chunk_edges(
+        self,
+        chunk_id: str,
+        issue_vertex_id: str,
+        entities: tuple[tuple[str, str], ...],
+        previous_chunk_id: str | None,
+    ) -> list[EdgeRecord]:
+        edges = [
+            EdgeRecord(
+                "DocumentChunk",
+                chunk_id,
+                "HAS_CONTENT",
+                "Content",
+                chunk_id,
+            ),
+            EdgeRecord(
+                "DocumentChunk",
+                chunk_id,
+                "CONTAINS_ENTITY",
+                "JiraIssue",
+                issue_vertex_id,
+            ),
+        ]
+        for vertex_type, vertex_id in entities:
+            edges.append(
+                EdgeRecord(
+                    "DocumentChunk",
+                    chunk_id,
+                    "CONTAINS_ENTITY",
+                    vertex_type,
+                    vertex_id,
+                )
+            )
+        if previous_chunk_id:
+            edges.append(
+                EdgeRecord(
+                    "DocumentChunk",
+                    chunk_id,
+                    "IS_AFTER",
+                    "DocumentChunk",
+                    previous_chunk_id,
+                )
+            )
+        return edges
 
     def _upsert_comment_chunks(
         self,
@@ -960,66 +1114,23 @@ class JiraSyncService:
         vertices: list[VertexRecord] = []
         edges: list[EdgeRecord] = []
         for comment in comments:
+            previous_chunk_id: str | None = None
             for chunk in comment.chunks:
                 vertices.extend(
-                    [
-                        VertexRecord(
-                            "DocumentChunk",
-                            chunk.chunk_id,
-                            {
-                                "idx": chunk.index,
-                                "epoch_added": epoch_added,
-                                "epoch_processing": 0,
-                                "epoch_processed": 0,
-                            },
-                        ),
-                        VertexRecord(
-                            "Content",
-                            chunk.chunk_id,
-                            {
-                                "ctype": "jira_comment",
-                                "text": chunk.text,
-                                "epoch_added": epoch_added,
-                            },
-                        ),
-                    ]
+                    self._chunk_vertices(chunk, epoch_added, "jira_comment")
                 )
                 edges.extend(
-                    [
-                        EdgeRecord(
-                            "DocumentChunk",
-                            chunk.chunk_id,
-                            "HAS_CONTENT",
-                            "Content",
-                            chunk.chunk_id,
-                        ),
-                        EdgeRecord(
-                            "DocumentChunk",
-                            chunk.chunk_id,
-                            "CONTAINS_ENTITY",
-                            "JiraComment",
-                            comment.comment_vertex_id,
-                        ),
-                        EdgeRecord(
-                            "DocumentChunk",
-                            chunk.chunk_id,
-                            "CONTAINS_ENTITY",
-                            "JiraIssue",
-                            comment.issue_vertex_id,
-                        ),
-                    ]
+                    self._chunk_edges(
+                        chunk.chunk_id,
+                        comment.issue_vertex_id,
+                        (("JiraComment", comment.comment_vertex_id),),
+                        previous_chunk_id,
+                    )
                 )
+                previous_chunk_id = chunk.chunk_id
         self._upsert_records(vertices, edges)
 
-    def _embed_comment_chunks(
-        self,
-        comments: list[MappedComment],
-    ) -> None:
-        chunks = [
-            chunk
-            for comment in comments
-            for chunk in comment.chunks
-        ]
+    def _embed_chunks(self, chunks: list[MappedChunk]) -> None:
         if not chunks:
             return
         store = get_embedding_store(graphname=self.graphname)
