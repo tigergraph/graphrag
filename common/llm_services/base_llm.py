@@ -840,7 +840,6 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
 - Prefer attributes over primary IDs when an attribute name is more similar to the keyword in the question.
 - Keep the query minimal — fewest vertex types, edge types, and attributes possible.
 - Do NOT return attributes that aren't explicitly mentioned in the question. If only a vertex is mentioned, return only the vertex.
-- For Jira business-key lookups where only the numeric portion is given (e.g. `2192`), use `ENDS WITH "-2192"` on the issue_key attribute rather than an exact match.
 - Always include the entity from the `WHERE` clause in the final `RETURN`. Use vertex name over ID when available.
 - Always use **undirected** edge patterns. Ensure edges connect correct vertex types per schema.
 - Use **double quotes** for strings.

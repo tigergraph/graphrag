@@ -30,13 +30,7 @@ def get_chunker(chunker_type: str = "", graphname: str = None):
             chunk_size=chunker_config.get("chunk_size", 0),
             overlap_size=chunker_config.get("overlap_size", -1),
         )
-    elif chunker_type in (
-        "structured",
-        "markdown",
-        "html",
-        "jira",
-        "jira_comment",
-    ):
+    elif chunker_type in ("structured", "markdown", "html"):
         # Structure-aware chunker for markdown AND HTML: tables/figures/lists/
         # code stay atomic (never split mid-row), prose char-splits by size.
         # Supersedes MarkdownChunker/HTMLChunker, which split structure blindly.

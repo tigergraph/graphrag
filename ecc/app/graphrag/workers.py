@@ -154,22 +154,6 @@ async def chunk_doc(
 
         v_id = doc["v_id"].lower()
 
-        # Look up the authoritative JiraIssue vertex ID from the Document's
-        # CONTAINS_ENTITY edge — derived IDs are unreliable for key-based vertices.
-        jira_issue_vertex_id: str | None = None
-        if chunker_type == "jira" and ":issue-doc:" in v_id:
-            try:
-                edges = await conn.getEdges(
-                    "Document", v_id, "CONTAINS_ENTITY", "JiraIssue"
-                )
-                if edges:
-                    jira_issue_vertex_id = edges[0]["to_id"]
-            except Exception as exc:
-                logger.warning(
-                    f"Could not look up JiraIssue vertex for {v_id}: {exc}; "
-                    "falling back to derived ID"
-                )
-
         # Use get_chunker for all types (including images)
         # For images, get_chunker returns SingleChunker which preserves markdown image references
         chunker = ecc_util.get_chunker(chunker_type, graphname=conn.graphname)
@@ -189,25 +173,19 @@ async def chunk_doc(
 
             # send chunks to be upserted (func, args)
             logger.debug("chunk writes to upsert_chan")
-            await upsert_chan.put(
-                (upsert_chunk, (conn, v_id, chunk_id, chunk, i, chunker_type, jira_issue_vertex_id))
-            )
+            await upsert_chan.put((upsert_chunk, (conn, v_id, chunk_id, chunk, i)))
 
             # send chunks to have entities extracted
-            skip_extraction = chunker_type in ("jira", "jira_comment")
-            if not skip_extraction:
-                logger.debug("chunk writes to extract_chan")
-                await extract_chan.put((chunk, chunk_id))
+            logger.debug("chunk writes to extract_chan")
+            await extract_chan.put((chunk, chunk_id))
 
             # When extraction is enabled the extract worker pushes the
             # summary-augmented embed message itself (Contextual Retrieval),
             # so only embed the raw chunk here when extraction is off.
             from common.config import entity_extraction_switch
-            if not entity_extraction_switch or skip_extraction:
+            if not entity_extraction_switch:
                 logger.debug("chunk writes to embed_chan (no extraction)")
                 await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
-                if tracker is not None:
-                    tracker.chunk_done(chunk_id)
 
     return v_id
 
@@ -230,15 +208,7 @@ async def upsert_doc(conn: AsyncTigerGraphConnection, doc_id, ctype, content_tex
         conn, "Document", doc_id, "HAS_CONTENT", "Content", doc_id
     )
 
-async def upsert_chunk(
-    conn: AsyncTigerGraphConnection,
-    doc_id,
-    chunk_id,
-    chunk,
-    idx,
-    source_type="",
-    jira_issue_vertex_id: "str | None" = None,
-):
+async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk, idx):
     logger.debug(f"Upserting chunk {chunk_id}")
     date_added = int(time.time())
     # Build the chunk's full vertex + edge bundle and enqueue atomically.
@@ -263,39 +233,6 @@ async def upsert_chunk(
             "DocumentChunk", chunk_id, "IS_AFTER",
             "DocumentChunk", util.process_id(f"{doc_id}_chunk_{idx - 1}"), None,
         ))
-    if source_type == "jira" and ":issue-doc:" in doc_id:
-        # Link chunk to the authoritative JiraIssue vertex for graph traversal.
-        issue_id = jira_issue_vertex_id or doc_id.replace(":issue-doc:", ":issue:", 1)
-        edges.append((
-            "DocumentChunk",
-            chunk_id,
-            "CONTAINS_ENTITY",
-            "JiraIssue",
-            issue_id,
-            None,
-        ))
-    elif source_type == "jira_comment" and ":comment-doc:" in doc_id:
-        issue_id, comment_id = doc_id.rsplit(":comment-doc:", 1)
-        cloud_prefix = issue_id.split(":issue:", 1)[0]
-        comment_vertex_id = f"{cloud_prefix}:comment:{comment_id}"
-        edges.extend([
-            (
-                "DocumentChunk",
-                chunk_id,
-                "CONTAINS_ENTITY",
-                "JiraIssue",
-                issue_id,
-                None,
-            ),
-            (
-                "DocumentChunk",
-                chunk_id,
-                "CONTAINS_ENTITY",
-                "JiraComment",
-                comment_vertex_id,
-                None,
-            ),
-        ])
     await util.upsert_group(conn, vertices, edges)
 
 
@@ -326,14 +263,6 @@ async def embed(
     async with embed_sem:
         logger.debug(f"Embedding {v_id}")
 
-        # Skip empty chunks — embedding API returns 500 on empty content.
-        if not content or not content.strip():
-            logger.warning(
-                f"Skipping embed for {v_id}: content is empty. "
-                "Check the source document for missing text."
-            )
-            return
-
         # if loader is running, wait until it's done
         if not util.loading_event.is_set():
             logger.debug("Embed worker waiting for loading event to finish")
@@ -342,7 +271,6 @@ async def embed(
             await embed_store.aadd_embeddings([(content, [])], [{"vertex_id": v_id}])
         except Exception as e:
             logger.error(f"Failed to add embeddings for {v_id}: {e}")
-            raise
 
 
 def _is_near_duplicate(new_desc, existing_descs, threshold=0.85):
