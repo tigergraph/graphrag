@@ -666,7 +666,7 @@ In the `llm_config` section of `configs/server_config.json` file, copy JSON conf
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `authentication_configuration` | object | — | Shared authentication credentials for all services. Service-level values take precedence. |
-| `token_limit` | int | — | Hard cap on token count for retrieved context sent to the LLM. Context exceeding this limit is truncated. Inherited by all services if not set at service level. `0` or omitted means unlimited. |
+| `token_limit` | int | — | Hard cap on token count for a prompt carrying retrieved context, prompt included. Context beyond it is truncated. Inherited by all services if not set at service level. `0` or omitted uses the chat model's own input limit when known, otherwise no cap. |
 
 **`completion_service` parameters:**
 
@@ -678,7 +678,7 @@ In the `llm_config` section of `configs/server_config.json` file, copy JSON conf
 | `model_kwargs` | object | No | `{}` | Additional model parameters (e.g., `{"temperature": 0}`). |
 | `prompt_path` | string | No | `"./common/prompts/openai_gpt4/"` | Path to prompt template files. |
 | `base_url` | string | No | — | Custom API endpoint URL. |
-| `token_limit` | int | No | inherited from top-level | Hard cap on token count for retrieved context sent to the LLM. Context exceeding this limit is truncated. `0` or omitted means unlimited. |
+| `token_limit` | int | No | inherited from top-level | Hard cap on token count for a prompt carrying retrieved context, prompt included. Context beyond it is truncated. `0` or omitted uses the model's own input limit when known, otherwise no cap. |
 
 **`embedding_service` parameters:**
 
@@ -701,7 +701,7 @@ Chatbot LLM override. If not configured, inherits from `completion_service`. Con
 | `model_kwargs` | object | No | inherited from completion | Additional model parameters (e.g., `{"temperature": 0}`). |
 | `prompt_path` | string | No | inherited from completion | Path to prompt template files. |
 | `base_url` | string | No | inherited from completion | Custom API endpoint URL. |
-| `token_limit` | int | No | inherited from completion | Hard cap on token count for retrieved context sent to the chatbot LLM. Context exceeding this limit is truncated. `0` or omitted means unlimited. |
+| `token_limit` | int | No | inherited from completion | Hard cap on token count for a prompt carrying retrieved context to the chatbot LLM, prompt included. Context beyond it is truncated. `0` or omitted uses the model's own input limit when known, otherwise no cap. |
 
 **`multimodal_service` parameters (optional):**
 

@@ -61,6 +61,7 @@ class SiblingRetriever(BaseRetriever):
             self.logger.info(f"Retrived SiblingSearch query verbose info: {verbose_info}")
             if expand:
                 res[1]["verbose"]["expanded_questions"] = questions
+        self._log_retrieval("Chunk_Sibling_Vector_Search", res)
         return res
 
     def retrieve_answer(

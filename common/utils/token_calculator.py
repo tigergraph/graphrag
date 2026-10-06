@@ -19,6 +19,10 @@ from typing import List, Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Extra tokens kept free beyond the measured prompt, for chat-message framing
+# and small differences between tiktoken and the provider's tokenizer.
+PROMPT_RESERVE_MARGIN = 200
+
 # Cache for TokenCalculator instances to avoid re-initialization
 _token_calculator_cache: dict[tuple[str, int], 'TokenCalculator'] = {}
 
@@ -112,6 +116,51 @@ class TokenCalculator:
             logger.warning(f"Error counting tokens: {e}, using character-based estimation")
             # Fallback: rough estimation (1 token ≈ 4 characters for English text)
             return len(text) // 4
+
+    def fit_context(self, context: str | dict, prompt_without_context: str) -> str | dict:
+        """Trim ``context`` so the whole prompt stays within the token limit.
+
+        ``prompt_without_context`` is the prompt rendered with an empty context;
+        its size, plus a small margin, is reserved for the rest of the prompt.
+        Decides on token counts, never character counts, which undercount
+        tokens for CJK text.
+        """
+        if self.is_unlimited_tokens():
+            return context
+        budget = max(
+            self.max_context_tokens
+            - self.count_tokens(prompt_without_context)
+            - PROMPT_RESERVE_MARGIN,
+            0,
+        )
+        context_tokens = self.count_tokens(context)
+        if context_tokens <= budget:
+            return context
+        logger.info(f"Truncating context from {context_tokens} to {budget} tokens")
+        if isinstance(context, list):
+            return self._truncate_list(context, budget)
+        if budget == 0:
+            # The dict truncation treats a limit of 0 as "no limit".
+            return {} if isinstance(context, dict) else ""
+        return self.truncate_to_token_limit(context, budget)
+
+    def _truncate_list(self, items: list, max_tokens: int) -> list:
+        """Keep items in order until ``max_tokens``; a string that only partly
+        fits is cut to the remaining budget."""
+        kept, used = [], 0
+        for item in items:
+            remaining = max_tokens - used
+            if remaining <= 0:
+                break
+            item_tokens = self.count_tokens(item)
+            if item_tokens <= remaining:
+                kept.append(item)
+                used += item_tokens
+            else:
+                if isinstance(item, str):
+                    kept.append(self.truncate_text_to_token_limit(item, remaining))
+                break
+        return kept
 
     def truncate_dict_to_token_limit(self, sources_dict: dict, max_tokens: Optional[int] = None) -> dict:
         """

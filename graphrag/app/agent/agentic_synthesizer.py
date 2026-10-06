@@ -25,23 +25,66 @@ import logging
 from agent.agent_generation import TigerGraphAgentGenerator
 from agent.agentic_executor import retrieved_chunk_ids
 from common.py_schemas import GraphRAGResponse
+from common.utils.retrieval_stats import is_grouped, retrieved_entries
 
 logger = logging.getLogger(__name__)
 
 
-def _gather(results: dict) -> dict:
-    """Collect non-empty step contexts into a combined context block."""
+def _without_seen(ctx, seen: set):
+    """``ctx`` minus the retrieved entries already in ``seen`` (which it then
+    extends), or ``None`` when nothing new is left. ``ctx`` is not modified."""
+    result = ctx.get("result") if isinstance(ctx, dict) else None
+    fr = result.get("final_retrieval") if isinstance(result, dict) else None
+    if not isinstance(fr, dict):
+        return ctx
+    kept = {}
+    for key, value in fr.items():
+        if is_grouped(value):
+            fresh = {k: v for k, v in value.items() if k not in seen}
+            seen.update(fresh)
+            if fresh:
+                kept[key] = fresh
+        elif key == "Similarity_Context" or key not in seen:
+            seen.add(key)
+            kept[key] = value
+    if not kept:
+        return None
+    return {**ctx, "result": {**result, "final_retrieval": kept}}
+
+
+def _gather(results: dict, log: bool = False) -> dict:
+    """Collect non-empty step contexts into a combined context block.
+
+    Document passages already returned by an earlier step are left out of
+    later ones, so the answer model reads (and is billed for) each passage
+    once; a step left with nothing new is dropped.
+    """
     structural, unstructured = [], []
+    seen: set = set()
+    skipped = 0
     for sr in results.values():
         if not sr.ok or sr.context is None:
             continue
         ctx = sr.context
         fc = ctx.get("function_call") if isinstance(ctx, dict) else None
         if fc and "Vector_Search" in str(fc):
-            unstructured.append(ctx)
+            before = len(retrieved_entries(_final_retrieval(ctx)))
+            ctx = _without_seen(ctx, seen)
+            after = len(retrieved_entries(_final_retrieval(ctx))) if ctx else 0
+            skipped += before - after
+            if ctx is not None:
+                unstructured.append(ctx)
         else:
             structural.append(ctx)
+    if skipped and log:
+        logger.info(f"synthesize: left out {skipped} passage(s) already retrieved by an earlier step")
     return {"structural": structural, "unstructured": unstructured}
+
+
+def _final_retrieval(ctx) -> dict:
+    result = ctx.get("result") if isinstance(ctx, dict) else None
+    fr = result.get("final_retrieval") if isinstance(result, dict) else None
+    return fr if isinstance(fr, dict) else {}
 
 
 def has_context(results: dict) -> bool:
@@ -51,7 +94,7 @@ def has_context(results: dict) -> bool:
 
 def synthesize(llm, question, results: dict, plan=None, conversation=None) -> GraphRAGResponse:
     """Produce the final answer from gathered step contexts."""
-    combined = _gather(results)
+    combined = _gather(results, log=True)
     generator = TigerGraphAgentGenerator(llm)
     answer = generator.generate_answer(question, combined)
 
