@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { safeJson } from "@/utils/safeJson";
 import { pauseIdleTimer, pingIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
 import type { JiraSchemaStatus, JiraSource } from "@/types/dataSources";
+import ConnectorPromptGuide from "@/pages/setup/ConnectorPromptGuide";
 
 const editingSourceKey = (graph: string) =>
   `graphrag:jira-editing-source:${graph}`;
@@ -1402,6 +1403,7 @@ const DataSourcesConfig: React.FC = () => {
                   </div>
                 ))}
               </div>
+              <ConnectorPromptGuide connectorType="jira_cloud" />
             </div>
           )}
         </div>
