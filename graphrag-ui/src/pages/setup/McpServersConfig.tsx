@@ -451,6 +451,10 @@ const McpServersConfig: React.FC = () => {
   // which may hold unsaved edits. New rows are only ever appended, so row
   // `idx` is a saved server exactly when `idx < savedRef.current.length`.
   const savedRef = useRef<McpServer[]>([]);
+  // Which list the page shows now; a delete still in flight after the user
+  // switches scope or graph must not touch the newly shown list.
+  const listKeyRef = useRef("");
+  listKeyRef.current = `${configScope}:${selectedGraph}`;
   const [confirm, confirmDialog] = useConfirm();
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -558,6 +562,7 @@ const McpServersConfig: React.FC = () => {
       return;
     }
     const remaining = saved.filter((_, i) => i !== idx);
+    const listKey = listKeyRef.current;
     setIsSaving(true);
     setMessage("");
     setMessageType("");
@@ -572,8 +577,10 @@ const McpServersConfig: React.FC = () => {
         const err = await resp.json().catch(() => null);
         throw new Error(err?.detail || `HTTP ${resp.status}`);
       }
-      savedRef.current = remaining;
-      removeRow(idx);
+      if (listKeyRef.current === listKey) {
+        savedRef.current = remaining;
+        removeRow(idx);
+      }
       setMessage(`Deleted "${label}".`);
       setMessageType("success");
       setTimeout(() => { setMessage(""); setMessageType(""); }, 3000);
