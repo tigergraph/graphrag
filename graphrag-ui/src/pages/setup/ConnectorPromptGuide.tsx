@@ -34,11 +34,16 @@ Once one issue is identified, plan both retrievals. Put the full issue key and t
 - History, timeline, progress, or who did what needs the JiraChange events and the comment text, together with the current status, assignee, and resolution.
 - Release, fix version, due date, or when it will be fixed needs fix_versions, due, status, and resolution, plus any release or fix mentioned in the description or comments.
 
-For the structural step, say which match to use: an exact case-insensitive match on issue_key when the full key is known, or issue_key ending with the number when only a number is known. Name the attributes and neighbour names to return. Returning the vertex alone is not enough.
+For the structural step, say which match to use: an exact case-insensitive match on issue_key when the full key is known, or issue_key ending with the number when only a number is known. Name the attributes and neighbour names to return. Returning the vertex alone is not enough. For a broad issue summary, request current fields, assignee, reporter, and project only. Request parent or linked issues only when the user asks about them, using a separate structural step for each relationship.
 
 A count, list, or filter across many issues stays a structural query. Add hybrid search only when that question also needs description, comment, or change-log text.
 
 The final answer step depends on every retrieval step.`;
+
+const JIRA_QUERY_GUIDANCE_EXAMPLE = `## Jira issue queries
+- For a broad single-issue lookup, retrieve the JiraIssue fields, assignee, reporter, and project. Do not add parent, issue-link, or comment relationships unless the question asks for them.
+- Handle JIRA_HAS_PARENT and JIRA_LINKS_TO in a separate, focused graph query. If the relationship is requested, prefer MATCH over OPTIONAL MATCH.
+- Return the related issue_key and requested edge attributes such as link_type. Do not return the parent or link edge object itself.`;
 
 const JIRA_AGENT_EXAMPLE = `## Jira issues
 Each issue has a current record in the graph and short document chunks. For one issue, call both graphrag__structural_retrieve and graphrag__hybrid_search before you answer. Use the conversation to resolve which issue is meant when this message does not repeat the key.
@@ -80,6 +85,12 @@ const GUIDES: Record<string, ConnectorGuide> = {
       "Do not put a real ticket key in the prompt. The model will treat that key as the ticket to retrieve. If fix version or due date is empty, say it is not available.",
     ],
     examples: [
+      {
+        id: "query_guidance",
+        name: "Query Guidance",
+        where: "Customize Prompts → Query Guidance, on this graph",
+        text: JIRA_QUERY_GUIDANCE_EXAMPLE,
+      },
       {
         id: "agentic_planner",
         name: "Agentic Planner",
