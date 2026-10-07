@@ -3,7 +3,7 @@ import { IoDocumentTextOutline } from "react-icons/io5";
 import { FiTerminal } from "react-icons/fi";
 import { FiLoader } from "react-icons/fi";
 import { IoCartOutline } from "react-icons/io5";
-import { FiKey } from "react-icons/fi";
+import { FiKey, FiTrash2 } from "react-icons/fi";
 import { IoIosHelpCircleOutline } from "react-icons/io";
 import { HiOutlineChatBubbleOvalLeft } from "react-icons/hi2";
 import { MdKeyboardArrowDown, MdKeyboardArrowUp } from "react-icons/md";
@@ -55,6 +55,7 @@ import { FaPaperclip } from "react-icons/fa6";
 import { useCallback } from "react";
 import { conversationManager } from "../actions/ActionProvider";
 import { useConfirm } from "@/hooks/useConfirm";
+import { useAlert } from "@/hooks/useAlert";
 import { useNavigate } from "react-router-dom";
 
 // TODO make dynamic
@@ -86,7 +87,13 @@ const SideMenu = ({
   const [loadedCount, setLoadedCount] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [clearingAll, setClearingAll] = useState(false);
+  // Multi-select: pick several shown conversations and delete them together.
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [deletingSelected, setDeletingSelected] = useState(false);
   const [confirm, confirmDialog] = useConfirm();
+  const [alert, alertDialog] = useAlert();
   // Fade + disable the side menu (conversation list + New Chat) while
   // the chat is streaming an answer, so the user can't unmount Chat by
   // switching conversations mid-response.
@@ -171,9 +178,9 @@ const SideMenu = ({
   const fetchHistory2 = useCallback(async () => {
     try {
       const list = await fetchConvList();
-      setConvList(list);
       const firstBatch = list.slice(0, PAGE_SIZE);
       const details = await loadDetails(firstBatch);
+      setConvList(list);
       setConversationId(details as any);
       setLoadedCount(firstBatch.length);
     } catch (error) {
@@ -242,6 +249,137 @@ const SideMenu = ({
     }
   };
 
+  // Delete conversations by id, a few at a time so a long history can't flood
+  // the browser. Returns the ids the server confirmed deleted.
+  const deleteConversations = async (ids: string[]) => {
+    const creds = sessionStorage.getItem("auth");
+    const settings = {
+      method: "DELETE",
+      headers: { Authorization: creds!, "Content-Type": "application/json" },
+    };
+    const deleted = new Set<string>();
+    const BATCH = 5;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const results = await Promise.all(
+        ids.slice(i, i + BATCH).map((id) =>
+          fetch(`${WS_CONVO_URL}/${id}`, settings)
+            .then((r) => (r.ok ? id : null))
+            .catch(() => null)
+        )
+      );
+      results.forEach((id) => { if (id) deleted.add(id); });
+    }
+    return deleted;
+  };
+
+  // Drop deleted conversations from the sidebar. If the open conversation was
+  // one of them, start a new chat rather than keep showing it.
+  const forgetConversations = (deleted: Set<string>) => {
+    if (deleted.size === 0) return;
+    const loadedGone = convList
+      .slice(0, loadedCount)
+      .filter((c: any) => deleted.has(c.conversation_id)).length;
+    setConvList((prev: any[]) => prev.filter((c: any) => !deleted.has(c.conversation_id)));
+    setConversationId((prev: any[]) => prev.filter((c: any) => !deleted.has(c.conversation_id)));
+    setLoadedCount((c) => c - loadedGone);
+    const openId = conversationManager.getCurrentConversationId();
+    if ((openId && deleted.has(openId)) || (activeConversationId && deleted.has(activeConversationId))) {
+      handleNewChat();
+    }
+  };
+
+  const deleteOne = async (id: string) => {
+    const ok = await confirm(
+      "Delete this conversation?\n\nThis permanently removes it and cannot be undone."
+    );
+    if (!ok) return;
+    const deleted = await deleteConversations([id]);
+    forgetConversations(deleted);
+    if (deleted.size === 0) {
+      await alert("The conversation could not be deleted. Please try again.");
+    }
+  };
+
+  const clearAll = async () => {
+    const n = convList.length;
+    if (n === 0) return;
+    const ok = await confirm(
+      `Delete all ${n} conversation${n === 1 ? "" : "s"}?\n\n` +
+        `This permanently removes them and cannot be undone.`
+    );
+    if (!ok) return;
+    setClearing(true);
+    setClearingAll(true);
+    let failed = 0;
+    try {
+      const deleted = await deleteConversations(convList.map((c: any) => c.conversation_id));
+      forgetConversations(deleted);
+      failed = n - deleted.size;
+    } finally {
+      setClearing(false);
+      setClearingAll(false);
+    }
+    if (failed > 0) {
+      await alert(
+        `${failed} of ${n} conversation${n === 1 ? "" : "s"} could not be deleted. Please try again.`
+      );
+    }
+  };
+
+  const visibleIds: string[] = newSet.map((c: any) => c.conversation_id);
+  // Only conversations still shown count as selected, so a refresh that drops
+  // one can't leave it selected out of sight.
+  const selectedIds = visibleIds.filter((id) => selected.has(id));
+  const allSelected = visibleIds.length > 0 && selectedIds.length === visibleIds.length;
+
+  const exitSelecting = () => {
+    setSelecting(false);
+    setSelected(new Set());
+  };
+
+  const toggleSelected = (id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    setSelected(allSelected ? new Set() : new Set(visibleIds));
+  };
+
+  const deleteSelected = async () => {
+    const ids = selectedIds;
+    const n = ids.length;
+    if (n === 0) return;
+    const ok = await confirm(
+      `Delete ${n} selected conversation${n === 1 ? "" : "s"}?\n\n` +
+        `This permanently removes them and cannot be undone.`
+    );
+    if (!ok) return;
+    setClearing(true);
+    setDeletingSelected(true);
+    let failed = 0;
+    try {
+      const deleted = await deleteConversations(ids);
+      forgetConversations(deleted);
+      failed = n - deleted.size;
+      // Keep only the ones that failed selected, so they can be retried.
+      setSelected(new Set(ids.filter((id) => !deleted.has(id))));
+      if (failed === 0) setSelecting(false);
+    } finally {
+      setClearing(false);
+      setDeletingSelected(false);
+    }
+    if (failed > 0) {
+      await alert(
+        `${failed} of ${n} conversation${n === 1 ? "" : "s"} could not be deleted. Please try again.`
+      );
+    }
+  };
+
   // eslint-disable-next-line
   // @ts-ignore
   const resumeConvo = async (id):any => {
@@ -303,7 +441,10 @@ const SideMenu = ({
   }
 
   const renderConvoHistory = () => {
-    if (newSet.length === 0) {
+    // Only truly empty history gets the empty state; if every loaded
+    // conversation was deleted but older ones remain, keep the footer so
+    // "more…" and "Clear all" stay reachable.
+    if (newSet.length === 0 && convList.length === 0) {
       return (
         <div className="mb-[200px] px-6 pt-4">
           <p className="text-sm text-gray-500 dark:text-gray-400">
@@ -332,6 +473,23 @@ const SideMenu = ({
 
     return (
       <div className="mb-[200px]">
+        {selecting && (
+          <label className="flex items-center gap-3 px-9 pt-4 text-sm text-black dark:text-white cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="h-4 w-4 cursor-pointer"
+              checked={allSelected}
+              ref={(el) => {
+                if (el) el.indeterminate = selectedIds.length > 0 && !allSelected;
+              }}
+              onChange={toggleSelectAll}
+              aria-label="Select all conversations"
+            />
+            <span>
+              {selectedIds.length > 0 ? `${selectedIds.length} selected` : "Select all"}
+            </span>
+          </label>
+        )}
         {sortedDates.map(([date, conversations]) => {
           return (
             <div key={date}>
@@ -353,12 +511,23 @@ const SideMenu = ({
                       <div className={`${isActive ? 'bg-gray-100 dark:bg-gray-800' : ''} rounded`}>
                         <a 
                           href="#" 
-                          className={`flex py-3 my-3 px-3 items-center hover:bg-gray-100 dark:hover:bg-gray-800 rounded cursor-pointer ${isActive ? 'font-medium' : ''}`}
+                          className={`group flex py-3 my-3 px-3 items-center hover:bg-gray-100 dark:hover:bg-gray-800 rounded cursor-pointer ${isActive ? 'font-medium' : ''}`}
                           onClick={(e) => {
                             e.preventDefault();
-                            resumeConvo(item.conversation_id);
+                            if (selecting) toggleSelected(item.conversation_id);
+                            else resumeConvo(item.conversation_id);
                           }}
                         >
+                          {selecting && (
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 mr-3 flex-shrink-0 cursor-pointer"
+                              checked={selected.has(item.conversation_id)}
+                              readOnly
+                              tabIndex={-1}
+                              aria-label="Select conversation"
+                            />
+                          )}
                           <HiOutlineChatBubbleOvalLeft className="text-xl mr-3 flex-shrink-0" />
                           <div className="truncate flex-1">{previewText}</div>
                           {userMessages.length > 1 && (
@@ -377,6 +546,21 @@ const SideMenu = ({
                               )}
                             </button>
                           )}
+                          {!selecting && (
+                          <button
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              deleteOne(item.conversation_id);
+                            }}
+                            disabled={clearing || loadingMore}
+                            aria-label="Delete conversation"
+                            title="Delete conversation"
+                            className="ml-1 flex-shrink-0 p-1 rounded text-gray-400 opacity-40 group-hover:opacity-100 focus:opacity-100 hover:text-red-600 hover:bg-gray-200 dark:hover:bg-gray-700 dark:hover:text-red-400 disabled:opacity-50"
+                          >
+                            <FiTrash2 className="text-base" />
+                          </button>
+                          )}
                         </a>
                         {isExpanded && userMessages.length > 1 && (
                           <div className="px-3 pb-3 ml-8 border-l-2 border-gray-300 dark:border-gray-600">
@@ -386,7 +570,8 @@ const SideMenu = ({
                                 className="py-2 text-sm text-gray-600 dark:text-gray-400 truncate cursor-pointer hover:text-gray-900 dark:hover:text-gray-200"
                                 onClick={(e) => {
                                   e.preventDefault();
-                                  resumeConvo(item.conversation_id);
+                                  if (selecting) toggleSelected(item.conversation_id);
+                                  else resumeConvo(item.conversation_id);
                                 }}
                               >
                                 {msg.content}
@@ -402,22 +587,63 @@ const SideMenu = ({
             </div>
           );
         })}
-        {loadedCount < convList.length && (
+        {convList.length > 0 && (
           <div className="px-6 py-4 flex items-center justify-between gap-3">
-            <button
-              onClick={loadMore}
-              disabled={loadingMore || clearing}
-              className="text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
-            >
-              {loadingMore ? "Loading…" : `more… (${convList.length - loadedCount} older)`}
-            </button>
-            <button
-              onClick={clearOlder}
-              disabled={clearing}
-              className="text-sm text-gray-400 hover:text-red-600 dark:text-gray-500 dark:hover:text-red-400 disabled:opacity-50"
-            >
-              {clearing ? "Clearing…" : "Clear older"}
-            </button>
+            {loadedCount < convList.length ? (
+              <button
+                onClick={loadMore}
+                disabled={loadingMore || clearing}
+                className="text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
+              >
+                {loadingMore ? "Loading…" : `more… (${convList.length - loadedCount} older)`}
+              </button>
+            ) : (
+              <span />
+            )}
+            {selecting ? (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={exitSelecting}
+                disabled={deletingSelected}
+                className="text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={deleteSelected}
+                disabled={selectedIds.length === 0 || clearing || loadingMore}
+                className="text-sm text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 disabled:opacity-50"
+              >
+                {deletingSelected ? "Deleting…" : `Delete selected (${selectedIds.length})`}
+              </button>
+            </div>
+            ) : (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setSelecting(true)}
+                disabled={clearing || loadingMore || visibleIds.length === 0}
+                className="text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
+              >
+                Select
+              </button>
+              {loadedCount < convList.length && (
+                <button
+                  onClick={clearOlder}
+                  disabled={clearing}
+                  className="text-sm text-gray-400 hover:text-red-600 dark:text-gray-500 dark:hover:text-red-400 disabled:opacity-50"
+                >
+                  {clearing && !clearingAll ? "Clearing…" : "Clear older"}
+                </button>
+              )}
+              <button
+                onClick={clearAll}
+                disabled={clearing || loadingMore}
+                className="text-sm text-gray-400 hover:text-red-600 dark:text-gray-500 dark:hover:text-red-400 disabled:opacity-50"
+              >
+                {clearingAll ? "Clearing…" : "Clear all"}
+              </button>
+            </div>
+            )}
           </div>
         )}
       </div>
@@ -675,6 +901,7 @@ const SideMenu = ({
       {renderConvoHistory()}
 
       {confirmDialog}
+      {alertDialog}
 
       {/* <div
         className={`hidden md:block w-[320px] md:max-w-[320px] absolute bg-white dark:bg-background dark:border-[#3D3D3D] rounded-bl-3xl border-t ${height ? "open-dialog-avatar" : "bottom-0"}`}

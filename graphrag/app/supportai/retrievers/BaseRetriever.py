@@ -4,6 +4,7 @@ from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.llm_services.base_llm import LLM_Model
 from common.py_schemas import CandidateScore, CandidateGenerator, GraphRAGAnswerOutput, CommunityAnswer
 from common.utils.token_calculator import get_token_calculator
+from common.utils.retrieval_stats import describe_retrieval
 from common.config import get_chat_config, get_embedding_store, get_graphrag_config
 
 from langchain_core.output_parsers import StrOutputParser, PydanticOutputParser
@@ -36,7 +37,19 @@ class BaseRetriever:
         # Use llm_service's own config when available (chatbot path);
         # fall back to get_chat_config() (direct supportai API path).
         llm_cfg = getattr(llm_service, "config", None) or get_chat_config()
-        self.token_calculator = get_token_calculator(token_limit=llm_cfg.get("token_limit"), model_name=llm_cfg.get("llm_model"))
+        token_limit = (
+            llm_service.context_token_limit()
+            if hasattr(llm_service, "context_token_limit")
+            else llm_cfg.get("token_limit")
+        )
+        self.token_calculator = get_token_calculator(token_limit=token_limit, model_name=llm_cfg.get("llm_model"))
+
+    def _log_retrieval(self, query_name, res):
+        """Log how many chunks a retrieval query returned and how big they are."""
+        result = res[0] if isinstance(res, list) and res else res
+        retrieved = result.get("final_retrieval") if isinstance(result, dict) else None
+        if isinstance(retrieved, dict):
+            self.logger.info(describe_retrieval(query_name, retrieved))
 
     def _install_query(self, query_name):
         self.logger.info(f"Installing query {query_name}")
@@ -144,23 +157,19 @@ class BaseRetriever:
         return [{"candidate_answer": x.answer, "score": x.quality_score} for x in results]
 
     def _generate_response(self, question, retrieved, query = "", verbose = False):
-        # Truncate retrieved sources to fit within token limit
-        if not self.token_calculator.is_unlimited_tokens():
-            # Reserve tokens for question, query, and format instructions (approximately 1000 tokens)
-            max_context_tokens = self.token_calculator.get_max_context_tokens() - 1000
-
-            if len(retrieved) > max_context_tokens:
-                retrieved_tokens = self.token_calculator.count_tokens(retrieved)
-                if retrieved_tokens > max_context_tokens:
-                    retrieved = self.token_calculator.truncate_to_token_limit(retrieved, max_context_tokens)
-                    self.logger.info(f"Truncated retrieved text from {retrieved_tokens} to {max_context_tokens} tokens")
-
         response_parser = PydanticOutputParser(pydantic_object=GraphRAGAnswerOutput)
         # {format_instructions} lives in the (hardcoded) system prompt; bind it
         # as a partial, consistent with the other prompts (see base_llm A1b).
         prompt = ChatPromptTemplate.from_template(
             self.llm_service.chatbot_response_prompt
         ).partial(format_instructions=response_parser.get_format_instructions())
+
+        # Trim retrieved sources so the full prompt fits the model's token limit.
+        if not self.token_calculator.is_unlimited_tokens():
+            retrieved = self.token_calculator.fit_context(
+                retrieved, prompt.format(question=question, context="", query=query)
+            )
+
         input_vars = {
             "question": question, "context": retrieved, "query": query,
         }

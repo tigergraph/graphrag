@@ -179,11 +179,24 @@ def _record_usage(caller_name: str, usage_data: dict, config: Optional[dict] = N
         bucket.append({"caller_name": caller_name, **usage_data})
 
 
+# Defaults for LLM_Model.context_token_limit when no token_limit is configured.
+# Prompts are counted with tiktoken, which can undercount a provider's own
+# tokenizer: Gemini counted ~23% more on a real 524K-token context.
+_TOKENIZER_MARGIN = 0.6
+_DEFAULT_ANSWER_RESERVE = 4096
+_warned_no_token_limit: set = set()
+
+
 class LLM_Model:
     """Base LLM_Model Class
 
     Used to connect to external LLM API services, and retrieve customized prompts for the tools.
     """
+
+    # Whether the provider's native structured output enforces strict JSON
+    # schema, which rejects free-form maps. True for the OpenAI family
+    # (GML-2302); callers with such maps then ask for tool calling instead.
+    strict_structured_output = False
 
     def __init__(self, config):
         self.llm = None
@@ -191,6 +204,32 @@ class LLM_Model:
         from common.config import validate_graphname
         self._graphname = validate_graphname(config.get("graphname"))
         self.prompt_path = config.get("prompt_path", "")
+
+    def context_token_limit(self) -> int:
+        """Token budget for an answer prompt, retrieved context included.
+
+        The configured ``token_limit`` when set. Otherwise the chat model's
+        input limit from its LangChain profile, less room for the answer and a
+        margin for tokenizer differences (counts use tiktoken, not the
+        provider's tokenizer). 0 means no limit: a model with no profile, such
+        as an Ollama or custom model name, keeps the old untrimmed behavior.
+        """
+        configured = self.config.get("token_limit")
+        if configured:
+            return int(configured)
+        profile = getattr(self.llm, "profile", None) or {}
+        max_input = profile.get("max_input_tokens")
+        if not max_input:
+            model = self.config.get("llm_model")
+            if model not in _warned_no_token_limit:
+                _warned_no_token_limit.add(model)
+                logger.warning(
+                    f"No token_limit configured and no known input limit for model "
+                    f"{model!r}; retrieved context will not be trimmed"
+                )
+            return 0
+        max_output = profile.get("max_output_tokens") or _DEFAULT_ANSWER_RESERVE
+        return max(int(max_input * _TOKENIZER_MARGIN) - int(max_output), 0)
 
     def _read_prompt_file(self, path):
         """Read a prompt file with per-graph override support.
@@ -599,17 +638,24 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         messages: list,
         schema,
         caller_name: str = "unknown",
+        method: str = None,
     ):
         """Invoke the chat model with native structured output.
 
         Returns an instance of ``schema`` (a pydantic class). Used by the
         planner to get a typed ``Plan`` back. Falls back to a JSON-extraction
         parse when the provider's structured-output path returns text.
+
+        ``method`` is passed to ``with_structured_output`` when given; ``None``
+        keeps the provider's default.
         """
         usage_data = {}
         with get_openai_callback() as cb:
             try:
-                structured = self.llm.with_structured_output(schema)
+                if method is None:
+                    structured = self.llm.with_structured_output(schema)
+                else:
+                    structured = self.llm.with_structured_output(schema, method=method)
                 result = structured.invoke(messages)
             except Exception as exc:
                 logger.warning(

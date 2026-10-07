@@ -261,7 +261,7 @@ class TestConvertSampleFiles(unittest.TestCase):
 
     @patch("app.routers.ui.auth", return_value=_ok_auth())
     def test_writes_to_flat_layout_and_returns_saved_files(self, _mock_auth):
-        async def _fake_process(self, folder, graphname, temp):
+        async def _fake_process(self, folder, graphname, temp, filenames=None):
             stem = "report"
             Path(temp).mkdir(parents=True, exist_ok=True)
             Path(temp, f"{stem}.jsonl").write_text('{"text":"hello"}\n')
@@ -287,8 +287,64 @@ class TestConvertSampleFiles(unittest.TestCase):
             self.assertNotIn("request_id", body)
 
     @patch("app.routers.ui.auth", return_value=_ok_auth())
+    def test_unreadable_sample_is_reported_and_not_passed_on(self, _mock_auth):
+        """A sample that fails to convert has no JSONL, so naming it in the
+        schema step would fail the whole step. It is reported instead."""
+        async def _fake_process(self, folder, graphname, temp, filenames=None):
+            Path(temp).mkdir(parents=True, exist_ok=True)
+            Path(temp, "good.jsonl").write_text('{"text":"hello"}\n')
+            return {"num_documents": 1, "files": [
+                {"file_path": str(Path(folder, "good.pdf")), "status": "success",
+                 "num_documents": 1},
+                {"file_path": str(Path(folder, "bad.pdf")), "status": "failed",
+                 "error": "Could not read text from bad.pdf. The file may be corrupt."},
+            ]}
+
+        with _ChdirTempDir(), patch(
+            "app.routers.ui.TextExtractor._process_folder_async", new=_fake_process,
+        ):
+            resp = self.client.post(
+                f"/ui/{GRAPH}/convert_sample_files",
+                files=[
+                    ("files", ("good.pdf", io.BytesIO(b"x"), "application/pdf")),
+                    ("files", ("bad.pdf", io.BytesIO(b"x"), "application/pdf")),
+                ],
+                auth=("testuser", "testpass"),
+            )
+            self.assertEqual(resp.status_code, 200, resp.text)
+            body = resp.json()
+            self.assertEqual(body["saved_files"], ["good.pdf"])
+            self.assertEqual(
+                body["failed_files"],
+                [{"file": "bad.pdf",
+                  "error": "Could not read text from bad.pdf. The file may be corrupt."}],
+            )
+
+    @patch("app.routers.ui.auth", return_value=_ok_auth())
+    def test_all_samples_unreadable_returns_the_reasons(self, _mock_auth):
+        async def _fake_process(self, folder, graphname, temp, filenames=None):
+            Path(temp).mkdir(parents=True, exist_ok=True)
+            return {"num_documents": 0, "files": [
+                {"file_path": str(Path(folder, "bad.pdf")), "status": "failed",
+                 "error": "Could not read text from bad.pdf. The file may be corrupt."},
+            ]}
+
+        with _ChdirTempDir(), patch(
+            "app.routers.ui.TextExtractor._process_folder_async", new=_fake_process,
+        ):
+            resp = self.client.post(
+                f"/ui/{GRAPH}/convert_sample_files",
+                files=[("files", ("bad.pdf", io.BytesIO(b"x"), "application/pdf"))],
+                auth=("testuser", "testpass"),
+            )
+            self.assertEqual(resp.status_code, 400, resp.text)
+            detail = resp.json()["detail"]
+            self.assertIn("bad.pdf", detail)
+            self.assertNotIn("/", detail, "no filesystem path in the message")
+
+    @patch("app.routers.ui.auth", return_value=_ok_auth())
     def test_sweeps_legacy_schema_subdirs_on_entry(self, _mock_auth):
-        async def _fake_process(self, folder, graphname, temp):
+        async def _fake_process(self, folder, graphname, temp, filenames=None):
             Path(temp).mkdir(parents=True, exist_ok=True)
             return {"num_documents": 0}
 

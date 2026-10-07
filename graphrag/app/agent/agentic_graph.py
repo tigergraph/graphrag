@@ -24,7 +24,7 @@ adopt LangGraph later if checkpointing/streaming-graph features are needed.
 import logging
 import time
 
-from agent.agentic_executor import cap_for_trace, execute_plan, _run_step, _usage_since
+from agent.agentic_executor import execute_plan, fit_for_trace, with_trace_note, _run_step, _usage_since
 from agent.agentic_planner import plan_question
 from agent.agentic_synthesizer import _gather, has_context, synthesize
 from common.llm_services.base_llm import get_collected_usage
@@ -138,12 +138,12 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     _u0 = len(get_collected_usage() or [])
     _t0 = time.time()
     resp = synthesize(llm, question, results, plan=plan, conversation=conversation)
+    # Input is the combined context fed to the answer LLM (what actually
+    # grounded the answer); output is the answer + citations.
     agent_steps.append({
         "node": "synthesize", "kind": "answer",
         "duration_s": round(time.time() - _t0, 3),
-        # Input is the combined context fed to the answer LLM (what actually
-        # grounded the answer); output is the answer + citations.
-        "input": cap_for_trace(_gather(results)),
+        "input": with_trace_note(*fit_for_trace(_gather(results))),
         "output": {
             "answer": resp.natural_language_response,
             "citations": (resp.query_sources or {}).get("citations", []),

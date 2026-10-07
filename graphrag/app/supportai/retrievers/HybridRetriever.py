@@ -97,6 +97,7 @@ class HybridRetriever(BaseRetriever):
             self.logger.info(f"Retrived HybridSearch query verbose info: {verbose_info}")
             if expand:
                 res[1]["verbose"]["expanded_questions"] = questions
+        self._log_retrieval("GraphRAG_Hybrid_Vector_Search", res)
         return res
 
     def retrieve_answer(self, question, index, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand: bool = False, method: str = "similarity", chunk_only: bool = False, doc_only: bool = False, combine: bool = False, verbose: bool = False, max_results: int = 0):
