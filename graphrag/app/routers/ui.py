@@ -1289,8 +1289,10 @@ def migration_status(
     Read-only — does NOT modify the graph. Pair with
     ``POST /migration/apply`` to actually repair.
 
-    Schema-attribute drift is reported as ``{}`` for now; the detection
-    is stubbed in ``common.db.migrate.check_and_apply_schema``.
+    ``schema.compatible`` says whether the graph has the base schema the
+    shipped queries are written against; query repair is offered only when
+    it does (graphs created before 1.4 do not and need recreating).
+    ``schema.check_failed`` means the schema could not be read.
     """
     from common.db.migrate import _gsql_hash, get_installed_query_names, get_installed_query_body
 
@@ -1298,6 +1300,8 @@ def migration_status(
 
     cred_obj = creds[1]
     conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
+
+    schema_compatible, schema_check_failed = _schema_compatibility(conn, graphname)
 
     # Read live domain schema once for templated-retriever rendering.
     domain_vts, domain_edges, include_entity = _get_domain_schema_for_render(conn, graphname)
@@ -1412,10 +1416,8 @@ def migration_status(
             "missing_files": missing_files,
         },
         "schema": {
-            # Populated from common.db.migrate.check_and_apply_schema once
-            # attribute additions are tracked; empty until then.
-            "missing_attributes": {},
-            "schema_change_required": False,
+            "compatible": schema_compatible,
+            "check_failed": schema_check_failed,
         },
         "prompts": prompt_issues,
         "embeddings": {
@@ -1428,7 +1430,27 @@ def migration_status(
             community_summaries.get("needs_resummarize", 0)
         ),
         "needs_repair": bool(outdated) or bool(not_installed) or bool(prompt_issues),
+        "repairable": schema_compatible,
     }
+
+
+def _schema_compatibility(conn, graphname) -> tuple[bool, bool]:
+    """``(compatible, check_failed)`` for the graph's schema; differences are
+    logged, not returned, since they are only useful to an administrator
+    reading the server log."""
+    from common.db.migrate import check_schema_compatibility
+
+    try:
+        result = check_schema_compatibility(conn)
+    except Exception as e:
+        logger.warning(f"migration: schema check for {graphname} failed: {e}")
+        return False, True
+    if not result.compatible:
+        logger.warning(
+            f"migration: graph {graphname} does not match the current base schema "
+            f"and cannot be repaired in place: {'; '.join(result.differences)}"
+        )
+    return result.compatible, False
 
 
 async def _proxy_regen(graphname, creds, action):
@@ -1490,6 +1512,10 @@ def migration_apply(
     per-category opt-in. When neither list is provided the endpoint detects
     the repair set itself. Only shipped query names are honored.
 
+    Refuses with 409 a graph whose schema lacks the shipped base schema
+    (created before 1.4), and with 503 when the schema cannot be read, so
+    queries are never replaced with ones the graph cannot run.
+
     Acquires the per-graph lock for the duration of the repair so that
     a concurrent ingest / rebuild / schema-extraction on the same graph
     cannot race against the CREATE OR REPLACE + INSTALL QUERY
@@ -1536,6 +1562,14 @@ def migration_apply(
     try:
         cred_obj = creds[1]
         conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
+        compatible, check_failed = _schema_compatibility(conn, graphname)
+        if check_failed:
+            raise HTTPException(
+                status_code=503,
+                detail="The graph's schema could not be checked. Try again shortly.",
+            )
+        if not compatible:
+            raise HTTPException(status_code=409, detail=_INCOMPATIBLE_SCHEMA_MESSAGE)
         return _migration_apply_inner(
             graphname, conn,
             queries_outdated=queries_outdated,
@@ -1544,6 +1578,12 @@ def migration_apply(
         )
     finally:
         release_graph_lock(graphname, "migration")
+
+
+_INCOMPATIBLE_SCHEMA_MESSAGE = (
+    "This graph was created with an older version of GraphRAG and can't be "
+    "repaired in place. Create a new graph and ingest its documents again."
+)
 
 
 def _migration_apply_inner(
