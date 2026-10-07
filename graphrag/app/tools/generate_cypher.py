@@ -13,6 +13,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+import re
 from typing import Iterable
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -25,6 +26,51 @@ from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
 
 logger = logging.getLogger(__name__)
+
+
+def validate_tigergraph_cypher(query: str, schema: str) -> None:
+    """Reject the OpenCypher shape TigerGraph cannot compile."""
+    directed_self_edges: set[str] = set()
+    edge_name = from_type = to_type = None
+    for line in schema.partition("Edge Types:")[2].splitlines() + ["END"]:
+        if line and not line[0].isspace():
+            edge_name = line.strip()
+            from_type = to_type = None
+        elif edge_name and line.strip().startswith("From Vertex:"):
+            from_type = line.split(":", 1)[1].strip()
+        elif edge_name and line.strip().startswith("To Vertex:"):
+            to_type = line.split(":", 1)[1].strip()
+        elif (
+            edge_name
+            and from_type == to_type
+            and line.strip() == "Edge direction: Directed"
+        ):
+            directed_self_edges.add(edge_name)
+
+    returned = re.search(r"\bRETURN\b(.*)", query, re.I | re.S)
+    if not returned:
+        return
+    return_items = returned.group(1).split(",")
+    for edge_var, edge_type in re.findall(
+        r"OPTIONAL\s+MATCH\s*\([^)]*\)\s*-\s*"
+        r"\[\s*(\w+)\s*:\s*(\w+)[^]]*]\s*-\s*\([^)]*\)",
+        query,
+        re.I,
+    ):
+        returns_edge = any(
+            re.fullmatch(
+                rf"`?{re.escape(edge_var)}`?(?:\s+AS\s+\w+)?",
+                item.strip(),
+                re.I,
+            )
+            for item in return_items
+        )
+        if edge_type in directed_self_edges and returns_edge:
+            raise ValueError(
+                f"TigerGraph cannot return {edge_var} from an undirected "
+                f"OPTIONAL MATCH on directed self-edge {edge_type}. Use MATCH "
+                "or return only the related vertex and requested edge attributes."
+            )
 
 
 class GenerateCypher(BaseTool):
@@ -105,6 +151,7 @@ class GenerateCypher(BaseTool):
         if not any(kw in out_upper for kw in ("MATCH", "RETURN", "WITH", "UNWIND", "CALL")):
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_cypher - LLM did not produce a valid Cypher query")
             raise ValueError(f"LLM did not produce a valid Cypher query: {out[:200]}")
+        validate_tigergraph_cypher(out, schema)
 
         query_header = "USE GRAPH " + self.conn.graphname + " "+ "\n" + "INTERPRET OPENCYPHER QUERY () {" + "\n"
         query_footer = "\n}"
