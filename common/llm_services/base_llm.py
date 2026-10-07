@@ -1147,7 +1147,7 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
     # Strategy (operator-customizable) — moved out of the fixed rules so it can
     # be tuned without touching the role / act model / plan mechanics.
     _AGENTIC_PLANNER_USER_DEFAULT = """\
-- Before building the plan, check whether the question is self-contained: can it be fully understood without reading ## Conversation? If the subject, entity, or topic is not named explicitly in the question, find the most recent relevant entity from ## Conversation and substitute its full name in every step's args. If ## Conversation has multiple candidates and it is genuinely unclear which one the user means, plan only a final answer step (no retrieval) that asks the user one short clarifying question.
+- Before building the plan, check whether the question is self-contained: can it be fully understood without reading ## Conversation? If the subject, entity, or topic is not named explicitly in the question, find the most recent relevant entity from ## Conversation and substitute its full name in every step's args. If ## Conversation has multiple candidates, use the most recent one (a genuinely ambiguous reference is clarified with the user before planning).
 - When a question has multiple clauses, assign each clause to its own retrieval step. If another clause still needs passages or typed graph facts after one is covered, plan hybrid/community/structural for that clause too.
 - Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
 - Use BOTH structural and unstructured kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
@@ -1168,7 +1168,7 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
 You are the front desk for an agentic assistant. The agent behind you has tools: it retrieves from a TigerGraph knowledge base and may also have external tools attached (e.g. weather, web, or other data sources).
 
 Decide whether the user's latest message can be answered directly without any lookup, or needs the agent to retrieve or call a tool:
-- needs_retrieval=false WITH a brief, friendly direct answer when the message is purely conversational per the routing policy below;
+- needs_retrieval=false WITH a brief, friendly direct answer when the message is purely conversational per the routing policy below, or WITH one short clarifying question when the routing policy says the message is too unclear to look up;
 - needs_retrieval=true WITH an empty answer otherwise — the agent will then pick the right tool, or honestly report it cannot answer.
 
 When unsure, choose needs_retrieval=true. Match the user's language.
@@ -1187,6 +1187,8 @@ Classify the message into exactly one bucket:
   - questions about the user's data, documents, entities, or relationships;
   - broad questions about what the data CONTAINS or is ABOUT — e.g. "what is this graph about?", "what data is in the graph?", "what topics are covered?", "summarize the documents";
   - anything else a tool might fetch (weather, current events, a calculation, etc.).
+
+- UNCLEAR FOLLOW-UP — the message refers back to something in ## Conversation ("it", "that one", "the company", "what about the other?") and ## Conversation offers more than one candidate, so it is genuinely unclear which one the user means. Answer with one short clarifying question that names the candidates. If ## Conversation makes the reference clear, the message is INFORMATIONAL, not this bucket.
 
 Key distinction: a question about the ASSISTANT's capabilities is CONVERSATIONAL; a question about the DATA's contents (what is in the graph, or what it is about) is INFORMATIONAL — never deflect those. Do not deflect an informational question just because it looks outside the knowledge base — the agent may have a tool that answers it."""
 
