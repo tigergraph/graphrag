@@ -88,8 +88,25 @@ class TestContextTokenLimit(unittest.TestCase):
         )
         self.assertEqual(
             svc.context_token_limit(),
-            int(128000 * self.base_llm._TOKENIZER_MARGIN) - 16384,
+            int(128000 * self.base_llm._TOKENIZER_MARGIN) - self.base_llm._ANSWER_RESERVE_CAP,
         )
+
+    def test_large_output_budgets_reserve_only_a_capped_answer(self):
+        """Reasoning models declare 100K+ output budgets; reserving all of it
+        left gpt-5 about 35K and o3 about 20K tokens for context."""
+        for max_in, max_out in ((272000, 128000), (200000, 100000), (272000, 272000)):
+            svc = self._service({"llm_model": "m"},
+                                {"max_input_tokens": max_in, "max_output_tokens": max_out})
+            self.assertEqual(
+                svc.context_token_limit(),
+                int(max_in * self.base_llm._TOKENIZER_MARGIN) - self.base_llm._ANSWER_RESERVE_CAP,
+            )
+
+    def test_small_window_keeps_at_least_half_for_context(self):
+        svc = self._service({"llm_model": "m"},
+                            {"max_input_tokens": 8192, "max_output_tokens": 8192})
+        budget = int(8192 * self.base_llm._TOKENIZER_MARGIN)
+        self.assertEqual(svc.context_token_limit(), budget - budget // 2)
 
     def test_unknown_model_keeps_no_limit_and_warns_once(self):
         self.base_llm._warned_no_token_limit.discard("custom-model")
@@ -148,6 +165,25 @@ class TestAnswerGenerationTrimsContext(unittest.TestCase):
         calc = gen.token_calculator
         self.assertLess(calc.count_tokens(seen["context"]), calc.count_tokens("fact " * 10000))
         self.assertLessEqual(calc.count_tokens(seen["prompt"]), 3000)
+
+    def test_prompt_that_cannot_render_gets_the_fallback_answer(self):
+        class BracesService:
+            config = {"llm_model": "gpt-4o-mini"}
+            # A custom prompt with stray braces cannot be rendered.
+            chatbot_response_prompt = "{format_instructions}\n{question}\n{query}\n{context}\nUse {oops}"
+
+            def context_token_limit(self):
+                return 3000
+
+            @staticmethod
+            def _salvage_answer_output(raw):
+                return raw
+
+            def invoke_with_parser(self, *args, **kwargs):
+                raise AssertionError("not reached")
+
+        answer = self.Generator(BracesService()).generate_answer("q", "ctx")
+        self.assertIn("I wasn't able to generate an answer", answer.generated_answer)
 
     def test_failure_log_names_the_provider_error(self):
         class FailingService:

@@ -183,7 +183,9 @@ def _record_usage(caller_name: str, usage_data: dict, config: Optional[dict] = N
 # Prompts are counted with tiktoken, which can undercount a provider's own
 # tokenizer: Gemini counted ~23% more on a real 524K-token context.
 _TOKENIZER_MARGIN = 0.6
-_DEFAULT_ANSWER_RESERVE = 4096
+# Room kept for the answer. Capped: reasoning models declare output budgets of
+# 100K+ tokens, and reserving all of it left them a few thousand for context.
+_ANSWER_RESERVE_CAP = 8192
 _warned_no_token_limit: set = set()
 
 
@@ -209,8 +211,8 @@ class LLM_Model:
         """Token budget for an answer prompt, retrieved context included.
 
         The configured ``token_limit`` when set. Otherwise the chat model's
-        input limit from its LangChain profile, less room for the answer and a
-        margin for tokenizer differences (counts use tiktoken, not the
+        input limit from its LangChain profile, less room for the answer (at
+        most ``_ANSWER_RESERVE_CAP``) and a margin for tokenizer differences (counts use tiktoken, not the
         provider's tokenizer). 0 means no limit: a model with no profile, such
         as an Ollama or custom model name, keeps the old untrimmed behavior.
         """
@@ -228,8 +230,11 @@ class LLM_Model:
                     f"{model!r}; retrieved context will not be trimmed"
                 )
             return 0
-        max_output = profile.get("max_output_tokens") or _DEFAULT_ANSWER_RESERVE
-        return max(int(max_input * _TOKENIZER_MARGIN) - int(max_output), 0)
+        budget = int(max_input * _TOKENIZER_MARGIN)
+        # Never more than half the budget, so small-window models keep context.
+        answer_room = min(int(profile.get("max_output_tokens") or _ANSWER_RESERVE_CAP),
+                          _ANSWER_RESERVE_CAP, budget // 2)
+        return budget - answer_room
 
     def _read_prompt_file(self, path):
         """Read a prompt file with per-graph override support.

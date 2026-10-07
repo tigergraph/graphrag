@@ -65,13 +65,14 @@ class TigerGraphAgentGenerator:
             }
         )
 
-        # Trim the context so the full prompt fits the model's token limit.
-        if not self.token_calculator.is_unlimited_tokens():
-            context = self.token_calculator.fit_context(
-                context, prompt.format(question=question, context="", query=query)
-            )
-
         try:
+            # Trim the context so the full prompt fits the model's token limit.
+            # Inside the try: rendering the prompt can fail (e.g. a custom
+            # prompt with stray braces), which must still yield the fallback.
+            if not self.token_calculator.is_unlimited_tokens():
+                context = self.token_calculator.fit_context(
+                    context, prompt.format(question=question, context="", query=query)
+                )
             generation = self.llm.invoke_with_parser(
                 prompt, answer_parser,
                 {"question": question, "context": context, "query": query},

@@ -20,6 +20,7 @@ block and produces the final grounded answer by reusing the existing
 the out-of-corpus honesty match classic mode.
 """
 
+import json
 import logging
 
 from agent.agent_generation import TigerGraphAgentGenerator
@@ -30,9 +31,23 @@ from common.utils.retrieval_stats import is_grouped, retrieved_entries
 logger = logging.getLogger(__name__)
 
 
-def _without_seen(ctx, seen: set):
-    """``ctx`` minus the retrieved entries already in ``seen`` (which it then
-    extends), or ``None`` when nothing new is left. ``ctx`` is not modified."""
+def _pieces(value) -> list:
+    """The separate texts in a ``final_retrieval`` value, as comparable strings."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict) and "content" in value:
+        return [str(value["content"])]
+    if isinstance(value, list):
+        return [v if isinstance(v, str) else json.dumps(v, sort_keys=True, default=str)
+                for v in value]
+    return [json.dumps(value, sort_keys=True, default=str)]
+
+
+def _without_seen(ctx, seen: dict):
+    """``ctx`` minus the texts already sent for the same id, or ``None`` when
+    nothing new is left. ``seen`` maps id -> texts sent so far and is extended;
+    ``ctx`` is not modified. Comparing text, not just ids, keeps a later step's
+    different or extra text for an id an earlier step also returned."""
     result = ctx.get("result") if isinstance(ctx, dict) else None
     fr = result.get("final_retrieval") if isinstance(result, dict) else None
     if not isinstance(fr, dict):
@@ -40,12 +55,25 @@ def _without_seen(ctx, seen: set):
     kept = {}
     for key, value in fr.items():
         if is_grouped(value):
-            fresh = {k: v for k, v in value.items() if k not in seen}
-            seen.update(fresh)
+            fresh = {}
+            for inner_key, inner in value.items():
+                text = str(inner.get("content", ""))
+                sent = seen.setdefault(inner_key, set())
+                if text not in sent:
+                    sent.add(text)
+                    fresh[inner_key] = inner
             if fresh:
                 kept[key] = fresh
-        elif key == "Similarity_Context" or key not in seen:
-            seen.add(key)
+            continue
+        sent = seen.setdefault(key, set())
+        pieces = _pieces(value)
+        new = [p for p in pieces if p not in sent]
+        if not new:
+            continue
+        sent.update(new)
+        if isinstance(value, list) and len(new) < len(pieces):
+            kept[key] = [v for v, p in zip(value, pieces) if p in new]
+        else:
             kept[key] = value
     if not kept:
         return None
@@ -60,7 +88,7 @@ def _gather(results: dict, log: bool = False) -> dict:
     once; a step left with nothing new is dropped.
     """
     structural, unstructured = [], []
-    seen: set = set()
+    seen: dict = {}
     skipped = 0
     for sr in results.values():
         if not sr.ok or sr.context is None:
