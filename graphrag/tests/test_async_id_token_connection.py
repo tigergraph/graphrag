@@ -133,7 +133,8 @@ class TestConnectionSurvivesTheCheck(unittest.TestCase):
         # The check runs on one throwaway loop; the connection is then reused
         # on another, which is how ECC drives it.
         asyncio.run(_load_verify_helper()(conn, "g"))
-        self.assertIsNone(conn._async_client)
+        # Behavior only: how pyTigerGraph holds its sessions is internal and
+        # differs between 2.0.4 (one client) and 2.0.5 (one per loop).
         asyncio.run(conn.gsql("ls"))  # raised "Event loop is closed" before
 
 
