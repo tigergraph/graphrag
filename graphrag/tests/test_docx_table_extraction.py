@@ -123,6 +123,20 @@ class TestDocxTablesSurvive(unittest.TestCase):
         self.assertIn("Merged", text)
         self.assertIn("| x | y | z |", text)
 
+    def test_table_that_cannot_be_laid_out_keeps_its_text(self):
+        """One unusual table must not fail the whole document; its text stays,
+        without the table layout, in place."""
+        from unittest import mock
+        import common.utils.text_extractors as te
+
+        path = self._build(self._thresholds)
+        with mock.patch.object(te, "_docx_render_table", side_effect=RecursionError("deep merge")):
+            text = extract_text_from_file(path)
+        for value in ("Approval thresholds", "Manager", "$250,000", "escalate to the CFO"):
+            self.assertIn(value, text)
+        self.assertLess(text.index("Approval thresholds"), text.index("$250,000"))
+        self.assertLess(text.index("$250,000"), text.index("escalate to the CFO"))
+
     def test_document_without_tables_is_unchanged(self):
         """Prose-only documents keep their previous shape."""
 

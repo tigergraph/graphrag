@@ -1202,6 +1202,18 @@ def _docx_flatten_table(table):
     return "; ".join(rows)
 
 
+def _docx_table_plain_text(tbl_element):
+    """A table's paragraph texts, one per line, read straight from the XML."""
+    from docx.oxml.ns import qn
+
+    lines = []
+    for p in tbl_element.iter(qn("w:p")):
+        text = "".join(t.text or "" for t in p.iter(qn("w:t"))).strip()
+        if text:
+            lines.append(text)
+    return "\n".join(lines)
+
+
 def _docx_blocks_to_text(parent):
     """Yield the text of ``parent``'s paragraphs and tables, in document order.
 
@@ -1231,7 +1243,13 @@ def _docx_blocks_to_text(parent):
             if text:
                 yield text
         elif isinstance(child, CT_Tbl):
-            rendered = render(Table(child, parent))
+            try:
+                rendered = render(Table(child, parent))
+            except Exception as e:  # noqa: BLE001 — incl. RecursionError on deep merges
+                # One unusual table must not cost the whole document: keep its
+                # text, without the table layout.
+                logger.warning(f"Could not lay out a Word table ({type(e).__name__}: {e}); keeping its text")
+                rendered = _docx_table_plain_text(child)
             if rendered:
                 yield rendered
 
