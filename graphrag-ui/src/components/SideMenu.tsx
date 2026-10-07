@@ -11,7 +11,7 @@ import { IoIosArrowForward } from "react-icons/io";
 import { useTheme } from "@/components/ThemeProvider";
 import { safeJson } from "@/utils/safeJson";
 import { GoGear } from "react-icons/go";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Popover,
   PopoverContent,
@@ -92,6 +92,13 @@ const SideMenu = ({
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deletingSelected, setDeletingSelected] = useState(false);
+  const [deletingOne, setDeletingOne] = useState(false);
+  // Any delete in flight: keeps the other delete actions disabled meanwhile.
+  const busy = clearing || deletingOne;
+  // The list as last rendered, read when a delete lands: a background refresh
+  // may have replaced it since the delete was started.
+  const convListRef = useRef<any[]>([]);
+  convListRef.current = convList;
   const [confirm, confirmDialog] = useConfirm();
   const [alert, alertDialog] = useAlert();
   // Fade + disable the side menu (conversation list + New Chat) while
@@ -276,12 +283,14 @@ const SideMenu = ({
   // one of them, start a new chat rather than keep showing it.
   const forgetConversations = (deleted: Set<string>) => {
     if (deleted.size === 0) return;
-    const loadedGone = convList
-      .slice(0, loadedCount)
-      .filter((c: any) => deleted.has(c.conversation_id)).length;
     setConvList((prev: any[]) => prev.filter((c: any) => !deleted.has(c.conversation_id)));
     setConversationId((prev: any[]) => prev.filter((c: any) => !deleted.has(c.conversation_id)));
-    setLoadedCount((c) => c - loadedGone);
+    setLoadedCount((c) => {
+      const gone = convListRef.current
+        .slice(0, c)
+        .filter((x: any) => deleted.has(x.conversation_id)).length;
+      return Math.max(0, c - gone);
+    });
     const openId = conversationManager.getCurrentConversationId();
     if ((openId && deleted.has(openId)) || (activeConversationId && deleted.has(activeConversationId))) {
       handleNewChat();
@@ -293,8 +302,14 @@ const SideMenu = ({
       "Delete this conversation?\n\nThis permanently removes it and cannot be undone."
     );
     if (!ok) return;
-    const deleted = await deleteConversations([id]);
-    forgetConversations(deleted);
+    setDeletingOne(true);
+    let deleted: Set<string>;
+    try {
+      deleted = await deleteConversations([id]);
+      forgetConversations(deleted);
+    } finally {
+      setDeletingOne(false);
+    }
     if (deleted.size === 0) {
       await alert("The conversation could not be deleted. Please try again.");
     }
@@ -553,7 +568,7 @@ const SideMenu = ({
                               e.stopPropagation();
                               deleteOne(item.conversation_id);
                             }}
-                            disabled={clearing || loadingMore}
+                            disabled={busy || loadingMore}
                             aria-label="Delete conversation"
                             title="Delete conversation"
                             className="ml-1 flex-shrink-0 p-1 rounded text-gray-400 opacity-40 group-hover:opacity-100 focus:opacity-100 hover:text-red-600 hover:bg-gray-200 dark:hover:bg-gray-700 dark:hover:text-red-400 disabled:opacity-50"
@@ -592,7 +607,7 @@ const SideMenu = ({
             {loadedCount < convList.length ? (
               <button
                 onClick={loadMore}
-                disabled={loadingMore || clearing}
+                disabled={loadingMore || busy}
                 className="text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
               >
                 {loadingMore ? "Loading…" : `more… (${convList.length - loadedCount} older)`}
@@ -611,7 +626,7 @@ const SideMenu = ({
               </button>
               <button
                 onClick={deleteSelected}
-                disabled={selectedIds.length === 0 || clearing || loadingMore}
+                disabled={selectedIds.length === 0 || busy || loadingMore}
                 className="text-sm text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300 disabled:opacity-50"
               >
                 {deletingSelected ? "Deleting…" : `Delete selected (${selectedIds.length})`}
@@ -621,7 +636,7 @@ const SideMenu = ({
             <div className="flex items-center gap-3">
               <button
                 onClick={() => setSelecting(true)}
-                disabled={clearing || loadingMore || visibleIds.length === 0}
+                disabled={busy || loadingMore || visibleIds.length === 0}
                 className="text-sm text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200 disabled:opacity-50"
               >
                 Select
@@ -629,7 +644,7 @@ const SideMenu = ({
               {loadedCount < convList.length && (
                 <button
                   onClick={clearOlder}
-                  disabled={clearing}
+                  disabled={busy}
                   className="text-sm text-gray-400 hover:text-red-600 dark:text-gray-500 dark:hover:text-red-400 disabled:opacity-50"
                 >
                   {clearing && !clearingAll ? "Clearing…" : "Clear older"}
@@ -637,7 +652,7 @@ const SideMenu = ({
               )}
               <button
                 onClick={clearAll}
-                disabled={clearing || loadingMore}
+                disabled={busy || loadingMore}
                 className="text-sm text-gray-400 hover:text-red-600 dark:text-gray-500 dark:hover:text-red-400 disabled:opacity-50"
               >
                 {clearingAll ? "Clearing…" : "Clear all"}
