@@ -32,7 +32,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
-from common.utils.retrieval_stats import retrieval_stats
+from common.utils.retrieval_stats import describe_retrieval
 from tools import tool_guards as guards
 from tools.validation_utils import MapQuestionToSchemaException
 
@@ -301,12 +301,10 @@ def _unstructured_result(query_name: str, step) -> dict:
     if not isinstance(retrieved, dict):
         return _ok(f"{query_name} returned results",
                    {"function_call": query_name, "result": result})
-    # Count what the answer will see; non-chunk entries (entity text,
-    # community summaries, whole documents) are reported separately.
-    stats = retrieval_stats(retrieved)
-    summary = f"{query_name} returned {stats.chunks} chunk(s)"
-    if stats.others:
-        summary += f" and {stats.others} other entr{'y' if stats.others == 1 else 'ies'}"
+    # Count and size what the answer will see, as in the retrieval log line;
+    # non-chunk entries (entity text, community summaries, whole documents)
+    # are reported separately.
+    summary = describe_retrieval(query_name, retrieved, verb="returned")
     return _ok(summary, {"function_call": query_name, "result": result})
 
 

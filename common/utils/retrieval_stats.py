@@ -76,11 +76,11 @@ def retrieval_stats(final_retrieval: dict) -> RetrievalStats:
     return stats
 
 
-def describe_retrieval(query_name: str, final_retrieval: dict) -> str:
-    """One line for the log: e.g. "<query> retrieved 20 chunk(s), 16,102,331
-    chars; 3 other entries, 12,345 chars"."""
+def describe_retrieval(query_name: str, final_retrieval: dict, verb: str = "retrieved") -> str:
+    """One line for the log and the step summary: e.g. "<query> retrieved 20
+    chunk(s), 16,102,331 chars; 3 other entries, 12,345 chars"."""
     s = retrieval_stats(final_retrieval)
-    line = f"{query_name} retrieved {s.chunks} chunk(s), {s.chunk_chars:,} chars"
+    line = f"{query_name} {verb} {s.chunks} chunk(s), {s.chunk_chars:,} chars"
     if s.others:
         line += (f"; {s.others} other entr{'y' if s.others == 1 else 'ies'}, "
                  f"{s.other_chars:,} chars")

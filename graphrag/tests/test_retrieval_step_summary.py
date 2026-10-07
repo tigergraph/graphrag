@@ -20,7 +20,7 @@ class TestRetrievalStepSummary(unittest.TestCase):
         fr = {f"guide.pdf_chunk_{i}": [f"text {i}"] for i in range(20)}
         out = _unstructured_result(Q, _step(fr, edges=[{"s": "a", "t": "b"}] * 7))
         self.assertTrue(out["ok"])
-        self.assertEqual(out["summary"], f"{Q} returned 20 chunk(s)")
+        self.assertEqual(out["summary"], f"{Q} returned 20 chunk(s), 130 chars")  # "text 0".."text 19"
         self.assertEqual(out["context"]["result"]["final_retrieval"], fr)
 
     def test_reports_non_chunk_entries_separately(self):
@@ -28,15 +28,15 @@ class TestRetrievalStepSummary(unittest.TestCase):
               "TigerGraph": ["Entity: TigerGraph ..."], "GPE": ["Entity: GPE ..."],
               "Similarity_Context": ["..."]}
         out = _unstructured_result(Q, _step(fr))
-        self.assertEqual(out["summary"], f"{Q} returned 2 chunk(s) and 3 other entries")
+        self.assertEqual(out["summary"], f"{Q} returned 2 chunk(s), 2 chars; 3 other entries, 40 chars")
 
     def test_one_other_entry_is_singular(self):
         out = _unstructured_result(Q, _step({"a_chunk_0": ["t"], "community_1": ["s"]}))
-        self.assertEqual(out["summary"], f"{Q} returned 1 chunk(s) and 1 other entry")
+        self.assertEqual(out["summary"], f"{Q} returned 1 chunk(s), 1 chars; 1 other entry, 1 chars")
 
     def test_name_merely_containing_chunk_is_not_a_chunk(self):
         out = _unstructured_result(Q, _step({"chunk_size_setting": ["t"]}))
-        self.assertEqual(out["summary"], f"{Q} returned 0 chunk(s) and 1 other entry")
+        self.assertEqual(out["summary"], f"{Q} returned 0 chunk(s), 0 chars; 1 other entry, 1 chars")
 
     def test_empty_retrieval_is_reported_as_empty(self):
         out = _unstructured_result(Q, _step({}))
@@ -94,9 +94,17 @@ class TestNestedSiblingResults(unittest.TestCase):
         },
     }
 
+    def test_summary_matches_the_log_line(self):
+        from common.utils.retrieval_stats import describe_retrieval
+        out = _unstructured_result("Chunk_Sibling_Vector_Search", _step(self.FR))
+        self.assertEqual(
+            out["summary"],
+            describe_retrieval("Chunk_Sibling_Vector_Search", self.FR).replace("retrieved", "returned"),
+        )
+
     def test_summary_counts_the_chunks_returned_not_the_matches(self):
         out = _unstructured_result("Chunk_Sibling_Vector_Search", _step(self.FR))
-        self.assertEqual(out["summary"], "Chunk_Sibling_Vector_Search returned 4 chunk(s)")
+        self.assertEqual(out["summary"], "Chunk_Sibling_Vector_Search returned 4 chunk(s), 100 chars")
 
     def test_log_sizes_by_chunk_text(self):
         from common.utils.retrieval_stats import describe_retrieval
