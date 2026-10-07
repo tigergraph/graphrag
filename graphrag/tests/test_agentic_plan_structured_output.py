@@ -112,6 +112,24 @@ class TestInvokeStructuredPassesMethod(unittest.TestCase):
         self.assertIs(result, plan)
         return seen
 
+    def test_empty_structured_result_falls_back_to_parsing(self):
+        """A model that answers without the tool call yields None, not an error."""
+        from common.llm_services.base_llm import LLM_Model
+        plan_json = self.Plan().model_dump_json()
+
+        class NoToolCallLLM:
+            def with_structured_output(self, schema, **kwargs):
+                return types.SimpleNamespace(invoke=lambda messages: None)
+
+            def invoke(self, messages):
+                return types.SimpleNamespace(content=plan_json)
+
+        svc = object.__new__(LLM_Model)
+        svc.llm, svc.config = NoToolCallLLM(), {}
+        result = svc.invoke_structured([("user", "q")], self.Plan, caller_name="t",
+                                       method="function_calling")
+        self.assertIsInstance(result, self.Plan)
+
     def test_no_method_keeps_the_provider_default(self):
         self.assertEqual(self._run(None), {})
 

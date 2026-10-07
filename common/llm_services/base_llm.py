@@ -662,6 +662,11 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
                 else:
                     structured = self.llm.with_structured_output(schema, method=method)
                 result = structured.invoke(messages)
+                if result is None:
+                    # Tool-calling structured output returns None, not an
+                    # error, when the model answers without calling the tool
+                    # (common on OpenAI-compatible servers); parse instead.
+                    raise ValueError("model returned no structured result")
             except Exception as exc:
                 logger.warning(
                     f"{caller_name}: structured output failed ({exc}); "
