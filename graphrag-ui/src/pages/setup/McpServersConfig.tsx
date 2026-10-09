@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import { Plus, Save, Loader2, Trash2, Pencil, PlugZap, Server, ChevronDown, ChevronRight, Upload } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { useConfirm } from "@/hooks/useConfirm";
 import {
   Select,
   SelectContent,
@@ -445,6 +446,16 @@ const McpServersConfig: React.FC = () => {
   const [availableGraphs, setAvailableGraphs] = useState<string[]>([]);
 
   const [servers, setServers] = useState<McpServer[]>([]);
+  // The list as last loaded from the server. Saving replaces the whole stored
+  // list, so deletes are written from this copy rather than from `servers`,
+  // which may hold unsaved edits. New rows are only ever appended, so row
+  // `idx` is a saved server exactly when `idx < savedRef.current.length`.
+  const savedRef = useRef<McpServer[]>([]);
+  // Which list the page shows now; a delete still in flight after the user
+  // switches scope or graph must not touch the newly shown list.
+  const listKeyRef = useRef("");
+  listKeyRef.current = `${configScope}:${selectedGraph}`;
+  const [confirm, confirmDialog] = useConfirm();
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -490,10 +501,13 @@ const McpServersConfig: React.FC = () => {
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       const list = Array.isArray(data?.data) ? data.data : [];
-      setServers(list.map(fromApi));
+      const loaded: McpServer[] = list.map(fromApi);
+      savedRef.current = loaded;
+      setServers(loaded);
     } catch (e: any) {
       setMessage(`Failed to load MCP servers: ${e.message}`);
       setMessageType("error");
+      savedRef.current = [];
       setServers([]);
     } finally {
       setIsLoading(false);
@@ -502,6 +516,7 @@ const McpServersConfig: React.FC = () => {
 
   useEffect(() => {
     if (configScope === "graph" && !selectedGraph) {
+      savedRef.current = [];
       setServers([]);
       return;
     }
@@ -527,6 +542,67 @@ const McpServersConfig: React.FC = () => {
     setEditingIndex(null);
     setTestResults((p) => { const c = { ...p }; delete c[idx]; return c; });
   }, []);
+
+  const serversUrl = () =>
+    configScope === "graph" && selectedGraph
+      ? `/ui/${selectedGraph}/mcp_servers`
+      : "/ui/mcp_servers";
+
+  const deleteRow = async (idx: number) => {
+    const saved = savedRef.current;
+    if (idx >= saved.length) {
+      // Never saved: nothing to write.
+      const label = servers[idx]?.name.trim();
+      if (label && !(await confirm(`Discard the unsaved MCP server "${label}"?`))) return;
+      removeRow(idx);
+      return;
+    }
+    const label = saved[idx].name || "this server";
+    if (!(await confirm(`Delete MCP server "${label}"? It will be removed from the configuration.`))) {
+      return;
+    }
+    const remaining = saved.filter((_, i) => i !== idx);
+    const listKey = listKeyRef.current;
+    setIsSaving(true);
+    setMessage("");
+    setMessageType("");
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const resp = await fetch(serversUrl(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: creds! },
+        body: JSON.stringify(remaining),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => null);
+        throw new Error(err?.detail || `HTTP ${resp.status}`);
+      }
+      if (listKeyRef.current === listKey) {
+        savedRef.current = remaining;
+        removeRow(idx);
+      }
+      setMessage(`Deleted "${label}".`);
+      setMessageType("success");
+      setTimeout(() => { setMessage(""); setMessageType(""); }, 3000);
+    } catch (e: any) {
+      setMessage(`Delete failed: ${humanizeMcpError(e.message)}`);
+      setMessageType("error");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const cancelEdit = useCallback((idx: number) => {
+    const saved = savedRef.current;
+    if (idx >= saved.length) {
+      removeRow(idx); // a new server: discard it
+      return;
+    }
+    // An existing server: undo the edits rather than removing it.
+    setServers((prev) => prev.map((s, i) => (i === idx ? saved[idx] : s)));
+    setEditingIndex(null);
+    setTestResults((p) => { const c = { ...p }; delete c[idx]; return c; });
+  }, [removeRow]);
 
   const addRow = useCallback(() => {
     setServers((prev) => {
@@ -560,10 +636,7 @@ const McpServersConfig: React.FC = () => {
     setMessageType("");
     try {
       const creds = sessionStorage.getItem("auth");
-      const url = configScope === "graph" && selectedGraph
-        ? `/ui/${selectedGraph}/mcp_servers`
-        : "/ui/mcp_servers";
-      const resp = await fetch(url, {
+      const resp = await fetch(serversUrl(), {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: creds! },
         body: JSON.stringify(servers),
@@ -617,6 +690,7 @@ const McpServersConfig: React.FC = () => {
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
+      {confirmDialog}
       {/* Header — matches GraphRAGConfig / LLMConfig pattern */}
       <div className="flex items-center gap-4 mb-6">
         <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center">
@@ -725,7 +799,13 @@ const McpServersConfig: React.FC = () => {
                   <Button variant="ghost" size="sm" onClick={() => setEditingIndex(isOpen ? null : idx)}>
                     <Pencil size={14} />
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={() => removeRow(idx)}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => deleteRow(idx)}
+                    disabled={isSaving}
+                    title="Delete"
+                  >
                     <Trash2 size={14} />
                   </Button>
                 </div>
@@ -763,7 +843,7 @@ const McpServersConfig: React.FC = () => {
                     server={s}
                     onPatch={(patch) => patchRow(idx, patch)}
                     onSave={async () => { const ok = await handleSave(); if (ok) setEditingIndex(null); }}
-                    onCancel={() => removeRow(idx)}
+                    onCancel={() => cancelEdit(idx)}
                     isSaving={isSaving}
                     testPassed={!!testResults[idx]?.ok}
                   />

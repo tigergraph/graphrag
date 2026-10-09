@@ -50,6 +50,19 @@ import httpx
 if "/code" not in sys.path:
     sys.path.insert(0, "/code")
 
+# Pre-load modules that are used inside per-question worker threads.
+# Importing them here (single-threaded, at startup) prevents race conditions
+# in Python's import lock when multiple ThreadPoolExecutor workers all try to
+# initialize the same partially-loaded module simultaneously (manifests as
+# ImportError: cannot import name '...' from partially initialized module).
+try:
+    import common.config          # noqa: F401
+    from common.config import get_chat_config, get_llm_service  # noqa: F401
+    from hallucination_check import TigerGraphAgentHallucinationCheck  # noqa: F401
+    import openai.types.chat      # noqa: F401
+except Exception:
+    pass  # container may not have all deps at parse time; threads will surface real errors
+
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
 # ANSI colours for clean CLI output. NO_COLOR disables; FORCE_COLOR forces on
@@ -218,6 +231,27 @@ def _build_deepeval_llm():
     model_name   = cfg.get("llm_model", "unknown")
     lc_model     = getattr(llm_provider, "llm", None) or llm_provider
 
+    # Gemini 3.x / thinking models return AIMessage.content as a list of
+    # typed blocks, not a string. DeepEval then does re.search() on it →
+    # AttributeError: 'list' object has no attribute 'find'.
+    _to_text = getattr(llm_provider, "_message_text", None)
+
+    def _as_text(resp) -> str:
+        if callable(_to_text):
+            return _to_text(resp) or ""
+        content = resp.content if hasattr(resp, "content") else resp
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for b in content:
+                if isinstance(b, str):
+                    parts.append(b)
+                elif isinstance(b, dict) and isinstance(b.get("text"), str):
+                    parts.append(b["text"])
+            return "".join(parts)
+        return str(content)
+
     def _parse(text, schema):
         try:
             m = _re.search(r"\{.*\}", text, _re.DOTALL)
@@ -236,12 +270,12 @@ def _build_deepeval_llm():
 
         def generate(self, prompt: str, schema=None):
             resp = lc_model.invoke([HumanMessage(content=prompt)])
-            text = resp.content if hasattr(resp, "content") else str(resp)
+            text = _as_text(resp)
             return _parse(text, schema) if schema else text
 
         async def a_generate(self, prompt: str, schema=None):
             resp = await lc_model.ainvoke([HumanMessage(content=prompt)])
-            text = resp.content if hasattr(resp, "content") else str(resp)
+            text = _as_text(resp)
             return _parse(text, schema) if schema else text
 
         def get_model_name(self) -> str:

@@ -53,6 +53,7 @@ class SimilarityRetriever(BaseRetriever):
             self.logger.info(f"Retrived SimilaritySearch query verbose info: {verbose_info}")
             if expand:
                 res[1]["verbose"]["expanded_questions"] = questions
+        self._log_retrieval("Content_Similarity_Vector_Search", res)
         return res
 
     def retrieve_answer(self, question, index, top_k=1, withHyDE=False, expand=False, combine=False, verbose=False):

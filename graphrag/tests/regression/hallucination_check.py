@@ -111,12 +111,10 @@ RULES:
 to the wrong subject; (2) a claim directly contradicts the context; OR \
 (3) the answer introduces topics entirely unrelated to the context.
 
-Provide your verdict as JSON.
-Format: {format_instructions}""",
+Respond ONLY with a valid JSON object — no prose, no markdown fences:
+{{"confidence": <float 0.0-1.0>, "reason": "<one or two sentences>"}}""",
             input_variables=["generation", "context", "question_block"],
-            partial_variables={
-                "format_instructions": hallucination_parser.get_format_instructions()
-            },
+            partial_variables={},
         )
 
         prediction = self.llm.invoke_with_parser(

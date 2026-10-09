@@ -287,8 +287,17 @@ async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
         # Verify the graph still exists before doing any work
         try:
             await conn.getVertexTypes()
-        except Exception:
-            raise Exception(f"Graph '{graphname}' does not exist or is not accessible")
+        except Exception as e:
+            # Log the real cause (GML-2182). This message once hid an unrelated
+            # failure — "Event loop is closed" from a connection reused across
+            # event loops — and sent debugging the wrong way. The cause stays out
+            # of the message itself, which is shown to operators.
+            LogWriter.error(
+                f"Graph check failed for '{graphname}': {type(e).__name__}: {e}"
+            )
+            raise Exception(
+                f"Graph '{graphname}' does not exist or is not accessible"
+            ) from e
 
         # Reload config at the start of each job to ensure latest settings are used
         LogWriter.info("Reloading configuration for new job...")

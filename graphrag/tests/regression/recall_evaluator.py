@@ -332,7 +332,13 @@ def _llm_judge(gt_chunk: str, retrieved_chunk: str, **_kwargs) -> bool:
             chunk=retrieved_chunk[:_LLM_CHUNK_CHARS],
         )
         resp    = lc.invoke([HumanMessage(content=prompt)])
-        text    = (resp.content if hasattr(resp, "content") else str(resp)).strip().upper()
+        content = resp.content if hasattr(resp, "content") else str(resp)
+        if isinstance(content, list):
+            content = "".join(
+                b["text"] if isinstance(b, dict) and "text" in b else str(b)
+                for b in content
+            )
+        text    = content.strip().upper()
         verdict = text.startswith("YES")
         with _llm_lock:
             _llm_cache[cache_key] = verdict

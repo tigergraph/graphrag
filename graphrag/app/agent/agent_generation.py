@@ -29,7 +29,12 @@ class TigerGraphAgentGenerator:
     def __init__(self, llm_service):
         self.llm = llm_service
         svc_config = getattr(llm_service, "config", {})
-        self.token_calculator = get_token_calculator(token_limit=svc_config.get("token_limit"), model_name=svc_config.get("llm_model"))
+        token_limit = (
+            llm_service.context_token_limit()
+            if hasattr(llm_service, "context_token_limit")
+            else svc_config.get("token_limit")
+        )
+        self.token_calculator = get_token_calculator(token_limit=token_limit, model_name=svc_config.get("llm_model"))
 
     def generate_answer(self, question: str, context: str | dict, query: str = "") -> dict:
         """Generate an answer based on the question and context.
@@ -51,17 +56,6 @@ class TigerGraphAgentGenerator:
         if isinstance(context, dict):
             context = json.dumps(context, ensure_ascii=False)
 
-        # Truncate context to fit within token limit
-        if not self.token_calculator.is_unlimited_tokens():
-            # Reserve tokens for question, query, and format instructions (approximately 1000 tokens)
-            max_context_tokens = self.token_calculator.get_max_context_tokens() - 1000
-
-            if len(context) > max_context_tokens:
-                context_tokens = self.token_calculator.count_tokens(context)
-                if context_tokens > max_context_tokens:
-                    context = self.token_calculator.truncate_to_token_limit(context, max_context_tokens)
-                    logger.info(f"Truncated context from {context_tokens} to {max_context_tokens} tokens")
-
         answer_parser = PydanticOutputParser(pydantic_object=GraphRAGAnswerOutput)
         prompt = PromptTemplate(
             template=self.llm.chatbot_response_prompt,
@@ -72,6 +66,13 @@ class TigerGraphAgentGenerator:
         )
 
         try:
+            # Trim the context so the full prompt fits the model's token limit.
+            # Inside the try: rendering the prompt can fail (e.g. a custom
+            # prompt with stray braces), which must still yield the fallback.
+            if not self.token_calculator.is_unlimited_tokens():
+                context = self.token_calculator.fit_context(
+                    context, prompt.format(question=question, context="", query=query)
+                )
             generation = self.llm.invoke_with_parser(
                 prompt, answer_parser,
                 {"question": question, "context": context, "query": query},
@@ -80,8 +81,9 @@ class TigerGraphAgentGenerator:
                 # from the raw model output.
                 on_parse_error=self.llm._salvage_answer_output,
             )
-        except Exception:
-            logger.warning("generate_answer: generation failed")
+        except Exception as e:
+            logger.warning(f"generate_answer: generation failed: {type(e).__name__}: {e}")
+            logger.debug("generate_answer: generation failure traceback", exc_info=True)
             generation = GraphRAGAnswerOutput(
                 generated_answer=(
                     "I wasn't able to generate an answer for this question. "

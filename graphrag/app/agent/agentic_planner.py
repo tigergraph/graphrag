@@ -126,7 +126,18 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
     # editable "Additional Instructions" portion); the default lives in base_llm.
     messages = [("system", llm.agentic_planner_prompt), ("user", "\n\n".join(user_parts))]
     try:
-        plan = llm.invoke_structured(messages, Plan, caller_name="agentic_plan")
+        # Plan steps carry free-form ``args`` maps. Where a provider's default
+        # structured output is strict JSON schema (the OpenAI family), it
+        # rejects them, so every plan paid for a failed request before falling
+        # back to parsing (GML-2302). Tool calling accepts them there; other
+        # providers keep their default.
+        plan = llm.invoke_structured(
+            messages, Plan, caller_name="agentic_plan",
+            method=(
+                "function_calling"
+                if getattr(llm, "strict_structured_output", False) else None
+            ),
+        )
     except Exception as exc:
         logger.warning(f"planner failed ({exc}); falling back to single hybrid step")
         from common.py_schemas import PlanStep

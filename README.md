@@ -22,6 +22,7 @@
 - [Use TigerGraph GraphRAG](#use-tigergraph-graphrag)
   - [Run Demo with Preloaded GraphRAG](#run-demo-with-preloaded-graphrag)
   - [Manually Build GraphRAG From Scratch](#manually-build-graphrag-from-scratch)
+  - [Upgrade an Existing Graph](#upgrade-an-existing-graph)
 - [Chat Engines and Agents](#chat-engines-and-agents)
   - [Agentic](#agentic)
   - [Classic](#classic)
@@ -67,6 +68,7 @@
 ---
 
 ## Releases
+* **10/7/2026**: GraphRAG v2.0.3 released. Improved agentic answers to multi-part and follow-up questions, kept answers within the chat model's input limit, added deleting chat conversations individually, in groups, or all at once, made the Migration Assistant check a graph's schema before repairing it, and fixed document retrieval, ingestion, and contextual search issues. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.3) for details.
 * **8/28/2026**: GraphRAG v2.0.2 released. Added Migration Assistant data-integrity checks with targeted re-embedding of missing embeddings and re-summarization of incomplete community summaries, made agentic chat work with current and future tool-calling models automatically, and fixed rebuild, PDF extraction, and chat issues. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.2) for details.
 * **7/22/2026**: GraphRAG v2.0.1 released. Fixed a chat error with models that return structured content (such as Gemini 3), and hardened knowledge-graph rebuild so it no longer hangs when the language model is unreachable. Relicensed from Apache 2.0 to AGPL-3.0. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.1) for details.
 * **7/1/2026**: GraphRAG v2.0.0 released. Added an agentic chat engine that plans and runs its own retrieval (Planner and Reactive styles), external MCP tools, and structure-aware document chunking, along with additive prompt customization and many other improvements and bug fixes. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.0) for details.
@@ -363,6 +365,19 @@ The script will:
 1. Load the sample data
 1. Init the GraphRAG based on the graph and install required queries
 1. Ask a question via Python to get answer from GraphRAG
+
+### Upgrade an Existing Graph
+
+Upgrading GraphRAG does not change graphs that already exist: their installed queries stay as they were until they are repaired. After upgrading, open **Knowledge Graph Admin → Migration Assistant** and check each graph. The check reports:
+
+- **Schema compatibility** — whether the graph's schema supports the current release. Graphs created with GraphRAG 1.4 or later are compatible.
+- **Queries** — installed queries that are outdated or missing. **Repair** reinstalls them in place, without rebuilding the knowledge graph.
+- **Prompt overrides** — saved custom prompts in a format the current release no longer uses.
+- **Data health** — vertices missing embeddings and communities missing summaries, each with its own regenerate action.
+
+A graph created with a version earlier than 1.4 can't be repaired in place; the Migration Assistant reports this and does not offer **Repair**. Create a new graph and ingest its documents again.
+
+Repair can't run while the graph is being rebuilt or ingested.
 
 [Go back to top](#top)
 
@@ -666,7 +681,7 @@ In the `llm_config` section of `configs/server_config.json` file, copy JSON conf
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
 | `authentication_configuration` | object | — | Shared authentication credentials for all services. Service-level values take precedence. |
-| `token_limit` | int | — | Hard cap on token count for retrieved context sent to the LLM. Context exceeding this limit is truncated. Inherited by all services if not set at service level. `0` or omitted means unlimited. |
+| `token_limit` | int | — | Hard cap on token count for a prompt carrying retrieved context, prompt included. Context beyond it is truncated. Inherited by all services if not set at service level. `0` or omitted uses the chat model's own input limit when known, otherwise no cap. |
 
 **`completion_service` parameters:**
 
@@ -678,7 +693,7 @@ In the `llm_config` section of `configs/server_config.json` file, copy JSON conf
 | `model_kwargs` | object | No | `{}` | Additional model parameters (e.g., `{"temperature": 0}`). |
 | `prompt_path` | string | No | `"./common/prompts/openai_gpt4/"` | Path to prompt template files. |
 | `base_url` | string | No | — | Custom API endpoint URL. |
-| `token_limit` | int | No | inherited from top-level | Hard cap on token count for retrieved context sent to the LLM. Context exceeding this limit is truncated. `0` or omitted means unlimited. |
+| `token_limit` | int | No | inherited from top-level | Hard cap on token count for a prompt carrying retrieved context, prompt included. Context beyond it is truncated. `0` or omitted uses the model's own input limit when known, otherwise no cap. |
 
 **`embedding_service` parameters:**
 
@@ -701,7 +716,7 @@ Chatbot LLM override. If not configured, inherits from `completion_service`. Con
 | `model_kwargs` | object | No | inherited from completion | Additional model parameters (e.g., `{"temperature": 0}`). |
 | `prompt_path` | string | No | inherited from completion | Path to prompt template files. |
 | `base_url` | string | No | inherited from completion | Custom API endpoint URL. |
-| `token_limit` | int | No | inherited from completion | Hard cap on token count for retrieved context sent to the chatbot LLM. Context exceeding this limit is truncated. `0` or omitted means unlimited. |
+| `token_limit` | int | No | inherited from completion | Hard cap on token count for a prompt carrying retrieved context to the chatbot LLM, prompt included. Context beyond it is truncated. `0` or omitted uses the model's own input limit when known, otherwise no cap. |
 
 **`multimodal_service` parameters (optional):**
 

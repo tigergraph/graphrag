@@ -32,6 +32,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
+from common.utils.retrieval_stats import describe_retrieval
 from tools import tool_guards as guards
 from tools.validation_utils import MapQuestionToSchemaException
 
@@ -294,11 +295,17 @@ def community_search(
 
 def _unstructured_result(query_name: str, step) -> dict:
     result = step[0] if isinstance(step, (list, tuple)) and step else step
-    if _result_is_empty(result):
+    retrieved = result.get("final_retrieval") if isinstance(result, dict) else None
+    if _result_is_empty(result) or retrieved == {}:
         return _empty(f"{query_name} returned no chunks")
-    n = len(result) if hasattr(result, "__len__") else "?"
-    return _ok(f"{query_name} returned {n} item(s)",
-               {"function_call": query_name, "result": result})
+    if not isinstance(retrieved, dict):
+        return _ok(f"{query_name} returned results",
+                   {"function_call": query_name, "result": result})
+    # Count and size what the answer will see, as in the retrieval log line;
+    # non-chunk entries (entity text, community summaries, whole documents)
+    # are reported separately.
+    summary = describe_retrieval(query_name, retrieved, verb="returned")
+    return _ok(summary, {"function_call": query_name, "result": result})
 
 
 # --------------------------------------------------------------------------
