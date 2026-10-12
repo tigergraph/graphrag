@@ -77,3 +77,57 @@ class TestToolCallingProbe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeChat:
+    """A chat model whose tool calls are scripted per attempt."""
+
+    def __init__(self, calls_tool_when, raise_on_force=None):
+        self.calls_tool_when = calls_tool_when  # {"free": bool, "forced": bool}
+        self.raise_on_force = raise_on_force
+        self.attempts = []
+
+    def bind_tools(self, tools, tool_choice=None):
+        forced = tool_choice is not None
+        self.attempts.append("forced" if forced else "free")
+        if forced and self.raise_on_force:
+            raise self.raise_on_force
+        calls = self.calls_tool_when["forced" if forced else "free"]
+
+        class _Bound:
+            def invoke(_self, messages):
+                tool_calls = [{"name": "_ProbePing", "args": {"ok": True}, "id": "1"}] if calls else []
+                return mock.Mock(tool_calls=tool_calls)
+
+        return _Bound()
+
+
+class TestProbeRequiresAToolCall(unittest.TestCase):
+    """Accepting the request is not enough; the model must call the tool."""
+
+    def _probe(self, chat):
+        return cap._run_tool_calling_probe(mock.Mock(llm=chat))
+
+    def test_tool_call_on_first_attempt(self):
+        chat = _FakeChat({"free": True, "forced": True})
+        self.assertIs(self._probe(chat), True)
+        self.assertEqual(chat.attempts, ["free"])
+
+    def test_tool_call_only_when_forced_still_counts(self):
+        chat = _FakeChat({"free": False, "forced": True})
+        self.assertIs(self._probe(chat), True)
+        self.assertEqual(chat.attempts, ["free", "forced"])
+
+    def test_no_tool_call_even_when_forced_disables(self):
+        """An endpoint that accepts tools but ignores them."""
+        chat = _FakeChat({"free": False, "forced": False})
+        self.assertIs(self._probe(chat), False)
+
+    def test_forcing_rejected_as_unsupported_disables(self):
+        chat = _FakeChat({"free": False, "forced": True},
+                         raise_on_force=ValueError("tool_choice is not supported"))
+        self.assertIs(self._probe(chat), False)
+
+    def test_ambiguous_error_stays_unknown(self):
+        chat = _FakeChat({"free": False, "forced": True}, raise_on_force=RuntimeError("502 Bad Gateway"))
+        self.assertIsNone(self._probe(chat))

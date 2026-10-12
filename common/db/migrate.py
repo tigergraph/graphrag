@@ -13,6 +13,9 @@ The release-cut workflow that motivates this module:
   against the body currently installed on TigerGraph and re-creates +
   re-installs only the ones whose body has actually drifted.
 
+* ``check_schema_compatibility`` decides whether a graph can be repaired
+  in place at all: it must already have the shipped base schema.
+
 * ``check_and_apply_schema`` (still a stub — see TODO below) is the
   schema counterpart: detect missing attributes on existing vertex /
   edge types and emit ``ALTER VERTEX ... ADD ATTRIBUTE …`` statements.
@@ -28,6 +31,7 @@ import hashlib
 import logging
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
@@ -228,6 +232,123 @@ async def filter_queries_needing_update_async(
         if await query_needs_update_async(conn, p):
             out.append(p)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Schema compatibility
+# ---------------------------------------------------------------------------
+#
+# Query repair reinstalls the shipped queries in place, which only works when
+# the graph already has the base schema those queries are written against.
+# That base schema has been unchanged since 1.4.0; graphs created earlier
+# differ (1.3.x: IS_HEAD_OF / HAS_TAIL attach to Entity rather than
+# EntityType; 1.1-1.2: different types altogether) and are not repairable in
+# place. Rather than infer a version, compare the live schema with the shipped
+# base schema file: every base vertex type, edge type, edge endpoint pair and
+# attribute must exist. Extra types (domain types, images) are allowed. Vector
+# attributes live in separate files and depend on the deployment's vector
+# setup, so they are not part of the check.
+
+BASE_SCHEMA_PATH = "common/gsql/supportai/SupportAI_Schema.gsql"
+
+_ADD_VERTEX_RE = re.compile(
+    r"ADD\s+VERTEX\s+(\w+)\s*\((.*?)\)\s*WITH", re.IGNORECASE | re.DOTALL
+)
+_ADD_EDGE_RE = re.compile(
+    r"ADD\s+(?:UN)?DIRECTED\s+EDGE\s+(\w+)\s*\((.*?)\)\s*(?:WITH|;)",
+    re.IGNORECASE | re.DOTALL,
+)
+_EDGE_PAIR_RE = re.compile(r"FROM\s+(\w+)\s*,\s*TO\s+(\w+)", re.IGNORECASE)
+
+
+@dataclass
+class SchemaCompatibility:
+    compatible: bool
+    differences: list = field(default_factory=list)
+
+
+def _attr_names(segment: str) -> set:
+    """Attribute names from a comma-separated ``name TYPE`` list."""
+    names = set()
+    for part in segment.split(","):
+        words = part.split()
+        if words and words[0].upper() != "PRIMARY_ID":
+            names.add(words[0])
+    return names
+
+
+def parse_base_schema(text: str) -> tuple[dict, dict]:
+    """Expected schema from the shipped base schema GSQL.
+
+    Returns ``(vertices, edges)``: ``{vertex: {attr, ...}}`` and
+    ``{edge: {"pairs": {(from, to), ...}, "attrs": {attr, ...}}}``.
+    """
+    vertices = {m.group(1): _attr_names(m.group(2)) for m in _ADD_VERTEX_RE.finditer(text)}
+    edges = {}
+    for m in _ADD_EDGE_RE.finditer(text):
+        body = m.group(2)
+        pairs = {(f, t) for f, t in _EDGE_PAIR_RE.findall(body)}
+        edges[m.group(1)] = {
+            "pairs": pairs,
+            "attrs": _attr_names(_EDGE_PAIR_RE.sub("", body).replace("|", ",")),
+        }
+    return vertices, edges
+
+
+def _live_attr_names(meta: dict) -> set:
+    return {a.get("AttributeName") for a in (meta or {}).get("Attributes", []) or []}
+
+
+def _edge_connects(meta: dict, from_vt: str, to_vt: str) -> bool:
+    """Whether the live edge accepts ``from_vt -> to_vt``.
+
+    Multi-pair edges list their pairs under ``EdgePairs``. An edge whose
+    endpoints are reported as ``*`` with no pair list accepts any type at
+    that end; TigerGraph reports ``IN_COMMUNITY`` this way once domain types
+    have been added to it.
+    """
+    pairs = [(ep.get("From"), ep.get("To")) for ep in meta.get("EdgePairs", []) or []]
+    if pairs:
+        return (from_vt, to_vt) in pairs
+    f, t = meta.get("FromVertexTypeName"), meta.get("ToVertexTypeName")
+    return f in ("*", from_vt) and t in ("*", to_vt)
+
+
+def check_schema_compatibility(conn, base_schema_path: str = BASE_SCHEMA_PATH) -> SchemaCompatibility:
+    """Whether the graph has every element of the shipped base schema.
+
+    Raises when the live schema cannot be read, so callers can tell "not
+    compatible" from "could not check".
+    """
+    with open(base_schema_path, encoding="utf-8") as f:
+        exp_vertices, exp_edges = parse_base_schema(f.read())
+
+    live_vertices = set(conn.getVertexTypes() or [])
+    live_edges = set(conn.getEdgeTypes() or [])
+    differences = []
+
+    for vt, attrs in exp_vertices.items():
+        if vt not in live_vertices:
+            differences.append(f"missing vertex type {vt}")
+            continue
+        missing = attrs - _live_attr_names(conn.getVertexType(vt))
+        if missing:
+            differences.append(f"vertex type {vt} is missing attribute(s) {', '.join(sorted(missing))}")
+
+    for et, spec in exp_edges.items():
+        if et not in live_edges:
+            differences.append(f"missing edge type {et}")
+            continue
+        meta = conn.getEdgeType(et) or {}
+        missing_pairs = {(f, t) for f, t in spec["pairs"] if not _edge_connects(meta, f, t)}
+        if missing_pairs:
+            pairs = ", ".join(f"{a}->{b}" for a, b in sorted(missing_pairs))
+            differences.append(f"edge type {et} does not connect {pairs}")
+        missing = spec["attrs"] - _live_attr_names(meta)
+        if missing:
+            differences.append(f"edge type {et} is missing attribute(s) {', '.join(sorted(missing))}")
+
+    return SchemaCompatibility(compatible=not differences, differences=differences)
 
 
 # ---------------------------------------------------------------------------

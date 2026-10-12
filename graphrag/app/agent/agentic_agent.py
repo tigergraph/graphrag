@@ -51,14 +51,47 @@ class _Triage(BaseModel):
     """Front-desk classification of a user message before any DB/MCP work."""
     needs_retrieval: bool = Field(
         description="True if answering requires looking up the user's data in the "
-        "knowledge graph. False for greetings, small talk, thanks/goodbye, or "
-        "questions about the assistant itself (who/what are you, what can you do)."
+        "knowledge graph. False for greetings, small talk, thanks/goodbye, "
+        "questions about the assistant itself (who/what are you, what can you do), "
+        "or a follow-up that is too unclear to look up without asking which "
+        "subject the user means."
     )
     answer: str = Field(
         default="",
         description="When needs_retrieval is False, the complete direct answer to "
-        "give the user. Empty when needs_retrieval is True.",
+        "give the user, or one short clarifying question. Empty when "
+        "needs_retrieval is True.",
     )
+
+
+# Conversation budget for triage, in characters of the JSON sent.
+_TRIAGE_CONVO_CHARS = 4000
+
+
+def _recent_conversation(convo, limit: int = _TRIAGE_CONVO_CHARS) -> str:
+    """The most recent turns that fit ``limit``, as JSON, oldest first.
+
+    Follow-ups refer to the latest turns, so the budget is spent from the
+    end. If even the newest turn is too long, its response is shortened and
+    its question kept.
+    """
+    def dumps(turns):
+        return json.dumps(turns, ensure_ascii=False)
+
+    kept = []
+    for turn in reversed(convo or []):
+        if len(dumps([turn] + kept)) > limit:
+            break
+        kept.insert(0, turn)
+    if not kept and convo:
+        newest = dict(convo[-1])
+        room = limit - len(dumps([{**newest, "response": ""}]))
+        newest["response"] = str(newest.get("response", ""))[:max(room, 0)]
+        # JSON escaping can still push it over; trim until it fits.
+        while newest["response"] and len(dumps([newest])) > limit:
+            newest["response"] = newest["response"][: int(len(newest["response"]) * 0.9)]
+        kept = [newest]
+    return dumps(kept)
 
 
 def _triage_question(llm, question, convo):
@@ -67,7 +100,7 @@ def _triage_question(llm, question, convo):
     the question + conversation — no schema, no MCP, no DB."""
     try:
         user = (
-            f"## Conversation\n{json.dumps(convo or [])[:2000]}\n\n"
+            f"## Conversation\n{_recent_conversation(convo)}\n\n"
             f"## Message\n{question}"
         )
         # Customizable routing prompt (fixed contract + operator-editable

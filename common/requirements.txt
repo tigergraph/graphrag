@@ -140,7 +140,7 @@ python-multipart>=0.0.32
 python-iso639>=2025.2.18
 python-magic>=0.4.27
 pyTigerDriver>=1.0.15
-pyTigerGraph>=2.0.4
+pyTigerGraph>=2.0.5
 pytz>=2025.2
 PyYAML>=6.0.2
 rapidfuzz>=3.13.0
@@ -188,7 +188,7 @@ zipp>=3.23.0
 # tool execution. Requires the fastapi/starlette bump above (mcp pulls
 # starlette>=0.49).
 mcp>=1.27.1
-tigergraph-mcp>=1.0.1
+tigergraph-mcp>=1.0.4
 sse-starlette>=3.4.4
 httpx-sse>=0.4.3
 pydantic-settings>=2.14.1

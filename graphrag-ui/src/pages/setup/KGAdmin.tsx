@@ -79,6 +79,8 @@ const KGAdmin = () => {
       missing_files: string[];
     };
     needs_repair?: boolean;
+    repairable?: boolean;
+    schema?: { compatible: boolean; check_failed: boolean };
     embeddings?: {
       by_type: Record<string, { total: number; missing: number }>;
       total_missing: number;
@@ -154,7 +156,15 @@ const KGAdmin = () => {
         return;
       }
       setMigrationStatus(data);
-      if (
+      if (data.schema?.check_failed) {
+        setMigrationMessage(
+          "⚠️ The graph's schema could not be checked, so repair is unavailable. Try again shortly."
+        );
+      } else if (data.schema && !data.schema.compatible) {
+        setMigrationMessage(
+          "❌ This graph was created with an older version of GraphRAG and can't be repaired in place. Create a new graph and ingest its documents again."
+        );
+      } else if (
         !data.needs_repair &&
         !data.embeddings_incomplete &&
         !data.community_summaries_incomplete
@@ -808,9 +818,15 @@ const KGAdmin = () => {
       // Capture the composite fingerprint (files + hint chips) so the
       // Extract button stays disabled until something changes.
       setExtractedFingerprint(sampleFingerprint);
+      // Samples that could not be read were left out of the draft; say which.
+      const unreadable: Array<{ file: string; error: string }> = convertData.failed_files || [];
+      const skippedNote = unreadable.length
+        ? ` ${unreadable.length} sample file(s) could not be read and were left out: ${unreadable.map((f) => f.error).join(" ")}`
+        : "";
       setStatusMessage(
         `Draft schema ready (${data.summary?.vertex_count ?? "?"} vertex types, ` +
-          `${data.summary?.edge_count ?? "?"} edge types). Review/edit below, then click Initialize.`
+          `${data.summary?.edge_count ?? "?"} edge types). Review/edit below, then click Initialize.` +
+          skippedNote
       );
       setStatusType("success");
     } catch (error: any) {
@@ -1460,7 +1476,7 @@ const KGAdmin = () => {
                 Migration Assistant
               </h2>
               <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
-                Check an existing graph against the current release — repair drifted queries and review prompt-override compatibility.
+                Check an existing graph against the current release — schema compatibility, outdated queries, prompt overrides and data health.
               </p>
             </div>
             <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
@@ -2857,8 +2873,8 @@ const KGAdmin = () => {
                 Migration Assistant
               </DialogTitle>
               <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
-                Check an existing graph against the current release after upgrading graphrag:
-                repair drifted GSQL queries and review prompt-override compatibility — without recreating the graph.
+                Check an existing graph against the current release after upgrading GraphRAG: confirm its schema
+                is compatible, repair outdated queries and review prompt overrides — without recreating the graph.
               </DialogDescription>
             </DialogHeader>
 
@@ -3073,7 +3089,7 @@ const KGAdmin = () => {
               >
                 Close
               </Button>
-              {migrationStatus?.needs_repair && (
+              {migrationStatus?.needs_repair && migrationStatus?.repairable && (
                 <Button
                   onClick={runMigrationApply}
                   disabled={migrationApplying || migrationChecking || isRebuildRunning}

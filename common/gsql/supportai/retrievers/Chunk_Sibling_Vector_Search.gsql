@@ -21,7 +21,11 @@ CREATE OR REPLACE DISTRIBUTED QUERY Chunk_Sibling_Vector_Search(STRING v_type,
   TYPEDEF tuple<Vertex v, Float score> Similarity_Results;
   HeapAccum<Similarity_Results>(top_k, score DESC) @@topk_set;
   MapAccum<STRING, SetAccum<VertexTypes>> @@verbose_info;
-  MapAccum<VERTEX, INT> @distances;
+  // Offset of this chunk from each seed whose window reaches it: negative
+  // before the seed, positive after, 0 for the seed itself.
+  MapAccum<VERTEX, MinAccum<INT>> @offsets;
+  // Rank of the nearest seed (see below); the chunk is listed under it only.
+  MinAccum<INT> @best;
   SumAccum<STRING> @content;
   MapAccum<VERTEX, MapAccum<VERTEX, MapAccum<STRING, STRING>>> @@final_retrieval;
   OrAccum @touched;
@@ -29,7 +33,7 @@ CREATE OR REPLACE DISTRIBUTED QUERY Chunk_Sibling_Vector_Search(STRING v_type,
   SetAccum<VertexTypes> @@start_set_type;
   SetAccum<VertexTypes> @@sibling_set_type;
   SetAccum<EdgeTypes> @@edges;
-  
+
   all_chunks = {v_type};
   result = SELECT v FROM all_chunks:v WHERE v.embedding.size() > 0 POST-ACCUM @@topk_set += Similarity_Results(v, 1 - gds.vector.distance(query_vector, v.embedding, "COSINE"));
 
@@ -38,41 +42,52 @@ CREATE OR REPLACE DISTRIBUTED QUERY Chunk_Sibling_Vector_Search(STRING v_type,
   END;
 
   start = {@@start_set};
-  start = SELECT s FROM start:s ACCUM s.@distances += (s -> 0), s.@touched += TRUE, @@start_set_type += VertexTypes(s, s.type);
+  start = SELECT s FROM start:s ACCUM s.@offsets += (s -> 0), s.@touched += TRUE, @@start_set_type += VertexTypes(s, s.type);
 
   @@verbose_info += ("start_set" -> @@start_set_type);
 
-  FOREACH i IN RANGE[1, lookback] DO
-    start = SELECT tgt FROM start:s -(IS_AFTER)-> :tgt
-          ACCUM 
-            tgt.@touched += TRUE, @@sibling_set_type += VertexTypes(tgt, tgt.type),
-            @@edges += EdgeTypes(s, tgt),
-            FOREACH (key, val) IN s.@distances DO
-              tgt.@distances += (key -> -1*i)
-            END;
+  // Walk each seed's window on its own, so an offset is always measured from
+  // the seed it belongs to (IS_AFTER points to the previous chunk).
+  FOREACH seed IN @@start_set DO
+    frontier = {seed};
+    FOREACH i IN RANGE[1, lookback] DO
+      frontier = SELECT tgt FROM frontier:s -(IS_AFTER)-> :tgt
+                 ACCUM
+                   tgt.@touched += TRUE, tgt.@offsets += (seed -> -1*i),
+                   @@sibling_set_type += VertexTypes(tgt, tgt.type),
+                   @@edges += EdgeTypes(s, tgt);
+    END;
+    frontier = {seed};
+    FOREACH i IN RANGE[1, lookahead] DO
+      frontier = SELECT tgt FROM frontier:s -(reverse_IS_AFTER)-> :tgt
+                 ACCUM
+                   tgt.@touched += TRUE, tgt.@offsets += (seed -> i),
+                   @@sibling_set_type += VertexTypes(tgt, tgt.type),
+                   @@edges += EdgeTypes(s, tgt);
+    END;
   END;
-  
-  start = {@@start_set};
-  FOREACH i IN RANGE[1, lookahead] DO
-    start = SELECT tgt FROM start:s -(reverse_IS_AFTER)-> :tgt
-            ACCUM
-              tgt.@touched += TRUE, @@sibling_set_type += VertexTypes(tgt, tgt.type),
-              @@edges += EdgeTypes(s, tgt),
-              FOREACH (key, val) IN s.@distances DO
-                tgt.@distances += (key -> i)
-              END;
-  END;
-  
-  res = SELECT s FROM all_chunks:s -(HAS_CONTENT)- Content:t WHERE s.@touched == TRUE
-        ACCUM s.@content += t.text;
-  
+
+  // List each chunk once, under its nearest seed. Rank = 2*|offset|, plus 1
+  // when the chunk is not after the seed, so a chunk exactly between two
+  // seeds goes to the earlier one and every seed ranks itself first.
   res = SELECT s FROM all_chunks:s WHERE s.@touched == TRUE
         POST-ACCUM
-          FOREACH (key, val) IN s.@distances DO
-            @@final_retrieval += (key -> (s -> ("distance" -> to_string(val)))),
-            @@final_retrieval += (key -> (s -> ("content" -> s.@content)))
+          FOREACH (key, val) IN s.@offsets DO
+            s.@best += 2 * abs(val) + (CASE WHEN val > 0 THEN 0 ELSE 1 END)
           END;
-  
+
+  res = SELECT s FROM all_chunks:s -(HAS_CONTENT)- Content:t WHERE s.@touched == TRUE
+        ACCUM s.@content += t.text;
+
+  res = SELECT s FROM all_chunks:s WHERE s.@touched == TRUE
+        POST-ACCUM
+          FOREACH (key, val) IN s.@offsets DO
+            IF 2 * abs(val) + (CASE WHEN val > 0 THEN 0 ELSE 1 END) == s.@best THEN
+              @@final_retrieval += (key -> (s -> ("distance" -> to_string(val)))),
+              @@final_retrieval += (key -> (s -> ("content" -> s.@content)))
+            END
+          END;
+
   @@verbose_info += ("selected_set" -> @@sibling_set_type);
 
   PRINT @@final_retrieval as final_retrieval, @@edges as edges;
@@ -80,5 +95,4 @@ CREATE OR REPLACE DISTRIBUTED QUERY Chunk_Sibling_Vector_Search(STRING v_type,
   IF verbose THEN
       PRINT @@verbose_info as verbose;
   END;
-  
 }

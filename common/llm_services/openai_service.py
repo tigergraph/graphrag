@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 class OpenAI(LLM_Model):
+    strict_structured_output = True
+
     def __init__(self, config):
         super().__init__(config)
         for auth_detail in config["authentication_configuration"].keys():

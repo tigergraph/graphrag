@@ -18,6 +18,11 @@ from typing import Dict, List, Optional, Union
 from pydantic import BaseModel, Field
 
 
+class ConversationTurn(BaseModel):
+    query: str
+    response: str
+
+
 class NaturalLanguageQuery(BaseModel):
     query: str
     # Engine: "agentic" | "classic" | None (defer to graph config).
@@ -29,6 +34,10 @@ class NaturalLanguageQuery(BaseModel):
     # name fields (e.g. "query_sources") or "all" to include the supporting
     # sources / trace in the response.
     include_fields: Optional[List[str]] = Field(default=None)
+    # Prior turns of the caller's own conversation, oldest first. The server
+    # holds no conversation state, so a caller wanting follow-up context must
+    # send it; only the most recent turns are given to the agent.
+    history: Optional[List[ConversationTurn]] = Field(default=None)
 
 
 class SupportAIQuestion(BaseModel):

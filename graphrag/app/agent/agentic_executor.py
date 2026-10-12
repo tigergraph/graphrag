@@ -28,6 +28,7 @@ import time
 
 from common.llm_services.base_llm import get_collected_usage
 from common.py_schemas import StepResult
+from common.utils.retrieval_stats import retrieved_entries
 from tools import tool_registry as registry
 
 logger = logging.getLogger(__name__)
@@ -37,16 +38,80 @@ logger = logging.getLogger(__name__)
 _TRACE_FIELD_CAP = 12000
 
 
-def cap_for_trace(obj, limit: int = _TRACE_FIELD_CAP):
-    """Return ``obj`` unchanged if its JSON is under ``limit`` chars; else a
-    truncated-preview marker (kept JSON-valid for the Trace Logs UI)."""
+def _json_size(obj) -> int:
+    # Count characters as written, not as \uXXXX escapes, so non-English
+    # text is neither overcounted nor squeezed out of the preview.
+    return len(json.dumps(obj, ensure_ascii=False, default=str))
+
+
+def _cap_strings(obj, max_len: int):
+    if isinstance(obj, str):
+        if len(obj) <= max_len:
+            return obj
+        return f"{obj[:max_len]}…(+{len(obj) - max_len:,} chars)"
+    if isinstance(obj, dict):
+        return {k: _cap_strings(v, max_len) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_cap_strings(v, max_len) for v in obj]
+    return obj
+
+
+def _cap_items(obj, max_items: int):
+    if isinstance(obj, dict):
+        return {k: _cap_items(v, max_items) for k, v in list(obj.items())[:max_items]}
+    if isinstance(obj, list):
+        return [_cap_items(v, max_items) for v in obj[:max_items]]
+    return obj
+
+
+def fit_for_trace(obj, limit: int = _TRACE_FIELD_CAP):
+    """Return ``(value, shortened)`` for storing ``obj`` in the trace.
+
+    ``value`` is the tool's own data with its shape intact — long strings cut
+    first, then long lists and maps — so the Trace Logs view still shows
+    real tool output, never a wrapper. ``shortened`` is ``None`` when nothing
+    was cut, else ``{"full_chars": N, "shown_chars": M}`` for the trace to
+    report alongside the value.
+    """
     try:
-        s = json.dumps(obj, default=str)
+        plain = json.loads(json.dumps(obj, default=str))
     except Exception:
-        s = str(obj)
-    if len(s) <= limit:
-        return obj
-    return {"_truncated": True, "chars": len(s), "preview": s[:limit]}
+        plain = str(obj)
+    full = _json_size(plain)
+    if full <= limit:
+        return obj, None
+    value = plain
+    for max_len in (4000, 2000, 1000, 500, 250, 120, 60):
+        value = _cap_strings(plain, max_len)
+        if _json_size(value) <= limit:
+            break
+    else:
+        for max_items in (50, 20, 10, 5, 2, 1):
+            value = _cap_items(_cap_strings(plain, 60), max_items)
+            if _json_size(value) <= limit:
+                break
+    return value, {"full_chars": full, "shown_chars": _json_size(value)}
+
+
+def trace_note(cut: dict) -> str:
+    """The note recorded next to a value ``fit_for_trace`` shortened."""
+    return (
+        f"Truncated from {cut['full_chars']:,} to {cut['shown_chars']:,} "
+        "characters due to the trace log size limit."
+    )
+
+
+def with_trace_note(value, cut):
+    """``value`` with a ``note`` key when it was shortened and is a map."""
+    if cut and isinstance(value, dict):
+        return {**value, "note": trace_note(cut)}
+    return value
+
+
+def cap_for_trace(obj, limit: int = _TRACE_FIELD_CAP):
+    """The trace-sized value of ``obj``, for callers with nowhere to record
+    that it was shortened."""
+    return fit_for_trace(obj, limit)[0]
 
 
 def retrieved_chunk_ids(context) -> list:
@@ -64,7 +129,7 @@ def retrieved_chunk_ids(context) -> list:
     fr = inner.get("final_retrieval") if isinstance(inner, dict) else None
     if not isinstance(fr, dict):
         return []
-    return [k for k in fr.keys() if k != "Similarity_Context"]
+    return [k for k in retrieved_entries(fr) if k != "Similarity_Context"]
 
 
 def _usage_since(start_idx: int) -> dict:
@@ -134,15 +199,19 @@ def _run_step(step, args, ctx, results, traces):
     # Trace output carries the one-line summary AND the actual result, so
     # the Trace Logs detail view shows what each step returned (not just a
     # status line). Input is the resolved tool args.
+    # Input and output keep the tool's own data; a value shortened to fit the
+    # trace gets a ``note`` saying so next to it.
     trace_output = {"summary": out.get("summary", "")}
     if out.get("context") is not None:
-        trace_output["result"] = cap_for_trace(out.get("context"))
+        trace_output["result"], cut = fit_for_trace(out.get("context"))
+        trace_output = with_trace_note(trace_output, cut)
+    trace_input = with_trace_note(*fit_for_trace(args))
     traces.append({
         "node": f"{step.id}: {step.tool}",
         "kind": step.kind,
         "tool": step.tool,
         "duration_s": duration,
-        "input": cap_for_trace(args),
+        "input": trace_input,
         "output": trace_output,
         "rationale": step.rationale or "",
         "usage": _usage_since(usage_start),

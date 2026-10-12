@@ -44,6 +44,7 @@ from common.py_schemas.schemas import (  # SupportAIInitConfig,; SupportAIMethod
     SupportAIMethod,
     SupportAIQuestion,
 )
+from common.utils.text_extractors import ExtractionError
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["SupportAI"])
@@ -95,6 +96,9 @@ def create_ingest(
         return supportai.create_ingest(graphname, cfg, conn)
     except HTTPException:
         raise
+    except ExtractionError as e:
+        # None of the files could be read — a problem with the input.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"create_ingest failed for graph '{graphname}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ingest preparation failed: {str(e)}")

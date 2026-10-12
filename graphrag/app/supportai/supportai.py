@@ -17,7 +17,12 @@ from common.py_schemas.schemas import (
     # SupportAIMethod,
     # SupportAIQuestion,
 )
-from common.utils.text_extractors import TextExtractor
+from common.utils.text_extractors import (
+    ExtractionError,
+    TextExtractor,
+    describe_failures,
+    failed_extractions,
+)
 logger = logging.getLogger(__name__)
 
 def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, dict]:
@@ -510,6 +515,10 @@ def create_ingest(
                 raise Exception(f"Server folder processing failed: {server_processing_result}")
             
             doc_count = server_processing_result.get("num_documents", 0)
+            failures = failed_extractions(server_processing_result)
+            if failures and not doc_count:
+                # Nothing converted, so ingest would find no documents; say why.
+                raise ExtractionError(describe_failures(failures))
             logger.info(f"Server folder processing completed: {server_processing_result.get('message')}")
 
             res_ingest_config["data_path"] = temp_folder
@@ -518,6 +527,21 @@ def create_ingest(
             # Use a placeholder path to indicate temp storage
             res["data_path"] = "in_temp_storage"
             res["data_source_id"] = res_ingest_config
+            res["failed_files"] = [
+                {"file": name, "error": reason}
+                for name, reason in sorted(failures.items())
+            ]
+            # Ingest loads one JSONL per converted file across the whole folder,
+            # so count distinct JSONLs rather than the latest upload or the source
+            # files (two sources sharing a stem produce a single JSONL).
+            res["ready_files"] = len({
+                f.get("jsonl_file")
+                for f in server_processing_result.get("files", [])
+                if f.get("status") == "success" and f.get("jsonl_file")
+                and f.get("num_documents", 0) > 0  # e.g. a decorative image yields none
+            })
+        except ExtractionError:
+            raise
         except Exception as e:
             logger.error(f"Server folder processing failed for graph '{graphname}', path '{data_path}': {e}", exc_info=True)
             raise Exception(f"Error during server folder processing: {e}")
@@ -704,7 +728,8 @@ def ingest(
                 # Get all JSONL files from temp folder
                 jsonl_files = [f for f in os.listdir(data_path) if f.endswith('.jsonl')]
                 if not jsonl_files:
-                    raise Exception(f"No JSONL files found in: {data_path}")
+                    logger.error(f"No JSONL files found in: {data_path}")
+                    raise Exception("No readable documents were found to ingest.")
                 logger.info(f"Found {len(jsonl_files)} JSONL files to ingest from: {data_path}")
 
                 # Ensure loading job exists — recreate if missing (e.g. after schema drop)

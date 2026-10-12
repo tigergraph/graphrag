@@ -41,6 +41,11 @@ logger = logging.getLogger(__name__)
 _tg_conn_cfg: contextvars.ContextVar = contextvars.ContextVar(
     "tg_mcp_conn_cfg", default=None
 )
+# Connections a tool call used, so ``_run`` can close their sessions before
+# the call's event loop ends (pyTigerGraph keeps one session per loop).
+_used_conns: contextvars.ContextVar = contextvars.ContextVar(
+    "tg_mcp_used_conns", default=None
+)
 
 try:
     from tigergraph_mcp import connection_manager as _cm
@@ -53,9 +58,13 @@ try:
         # Inject the current request's per-user creds when the caller (the
         # stock tool) didn't pass an explicit connection_config.
         cfg = connection_config or _tg_conn_cfg.get()
-        return _orig_get_connection(
+        conn = _orig_get_connection(
             profile=profile, graph_name=graph_name, connection_config=cfg
         )
+        used = _used_conns.get()
+        if used is not None and conn is not None:
+            used.append(conn)
+        return conn
 
     # Patch the name bound inside each tool module we use.
     _qt.get_connection = _patched_get_connection
@@ -87,8 +96,25 @@ def conn_config_from_conn(conn, graphname: str) -> dict:
 def _run(coro):
     """Run an async tg-mcp tool from the sync executor (fresh event loop in
     the current worker thread; the ContextVar value is copied into it).
+
+    The sessions the call opened belong to that loop, so they are closed
+    before it ends; otherwise each call leaves one behind.
     """
-    return asyncio.run(coro)
+    async def _call():
+        token = _used_conns.set([])
+        try:
+            return await coro
+        finally:
+            for conn in _used_conns.get():
+                aclose = getattr(conn, "aclose", None)
+                if aclose is not None:
+                    try:
+                        await aclose()
+                    except Exception as exc:  # noqa: BLE001 — cleanup only
+                        logger.debug(f"tg-mcp: closing a connection failed: {exc}")
+            _used_conns.reset(token)
+
+    return asyncio.run(_call())
 
 
 def _normalize(res, label: str) -> dict:
