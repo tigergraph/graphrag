@@ -32,6 +32,7 @@ func main() {
 
 	router.HandleFunc("GET /user/{userId}", routes.GetUserConversations)
 	router.HandleFunc("GET /conversation/{conversationId}", routes.GetConversation)
+	router.HandleFunc("DELETE /conversation/{conversationId}", routes.DeleteConversation)
 	router.HandleFunc("POST /conversation", routes.UpdateConversation)
 	router.HandleFunc("GET /get_feedback", routes.GetFeedback(cfg.TgDbConfig.Hostname, cfg.TgDbConfig.GsPort, cfg.ChatDbConfig.ConversationAccessRoles))
 
