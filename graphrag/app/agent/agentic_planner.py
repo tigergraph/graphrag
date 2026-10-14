@@ -25,6 +25,7 @@ orchestrator).
 import json
 import logging
 
+from common.llm_services.capabilities import model_capabilities
 from common.py_schemas import Plan
 from tools import tool_registry as registry
 
@@ -91,6 +92,24 @@ def _sanitize(plan: Plan, ctx=None) -> Plan:
     return plan
 
 
+# A normal plan is a few hundred tokens; the cap only ends a runaway
+# generation early (GML-2324). Reasoning models spend output tokens on
+# thinking, so they get a higher floor.
+_PLANNER_MAX_OUTPUT_TOKENS = 4000
+_REASONING_PLANNER_MIN_OUTPUT_TOKENS = 16000
+
+
+def _planner_output_limit(llm, ctx) -> int:
+    cfg = getattr(ctx, "graphrag_cfg", None) or {}
+    try:
+        limit = int(cfg.get("planner_max_output_tokens") or _PLANNER_MAX_OUTPUT_TOKENS)
+    except (TypeError, ValueError):
+        limit = _PLANNER_MAX_OUTPUT_TOKENS
+    if model_capabilities(getattr(llm, "config", None)).get("supports_thinking"):
+        limit = max(limit, _REASONING_PLANNER_MIN_OUTPUT_TOKENS)
+    return limit
+
+
 def plan_question(llm, question, conversation=None, schema_rep="", prior_results=None, ctx=None) -> Plan:
     """Draft (or extend) a plan for ``question``.
 
@@ -137,6 +156,7 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
                 "function_calling"
                 if getattr(llm, "strict_structured_output", False) else None
             ),
+            max_output_tokens=_planner_output_limit(llm, ctx),
         )
     except Exception as exc:
         logger.warning(f"planner failed ({exc}); falling back to single hybrid step")

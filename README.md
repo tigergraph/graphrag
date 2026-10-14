@@ -546,6 +546,7 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `agent_style` | string | `"planned"` | Default agentic engine style: `"planned"` (plan the whole retrieval up front) or `"reactive"` (decide each step from the last result). The chat menu can override per request. See [Chat Engines and Agents](#chat-engines-and-agents). |
 | `agent_max_iterations` | int | `30` | Reactive agent only: maximum reason-act-observe steps before it must answer. |
 | `agent_max_replans` | int | `3` | Planned agent only: how many times the planner may extend its plan when the gathered context is insufficient. |
+| `planner_max_output_tokens` | int | `4000` | Planned agent only: the most output tokens the planner may use for one plan. Reasoning models use at least `16000`. |
 | `agent_max_total_steps` | int | `20` | Planned agent only: hard cap on executed retrieval steps across all replans. |
 | `chunk_only` | bool | `true` | If true, hybrid search only retrieves document chunks, excluding entity data. |
 | `doc_only` | bool | `false` | If true, hybrid search retrieves whole documents instead of chunks. Significantly increases context size. |

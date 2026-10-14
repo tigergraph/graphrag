@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.0.4]
+
+### Fixed
+- **Agentic planning no longer gets stuck writing its plan summary.** The planner's summary and step reasons had no stated purpose or length, and the planner's output had no limit, so a model could repeat a phrase until it reached its own output maximum — costing thousands of tokens and tens of seconds, and sometimes the plan itself. These fields now ask for one short sentence, an overlong value is shortened instead of failing the plan, and the planner's output is capped.
+
+### Added
+- **`planner_max_output_tokens` setting.** The most output tokens the planner may use for one plan (default `4000`; reasoning models use at least `16000`).
+
 ## [2.0.3]
 
 ### Added
