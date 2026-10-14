@@ -23,7 +23,6 @@ GraphRAG tool layer instead of the fixed classic LangGraph.
 """
 
 import logging
-import json
 import time
 from typing import Dict, List
 
@@ -64,34 +63,8 @@ class _Triage(BaseModel):
     )
 
 
-# Conversation budget for triage, in characters of the JSON sent.
-_TRIAGE_CONVO_CHARS = 4000
-
-
-def _recent_conversation(convo, limit: int = _TRIAGE_CONVO_CHARS) -> str:
-    """The most recent turns that fit ``limit``, as JSON, oldest first.
-
-    Follow-ups refer to the latest turns, so the budget is spent from the
-    end. If even the newest turn is too long, its response is shortened and
-    its question kept.
-    """
-    def dumps(turns):
-        return json.dumps(turns, ensure_ascii=False)
-
-    kept = []
-    for turn in reversed(convo or []):
-        if len(dumps([turn] + kept)) > limit:
-            break
-        kept.insert(0, turn)
-    if not kept and convo:
-        newest = dict(convo[-1])
-        room = limit - len(dumps([{**newest, "response": ""}]))
-        newest["response"] = str(newest.get("response", ""))[:max(room, 0)]
-        # JSON escaping can still push it over; trim until it fits.
-        while newest["response"] and len(dumps([newest])) > limit:
-            newest["response"] = newest["response"][: int(len(newest["response"]) * 0.9)]
-        kept = [newest]
-    return dumps(kept)
+from agent.conversation_window import CONVERSATION_CHARS as _TRIAGE_CONVO_CHARS
+from agent.conversation_window import recent_conversation as _recent_conversation
 
 
 def _triage_question(llm, question, convo):

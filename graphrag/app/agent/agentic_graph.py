@@ -26,7 +26,7 @@ import time
 
 from agent.agentic_executor import execute_plan, fit_for_trace, with_trace_note, _run_step, _usage_since
 from agent.agentic_planner import plan_question
-from agent.agentic_synthesizer import _gather, has_context, synthesize
+from agent.agentic_synthesizer import _gather, has_context, synthesize, with_conversation
 from common.llm_services.base_llm import get_collected_usage
 from common.py_schemas import GraphRAGResponse, PlanStep
 
@@ -53,6 +53,21 @@ def _hybrid_fallback_step() -> PlanStep:
         tool=_HYBRID_TOOL,
         rationale="Structural query returned no rows; falling back to hybrid search",
     )
+
+
+def _plan_output(plan) -> dict:
+    """A plan as shown in the trace."""
+    out = {"strategy": plan.strategy, "steps": [s.model_dump() for s in plan.steps]}
+    if not _retrieves(plan):
+        out["routing"] = "answered without retrieval"
+    return out
+
+
+def _retrieves(plan) -> bool:
+    """Whether the plan has a step that runs a tool. A plan with only the
+    answer step is the planner's decision to answer from the conversation
+    (or without data), not a retrieval that found nothing."""
+    return any(s.kind != "answer" and s.tool for s in plan.steps)
 
 
 def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
@@ -83,15 +98,14 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
         "node": "plan", "kind": "plan",
         "duration_s": round(time.time() - _t0, 3),
         "input": {"question": question, "conversation": conversation or []},
-        "output": {"strategy": plan.strategy,
-                   "steps": [s.model_dump() for s in plan.steps]},
+        "output": _plan_output(plan),
         "usage": _usage_since(_u0),
     })
     if plan.strategy:
         emit(plan.strategy)
 
     replans = 0
-    while True:
+    while _retrieves(plan):
         new_results, step_traces = execute_plan(plan, ctx)
         results.update(new_results)
         agent_steps.extend(step_traces)
@@ -129,8 +143,7 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
             "node": f"replan {replans}", "kind": "plan",
             "duration_s": round(time.time() - _t0, 3),
             "input": {"results_so_far": prior},
-            "output": {"strategy": plan.strategy,
-                       "steps": [s.model_dump() for s in plan.steps]},
+            "output": _plan_output(plan),
             "usage": _usage_since(_u0),
         })
 
@@ -143,7 +156,7 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     agent_steps.append({
         "node": "synthesize", "kind": "answer",
         "duration_s": round(time.time() - _t0, 3),
-        "input": with_trace_note(*fit_for_trace(_gather(results))),
+        "input": with_trace_note(*fit_for_trace(with_conversation(_gather(results), conversation))),
         "output": {
             "answer": resp.natural_language_response,
             "citations": (resp.query_sources or {}).get("citations", []),

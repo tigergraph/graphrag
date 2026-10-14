@@ -22,11 +22,11 @@ receives the results-so-far and may append follow-up steps (bounded by the
 orchestrator).
 """
 
-import json
 import logging
 
 from common.llm_services.capabilities import model_capabilities
 from common.py_schemas import Plan
+from agent.conversation_window import recent_conversation
 from tools import tool_registry as registry
 
 logger = logging.getLogger(__name__)
@@ -123,7 +123,7 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
     catalog = _catalog_text(ctx)
     user_parts = [
         f"## Question\n{question}",
-        f"## Conversation\n{json.dumps(conversation or [])[:2000]}",
+        f"## Conversation\n{recent_conversation(conversation)}",
     ]
     # Schema is normally not pre-loaded (the query tools load it themselves);
     # include it only if a caller explicitly supplied one.

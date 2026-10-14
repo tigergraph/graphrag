@@ -1106,6 +1106,12 @@ Start by analyzing the question and reasoning (1-2 sentences) about what it need
 - If not — a part is still unanswered, a needed value or table is missing, or the results were thin — take another action to close the gap (follow a lead, widen top_k / num_hops, or switch method). Do not settle for a partial or vague answer when more retrieval could complete it.
 Do not commit to a full multi-step plan up front; let each next step be driven by what is still missing for a complete answer.
 
+Before your first tool call, decide how much of the answer ## Conversation already holds:
+- All of it: give the final answer without calling a tool.
+- Part of it: call tools only for the missing parts. Do not retrieve again what ## Conversation already states. Combine both in the final answer.
+- None of it: retrieve as described below.
+Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
+
 The graph schema is required for the structural and unstructured query tools: before your first structural query or vector/unstructured retrieval, call graphrag__get_schema once to load the graph's vertex and edge types. Questions answered without graph data (e.g. by an external tool) do not need the schema.
 
 Run independent tool calls in parallel within one response; chain dependent calls across iterations. Cite specific findings from tool results in your final answer.
@@ -1152,6 +1158,12 @@ First analyze the question and decide the ENTIRE plan up front:
 Express this as a small DAG of tool steps that gathers exactly the context needed, ending with one final "answer" step that consolidates all the gathered context into the response. Express ordering with depends_on and repetition with multiple steps.
 
 The graph schema is NOT provided here — the structural and unstructured query tools load it themselves at run time, so plan retrieval steps directly. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
+
+Before you plan retrieval, decide how much of the answer ## Conversation already holds:
+- All of it: plan only the final answer step.
+- Part of it: plan retrieval steps only for the missing parts. Do not retrieve again what ## Conversation already states. The answer step combines both.
+- None of it: plan the retrieval steps as described below.
+Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
 
 You have two kinds of retrieval:
 - STRUCTURAL (graphrag__structural_retrieve): generates and runs a graph query. Best for counts, lookups by attribute/id, relationships, and aggregations over typed data. It depends on the LLM generating a correct query against the live schema — it can return nothing or the wrong rows when the question doesn't map cleanly to typed graph data, so it is NOT a safe sole source of context.
@@ -1264,6 +1276,7 @@ provided contexts to answer the user's question.
 ## Rules
 - The contexts arrive as JSON key-context pairs. **Combine and rephrase** them to answer the question.
 - **Preserve** image links exactly as `![description](url)` in the final answer when used. Do NOT modify or omit them.
+- The context "earlier_conversation", when present, holds earlier questions and answers from this chat. Use it to resolve references, and to answer when it holds the answer. When it conflicts with another context, the other context is correct.
 
 ## Inputs
 - **Question**: {question}

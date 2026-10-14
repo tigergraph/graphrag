@@ -33,6 +33,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.output_parsers import PydanticOutputParser
 
 from agent.agentic_executor import cap_for_trace, retrieved_chunk_ids, _usage_since
+from agent.conversation_window import recent_conversation
 from common.llm_services.base_llm import get_collected_usage
 from common.py_schemas import GraphRAGAnswerOutput, GraphRAGResponse
 from tools import tool_registry as registry
@@ -70,7 +71,7 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     # other tools (e.g. external MCP tools) skip the schema read entirely.
     user = (
         f"## Question\n{question}\n\n"
-        f"## Conversation\n{json.dumps(conversation or [])[:2000]}"
+        f"## Conversation\n{recent_conversation(conversation)}"
     )
     # Customizable system prompt (fixed rules + user "Additional Instructions");
     # the default lives in base_llm.
