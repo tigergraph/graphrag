@@ -960,10 +960,11 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
 - For string comparisons in `WHERE`, convert with `toLower()`.
 - Use multi-word, underscore-joined aliases for `ORDER BY`. Aliases / attributes used in `ORDER BY` must be in `RETURN`. Always specify `ASC` / `DESC` based on data type.
 - For "summarize" / "write a summary" questions, fetch all neighbour nodes and edges.
-- Avoid invalid queries based on errors in the history above.
+- For dates and times, use `to_datetime("YYYY-MM-DD hh:mm:ss")` (a date alone also works, e.g. `WHERE n.created >= to_datetime("2025-08-01")`). TigerGraph does not support `datetime()` or `date()`.
+- Avoid invalid queries based on errors in the history above. Each error gives the line and column of the problem.
 
 ## Supported
-- **Clauses**: `MATCH`, `OPTIONAL MATCH`, `MANDATORY MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`, `DELETE`, `DETACH DELETE`
+- **Clauses**: `MATCH`, `OPTIONAL MATCH`, `MANDATORY MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`
 - **Operators**:
   - Math: `+`, `-`, `*`, `/`, `%`, `^`
   - Comparison: `=`, `<`, `<=`, `>`, `>=`, `<>`, `IS NULL`, `IS NOT NULL`
@@ -974,12 +975,13 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
   - Math: `abs`, `sqrt`, `log`, `exp`, `sin`, `cos`, `tan`, `radians`, `degrees`
   - String: `left`, `right`, `substring`, `replace`, `trim`, `toLower`, `toUpper`, `split`
   - List: `head`, `last`, `size`, `range`, `coalesce`, `tail`
+  - Date / time: `to_datetime`, `datetime_format`, `datetime_to_epoch`, `year`
   - Other: `id`, `elementId`, `labels`, `properties`, `timestamp`
 - **Expressions**: `CASE`
 
 ## Unsupported
-- **Clauses**: `CALL`, `CREATE`, `MERGE`, `REMOVE`, `SET`, `UNION`, `UNION ALL`, `UNWIND`
-- **Functions**: `collect`, `exists`, `keys`, `nodes`, `relationships`, `length`, `percentileCont`, `percentileDisc`, `startNode`, `endNode`, `reverse` (list form)
+- **Clauses**: `CALL`, `CREATE`, `MERGE`, `REMOVE`, `SET`, `DELETE`, `DETACH DELETE`, `UNION`, `UNION ALL`, `UNWIND` (queries only read data)
+- **Functions**: `datetime`, `date`, `collect`, `exists`, `keys`, `nodes`, `relationships`, `length`, `percentileCont`, `percentileDisc`, `startNode`, `endNode`, `reverse` (list form)
 - **Syntax limits**:
   - `WITH` must group by exactly one vertex variable.
   - Path variables (`p = (...)`) not supported.
