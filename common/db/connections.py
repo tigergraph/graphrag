@@ -16,6 +16,7 @@ import logging
 import asyncio
 from typing import Annotated
 
+import aiohttp
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBasicCredentials, HTTPAuthorizationCredentials
 from pyTigerGraph import TigerGraphConnection, AsyncTigerGraphConnection
@@ -31,6 +32,21 @@ from common.logs.logwriter import LogWriter
 
 logger = logging.getLogger(__name__)
 consistency_checkers = {}
+
+
+async def _verify_async_connection(conn, graphname: str) -> None:
+    """Validate the token, then release the HTTP session in the same loop.
+
+    This runs under ``asyncio.run()``, which closes its loop on return. A session
+    left open stays bound to that closed loop, and with pyTigerGraph 2.0.4 the
+    next request on another loop fails with "Event loop is closed" (GML-2182).
+    Closing it here makes the connection open a fresh session on the caller's
+    loop at first use.
+    """
+    try:
+        await conn.gsql("USE GRAPH " + graphname)
+    finally:
+        await conn.aclose()
 
 
 def get_db_connection_id_token(
@@ -65,9 +81,29 @@ def get_db_connection_id_token(
 
     try:
         if async_conn:
-            asyncio.run(conn.gsql("USE GRAPH " + graphname))
+            asyncio.run(_verify_async_connection(conn, graphname))
         else:
             conn.gsql("USE GRAPH " + graphname)
+    except aiohttp.ClientResponseError as e:
+        # The async client raises aiohttp's error type, not requests.HTTPError.
+        if e.status in (401, 403):
+            LogWriter.error("Failed to connect to TigerGraph. Incorrect ID Token.")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        LogWriter.error(f"Failed to verify ID token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to get token - is the database running?"
+        )
+    except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+        LogWriter.error(f"Failed to reach TigerGraph to verify ID token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to get token - is the database running?"
+        )
     except HTTPError:
         LogWriter.error("Failed to connect to TigerGraph. Incorrect ID Token.")
         raise HTTPException(

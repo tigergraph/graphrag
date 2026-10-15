@@ -39,6 +39,7 @@ from supportai.retrievers import (HybridRetriever, SimilarityRetriever,
                                   SiblingRetriever, CommunityRetriever)
 from tools import MapQuestionToSchemaException
 from typing_extensions import TypedDict
+from common.utils.query_results import is_empty_result
 
 from common.logs.log import req_id_cv
 from common.metrics.prometheus_metrics import metrics as pmetrics
@@ -904,16 +905,7 @@ class TigerGraphAgentGraph:
         """
         Check if the query result is empty or contains empty values.
         """
-        if query_result in ("", [], {}, (), set(), range(0), None):
-            return True
-
-        if isinstance(query_result, (list, set)):
-            return all(self.is_query_result_empty(item) for item in query_result)
-
-        if isinstance(query_result, dict):
-            return all(self.is_query_result_empty(v) for v in query_result.values())
-
-        return False
+        return is_empty_result(query_result)
 
     # remove halucinaton check, always return grounded
     def check_answer_for_hallucinations(self, state):

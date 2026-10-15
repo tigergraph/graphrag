@@ -120,6 +120,81 @@ func TestGetConversation(t *testing.T) {
 	}
 }
 
+func TestDeleteConversation(t *testing.T) {
+	setupDB(t, true)
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /conversation/{conversationId}", DeleteConversation)
+	mux.HandleFunc("GET /conversation/{conversationId}", GetConversation)
+	mux.HandleFunc("GET /user/{userId}", GetUserConversations)
+
+	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/conversation/%s", CONVO_ID), nil)
+	req.Header.Add("Authorization", fmt.Sprintf("Basic %s", basicAuthSetup(USER, PASS)))
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Response code should be 200. It is: %v %s", resp.Code, body)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/conversation/%s", CONVO_ID), nil)
+	req.Header.Add("Authorization", fmt.Sprintf("Basic %s", basicAuthSetup(USER, PASS)))
+	resp = httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+	var messages []structs.Message
+	if err := json.Unmarshal(resp.Body.Bytes(), &messages); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 0 {
+		t.Fatalf("deleted conversation still has %d messages", len(messages))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/user/%s", USER), nil)
+	req.Header.Add("Authorization", fmt.Sprintf("Basic %s", basicAuthSetup(USER, PASS)))
+	resp = httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+	var convos []structs.Conversation
+	if err := json.Unmarshal(resp.Body.Bytes(), &convos); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range convos {
+		if c.ConversationId.String() == CONVO_ID {
+			t.Fatal("deleted conversation is still in the user list")
+		}
+	}
+
+	// Another user's conversation is left alone.
+	other := "601529eb-4927-4e24-b285-bd6b9519a952"
+	req = httptest.NewRequest(http.MethodDelete, "/conversation/"+other, nil)
+	req.Header.Add("Authorization", fmt.Sprintf("Basic %s", basicAuthSetup(USER, PASS)))
+	resp = httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("deleting another user's conversation should be 404. It is: %v", resp.Code)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/conversation/"+other, nil)
+	req.Header.Add("Authorization", fmt.Sprintf("Basic %s", basicAuthSetup("Miss_Take", PASS)))
+	resp = httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+	if err := json.Unmarshal(resp.Body.Bytes(), &messages); err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) == 0 {
+		t.Fatal("another user's conversation was deleted")
+	}
+}
+
+func TestDeleteConversation_401(t *testing.T) {
+	setupDB(t, true)
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /conversation/{conversationId}", DeleteConversation)
+	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/conversation/%s", CONVO_ID), nil)
+	resp := httptest.NewRecorder()
+	mux.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("Response code should be 401. It is: %v", resp.Code)
+	}
+}
+
 func TestGetConversation_401(t *testing.T) {
 	// setup
 	setupDB(t, false)

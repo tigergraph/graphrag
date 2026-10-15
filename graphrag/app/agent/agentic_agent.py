@@ -23,7 +23,6 @@ GraphRAG tool layer instead of the fixed classic LangGraph.
 """
 
 import logging
-import json
 import time
 from typing import Dict, List
 
@@ -51,14 +50,21 @@ class _Triage(BaseModel):
     """Front-desk classification of a user message before any DB/MCP work."""
     needs_retrieval: bool = Field(
         description="True if answering requires looking up the user's data in the "
-        "knowledge graph. False for greetings, small talk, thanks/goodbye, or "
-        "questions about the assistant itself (who/what are you, what can you do)."
+        "knowledge graph. False for greetings, small talk, thanks/goodbye, "
+        "questions about the assistant itself (who/what are you, what can you do), "
+        "or a follow-up that is too unclear to look up without asking which "
+        "subject the user means."
     )
     answer: str = Field(
         default="",
         description="When needs_retrieval is False, the complete direct answer to "
-        "give the user. Empty when needs_retrieval is True.",
+        "give the user, or one short clarifying question. Empty when "
+        "needs_retrieval is True.",
     )
+
+
+from agent.conversation_window import CONVERSATION_CHARS as _TRIAGE_CONVO_CHARS
+from agent.conversation_window import recent_conversation as _recent_conversation
 
 
 def _triage_question(llm, question, convo):
@@ -67,7 +73,7 @@ def _triage_question(llm, question, convo):
     the question + conversation — no schema, no MCP, no DB."""
     try:
         user = (
-            f"## Conversation\n{json.dumps(convo or [])[:2000]}\n\n"
+            f"## Conversation\n{_recent_conversation(convo)}\n\n"
             f"## Message\n{question}"
         )
         # Customizable routing prompt (fixed contract + operator-editable
@@ -174,15 +180,6 @@ class AgenticAgent:
                         "citations": [],
                     },
                 )
-            # Per-user creds for the tigergraph-mcp tools (when available), so
-            # those tool calls run as the logged-in user too.
-            tg_cfg = None
-            try:
-                from tools.tg_mcp_tools import conn_config_from_conn
-                tg_cfg = conn_config_from_conn(self.conn, self.conn.graphname)
-            except Exception:
-                tg_cfg = None
-
             # Make sure any tarball-backed stdio servers configured for this
             # graph are installed before we try to launch them (a server saved
             # since the last restart may not have been installed at startup).
@@ -225,7 +222,6 @@ class AgenticAgent:
                 use_cypher=self.use_cypher,
                 conversation=convo,
                 progress=self.emit_progress,
-                tg_connection_config=tg_cfg,
                 external_tools=external_tools,
                 mcp_manager=mcp_manager,
                 user=user,

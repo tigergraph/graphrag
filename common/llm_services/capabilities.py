@@ -241,27 +241,35 @@ def _looks_like_no_tool_support(exc) -> bool:
     return any(m in msg for m in _NO_TOOL_SUPPORT_MARKERS)
 
 
-def _invoke_probe(llm):
+def _invoke_probe(llm, force: bool = False) -> bool:
+    """Ask the model to call a trivial tool; True when it actually did.
+
+    ``force`` requires the call (``tool_choice``). A reply without a tool call
+    is not an error, so success means a tool call in the response, not just a
+    request the endpoint accepted.
+    """
     from pydantic import BaseModel, Field
 
     class _ProbePing(BaseModel):
         """Acknowledge readiness by calling this tool."""
         ok: bool = Field(default=True, description="always true")
 
-    bound = llm.bind_tools([_ProbePing])
-    bound.invoke([
+    bound = (llm.bind_tools([_ProbePing], tool_choice="any") if force
+             else llm.bind_tools([_ProbePing]))
+    resp = bound.invoke([
         ("system", "You can call tools."),
         ("user", "Call the ProbePing tool with ok set to true."),
     ])
+    return bool(getattr(resp, "tool_calls", None))
 
 
 def _run_tool_calling_probe(llm_provider):
-    """Bind a trivial tool and make a minimal, time-bounded call.
+    """Check that the model calls a tool when asked, within a time bound.
 
-    Returns ``True`` (confirmed tool-calling), ``False`` (the model explicitly
-    rejects tools — a *confident* no-support signal), or ``None`` (unknown:
-    transient, ambiguous, timeout, or no usable provider). ``None`` must not
-    disable Agentic mode.
+    Returns ``True`` (it called the tool), ``False`` (confident no-support: the
+    model rejects tools, or answered without the tool call even when the call
+    was required), or ``None`` (unknown: transient, ambiguous, timeout, or no
+    usable provider). ``None`` must not disable Agentic mode.
     """
     import concurrent.futures
 
@@ -270,8 +278,11 @@ def _run_tool_calling_probe(llm_provider):
         return None
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            ex.submit(_invoke_probe, llm).result(timeout=_PROBE_TIMEOUT_S)
-        return True
+            for force in (False, True):
+                if ex.submit(_invoke_probe, llm, force).result(timeout=_PROBE_TIMEOUT_S):
+                    return True
+        logger.info("tool-calling probe: model answered without calling the tool, even when required")
+        return False
     except concurrent.futures.TimeoutError:
         logger.warning("tool-calling probe timed out; leaving Agentic enabled")
         return None

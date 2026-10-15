@@ -27,7 +27,7 @@ from app.main import app
 # changes its import style, this alias must be updated accordingly.
 sys.modules.setdefault("app.routers.ui", sys.modules["routers.ui"])
 
-from app.routers.ui import _resolve_llm_config_access, _require_prompt_access
+from app.routers.ui import MASKED_SECRET, _resolve_llm_config_access, _require_prompt_access
 
 
 def _creds(username: str = "testuser", password: str = "testpass") -> HTTPBasicCredentials:
@@ -68,7 +68,7 @@ class TestUISetupUnit(unittest.TestCase):
     # Test 1 – _resolve_llm_config_access returns "full" for superuser
     # =========================================================================
 
-    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}))
+    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}, "testuser"))
     def test_resolve_llm_access_superuser_returns_full(self, _mock):
         result = _resolve_llm_config_access(_creds(), graphname=None)
         self.assertEqual(result, "full")
@@ -77,7 +77,7 @@ class TestUISetupUnit(unittest.TestCase):
     # Test 2 – _resolve_llm_config_access returns "chatbot_only" for graph admin
     # =========================================================================
 
-    @patch("app.routers.ui._get_user_role_details", return_value=([], {"mygraph": ["admin"]}))
+    @patch("app.routers.ui._get_user_role_details", return_value=([], {"mygraph": ["admin"]}, "testuser"))
     def test_resolve_llm_access_graph_admin_returns_chatbot_only(self, _mock):
         result = _resolve_llm_config_access(_creds(), graphname="mygraph")
         self.assertEqual(result, "chatbot_only")
@@ -86,7 +86,7 @@ class TestUISetupUnit(unittest.TestCase):
     # Test 3 – _resolve_llm_config_access raises 403 for globalobserver
     # =========================================================================
 
-    @patch("app.routers.ui._get_user_role_details", return_value=(["globalobserver"], {}))
+    @patch("app.routers.ui._get_user_role_details", return_value=(["globalobserver"], {}, "testuser"))
     def test_resolve_llm_access_globalobserver_raises_403(self, _mock):
         with self.assertRaises(HTTPException) as ctx:
             _resolve_llm_config_access(_creds(), graphname=None)
@@ -96,7 +96,7 @@ class TestUISetupUnit(unittest.TestCase):
     # Test 4 – GET /ui/config does NOT return db password
     # =========================================================================
 
-    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}))
+    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}, "testuser"))
     @patch(
         "app.routers.ui.db_config",
         {"hostname": "http://test-db", "username": "tigergraph", "password": "super-secret"},
@@ -107,13 +107,15 @@ class TestUISetupUnit(unittest.TestCase):
         response = self.client.get("/ui/config", auth=("testuser", "testpass"))
         self.assertEqual(response.status_code, 200)
         db = response.json().get("db_config", {})
-        self.assertNotIn("password", db, "'password' must not be returned in db_config")
+        # The password is masked, never returned.
+        self.assertNotIn("super-secret", response.text)
+        self.assertEqual(db.get("password"), MASKED_SECRET)
 
     # =========================================================================
     # Test 5 – GET /ui/config does NOT return LLM API keys
     # =========================================================================
 
-    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}))
+    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}, "testuser"))
     @patch(
         "app.routers.ui.llm_config",
         {
@@ -129,19 +131,21 @@ class TestUISetupUnit(unittest.TestCase):
         response = self.client.get("/ui/config", auth=("testuser", "testpass"))
         self.assertEqual(response.status_code, 200)
         llm = response.json().get("llm_config", {})
-        self.assertNotIn("authentication_configuration", llm)
+        # API keys are masked, never returned.
+        for secret in ("sk-top", "sk-c", "sk-e", "sk-m"):
+            self.assertNotIn(secret, response.text)
+        self.assertEqual(llm["authentication_configuration"], {"OPENAI_API_KEY": MASKED_SECRET})
         for svc in ("completion_service", "embedding_service", "multimodal_service"):
-            self.assertNotIn(
-                "authentication_configuration",
-                llm.get(svc, {}),
-                f"authentication_configuration must not be returned in {svc}",
+            self.assertEqual(
+                llm[svc]["authentication_configuration"], {"OPENAI_API_KEY": MASKED_SECRET},
+                f"API key must be masked in {svc}",
             )
 
     # =========================================================================
     # Test 8 – GET /ui/config does NOT return chat_service API keys
     # =========================================================================
 
-    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}))
+    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}, "testuser"))
     @patch(
         "app.routers.ui.llm_config",
         {
@@ -157,17 +161,15 @@ class TestUISetupUnit(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         llm = response.json().get("llm_config", {})
         chat_svc = llm.get("chat_service", {})
-        self.assertNotIn(
-            "authentication_configuration",
-            chat_svc,
-            "authentication_configuration must not be returned in chat_service",
-        )
+        # The chat service key is masked, never returned.
+        self.assertNotIn("gsk-secret", response.text)
+        self.assertEqual(chat_svc["authentication_configuration"], {"GROQ_API_KEY": MASKED_SECRET})
 
     # =========================================================================
     # Test 9 – GET /ui/config chatbot_only returns global_chat_info
     # =========================================================================
 
-    @patch("app.routers.ui._get_user_role_details", return_value=([], {"mygraph": ["admin"]}))
+    @patch("app.routers.ui._get_user_role_details", return_value=([], {"mygraph": ["admin"]}, "testuser"))
     @patch(
         "app.routers.ui.llm_config",
         {
@@ -191,7 +193,7 @@ class TestUISetupUnit(unittest.TestCase):
     # Test 6 – graph admin editing entity_extraction prompt raises 403
     # =========================================================================
 
-    @patch("app.routers.ui._get_user_role_details", return_value=([], {"mygraph": ["admin"]}))
+    @patch("app.routers.ui._get_user_role_details", return_value=([], {"mygraph": ["admin"]}, "testuser"))
     def test_graph_admin_entity_extraction_prompt_raises_403(self, _mock):
         response = self.client.post(
             "/ui/prompts",
@@ -209,7 +211,7 @@ class TestUISetupUnit(unittest.TestCase):
     # Test 7 – concurrent LLM save returns 409 when lock is held
     # =========================================================================
 
-    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}))
+    @patch("app.routers.ui._get_user_role_details", return_value=(["superuser"], {}, "testuser"))
     @patch("app.routers.ui.auth", return_value=([], MagicMock()))
     @patch("app.routers.ui._ecc_jobs_running", return_value=False)
     def test_concurrent_llm_save_returns_409(self, _mock_ecc, _mock_auth, _mock_roles):

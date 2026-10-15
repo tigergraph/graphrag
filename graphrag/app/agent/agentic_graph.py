@@ -24,11 +24,11 @@ adopt LangGraph later if checkpointing/streaming-graph features are needed.
 import logging
 import time
 
-from agent.agentic_executor import cap_for_trace, execute_plan, _run_step, _usage_since
-from agent.agentic_planner import plan_question
-from agent.agentic_synthesizer import _gather, has_context, synthesize
+from agent.agentic_executor import execute_plan, fit_for_trace, with_trace_note, _run_step, _usage_since
+from agent.agentic_planner import check_conversation, plan_question, schema_summary
+from agent.agentic_synthesizer import _gather, has_context, synthesize, with_conversation
 from common.llm_services.base_llm import get_collected_usage
-from common.py_schemas import GraphRAGResponse, PlanStep
+from common.py_schemas import GraphRAGResponse, Plan, PlanStep
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,35 @@ def _hybrid_fallback_step() -> PlanStep:
     )
 
 
+def _search_plan(question: str) -> Plan:
+    """One hybrid search for the question, then the answer."""
+    return Plan(
+        strategy="Search the documents for the question, then answer.",
+        steps=[
+            PlanStep(id="S1", kind="unstructured", tool=_HYBRID_TOOL,
+                     args={"question": question},
+                     rationale="The conversation does not hold the answer."),
+            PlanStep(id="A", kind="answer", tool="", depends_on=["S1"],
+                     rationale="Answer from the retrieved context."),
+        ],
+    )
+
+
+def _plan_output(plan) -> dict:
+    """A plan as shown in the trace."""
+    out = {"strategy": plan.strategy, "steps": [s.model_dump() for s in plan.steps]}
+    if not _retrieves(plan):
+        out["routing"] = "answered without retrieval"
+    return out
+
+
+def _retrieves(plan) -> bool:
+    """Whether the plan has a step that runs a tool. A plan with only the
+    answer step is the planner's decision to answer from the conversation
+    (or without data), not a retrieval that found nothing."""
+    return any(s.kind != "answer" and s.tool for s in plan.steps)
+
+
 def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     """Run the agentic workflow for one question and return a response.
 
@@ -68,9 +97,11 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     max_replans = int(_cfg.get("agent_max_replans", MAX_REPLANS))
     max_total_steps = int(_cfg.get("agent_max_total_steps", MAX_TOTAL_STEPS))
 
-    # The schema is loaded lazily by the query tools at run time, so a question
-    # that needs no graph data does not trigger a schema read.
     emit("Planning an approach")
+    # The planner decides from the schema whether the question needs
+    # structural retrieval. Questions that need no data are answered by triage
+    # before this point.
+    schema = schema_summary(getattr(ctx, "conn", None))
 
     results: dict = {}
     agent_steps: list = []
@@ -78,20 +109,55 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     # plan (timed + usage-attributed for the trace)
     _u0 = len(get_collected_usage() or [])
     _t0 = time.time()
-    plan = plan_question(llm, question, conversation, ctx=ctx)
+    plan = plan_question(llm, question, conversation, schema_rep=schema, ctx=ctx)
     agent_steps.append({
         "node": "plan", "kind": "plan",
         "duration_s": round(time.time() - _t0, 3),
-        "input": {"question": question, "conversation": conversation or []},
-        "output": {"strategy": plan.strategy,
-                   "steps": [s.model_dump() for s in plan.steps]},
+        "input": {"question": question, "conversation": conversation or [],
+                  "graph_schema": schema},
+        "output": _plan_output(plan),
         "usage": _usage_since(_u0),
     })
+    # A plan that skips retrieval relies on the conversation alone. A second,
+    # narrow check catches the cases where the planner judged that wrongly
+    # (a fact the conversation does not state, or a request for fresh data).
+    # It also runs without a conversation: a data question planned without
+    # retrieval would otherwise be answered with nothing.
+    if not _retrieves(plan):
+        _u0 = len(get_collected_usage() or [])
+        _t0 = time.time()
+        check = check_conversation(llm, question, conversation, ctx=ctx)
+        agent_steps.append({
+            "node": "conversation check", "kind": "plan",
+            "duration_s": round(time.time() - _t0, 3),
+            "input": {"question": question},
+            "output": check.model_dump() if check else {"error": "check failed; plan kept"},
+            "usage": _usage_since(_u0),
+        })
+        if check is not None and check.needs_retrieval:
+            emit("Refining the plan")
+            _u0 = len(get_collected_usage() or [])
+            _t0 = time.time()
+            plan = plan_question(llm, question, conversation, schema_rep=schema, ctx=ctx,
+                                 missing_from_conversation=check.missing or "some facts the question asks for")
+            agent_steps.append({
+                "node": "replan (conversation check)", "kind": "plan",
+                "duration_s": round(time.time() - _t0, 3),
+                "input": {"missing_from_conversation": check.missing},
+                "output": _plan_output(plan),
+                "usage": _usage_since(_u0),
+            })
+            if not _retrieves(plan):
+                # The planner skipped retrieval twice for a question the check
+                # says needs data: search instead of answering with nothing.
+                logger.info("agentic: replan still has no retrieval; using a hybrid search")
+                plan = _search_plan(question)
+
     if plan.strategy:
         emit(plan.strategy)
 
     replans = 0
-    while True:
+    while _retrieves(plan):
         new_results, step_traces = execute_plan(plan, ctx)
         results.update(new_results)
         agent_steps.extend(step_traces)
@@ -124,13 +190,13 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
         ]
         _u0 = len(get_collected_usage() or [])
         _t0 = time.time()
-        plan = plan_question(llm, question, conversation, prior_results=prior, ctx=ctx)
+        plan = plan_question(llm, question, conversation, schema_rep=schema,
+                             prior_results=prior, ctx=ctx)
         agent_steps.append({
             "node": f"replan {replans}", "kind": "plan",
             "duration_s": round(time.time() - _t0, 3),
             "input": {"results_so_far": prior},
-            "output": {"strategy": plan.strategy,
-                       "steps": [s.model_dump() for s in plan.steps]},
+            "output": _plan_output(plan),
             "usage": _usage_since(_u0),
         })
 
@@ -138,12 +204,12 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     _u0 = len(get_collected_usage() or [])
     _t0 = time.time()
     resp = synthesize(llm, question, results, plan=plan, conversation=conversation)
+    # Input is the combined context fed to the answer LLM (what actually
+    # grounded the answer); output is the answer + citations.
     agent_steps.append({
         "node": "synthesize", "kind": "answer",
         "duration_s": round(time.time() - _t0, 3),
-        # Input is the combined context fed to the answer LLM (what actually
-        # grounded the answer); output is the answer + citations.
-        "input": cap_for_trace(_gather(results)),
+        "input": with_trace_note(*fit_for_trace(with_conversation(_gather(results), conversation))),
         "output": {
             "answer": resp.natural_language_response,
             "citations": (resp.query_sources or {}).get("citations", []),

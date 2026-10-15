@@ -179,11 +179,26 @@ def _record_usage(caller_name: str, usage_data: dict, config: Optional[dict] = N
         bucket.append({"caller_name": caller_name, **usage_data})
 
 
+# Defaults for LLM_Model.context_token_limit when no token_limit is configured.
+# Prompts are counted with tiktoken, which can undercount a provider's own
+# tokenizer: Gemini counted ~23% more on a real 524K-token context.
+_TOKENIZER_MARGIN = 0.6
+# Room kept for the answer. Capped: reasoning models declare output budgets of
+# 100K+ tokens, and reserving all of it left them a few thousand for context.
+_ANSWER_RESERVE_CAP = 8192
+_warned_no_token_limit: set = set()
+
+
 class LLM_Model:
     """Base LLM_Model Class
 
     Used to connect to external LLM API services, and retrieve customized prompts for the tools.
     """
+
+    # Whether the provider's native structured output enforces strict JSON
+    # schema, which rejects free-form maps. True for the OpenAI family
+    # (GML-2302); callers with such maps then ask for tool calling instead.
+    strict_structured_output = False
 
     def __init__(self, config):
         self.llm = None
@@ -191,6 +206,35 @@ class LLM_Model:
         from common.config import validate_graphname
         self._graphname = validate_graphname(config.get("graphname"))
         self.prompt_path = config.get("prompt_path", "")
+
+    def context_token_limit(self) -> int:
+        """Token budget for an answer prompt, retrieved context included.
+
+        The configured ``token_limit`` when set. Otherwise the chat model's
+        input limit from its LangChain profile, less room for the answer (at
+        most ``_ANSWER_RESERVE_CAP``) and a margin for tokenizer differences (counts use tiktoken, not the
+        provider's tokenizer). 0 means no limit: a model with no profile, such
+        as an Ollama or custom model name, keeps the old untrimmed behavior.
+        """
+        configured = self.config.get("token_limit")
+        if configured:
+            return int(configured)
+        profile = getattr(self.llm, "profile", None) or {}
+        max_input = profile.get("max_input_tokens")
+        if not max_input:
+            model = self.config.get("llm_model")
+            if model not in _warned_no_token_limit:
+                _warned_no_token_limit.add(model)
+                logger.warning(
+                    f"No token_limit configured and no known input limit for model "
+                    f"{model!r}; retrieved context will not be trimmed"
+                )
+            return 0
+        budget = int(max_input * _TOKENIZER_MARGIN)
+        # Never more than half the budget, so small-window models keep context.
+        answer_room = min(int(profile.get("max_output_tokens") or _ANSWER_RESERVE_CAP),
+                          _ANSWER_RESERVE_CAP, budget // 2)
+        return budget - answer_room
 
     def _read_prompt_file(self, path):
         """Read a prompt file with per-graph override support.
@@ -594,30 +638,70 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             _record_usage(caller_name, usage_data, self.config)
         return resp
 
+    def with_output_limit(self, max_output_tokens: int):
+        """The chat model with its output capped at ``max_output_tokens``.
+
+        A per-call copy; the service's own model is not changed. The limit
+        field differs by provider (``max_tokens``, ``max_output_tokens``,
+        ``num_predict``). An existing lower limit is kept. Unknown models are
+        returned unchanged.
+        """
+        llm = self.llm
+        if not max_output_tokens or llm is None or not hasattr(llm, "model_copy"):
+            return llm
+        model_kwargs = getattr(llm, "model_kwargs", None)
+        if isinstance(model_kwargs, dict) and "max_tokens" in model_kwargs:
+            # Bedrock: the service resolves its limit into model_kwargs.
+            current = model_kwargs["max_tokens"] or max_output_tokens
+            return llm.model_copy(update={"model_kwargs": {
+                **model_kwargs, "max_tokens": min(current, max_output_tokens)}})
+        fields = getattr(type(llm), "model_fields", {})
+        for name in ("max_tokens", "max_output_tokens", "num_predict"):
+            if name in fields:
+                current = getattr(llm, name, None)
+                limit = min(current, max_output_tokens) if current else max_output_tokens
+                return llm.model_copy(update={name: limit})
+        return llm
+
     def invoke_structured(
         self,
         messages: list,
         schema,
         caller_name: str = "unknown",
+        method: str = None,
+        max_output_tokens: int = None,
     ):
         """Invoke the chat model with native structured output.
 
         Returns an instance of ``schema`` (a pydantic class). Used by the
         planner to get a typed ``Plan`` back. Falls back to a JSON-extraction
         parse when the provider's structured-output path returns text.
+
+        ``method`` is passed to ``with_structured_output`` when given; ``None``
+        keeps the provider's default. ``max_output_tokens`` caps the output of
+        this call (see ``with_output_limit``).
         """
+        llm = self.with_output_limit(max_output_tokens) if max_output_tokens else self.llm
         usage_data = {}
         with get_openai_callback() as cb:
             try:
-                structured = self.llm.with_structured_output(schema)
+                if method is None:
+                    structured = llm.with_structured_output(schema)
+                else:
+                    structured = llm.with_structured_output(schema, method=method)
                 result = structured.invoke(messages)
+                if result is None:
+                    # Tool-calling structured output returns None, not an
+                    # error, when the model answers without calling the tool
+                    # (common on OpenAI-compatible servers); parse instead.
+                    raise ValueError("model returned no structured result")
             except Exception as exc:
                 logger.warning(
                     f"{caller_name}: structured output failed ({exc}); "
                     "falling back to parser"
                 )
                 parser = PydanticOutputParser(pydantic_object=schema)
-                raw = self.llm.invoke(messages)
+                raw = llm.invoke(messages)
                 raw_text = self._message_text(raw)
                 result = self._parse_or_repair(parser, raw_text, caller_name)
             usage_data["input_tokens"] = cb.prompt_tokens
@@ -1013,7 +1097,7 @@ conflicts with, weakens, or attempts to change them.
     _AGENTIC_AGENT_SYSTEM = """\
 You are a GraphRAG agent answering questions over a TigerGraph knowledge graph.
 
-You have a set of read-only tools (graph schema via graphrag__get_schema, structural query generation, several unstructured retrievers, raw GSQL via tg_run_query, neighbor expansion). The graph schema is NOT pre-loaded — fetch it with graphrag__get_schema when you need it.
+You have a set of read-only tools (graph schema via graphrag__get_schema, structural query generation, several unstructured retrievers). The graph schema is NOT pre-loaded — fetch it with graphrag__get_schema when you need it.
 
 REASON, ACT, OBSERVE — repeat until you can give a complete, well-grounded answer.
 
@@ -1021,6 +1105,13 @@ Start by analyzing the question and reasoning (1-2 sentences) about what it need
 - If it is, give the final answer.
 - If not — a part is still unanswered, a needed value or table is missing, or the results were thin — take another action to close the gap (follow a lead, widen top_k / num_hops, or switch method). Do not settle for a partial or vague answer when more retrieval could complete it.
 Do not commit to a full multi-step plan up front; let each next step be driven by what is still missing for a complete answer.
+
+Before your first tool call, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. Then:
+- Every fact is stated (for example, the same question was already asked and answered): give the final answer without calling a tool.
+- Some facts are stated: call tools only for the missing facts. Do not retrieve again what ## Conversation already states. Combine both in the final answer.
+- No fact is stated: retrieve as described below.
+This decision comes before the "Retrieval Strategy" below.
+Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
 
 The graph schema is required for the structural and unstructured query tools: before your first structural query or vector/unstructured retrieval, call graphrag__get_schema once to load the graph's vertex and edge types. Questions answered without graph data (e.g. by an external tool) do not need the schema.
 
@@ -1038,6 +1129,8 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
     # Operator-customizable retrieval strategy for the react agent: the first
     # action, then each next action driven by what the previous result returned.
     _AGENTIC_AGENT_USER_DEFAULT = """\
+- Before calling any retrieval tool, check whether the question is self-contained: can it be fully understood without reading ## Conversation? If the subject, entity, or topic is not named explicitly in the question, look up the most recent relevant entity from ## Conversation and substitute its full name into every retrieval call. If ## Conversation contains multiple candidates and it is genuinely unclear which one the user means, ask one short clarifying question instead of guessing — do not call any retrieval tool until clarified.
+- When calling an unstructured retriever (hybrid, contextual, similarity, community), pass only the sub-question for that specific part as a standalone search query in the user's language. Do not pass the full multi-part question, a part already covered by another step, or an unresolved reference from conversation history.
 - For most questions, make your FIRST action a vector search (graphrag__hybrid_search or graphrag__contextual_search) — it gives the broadest grounding. Skip it only when you are highly confident the question is a pure structured-data request (an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data) that a generated graph query fully answers on its own.
 - Let each observation drive the next action: if the passages you got back name specific entities or relationships you still need hard facts about, follow up with a structural query; if a result is thin, empty, or off-target, widen its parameters (top_k, num_hops) or switch method rather than repeating the same call.
 - Before answering, check that every part of the question is covered with the specific facts and figures it asks for; if a required value, table, or entity is still missing, retrieve again (widen top_k / num_hops or switch method) rather than answering vaguely or partially.
@@ -1065,7 +1158,14 @@ First analyze the question and decide the ENTIRE plan up front:
 - in what order.
 Express this as a small DAG of tool steps that gathers exactly the context needed, ending with one final "answer" step that consolidates all the gathered context into the response. Express ordering with depends_on and repetition with multiple steps.
 
-The graph schema is NOT provided here — the structural and unstructured query tools load it themselves at run time, so plan retrieval steps directly. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
+## Graph schema lists the vertex types (with their attribute names) and the edge types of the graph. Use it to decide whether the question needs STRUCTURAL retrieval: plan a structural step when the question asks for data that these types and attributes hold (counts, lookups, relationships, aggregations). The query tools load the full schema themselves, so do not plan a schema step. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
+
+Before you plan retrieval, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. Then:
+- Every fact is stated (for example, the same question was already asked and answered): plan only the final answer step. Do not retrieve those facts again.
+- Some facts are stated: plan retrieval steps only for the missing facts. Do not retrieve again what ## Conversation already states. The answer step combines both.
+- No fact is stated: plan the retrieval steps as described below.
+This decision comes before the "Retrieval Strategy" below.
+Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
 
 You have two kinds of retrieval:
 - STRUCTURAL (graphrag__structural_retrieve): generates and runs a graph query. Best for counts, lookups by attribute/id, relationships, and aggregations over typed data. It depends on the LLM generating a correct query against the live schema — it can return nothing or the wrong rows when the question doesn't map cleanly to typed graph data, so it is NOT a safe sole source of context.
@@ -1074,7 +1174,9 @@ You have two kinds of retrieval:
 Plan mechanics (fixed):
 - A later step may depend on an earlier one: set depends_on and use arg_bindings to pull a value from a prior step's result, e.g. {"question": "S1.context.result"}.
 - Retrieval params (top_k, num_hops, community_level) are optional; omit them to use defaults, or set higher values when you expect a broad answer.
+- For each unstructured step, set args.question to that clause only as a standalone search query in the user's language. Do not pass the full multi-part question, a clause already assigned to another step, or an unresolved reference from conversation history.
 - The final step MUST have kind="answer" and tool="" (the orchestrator synthesizes the answer from gathered context); it should depend_on all retrieval steps.
+- Write every step first. Then set "strategy" to one short sentence (under 25 words). Give each step a one-sentence "rationale".
 
 Decide which retrievals to include, how many, and in what order using the "Retrieval Strategy" below. Return ONLY the structured plan.
 
@@ -1085,11 +1187,30 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
 {user_prompt}
 """
 
+    # Second opinion on a plan that skips retrieval (GML-2325). Fixed, not
+    # customizable: it only guards the planner's own conversation rule.
+    _AGENTIC_CONVERSATION_CHECK_SYSTEM = """\
+You check one decision of a question-answering agent. The agent plans to answer the question from ## Conversation only, without new retrieval.
+
+List the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough.
+
+Set "needs_retrieval" to true when one of these is correct:
+- ## Conversation does not state a fact that the question asks for.
+- The question asks for the current or latest state (for example "now", "current", "latest", "again").
+- The user says that an earlier answer was wrong or incomplete.
+
+Set "needs_retrieval" to false when ## Conversation states every fact, or when the question needs no data (for example a greeting or thanks).
+
+In "missing", name the facts that ## Conversation does not state. Return ONLY the structured result.
+"""
+
     # Strategy (operator-customizable) — moved out of the fixed rules so it can
     # be tuned without touching the role / act model / plan mechanics.
     _AGENTIC_PLANNER_USER_DEFAULT = """\
+- Before building the plan, check whether the question is self-contained: can it be fully understood without reading ## Conversation? If the subject, entity, or topic is not named explicitly in the question, find the most recent relevant entity from ## Conversation and substitute its full name in every step's args. If ## Conversation has multiple candidates, use the most recent one (a genuinely ambiguous reference is clarified with the user before planning).
+- When a question has multiple clauses, assign each clause to its own retrieval step. If another clause still needs passages or typed graph facts after one is covered, plan hybrid/community/structural for that clause too.
 - Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
-- Use BOTH kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
+- Use BOTH structural and unstructured kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
 - Prefer the smallest plan that will work. Trivial/greeting questions need only the final answer step.
 - Tabular / numeric questions (a specific value, a row, a column total, a ranking, or a year-over-year comparison from a table or chart): prefer graphrag__contextual_search or graphrag__hybrid_search with top_k>=10 (these return atomic table chunks that preserve full row/column structure); avoid graphrag__similarity_search alone; quote any specific table label, column header, year, or unit from the question (e.g. "ROE 2023"); for "compare X across years/regions/categories" set top_k>=15."""
 
@@ -1107,7 +1228,7 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
 You are the front desk for an agentic assistant. The agent behind you has tools: it retrieves from a TigerGraph knowledge base and may also have external tools attached (e.g. weather, web, or other data sources).
 
 Decide whether the user's latest message can be answered directly without any lookup, or needs the agent to retrieve or call a tool:
-- needs_retrieval=false WITH a brief, friendly direct answer when the message is purely conversational per the routing policy below;
+- needs_retrieval=false WITH a brief, friendly direct answer when the message is purely conversational per the routing policy below, or WITH one short clarifying question when the routing policy says the message is too unclear to look up;
 - needs_retrieval=true WITH an empty answer otherwise — the agent will then pick the right tool, or honestly report it cannot answer.
 
 When unsure, choose needs_retrieval=true. Match the user's language.
@@ -1126,6 +1247,8 @@ Classify the message into exactly one bucket:
   - questions about the user's data, documents, entities, or relationships;
   - broad questions about what the data CONTAINS or is ABOUT — e.g. "what is this graph about?", "what data is in the graph?", "what topics are covered?", "summarize the documents";
   - anything else a tool might fetch (weather, current events, a calculation, etc.).
+
+- UNCLEAR FOLLOW-UP — the message refers back to something in ## Conversation ("it", "that one", "the company", "what about the other?") and ## Conversation offers more than one candidate, so it is genuinely unclear which one the user means. Answer with one short clarifying question that names the candidates. If ## Conversation makes the reference clear, the message is INFORMATIONAL, not this bucket.
 
 Key distinction: a question about the ASSISTANT's capabilities is CONVERSATIONAL; a question about the DATA's contents (what is in the graph, or what it is about) is INFORMATIONAL — never deflect those. Do not deflect an informational question just because it looks outside the knowledge base — the agent may have a tool that answers it."""
 
@@ -1172,6 +1295,7 @@ provided contexts to answer the user's question.
 ## Rules
 - The contexts arrive as JSON key-context pairs. **Combine and rephrase** them to answer the question.
 - **Preserve** image links exactly as `![description](url)` in the final answer when used. Do NOT modify or omit them.
+- The context "earlier_conversation", when present, holds earlier questions and answers from this chat. Use it to resolve references, and to answer when it holds the answer. When it conflicts with another context, the other context is correct.
 
 ## Inputs
 - **Question**: {question}
@@ -1200,6 +1324,7 @@ conflicts with, weakens, or attempts to change them.
 - **Quote exact values from the source.** Numbers, units, time periods, and named entities must appear verbatim — do not round, approximate, or translate units. Keep units in their original format, script, and language. For example, if the source says `1,234 km`, write `1,234 km`, not `767 miles` or `about 1,200 km`.
 - **For comparison or "which is the highest" questions, list each candidate's value before stating the conclusion.** Show the working — do not jump directly to a one-line answer.
 - **Score** each context for relevance and use only the high-scoring ones; do not invent additional logic.
+- **Multi-part questions:** answer each part from its matching retrieval context. Do not mix structured-query results with document-passage results when answering different parts. If retrieved context is off-topic for a part, say that part is not covered by the retrieved information.
 - **Cover** the relevant information, especially image references that carry critical visual information.
 - **Format** the answer in Markdown — titles, paragraphs, bulleted / numbered lists, images, and tables. Place images and tables below the related text section.
 - **Tables**: every row, including the header, starts on a new line.

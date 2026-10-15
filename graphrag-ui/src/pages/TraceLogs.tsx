@@ -132,6 +132,7 @@ const NODE_LABELS: Record<string, string> = {
   rewrite_question: "Rewrite Question",
   apologize: "Apologize",
   greet: "Greet",
+  error: "Error",
 };
 
 function buildTraceFromMessage(message: any, userQuery?: string): TraceData {

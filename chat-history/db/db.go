@@ -131,6 +131,33 @@ func UpdateConversationById(message structs.Message) (*structs.Conversation, err
 	return &convo, nil
 }
 
+// DeleteUserConversation removes one conversation and its messages when it
+// belongs to userId. Missing and other users' conversations are not deleted.
+func DeleteUserConversation(userId, conversationId string) (bool, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	var convo structs.Conversation
+	tx := db.Where("user_id = ? AND conversation_id = ?", userId, conversationId).First(&convo)
+	if errors.Is(tx.Error, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+
+	err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("conversation_id = ?", conversationId).Delete(&structs.Message{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&convo).Error
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // GetAllMessages retrieves all messages from the database
 func GetAllMessages() ([]structs.Message, error) {
 	var messages []structs.Message

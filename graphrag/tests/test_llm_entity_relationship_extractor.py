@@ -12,9 +12,9 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-"""Unit tests for the schema-aware extension of
-``LLMEntityRelationshipExtractor`` — definitions are surfaced in the
-prompt without breaking the legacy ``allowed_*_types`` arguments.
+"""Unit tests for the schema-aware ``LLMEntityRelationshipExtractor``:
+the ``allowed_schema`` it is given (types, definitions, rendered schema)
+reaches the extraction prompt.
 
 We do not invoke the LLM. The tests exercise prompt assembly in
 ``adocument_er_extraction`` / ``document_er_extraction`` by capturing
@@ -23,9 +23,39 @@ the messages passed to ``ChatPromptTemplate.from_messages``.
 
 from __future__ import annotations
 
+from common.db.schema_utils import AllowedSchema
 from common.extractors.LLMEntityRelationshipExtractor import (
     LLMEntityRelationshipExtractor,
 )
+
+_SCHEMA_REP = (
+    "Vertex Types:\n"
+    "Company: A corporate entity.\n"
+    "Fund: An investment vehicle pooling capital.\n"
+    "Edge Types:\n"
+    "PUBLISHES (FROM Company, TO Report): A company publishes a report."
+)
+
+
+def _schema(**kw):
+    base = dict(
+        schema_rep=_SCHEMA_REP,
+        vertex_types=["Company", "Fund"],
+        edge_types=["PUBLISHES"],
+        vertex_definitions={"Company": "A corporate entity.",
+                            "Fund": "An investment vehicle pooling capital."},
+        edge_definitions={"PUBLISHES": "A company publishes a report."},
+    )
+    base.update(kw)
+    return AllowedSchema(**base)
+
+
+def _rendered(monkeypatch, **kw):
+    captured = _capture_prompt_messages(monkeypatch)
+    ext = LLMEntityRelationshipExtractor(_StubLLMService(), **kw)
+    monkeypatch.setattr(ext, "_extract_kg_from_doc", lambda *a, **kw: [])
+    ext.document_er_extraction("hello")
+    return "\n".join(m[1] for m in captured)
 
 
 class _StubLLMService:
@@ -51,7 +81,7 @@ def _capture_prompt_messages(monkeypatch):
         return _FakeTemplate(msgs)
 
     monkeypatch.setattr(
-        "langchain.prompts.ChatPromptTemplate.from_messages", _from_messages
+        "langchain_core.prompts.ChatPromptTemplate.from_messages", _from_messages
     )
     return captured
 
@@ -74,76 +104,28 @@ def test_extractor_without_definitions_leaves_prompt_unchanged(monkeypatch):
     assert "(system prompt)" in rendered
 
 
-def test_extractor_with_entity_definitions_appends_block(monkeypatch):
-    captured = _capture_prompt_messages(monkeypatch)
-    ext = LLMEntityRelationshipExtractor(
-        _StubLLMService(),
-        entity_type_definitions={
-            "Company": "A corporate entity.",
-            "Fund": "An investment vehicle pooling capital.",
-        },
-    )
-    monkeypatch.setattr(ext, "_extract_kg_from_doc", lambda *a, **kw: [])
-
-    ext.document_er_extraction("hello")
-
-    rendered = "\n".join(m[1] for m in captured)
-    assert "Schema entity types with definitions" in rendered
-    assert "- Company: A corporate entity." in rendered
-    assert "- Fund: An investment vehicle pooling capital." in rendered
-    # Sorted ordering: Company (C) before Fund (F)
-    assert rendered.index("Company") < rendered.index("Fund")
-    # Disambiguation tip is present
+def test_extractor_puts_the_schema_with_definitions_in_the_prompt(monkeypatch):
+    rendered = _rendered(monkeypatch, allowed_schema=_schema())
+    assert "Company: A corporate entity." in rendered
+    assert "Fund: An investment vehicle pooling capital." in rendered
+    assert "PUBLISHES (FROM Company, TO Report): A company publishes a report." in rendered
+    # The definitions are used to choose between similar types.
     assert "disambiguate" in rendered.lower()
 
 
-def test_extractor_renders_relationship_definitions(monkeypatch):
-    captured = _capture_prompt_messages(monkeypatch)
-    ext = LLMEntityRelationshipExtractor(
-        _StubLLMService(),
-        relationship_type_definitions={
-            "PUBLISHES": "A company publishes a report.",
-        },
-    )
-    monkeypatch.setattr(ext, "_extract_kg_from_doc", lambda *a, **kw: [])
-
-    ext.document_er_extraction("hello")
-
-    rendered = "\n".join(m[1] for m in captured)
-    assert "Schema relationship types with definitions" in rendered
-    assert "- PUBLISHES: A company publishes a report." in rendered
+def test_extractor_lists_the_allowed_types(monkeypatch):
+    rendered = _rendered(monkeypatch, allowed_schema=_schema())
+    assert "Allowed Node Types: ['Company', 'Fund']" in rendered
+    assert "Allowed Edge Types: ['PUBLISHES']" in rendered
 
 
-def test_extractor_skips_empty_definitions(monkeypatch):
-    captured = _capture_prompt_messages(monkeypatch)
-    ext = LLMEntityRelationshipExtractor(
-        _StubLLMService(),
-        entity_type_definitions={"Company": "", "Fund": ""},
-    )
-    monkeypatch.setattr(ext, "_extract_kg_from_doc", lambda *a, **kw: [])
-
-    ext.document_er_extraction("hello")
-
-    rendered = "\n".join(m[1] for m in captured)
-    # No definitions block when every value is empty.
-    assert "Schema entity types with definitions" not in rendered
+def test_extractor_without_schema_text_adds_no_schema_block(monkeypatch):
+    rendered = _rendered(monkeypatch, allowed_schema=_schema(schema_rep=""))
+    assert "disambiguate" not in rendered.lower()
+    assert "STRICT SCHEMA MODE" not in rendered
 
 
-def test_extractor_combines_allowed_types_and_definitions(monkeypatch):
-    """Legacy ``allowed_entity_types`` still renders, AND definitions
-    block also renders below it. They are not mutually exclusive.
-    """
-    captured = _capture_prompt_messages(monkeypatch)
-    ext = LLMEntityRelationshipExtractor(
-        _StubLLMService(),
-        allowed_entity_types=["Company", "Fund"],
-        entity_type_definitions={"Company": "A corp."},
-    )
-    monkeypatch.setattr(ext, "_extract_kg_from_doc", lambda *a, **kw: [])
-
-    ext.document_er_extraction("hello")
-
-    rendered = "\n".join(m[1] for m in captured)
-    assert "Allowed Node Types" in rendered
-    assert "Schema entity types with definitions" in rendered
-    assert "- Company: A corp." in rendered
+def test_strict_mode_keeps_extraction_inside_the_schema(monkeypatch):
+    rendered = _rendered(monkeypatch, allowed_schema=_schema(), strict_mode=True)
+    assert "STRICT SCHEMA MODE" in rendered
+    assert "Company: A corporate entity." in rendered

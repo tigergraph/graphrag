@@ -143,6 +143,32 @@ func UpdateConversation(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Delete a conversation and its messages.
+// "DELETE /conversation/{conversationId}"
+func DeleteConversation(w http.ResponseWriter, r *http.Request) {
+	conversationId := r.PathValue("conversationId")
+	userId, code, reason, ok := auth("", r)
+	if !ok {
+		w.Header().Add("Content-Type", "application/json")
+		w.WriteHeader(code)
+		w.Write(reason)
+		return
+	}
+
+	deleted, err := db.DeleteUserConversation(userId, conversationId)
+	if err != nil {
+		panic(err)
+	}
+	w.Header().Add("Content-Type", "application/json")
+	if !deleted {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"reason":"conversation not found"}`))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"message":"Conversation deleted successfully"}`))
+}
+
 // Basic auth helper
 func auth(userId string, r *http.Request) (string, int, []byte, bool) {
 	usr, _, ok := r.BasicAuth()

@@ -13,9 +13,15 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import enum
+import logging
 from typing import Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
+
+
+class ConversationTurn(BaseModel):
+    query: str
+    response: str
 
 
 class NaturalLanguageQuery(BaseModel):
@@ -29,6 +35,10 @@ class NaturalLanguageQuery(BaseModel):
     # name fields (e.g. "query_sources") or "all" to include the supporting
     # sources / trace in the response.
     include_fields: Optional[List[str]] = Field(default=None)
+    # Prior turns of the caller's own conversation, oldest first. The server
+    # holds no conversation state, so a caller wanting follow-up context must
+    # send it; only the most recent turns are given to the agent.
+    history: Optional[List[ConversationTurn]] = Field(default=None)
 
 
 class SupportAIQuestion(BaseModel):
@@ -59,9 +69,43 @@ class GraphRAGResponse(BaseModel):
     answered_question: bool
     response_type: str
     query_sources: Dict = None
+    # The error that stopped the answer, for the trace log only. Private, so
+    # it is never serialized into the chat response or the chat history.
+    _error: Optional[str] = PrivateAttr(default=None)
 
 
 # --- Agentic engine (v2.0 deep-thinking mode) ------------------------------
+
+logger = logging.getLogger(__name__)
+
+# Length bound for the planner's free-text fields. Without a purpose and a
+# bound, a model can write these as an endless repetition loop (GML-2324).
+_PLAN_TEXT_MAX = 200
+
+
+def _collapse_repeats(text: str, min_words: int = 4, max_words: int = 60) -> str:
+    """Cut ``text`` at the first phrase of ``min_words``–``max_words`` words
+    that repeats three times in a row, keeping one copy of it."""
+    words = text.split()
+    for i in range(len(words)):
+        for n in range(min_words, max_words + 1):
+            if i + 3 * n > len(words):
+                break
+            if words[i:i + n] == words[i + n:i + 2 * n] == words[i + 2 * n:i + 3 * n]:
+                return " ".join(words[:i + n])
+    return text
+
+
+def _short_plan_text(value, field: str):
+    """Shorten an overlong plan text instead of rejecting the whole plan."""
+    if not isinstance(value, str) or len(value) <= _PLAN_TEXT_MAX:
+        return value
+    text = _collapse_repeats(value)
+    if len(text) > _PLAN_TEXT_MAX:
+        text = text[:_PLAN_TEXT_MAX - 1].rstrip() + "…"
+    logger.warning(f"agentic plan: shortened {field} from {len(value):,} to {len(text):,} chars")
+    return text
+
 
 class PlanStep(BaseModel):
     """One step in an agentic plan DAG.
@@ -77,12 +121,45 @@ class PlanStep(BaseModel):
     args: Dict = {}
     arg_bindings: Dict[str, str] = {}
     depends_on: List[str] = []
-    rationale: str = ""
+    rationale: str = Field(
+        "",
+        description="One short sentence on why this step is needed.",
+        json_schema_extra={"maxLength": _PLAN_TEXT_MAX},
+    )
+
+    @field_validator("rationale", mode="before")
+    @classmethod
+    def _short_rationale(cls, v):
+        return _short_plan_text(v, "rationale")
 
 
 class Plan(BaseModel):
     steps: List[PlanStep] = []
-    strategy: str = ""           # one-line, user-facing summary
+    strategy: str = Field(
+        "",
+        description="One short sentence (under 25 words) on the approach. "
+                    "Write it after the steps.",
+        json_schema_extra={"maxLength": _PLAN_TEXT_MAX},
+    )
+
+    @field_validator("strategy", mode="before")
+    @classmethod
+    def _short_strategy(cls, v):
+        return _short_plan_text(v, "strategy")
+
+
+class ConversationCheck(BaseModel):
+    """Whether a plan that skips retrieval can answer from the conversation."""
+    missing: str = Field(
+        "",
+        description="The facts the question asks for that the conversation does "
+                    "not state. Empty when it states all of them.",
+    )
+    needs_retrieval: bool = Field(
+        False,
+        description="True when the answer needs a fact the conversation does not "
+                    "state, or the question asks for the current or latest state.",
+    )
 
 
 class StepResult(BaseModel):

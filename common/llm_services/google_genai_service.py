@@ -24,6 +24,21 @@ from common.logs.logwriter import LogWriter
 logger = logging.getLogger(__name__)
 
 
+class _ChatGoogleGenerativeAIWithoutAFC(ChatGoogleGenerativeAI):
+    """Keep tool execution under GraphRAG's orchestrators.
+
+    The Google Gen AI SDK enables automatic function calling (AFC) by
+    default. GraphRAG already owns the tool loop, so allowing the SDK to run
+    functions can bypass planning, tracing, and the configured step order.
+    ``_prepare_request`` is shared by normal, structured, streaming, and
+    tool-bound calls, making this the single place to disable AFC.
+    """
+
+    def _prepare_request(self, *args, **kwargs):
+        kwargs["automatic_function_calling"] = {"disable": True}
+        return super()._prepare_request(*args, **kwargs)
+
+
 class GoogleGenAI(LLM_Model):
     def __init__(self, config):
         super().__init__(config)
@@ -33,7 +48,7 @@ class GoogleGenAI(LLM_Model):
             ]
 
         model_name = config["llm_model"]
-        self.llm = ChatGoogleGenerativeAI(
+        self.llm = _ChatGoogleGenerativeAIWithoutAFC(
             temperature=config["model_kwargs"]["temperature"],
             model=model_name,
             timeout=None,

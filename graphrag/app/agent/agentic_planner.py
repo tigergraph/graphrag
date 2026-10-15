@@ -22,13 +22,97 @@ receives the results-so-far and may append follow-up steps (bounded by the
 orchestrator).
 """
 
-import json
 import logging
+import threading
+import time
 
-from common.py_schemas import Plan
+from common.llm_services.capabilities import model_capabilities
+from common.py_schemas import ConversationCheck, Plan
+from agent.conversation_window import recent_conversation
 from tools import tool_registry as registry
 
 logger = logging.getLogger(__name__)
+
+# The planner decides from the schema whether a question needs structural
+# retrieval (GML-2331). It gets a compact summary: type names, attribute
+# names, edge endpoints and descriptions. The query tools still load the
+# full schema themselves.
+_SCHEMA_SUMMARY_MAX_CHARS = 12000
+# How long a cached summary is used before the schema version is read again.
+_SCHEMA_RECHECK_SECONDS = 60
+_schema_cache: dict = {}
+_schema_cache_lock = threading.Lock()
+
+
+def _is_bookkeeping_attr(name: str, tg_type) -> bool:
+    """GraphRAG processing timestamps and embedding vectors, which no
+    question asks about."""
+    t = str(tg_type or "").upper()
+    return name.startswith("epoch_") or "LIST<FLOAT" in t or "VECTOR" in t
+
+
+def render_schema_summary(rep) -> str:
+    """A compact schema for the planner, from an ``AllowedSchema``."""
+    lines = ["Vertex types (attributes):"]
+    for vt in rep.vertex_types:
+        attrs = [a for a, t in (rep.vertex_attributes.get(vt) or {}).items()
+                 if not _is_bookkeeping_attr(a, t)]
+        desc = (rep.vertex_definitions or {}).get(vt)
+        lines.append(f"- {vt}({', '.join(attrs)})" + (f": {desc}" if desc else ""))
+    lines.append("Edge types (from -> to):")
+    for et in rep.edge_types:
+        pairs = (rep.edge_endpoints or {}).get(et) or []
+        ends = ", ".join(f"{f} -> {t}" for f, t in pairs)
+        attrs = [a for a, t in (rep.edge_attributes.get(et) or {}).items()
+                 if not _is_bookkeeping_attr(a, t)]
+        desc = (rep.edge_definitions or {}).get(et)
+        line = f"- {et}: {ends}" if ends else f"- {et}"
+        if attrs:
+            line += f" ({', '.join(attrs)})"
+        if desc:
+            line += f": {desc}"
+        lines.append(line)
+    text = "\n".join(lines)
+    if len(text) > _SCHEMA_SUMMARY_MAX_CHARS:
+        text = text[:_SCHEMA_SUMMARY_MAX_CHARS].rsplit("\n", 1)[0] + "\n(more types not shown)"
+    return text
+
+
+def schema_summary(conn) -> str:
+    """The planner's schema summary for the graph of ``conn``.
+
+    Cached per graph. After ``_SCHEMA_RECHECK_SECONDS`` the schema version
+    is read again, and the summary is rebuilt only when it changed. Returns
+    the last known summary (or "") when the schema cannot be read.
+    """
+    if conn is None:
+        return ""
+    key = (str(getattr(conn, "host", "")), getattr(conn, "graphname", ""))
+    now = time.time()
+    with _schema_cache_lock:
+        entry = _schema_cache.get(key)
+    if entry and now - entry["checked"] < _SCHEMA_RECHECK_SECONDS:
+        return entry["text"]
+    try:
+        from common.db.connections import get_schema_ver
+        version = get_schema_ver(conn)
+        if entry and version is not None and version == entry["version"]:
+            with _schema_cache_lock:
+                entry["checked"] = now
+            return entry["text"]
+        from common.db.schema_utils import render_schema_rep
+        rep = render_schema_rep(conn)
+        text = render_schema_summary(rep)
+        with _schema_cache_lock:
+            _schema_cache[key] = {
+                "checked": now,
+                "version": rep.schema_version if rep.schema_version is not None else version,
+                "text": text,
+            }
+        return text
+    except Exception as exc:
+        logger.warning(f"planner: schema summary unavailable ({exc})")
+        return entry["text"] if entry else ""
 
 def _param_type(pinfo: dict) -> str:
     """Render a JSON-schema property's type for the catalog. Falls back through
@@ -91,7 +175,46 @@ def _sanitize(plan: Plan, ctx=None) -> Plan:
     return plan
 
 
-def plan_question(llm, question, conversation=None, schema_rep="", prior_results=None, ctx=None) -> Plan:
+# A normal plan is a few hundred tokens; the cap only ends a runaway
+# generation early (GML-2324). Reasoning models spend output tokens on
+# thinking, so they get a higher floor.
+_PLANNER_MAX_OUTPUT_TOKENS = 4000
+_REASONING_PLANNER_MIN_OUTPUT_TOKENS = 16000
+
+
+def _planner_output_limit(llm, ctx) -> int:
+    cfg = getattr(ctx, "graphrag_cfg", None) or {}
+    try:
+        limit = int(cfg.get("planner_max_output_tokens") or _PLANNER_MAX_OUTPUT_TOKENS)
+    except (TypeError, ValueError):
+        limit = _PLANNER_MAX_OUTPUT_TOKENS
+    if model_capabilities(getattr(llm, "config", None)).get("supports_thinking"):
+        limit = max(limit, _REASONING_PLANNER_MIN_OUTPUT_TOKENS)
+    return limit
+
+
+def check_conversation(llm, question, conversation, ctx=None):
+    """Ask whether a plan that skips retrieval can answer from the conversation.
+
+    Returns a ``ConversationCheck``, or ``None`` when the check fails (the
+    caller then keeps the plan).
+    """
+    try:
+        messages = [
+            ("system", llm._AGENTIC_CONVERSATION_CHECK_SYSTEM),
+            ("user", f"## Question\n{question}\n\n## Conversation\n{recent_conversation(conversation)}"),
+        ]
+        return llm.invoke_structured(
+            messages, ConversationCheck, caller_name="agentic_conversation_check",
+            max_output_tokens=_planner_output_limit(llm, ctx),
+        )
+    except Exception as exc:
+        logger.warning(f"conversation check failed ({exc}); keeping the plan")
+        return None
+
+
+def plan_question(llm, question, conversation=None, schema_rep="", prior_results=None, ctx=None,
+                  missing_from_conversation: str = "") -> Plan:
     """Draft (or extend) a plan for ``question``.
 
     ``prior_results`` (a list of ``StepResult``-like dicts) is supplied on
@@ -104,13 +227,19 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
     catalog = _catalog_text(ctx)
     user_parts = [
         f"## Question\n{question}",
-        f"## Conversation\n{json.dumps(conversation or [])[:2000]}",
+        f"## Conversation\n{recent_conversation(conversation)}",
     ]
-    # Schema is normally not pre-loaded (the query tools load it themselves);
-    # include it only if a caller explicitly supplied one.
-    if schema_rep:
-        user_parts.append(f"## Graph schema\n{schema_rep[:6000]}")
+    user_parts.append(
+        f"## Graph schema\n{schema_rep[:_SCHEMA_SUMMARY_MAX_CHARS + 100]}" if schema_rep
+        else "## Graph schema\nNot available. Decide from the question."
+    )
     user_parts.append(f"## Tools\n{catalog}")
+    if missing_from_conversation:
+        user_parts.append(
+            "## Missing from the conversation\n"
+            f"## Conversation does not state: {missing_from_conversation}\n\n"
+            "Plan retrieval steps for these facts, then the final answer step."
+        )
     if prior_results:
         summary = "\n".join(
             f"- {r.get('step_id')}: ok={r.get('ok')} — {r.get('summary')}"
@@ -126,7 +255,19 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
     # editable "Additional Instructions" portion); the default lives in base_llm.
     messages = [("system", llm.agentic_planner_prompt), ("user", "\n\n".join(user_parts))]
     try:
-        plan = llm.invoke_structured(messages, Plan, caller_name="agentic_plan")
+        # Plan steps carry free-form ``args`` maps. Where a provider's default
+        # structured output is strict JSON schema (the OpenAI family), it
+        # rejects them, so every plan paid for a failed request before falling
+        # back to parsing (GML-2302). Tool calling accepts them there; other
+        # providers keep their default.
+        plan = llm.invoke_structured(
+            messages, Plan, caller_name="agentic_plan",
+            method=(
+                "function_calling"
+                if getattr(llm, "strict_structured_output", False) else None
+            ),
+            max_output_tokens=_planner_output_limit(llm, ctx),
+        )
     except Exception as exc:
         logger.warning(f"planner failed ({exc}); falling back to single hybrid step")
         from common.py_schemas import PlanStep
