@@ -202,3 +202,5 @@ rpds-py>=0.30.0
 PyJWT>=2.13.0
 annotated-doc>=0.0.4
 typing-inspection>=0.4.2
+mem0ai==2.1.0
+psycopg[binary]>=3.2.8,<4.0.0

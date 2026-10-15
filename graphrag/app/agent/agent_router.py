@@ -18,6 +18,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
+from common.db.schema_utils import is_hidden_memory_type
 from pyTigerGraph.pyTigerGraph import TigerGraphConnection
 import logging
 
@@ -41,7 +42,11 @@ class TigerGraphAgentRouter:
             str: The datasource to use for the question.
         """
         LogWriter.info(f"request_id={req_id_cv.get()} ENTRY route_question with {question}")
-        v_types = self.db_conn.getVertexTypes()
+        v_types = [
+            value
+            for value in self.db_conn.getVertexTypes()
+            if not is_hidden_memory_type(value)
+        ]
         e_types = self.db_conn.getEdgeTypes()
 
         router_parser = PydanticOutputParser[RouterResponse](pydantic_object=RouterResponse)

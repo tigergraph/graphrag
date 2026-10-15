@@ -27,7 +27,7 @@ import logging
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.db.connections import get_schema_ver
-from common.db.schema_utils import read_type_metadata
+from common.db.schema_utils import is_hidden_memory_type, read_type_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,11 @@ class MapQuestionToSchema(BaseTool):
         schema_ver = get_schema_ver(self.conn)
         if schema_ver is None or self.schema_ver != schema_ver:
             self.schema_ver = schema_ver if schema_ver is not None else -1
-            self.vertices = self.conn.getVertexTypes()
+            self.vertices = [
+                vertex
+                for vertex in self.conn.getVertexTypes()
+                if not is_hidden_memory_type(vertex)
+            ]
             self.edges = self.conn.getEdgeTypes()
 
             for vertex in self.vertices:

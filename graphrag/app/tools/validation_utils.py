@@ -7,6 +7,7 @@ Used to verify that the tools correctly mapped questions to valid schema element
 import logging
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
+from common.db.schema_utils import is_hidden_memory_type
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,10 @@ def validate_schema(conn, v_types, e_types, v_attrs, e_attrs):
     if v_types:
         vertices = conn.getVertexTypes()
         for v in v_types:
+            if is_hidden_memory_type(v):
+                raise MapQuestionToSchemaException(
+                    "Internal memory schema is not available to agents."
+                )
             logger.debug(
                 f"request_id={req_id_cv.get()} validate_schema() validating vertex_type={v}"
             )
@@ -83,6 +88,10 @@ def validate_function_call(conn, generated_call: str, valid_functions: list) -> 
     # handle installed queries
     LogWriter.info(f"request_id={req_id_cv.get()} ENTRY validate_function_call()")
     generated_call = generated_call.strip().strip("\n").strip("\t")
+    if "memoryembedding" in generated_call.casefold() or "memory_" in generated_call.casefold():
+        raise InvalidFunctionCallException(
+            "Internal memory schema and queries are not available to agents."
+        )
     # LogWriter.info(f"generated_call: {generated_call}")
     # LogWriter.info(f"valid_headers: {valid_headers}")
     endpoints = conn.getEndpoints(dynamic=True)  # installed queries in database
