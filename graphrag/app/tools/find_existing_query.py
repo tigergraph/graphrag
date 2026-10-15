@@ -75,7 +75,9 @@ class FindExistingQuery(BaseTool):
             graphname = self.conn.graphname
             installed_queries = [
                 q.split("/")[-1] for q in endpoints 
-                if f"/{graphname}/" in q and q.endswith(("GET", "POST"))
+                if f"/{graphname}/" in q
+                and q.endswith(("GET", "POST"))
+                and not q.split("/")[-1].casefold().startswith("memory_")
             ]
             return installed_queries
         except Exception as e:

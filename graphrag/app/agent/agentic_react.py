@@ -70,7 +70,7 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     # other tools (e.g. external MCP tools) skip the schema read entirely.
     user = (
         f"## Question\n{question}\n\n"
-        f"## Conversation\n{json.dumps(conversation or [])[:2000]}"
+        f"## Conversation\n{json.dumps(conversation or [])}"
     )
     # Customizable system prompt (fixed rules + user "Additional Instructions");
     # the default lives in base_llm.

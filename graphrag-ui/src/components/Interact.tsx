@@ -40,9 +40,10 @@ export const Interactions: FC<Interactions> = ({
 
   const sendFeedback = async (action: Feedback, message: Message) => {
     const creds = sessionStorage.getItem("auth");
+    const graph = sessionStorage.getItem("selectedGraph") || "";
     setFeedback(action);
     message.feedback = action;
-    await fetch(`${GRAPHRAG_URL}/ui/feedback`, {
+    await fetch(`${GRAPHRAG_URL}/ui/${encodeURIComponent(graph)}/feedback`, {
       method: "POST",
       body: JSON.stringify(message),
       headers: {

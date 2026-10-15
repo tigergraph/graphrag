@@ -217,7 +217,7 @@ class TigerGraphAgentGraph:
             return question
         try:
             history_lines = []
-            for turn in conversation[-4:]:
+            for turn in conversation:
                 if isinstance(turn, dict):
                     q = turn.get("query", "")
                     a = turn.get("response", "")

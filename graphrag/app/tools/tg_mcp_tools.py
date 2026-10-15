@@ -33,6 +33,8 @@ import asyncio
 import contextvars
 import json
 import logging
+from common.db.schema_utils import is_hidden_memory_type
+
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -154,6 +156,8 @@ def _ensure(ctx):
 
 def tg_run_query(ctx, query_text: str) -> dict:
     """Run an interpreted (dynamic) GSQL query as the logged-in user."""
+    if "memoryembedding" in query_text.casefold():
+        return {"ok": False, "summary": "Internal memory schema is not available to agents.", "context": None, "citations": []}
     if not AVAILABLE:
         return {"ok": False, "summary": "tigergraph-mcp unavailable", "context": None, "citations": []}
     ctx.emit("Running a graph query (tigergraph-mcp)")
@@ -164,6 +168,8 @@ def tg_run_query(ctx, query_text: str) -> dict:
 
 def tg_run_installed_query(ctx, query_name: str, params: Optional[dict] = None) -> dict:
     """Run a pre-installed query by name as the logged-in user."""
+    if query_name.casefold().startswith("memory_"):
+        return {"ok": False, "summary": "Internal memory queries are not available to agents.", "context": None, "citations": []}
     if not AVAILABLE:
         return {"ok": False, "summary": "tigergraph-mcp unavailable", "context": None, "citations": []}
     ctx.emit(f"Running installed query {query_name} (tigergraph-mcp)")
@@ -180,6 +186,8 @@ def tg_get_neighbors(ctx, vertex_type: str, vertex_id: str,
                      target_vertex_type: Optional[str] = None,
                      limit: Optional[int] = None) -> dict:
     """Expand neighbors of a vertex as the logged-in user (no GSQL needed)."""
+    if is_hidden_memory_type(vertex_type) or is_hidden_memory_type(target_vertex_type):
+        return {"ok": False, "summary": "Internal memory schema is not available to agents.", "context": None, "citations": []}
     if not AVAILABLE:
         return {"ok": False, "summary": "tigergraph-mcp unavailable", "context": None, "citations": []}
     ctx.emit("Expanding neighbors (tigergraph-mcp)")

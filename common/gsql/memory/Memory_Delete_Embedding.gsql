@@ -1,0 +1,9 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ */
+
+CREATE OR REPLACE DISTRIBUTED QUERY Memory_Delete_Embedding(STRING index_id) {
+  targets = SELECT s FROM MemoryEmbedding:s WHERE s.id == index_id
+            POST-ACCUM DELETE(s);
+  PRINT index_id;
+}
