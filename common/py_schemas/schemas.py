@@ -145,6 +145,20 @@ class Plan(BaseModel):
         return _short_plan_text(v, "strategy")
 
 
+class ConversationCheck(BaseModel):
+    """Whether a plan that skips retrieval can answer from the conversation."""
+    missing: str = Field(
+        "",
+        description="The facts the question asks for that the conversation does "
+                    "not state. Empty when it states all of them.",
+    )
+    needs_retrieval: bool = Field(
+        False,
+        description="True when the answer needs a fact the conversation does not "
+                    "state, or the question asks for the current or latest state.",
+    )
+
+
 class StepResult(BaseModel):
     step_id: str
     ok: bool

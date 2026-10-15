@@ -1106,10 +1106,11 @@ Start by analyzing the question and reasoning (1-2 sentences) about what it need
 - If not — a part is still unanswered, a needed value or table is missing, or the results were thin — take another action to close the gap (follow a lead, widen top_k / num_hops, or switch method). Do not settle for a partial or vague answer when more retrieval could complete it.
 Do not commit to a full multi-step plan up front; let each next step be driven by what is still missing for a complete answer.
 
-Before your first tool call, decide how much of the answer ## Conversation already holds:
-- All of it: give the final answer without calling a tool.
-- Part of it: call tools only for the missing parts. Do not retrieve again what ## Conversation already states. Combine both in the final answer.
-- None of it: retrieve as described below.
+Before your first tool call, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. Then:
+- Every fact is stated (for example, the same question was already asked and answered): give the final answer without calling a tool.
+- Some facts are stated: call tools only for the missing facts. Do not retrieve again what ## Conversation already states. Combine both in the final answer.
+- No fact is stated: retrieve as described below.
+This decision comes before the "Retrieval Strategy" below.
 Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
 
 The graph schema is required for the structural and unstructured query tools: before your first structural query or vector/unstructured retrieval, call graphrag__get_schema once to load the graph's vertex and edge types. Questions answered without graph data (e.g. by an external tool) do not need the schema.
@@ -1159,10 +1160,11 @@ Express this as a small DAG of tool steps that gathers exactly the context neede
 
 The graph schema is NOT provided here — the structural and unstructured query tools load it themselves at run time, so plan retrieval steps directly. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
 
-Before you plan retrieval, decide how much of the answer ## Conversation already holds:
-- All of it: plan only the final answer step.
-- Part of it: plan retrieval steps only for the missing parts. Do not retrieve again what ## Conversation already states. The answer step combines both.
-- None of it: plan the retrieval steps as described below.
+Before you plan retrieval, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. Then:
+- Every fact is stated (for example, the same question was already asked and answered): plan only the final answer step. Do not retrieve those facts again.
+- Some facts are stated: plan retrieval steps only for the missing facts. Do not retrieve again what ## Conversation already states. The answer step combines both.
+- No fact is stated: plan the retrieval steps as described below.
+This decision comes before the "Retrieval Strategy" below.
 Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
 
 You have two kinds of retrieval:
@@ -1183,6 +1185,23 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
 
 ## Retrieval Strategy
 {user_prompt}
+"""
+
+    # Second opinion on a plan that skips retrieval (GML-2325). Fixed, not
+    # customizable: it only guards the planner's own conversation rule.
+    _AGENTIC_CONVERSATION_CHECK_SYSTEM = """\
+You check one decision of a question-answering agent. The agent plans to answer the question from ## Conversation only, without new retrieval.
+
+List the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough.
+
+Set "needs_retrieval" to true when one of these is correct:
+- ## Conversation does not state a fact that the question asks for.
+- The question asks for the current or latest state (for example "now", "current", "latest", "again").
+- The user says that an earlier answer was wrong or incomplete.
+
+Set "needs_retrieval" to false when ## Conversation states every fact, or when the question needs no data (for example a greeting or thanks).
+
+In "missing", name the facts that ## Conversation does not state. Return ONLY the structured result.
 """
 
     # Strategy (operator-customizable) — moved out of the fixed rules so it can

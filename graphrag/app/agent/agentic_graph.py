@@ -25,10 +25,10 @@ import logging
 import time
 
 from agent.agentic_executor import execute_plan, fit_for_trace, with_trace_note, _run_step, _usage_since
-from agent.agentic_planner import plan_question
+from agent.agentic_planner import check_conversation, plan_question
 from agent.agentic_synthesizer import _gather, has_context, synthesize, with_conversation
 from common.llm_services.base_llm import get_collected_usage
-from common.py_schemas import GraphRAGResponse, PlanStep
+from common.py_schemas import GraphRAGResponse, Plan, PlanStep
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,20 @@ def _hybrid_fallback_step() -> PlanStep:
         kind="unstructured",
         tool=_HYBRID_TOOL,
         rationale="Structural query returned no rows; falling back to hybrid search",
+    )
+
+
+def _search_plan(question: str) -> Plan:
+    """One hybrid search for the question, then the answer."""
+    return Plan(
+        strategy="Search the documents for the question, then answer.",
+        steps=[
+            PlanStep(id="S1", kind="unstructured", tool=_HYBRID_TOOL,
+                     args={"question": question},
+                     rationale="The conversation does not hold the answer."),
+            PlanStep(id="A", kind="answer", tool="", depends_on=["S1"],
+                     rationale="Answer from the retrieved context."),
+        ],
     )
 
 
@@ -101,6 +115,41 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
         "output": _plan_output(plan),
         "usage": _usage_since(_u0),
     })
+    # A plan that skips retrieval relies on the conversation alone. A second,
+    # narrow check catches the cases where the planner judged that wrongly
+    # (a fact the conversation does not state, or a request for fresh data).
+    # It also runs without a conversation: a data question planned without
+    # retrieval would otherwise be answered with nothing.
+    if not _retrieves(plan):
+        _u0 = len(get_collected_usage() or [])
+        _t0 = time.time()
+        check = check_conversation(llm, question, conversation, ctx=ctx)
+        agent_steps.append({
+            "node": "conversation check", "kind": "plan",
+            "duration_s": round(time.time() - _t0, 3),
+            "input": {"question": question},
+            "output": check.model_dump() if check else {"error": "check failed; plan kept"},
+            "usage": _usage_since(_u0),
+        })
+        if check is not None and check.needs_retrieval:
+            emit("Refining the plan")
+            _u0 = len(get_collected_usage() or [])
+            _t0 = time.time()
+            plan = plan_question(llm, question, conversation, ctx=ctx,
+                                 missing_from_conversation=check.missing or "some facts the question asks for")
+            agent_steps.append({
+                "node": "replan (conversation check)", "kind": "plan",
+                "duration_s": round(time.time() - _t0, 3),
+                "input": {"missing_from_conversation": check.missing},
+                "output": _plan_output(plan),
+                "usage": _usage_since(_u0),
+            })
+            if not _retrieves(plan):
+                # The planner skipped retrieval twice for a question the check
+                # says needs data: search instead of answering with nothing.
+                logger.info("agentic: replan still has no retrieval; using a hybrid search")
+                plan = _search_plan(question)
+
     if plan.strategy:
         emit(plan.strategy)
 

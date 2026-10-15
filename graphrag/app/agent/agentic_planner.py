@@ -25,7 +25,7 @@ orchestrator).
 import logging
 
 from common.llm_services.capabilities import model_capabilities
-from common.py_schemas import Plan
+from common.py_schemas import ConversationCheck, Plan
 from agent.conversation_window import recent_conversation
 from tools import tool_registry as registry
 
@@ -110,7 +110,28 @@ def _planner_output_limit(llm, ctx) -> int:
     return limit
 
 
-def plan_question(llm, question, conversation=None, schema_rep="", prior_results=None, ctx=None) -> Plan:
+def check_conversation(llm, question, conversation, ctx=None):
+    """Ask whether a plan that skips retrieval can answer from the conversation.
+
+    Returns a ``ConversationCheck``, or ``None`` when the check fails (the
+    caller then keeps the plan).
+    """
+    try:
+        messages = [
+            ("system", llm._AGENTIC_CONVERSATION_CHECK_SYSTEM),
+            ("user", f"## Question\n{question}\n\n## Conversation\n{recent_conversation(conversation)}"),
+        ]
+        return llm.invoke_structured(
+            messages, ConversationCheck, caller_name="agentic_conversation_check",
+            max_output_tokens=_planner_output_limit(llm, ctx),
+        )
+    except Exception as exc:
+        logger.warning(f"conversation check failed ({exc}); keeping the plan")
+        return None
+
+
+def plan_question(llm, question, conversation=None, schema_rep="", prior_results=None, ctx=None,
+                  missing_from_conversation: str = "") -> Plan:
     """Draft (or extend) a plan for ``question``.
 
     ``prior_results`` (a list of ``StepResult``-like dicts) is supplied on
@@ -130,6 +151,12 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
     if schema_rep:
         user_parts.append(f"## Graph schema\n{schema_rep[:6000]}")
     user_parts.append(f"## Tools\n{catalog}")
+    if missing_from_conversation:
+        user_parts.append(
+            "## Missing from the conversation\n"
+            f"## Conversation does not state: {missing_from_conversation}\n\n"
+            "Plan retrieval steps for these facts, then the final answer step."
+        )
     if prior_results:
         summary = "\n".join(
             f"- {r.get('step_id')}: ok={r.get('ok')} — {r.get('summary')}"
