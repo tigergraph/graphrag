@@ -33,6 +33,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
+from common.utils.query_results import is_empty_result
 from common.utils.retrieval_stats import describe_retrieval
 from tools import tool_guards as guards
 from tools.validation_utils import MapQuestionToSchemaException
@@ -83,30 +84,8 @@ def _empty(summary: str) -> dict:
     return {"ok": False, "summary": summary, "context": None, "citations": []}
 
 
-def _result_is_empty(result: Any) -> bool:
-    """True when ``result`` holds no rows.
-
-    Query results arrive as JSON text (pyTigerGraph) or nested containers
-    (openCypher, e.g. ``{"VS_XXX": []}``), so both are read through. A
-    container is empty when every value in it is empty. A scalar such as a
-    count of 0 is an answer, not an empty result.
-    """
-    if result is None:
-        return True
-    if isinstance(result, str):
-        text = result.strip()
-        if not text:
-            return True
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            return False
-        return _result_is_empty(parsed) if isinstance(parsed, (list, dict)) or parsed is None else False
-    if isinstance(result, dict):
-        return all(_result_is_empty(v) for v in result.values())
-    if isinstance(result, list):
-        return all(_result_is_empty(v) for v in result)
-    return False
+# One empty-result check for the agentic and classic engines.
+_result_is_empty = is_empty_result
 
 
 # Longest error text kept for one query attempt in the trace.
