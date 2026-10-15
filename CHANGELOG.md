@@ -4,6 +4,7 @@
 
 ### Changed
 - **Agentic answers reuse what the conversation already holds.** Before, the agentic engines retrieved again for a question the conversation had already answered, and the planned engine's answer step did not see the conversation at all. The planner and the reactive agent now first decide how much of the answer the conversation holds: all of it is answered without retrieval, part of it gets retrieval only for the missing parts, and questions about the current or latest state still retrieve. The answer step reads the recent conversation together with the retrieved context, and the retrieved context wins where they disagree. In planned mode, a plan that skips retrieval gets one more check, so a question the conversation does not fully answer is still looked up. Trace Logs show the check and mark a plan that answers without retrieval.
+- **Failed answers show their error in Trace Logs.** When GraphRAG cannot answer, the trace log ends with an Error step that states the error, even when no other step ran. The error appears only in Trace Logs, which only the asking superuser can open; the chat message stays generic and now asks to rephrase the question instead of the prompt.
 - **Trace Logs show the structured query that ran.** Each structured query step lists the query at the top of its output, followed by any attempts that returned nothing or failed, with their errors. Before, the query was buried in the result, and it was missing entirely when the query returned no rows — the case where it is most needed.
 
 ### Fixed

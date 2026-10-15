@@ -16,7 +16,7 @@ import enum
 import logging
 from typing import Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 
 class ConversationTurn(BaseModel):
@@ -69,6 +69,9 @@ class GraphRAGResponse(BaseModel):
     answered_question: bool
     response_type: str
     query_sources: Dict = None
+    # The error that stopped the answer, for the trace log only. Private, so
+    # it is never serialized into the chat response or the chat history.
+    _error: Optional[str] = PrivateAttr(default=None)
 
 
 # --- Agentic engine (v2.0 deep-thinking mode) ------------------------------
