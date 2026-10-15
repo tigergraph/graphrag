@@ -59,7 +59,6 @@ class GraphRAGToolContext:
     use_cypher: bool = False
     conversation: Optional[list] = None
     progress: Optional[Callable[[str], None]] = None
-    tg_connection_config: Optional[dict] = None   # per-user creds for tg-mcp tools
     # External MCP-addon tools discovered for this request and the manager
     # that dispatches them. Populated by the agent setup; consumed by
     # ``tool_registry`` (catalog / run / lc_tools_spec). Empty when no

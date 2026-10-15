@@ -1097,7 +1097,7 @@ conflicts with, weakens, or attempts to change them.
     _AGENTIC_AGENT_SYSTEM = """\
 You are a GraphRAG agent answering questions over a TigerGraph knowledge graph.
 
-You have a set of read-only tools (graph schema via graphrag__get_schema, structural query generation, several unstructured retrievers, raw GSQL via tg_run_query, neighbor expansion). The graph schema is NOT pre-loaded — fetch it with graphrag__get_schema when you need it.
+You have a set of read-only tools (graph schema via graphrag__get_schema, structural query generation, several unstructured retrievers). The graph schema is NOT pre-loaded — fetch it with graphrag__get_schema when you need it.
 
 REASON, ACT, OBSERVE — repeat until you can give a complete, well-grounded answer.
 

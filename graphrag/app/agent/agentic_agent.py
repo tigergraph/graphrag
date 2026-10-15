@@ -180,15 +180,6 @@ class AgenticAgent:
                         "citations": [],
                     },
                 )
-            # Per-user creds for the tigergraph-mcp tools (when available), so
-            # those tool calls run as the logged-in user too.
-            tg_cfg = None
-            try:
-                from tools.tg_mcp_tools import conn_config_from_conn
-                tg_cfg = conn_config_from_conn(self.conn, self.conn.graphname)
-            except Exception:
-                tg_cfg = None
-
             # Make sure any tarball-backed stdio servers configured for this
             # graph are installed before we try to launch them (a server saved
             # since the last restart may not have been installed at startup).
@@ -231,7 +222,6 @@ class AgenticAgent:
                 use_cypher=self.use_cypher,
                 conversation=convo,
                 progress=self.emit_progress,
-                tg_connection_config=tg_cfg,
                 external_tools=external_tools,
                 mcp_manager=mcp_manager,
                 user=user,

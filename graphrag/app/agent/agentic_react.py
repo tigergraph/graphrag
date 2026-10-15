@@ -52,7 +52,6 @@ _TOOL_LABELS = {
     "graphrag__contextual_search": "Searching the documents",
     "graphrag__similarity_search": "Searching the documents",
     "graphrag__community_search": "Searching community summaries",
-    "tg_run_query": "Running a graph query",
 }
 
 

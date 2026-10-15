@@ -14,6 +14,9 @@
 - **The agentic planner and reactive agent see the most recent conversation turns.** They received the oldest part of the conversation, so one long earlier answer could hide the latest turns that a follow-up question refers to. They now receive the most recent turns, as triage does.
 - **Agentic planning no longer gets stuck writing its plan summary.** The planner's summary and step reasons had no stated purpose or length, and the planner's output had no limit, so a model could repeat a phrase until it reached its own output maximum — costing thousands of tokens and tens of seconds, and sometimes the plan itself. These fields now ask for one short sentence, an overlong value is shortened instead of failing the plan, and the planner's output is capped.
 
+### Removed
+- **The `tg_run_query` and `tg_get_neighbors` agent tools.** They let the agent write and run its own GSQL and expand neighbors through an in-process copy of tigergraph-mcp's functions. Structured retrieval already maps the question to the schema, writes the query, runs it and retries on errors, so the agent does not need to write queries itself, and GraphRAG code now reaches TigerGraph only through pyTigerGraph. Custom planner or agent prompts that name these tools should drop them.
+
 ### Added
 - **`planner_max_output_tokens` setting.** The most output tokens the planner may use for one plan (default `4000`; reasoning models use at least `16000`).
 
