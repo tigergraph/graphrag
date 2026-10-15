@@ -28,12 +28,12 @@ clamped by ``tool_guards``. Execution runs through the per-user
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
 from common.utils.query_results import is_empty_result
+from tools.generate_cypher import CYPHER_MAX_ATTEMPTS, generate_and_run_cypher
 from common.utils.retrieval_stats import describe_retrieval
 from tools import tool_guards as guards
 from tools.validation_utils import MapQuestionToSchemaException
@@ -200,41 +200,22 @@ def structural_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
 
 
 def _cypher_retrieve(ctx: GraphRAGToolContext, question: str, attempts: Optional[list] = None) -> dict:
-    """Generate and run an openCypher query, retrying on errors.
-
-    Each attempt that does not produce rows is appended to ``attempts``. A
-    query that runs and returns no rows is a valid answer, so it is not
-    retried.
-    """
+    """Generate, check and run an openCypher query (see
+    ``generate_and_run_cypher``). Attempts that do not produce rows are
+    appended to ``attempts``."""
     attempts = [] if attempts is None else attempts
     ctx.emit("Generating a graph query")
-    gen_history: list = []
-    for i in range(3):
-        try:
-            cypher = ctx.cypher_gen._run(question, gen_history)
-        except ValueError as exc:
-            gen_history.append(f"{i}: Error: {exc}\n")
-            attempts.append(_attempt(error=exc))
-            continue
-        response = ctx.conn.gsql(cypher)
-        json_str = "\n".join(response.split("\n")[1:])
-        try:
-            parsed = json.loads(json_str)
-        except Exception:
-            gen_history.append(f"{i}: {cypher}\n\tError: {json_str}\n")
-            attempts.append(_attempt(cypher, json_str or response))
-            continue
-        rows = parsed.get("results", [{}])
-        first = rows[0] if rows else None
-        if not _result_is_empty(first):
-            return _ok(
-                "graph query returned rows",
-                {"result": first, "cypher": cypher,
-                 "reasoning": f"The following openCypher query was executed:\n{cypher}"},
-            )
-        attempts.append(_attempt(cypher, outcome="no rows"))
+    max_attempts = (getattr(ctx, "graphrag_cfg", None) or {}).get("cypher_max_attempts", CYPHER_MAX_ATTEMPTS)
+    cypher, first = generate_and_run_cypher(ctx.cypher_gen, ctx.conn, question, max_attempts, attempts)
+    if cypher is None:
+        return _empty("graph query returned no rows after retries")
+    if first is None:
         return _empty("graph query returned no rows")
-    return _empty("graph query returned no rows after retries")
+    return _ok(
+        "graph query returned rows",
+        {"result": first, "cypher": cypher,
+         "reasoning": f"The following openCypher query was executed:\n{cypher}"},
+    )
 
 
 # --------------------------------------------------------------------------

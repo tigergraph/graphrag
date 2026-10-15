@@ -25,7 +25,7 @@ class TestResultIsEmpty(unittest.TestCase):
 
 
 _FUNC = "getVertexCount('Document')"
-_CYPHER = "USE GRAPH g\nINTERPRET OPENCYPHER QUERY () {\nMATCH (d:Document) RETURN d\n}"
+_CYPHER = "MATCH (d:Document) RETURN d"
 
 
 def _ctx(gen_result, use_cypher=False, cypher_runs=()):
@@ -40,8 +40,10 @@ def _ctx(gen_result, use_cypher=False, cypher_runs=()):
         gen_func._run.return_value = gen_result
     cypher_gen = mock.Mock()
     cypher_gen._run.side_effect = [c for c, _ in cypher_runs] or [_CYPHER]
-    conn = mock.Mock()
-    conn.gsql.side_effect = [r for _, r in cypher_runs] or ["header\n{}"]
+    conn = mock.Mock(graphname="G")
+    conn.checkQuerySemantic.return_value = {"warnings": [], "errors": []}
+    # runInterpretedQuery returns result blocks, or raises with TigerGraph's message.
+    conn.runInterpretedQuery.side_effect = [r for _, r in cypher_runs] or [[]]
     return types.SimpleNamespace(
         emit=lambda *a, **k: None, conversation=[], use_cypher=use_cypher,
         mq2s=mock.Mock(_run=mock.Mock(return_value=mapping)),
@@ -50,7 +52,8 @@ def _ctx(gen_result, use_cypher=False, cypher_runs=()):
 
 
 def _gsql(results):
-    return "header\n" + json.dumps({"results": results})
+    """What runInterpretedQuery returns: the query's result blocks."""
+    return results
 
 
 class TestStructuralRetrieveQuery(unittest.TestCase):
@@ -72,7 +75,7 @@ class TestStructuralRetrieveQuery(unittest.TestCase):
 
     def test_cypher_rows_report_the_query_and_earlier_attempts(self):
         ctx = _ctx({"function_call": _FUNC, "result": "[]"}, use_cypher=True,
-                   cypher_runs=[("BAD", "header\nnot json"), (_CYPHER, _gsql([{"VS": [{"v_id": "d1"}]}]))])
+                   cypher_runs=[("BAD", RuntimeError("syntax error")), (_CYPHER, _gsql([{"VS": [{"v_id": "d1"}]}]))])
         out = gt.structural_retrieve(ctx, "q")
         self.assertTrue(out["ok"])
         self.assertEqual(out["query"], _CYPHER)
@@ -129,6 +132,116 @@ class TestEmptyFunctionRegistry(unittest.TestCase):
         out = gen._run("How many documents?", ["Document"], None, None, None, None)
         self.assertEqual(out["function_call"], "getVertexCount('Document')")
         self.assertEqual(json.loads(out["result"]), 4)
+
+
+class TestCypherText(unittest.TestCase):
+    """The generated query is the Cypher only (GML-2336)."""
+
+    def test_fences_and_language_lines_are_removed(self):
+        from tools.generate_cypher import strip_code_fence
+        q = "MATCH (i:JiraIssue) RETURN i"
+        for reply in (q, f"```cypher\n{q}\n```", f"```opencypher\n{q}\n```", f"```\n{q}\n```",
+                      f"opencypher\n{q}", f"```Cypher\n{q}```", f"`{q}`"):
+            self.assertEqual(strip_code_fence(reply), q, reply)
+
+    def test_query_runs_interpreted_on_the_connection_graph(self):
+        from tools.generate_cypher import run_cypher
+        conn = mock.Mock(graphname="G")
+        conn.runInterpretedQuery.return_value = [{"T": {"n": 4}}]
+        self.assertEqual(run_cypher(conn, "MATCH (d:Document) RETURN count(d) AS n"), [{"T": {"n": 4}}])
+        text = conn.runInterpretedQuery.call_args[0][0]
+        self.assertTrue(text.startswith("INTERPRET OPENCYPHER QUERY () FOR GRAPH G {"))
+        self.assertNotIn("USE GRAPH", text)
+        conn.gsql.assert_not_called()
+
+    def test_classic_engine_uses_the_same_runner(self):
+        from agent.agent_graph import TigerGraphAgentGraph
+        node = object.__new__(TigerGraphAgentGraph)
+        node.emit_progress = lambda *a, **k: None
+        node.cypher_gen = mock.Mock(_run=mock.Mock(return_value="MATCH (d:Document) RETURN count(d) AS n"))
+        node.db_connection = mock.Mock(graphname="G")
+        node.db_connection.checkQuerySemantic.return_value = {"warnings": [], "errors": []}
+        node.db_connection.runInterpretedQuery.return_value = [{"T": {"n": 4}}]
+        state = node.generate_cypher({"question": "How many documents?"})
+        self.assertEqual(state["context"]["result"], {"T": {"n": 4}})
+        self.assertEqual(state["context"]["cypher"], "MATCH (d:Document) RETURN count(d) AS n")
+        node.db_connection.gsql.assert_not_called()
+
+
+class TestCheckBeforeRun(unittest.TestCase):
+    """Generated queries are checked before they run (GML-2336)."""
+
+    def _conn(self, checks, runs=None):
+        conn = mock.Mock(graphname="G")
+        conn.checkQuerySemantic.side_effect = checks
+        conn.runInterpretedQuery.side_effect = runs or [[{"T": {"n": 4}}]]
+        return conn
+
+    def _gen(self, queries):
+        return mock.Mock(_run=mock.Mock(side_effect=queries))
+
+    def test_failed_check_feeds_the_error_back_and_skips_the_run(self):
+        from tools.generate_cypher import generate_and_run_cypher
+        bad = 'MATCH (i:JiraIssue)\nWHERE i.created >= datetime("2025-08-01")\nRETURN count(i) AS n'
+        good = 'MATCH (i:JiraIssue)\nWHERE i.created >= to_datetime("2025-08-01")\nRETURN count(i) AS n'
+        err = {"errors": [{"msg": "no viable alternative at input 'datetime'", "line": 3, "charpositioninline": 18}]}
+        conn = self._conn([err, {"errors": []}])
+        gen = self._gen([bad, good])
+        attempts = []
+        cypher, first = generate_and_run_cypher(gen, conn, "q", 10, attempts)
+        self.assertEqual((cypher, first), (good, {"T": {"n": 4}}))
+        conn.runInterpretedQuery.assert_called_once()  # the bad query never ran
+        self.assertEqual(attempts[0]["outcome"], "failed check")
+        self.assertIn("line 2, column 18", attempts[0]["error"])
+        history = gen._run.call_args_list[1][0][1]
+        self.assertIn("to_datetime", history[0])  # the date hint went back to the generator
+
+    def test_stops_when_the_generator_repeats_itself(self):
+        from tools.generate_cypher import generate_and_run_cypher
+        q = "MATCH (x:Nope) RETURN x"
+        conn = self._conn([{"errors": [{"msg": "unknown type"}]}] * 3)
+        attempts = []
+        self.assertEqual(generate_and_run_cypher(self._gen([q, q, q]), conn, "q", 10, attempts), (None, None))
+        self.assertEqual(attempts[-1]["outcome"], "repeated an earlier query; stopped")
+        self.assertEqual(len(attempts), 2)
+
+    def test_attempt_limit(self):
+        from tools.generate_cypher import generate_and_run_cypher
+        conn = self._conn([{"errors": [{"msg": "bad"}]}] * 20)
+        gen = self._gen([f"MATCH (n{i}) RETURN n{i}" for i in range(20)])
+        generate_and_run_cypher(gen, conn, "q", 4, [])
+        self.assertEqual(gen._run.call_count, 4)
+
+    def test_write_queries_are_rejected_without_a_check(self):
+        from tools.generate_cypher import check_cypher
+        conn = mock.Mock(graphname="G")
+        self.assertIn("changes data", check_cypher(conn, "MATCH (n) DETACH DELETE n")[0])
+        conn.checkQuerySemantic.assert_not_called()
+        conn.checkQuerySemantic.return_value = {"errors": []}
+        self.assertEqual(check_cypher(conn, 'MATCH (n {name: "set to delete"}) RETURN n'), [])
+
+    def test_unavailable_check_runs_the_query(self):
+        from tools.generate_cypher import generate_and_run_cypher
+        conn = self._conn(RuntimeError("only on TigerGraph >= 4.0"))
+        cypher, first = generate_and_run_cypher(self._gen(["MATCH (d:Document) RETURN count(d) AS n"]), conn, "q")
+        self.assertEqual(first, {"T": {"n": 4}})
+
+    def test_attempt_setting_reaches_the_structural_tool(self):
+        ctx = _ctx({"function_call": _FUNC, "result": "[]"}, use_cypher=True,
+                   cypher_runs=[(f"MATCH (n{i}) RETURN n{i}", []) for i in range(6)])
+        ctx.conn.checkQuerySemantic.return_value = {"errors": [{"msg": "bad"}]}
+        ctx.graphrag_cfg = {"cypher_max_attempts": 3}
+        gt.structural_retrieve(ctx, "q")
+        self.assertEqual(ctx.cypher_gen._run.call_count, 3)
+
+    def test_prompt_rules(self):
+        from common.llm_services.base_llm import LLM_Model
+        prompt = LLM_Model.generate_cypher_prompt.fget(types.SimpleNamespace(
+            _read_prompt_file=lambda p: None, prompt_path=""))
+        self.assertIn('to_datetime("YYYY-MM-DD hh:mm:ss")', prompt)
+        supported = prompt.split("## Supported")[1].split("## Unsupported")[0]
+        self.assertNotIn("DELETE", supported)
+        self.assertIn("`DETACH DELETE`", prompt.split("## Unsupported")[1])
 
 
 class TestTraceShowsTheQuery(unittest.TestCase):

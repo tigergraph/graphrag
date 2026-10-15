@@ -14,6 +14,7 @@
 
 import enum
 import logging
+import re
 from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field, PrivateAttr, field_validator
@@ -83,9 +84,21 @@ logger = logging.getLogger(__name__)
 _PLAN_TEXT_MAX = 200
 
 
+# A unit of 1-8 characters repeated 12+ times in a row, e.g. "2026.0000…".
+_CHAR_RUN = re.compile(r"(.{1,8}?)\1{11,}", re.S)
+
+
 def _collapse_repeats(text: str, min_words: int = 4, max_words: int = 60) -> str:
-    """Cut ``text`` at the first phrase of ``min_words``–``max_words`` words
-    that repeats three times in a row, keeping one copy of it."""
+    """Cut ``text`` at the first runaway repetition.
+
+    Two shapes are caught: a short run of characters repeated in place
+    ("2026.0000…"), cut where the run starts; and a phrase of
+    ``min_words``–``max_words`` words that repeats three times in a row,
+    keeping one copy of it.
+    """
+    run = _CHAR_RUN.search(text)
+    if run:
+        text = text[:run.start()].rstrip(" .,;:-")
     words = text.split()
     for i in range(len(words)):
         for n in range(min_words, max_words + 1):
@@ -135,6 +148,9 @@ class PlanStep(BaseModel):
 
 class Plan(BaseModel):
     steps: List[PlanStep] = []
+    # Steps the planner wrote that named an unknown tool and were dropped.
+    # Shown in the trace only; never part of the model's output schema.
+    _dropped_steps: list = PrivateAttr(default_factory=list)
     strategy: str = Field(
         "",
         description="One short sentence (under 25 words) on the approach. "

@@ -165,7 +165,8 @@ def _sanitize(plan: Plan, ctx=None) -> Plan:
         if s.kind == "answer" or s.tool == "" or s.tool in known:
             steps.append(s)
         else:
-            logger.info(f"planner: dropping step with unknown tool {s.tool!r}")
+            logger.warning(f"planner: dropping step with unknown tool {s.tool!r}")
+            plan._dropped_steps.append({"id": s.id, "tool": s.tool})
     if not any(s.kind == "answer" or s.tool == "" for s in steps):
         retrieval_ids = [s.id for s in steps]
         from common.py_schemas import PlanStep

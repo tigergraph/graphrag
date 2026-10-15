@@ -56,14 +56,19 @@ def _hybrid_fallback_step() -> PlanStep:
 
 
 def _search_plan(question: str) -> Plan:
-    """One hybrid search for the question, then the answer."""
+    """A structural query and a hybrid search for the question, then the
+    answer. Used when the planner gives no retrieval for a question that
+    needs data; a structural query that finds nothing just returns no rows."""
     return Plan(
-        strategy="Search the documents for the question, then answer.",
+        strategy="Query the graph and search the documents for the question, then answer.",
         steps=[
-            PlanStep(id="S1", kind="unstructured", tool=_HYBRID_TOOL,
+            PlanStep(id="S1", kind="structural", tool=_STRUCTURAL_TOOL,
                      args={"question": question},
                      rationale="The conversation does not hold the answer."),
-            PlanStep(id="A", kind="answer", tool="", depends_on=["S1"],
+            PlanStep(id="S2", kind="unstructured", tool=_HYBRID_TOOL,
+                     args={"question": question},
+                     rationale="The conversation does not hold the answer."),
+            PlanStep(id="A", kind="answer", tool="", depends_on=["S1", "S2"],
                      rationale="Answer from the retrieved context."),
         ],
     )
@@ -72,8 +77,11 @@ def _search_plan(question: str) -> Plan:
 def _plan_output(plan) -> dict:
     """A plan as shown in the trace."""
     out = {"strategy": plan.strategy, "steps": [s.model_dump() for s in plan.steps]}
+    dropped = getattr(plan, "_dropped_steps", None)
+    if dropped:
+        out["dropped_steps"] = dropped
     if not _retrieves(plan):
-        out["routing"] = "answered without retrieval"
+        out["routing"] = "no retrieval steps"
     return out
 
 
@@ -149,9 +157,15 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
             })
             if not _retrieves(plan):
                 # The planner skipped retrieval twice for a question the check
-                # says needs data: search instead of answering with nothing.
-                logger.info("agentic: replan still has no retrieval; using a hybrid search")
+                # says needs data: retrieve instead of answering with nothing.
+                logger.info("agentic: replan still has no retrieval; using the fallback plan")
                 plan = _search_plan(question)
+                agent_steps.append({
+                    "node": "fallback plan", "kind": "plan", "duration_s": 0,
+                    "input": {"reason": "The question needs data, and the plan has no retrieval steps."},
+                    "output": _plan_output(plan),
+                    "usage": {},
+                })
 
     if plan.strategy:
         emit(plan.strategy)

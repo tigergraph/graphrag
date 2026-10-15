@@ -74,7 +74,7 @@ class TestAnswerOnlyPlan(unittest.TestCase):
         execute.assert_not_called()
         run_step.assert_not_called()
         steps = resp.query_sources["agent_steps"]
-        self.assertEqual(steps[0]["output"]["routing"], "answered without retrieval")
+        self.assertEqual(steps[0]["output"]["routing"], "no retrieval steps")
         self.assertIn("earlier_conversation", steps[-1]["input"])
 
     def test_empty_retrieval_still_replans(self):
@@ -86,7 +86,7 @@ class TestAnswerOnlyPlan(unittest.TestCase):
 
     def test_trace_marks_the_decision(self):
         answer_only = Plan(steps=[PlanStep(id="A", kind="answer", tool="")])
-        self.assertEqual(g._plan_output(answer_only)["routing"], "answered without retrieval")
+        self.assertEqual(g._plan_output(answer_only)["routing"], "no retrieval steps")
         search = Plan(steps=[PlanStep(id="S1", kind="unstructured", tool=g._HYBRID_TOOL)])
         self.assertNotIn("routing", g._plan_output(search))
 
@@ -120,14 +120,26 @@ class TestConversationCheck(unittest.TestCase):
         nodes = [s["node"] for s in resp.query_sources["agent_steps"]]
         self.assertEqual(nodes[:3], ["plan", "conversation check", "replan (conversation check)"])
 
-    def test_second_skip_searches_anyway(self):
+    def test_second_skip_retrieves_anyway(self):
         check = ConversationCheck(missing="iPhone net sales", needs_retrieval=True)
-        _, _, planner, execute = self._run([_ANSWER_ONLY, _ANSWER_ONLY], check)
+        resp, _, planner, execute = self._run([_ANSWER_ONLY, _ANSWER_ONLY], check)
         self.assertEqual(planner.call_count, 2)
         execute.assert_called_once()
         plan = execute.call_args[0][0]
-        self.assertEqual([s.tool for s in plan.steps], [g._HYBRID_TOOL, ""])
+        self.assertEqual([s.tool for s in plan.steps], [g._STRUCTURAL_TOOL, g._HYBRID_TOOL, ""])
         self.assertEqual(plan.steps[0].args, {"question": "Add iPad."})
+        nodes = [s["node"] for s in resp.query_sources["agent_steps"]]
+        self.assertEqual(nodes[:4], ["plan", "conversation check", "replan (conversation check)", "fallback plan"])
+
+    def test_dropped_steps_are_shown_in_the_trace(self):
+        from agent.agentic_planner import _sanitize
+        plan = Plan(steps=[PlanStep(id="S1", kind="structural", tool="structural_retrieve")])
+        with mock.patch("agent.agentic_planner.registry.tool_names", return_value=[g._STRUCTURAL_TOOL]):
+            plan = _sanitize(plan)
+        out = g._plan_output(plan)
+        self.assertEqual(out["dropped_steps"], [{"id": "S1", "tool": "structural_retrieve"}])
+        self.assertEqual(out["routing"], "no retrieval steps")
+        self.assertNotIn("_dropped_steps", plan.model_dump())
 
     def test_confirmed_plan_answers_without_retrieval(self):
         _, _, planner, execute = self._run([_ANSWER_ONLY], ConversationCheck(needs_retrieval=False))
@@ -217,8 +229,19 @@ class TestPrompts(unittest.TestCase):
             self.assertIn("A related topic or a similar question is not enough", prompt)
             self.assertIn('"now"', prompt)
 
+    def test_bad_earlier_answers_count_as_not_answered(self):
+        for prompt in (LLM_Model._AGENTIC_PLANNER_SYSTEM, LLM_Model._AGENTIC_AGENT_SYSTEM,
+                       LLM_Model._AGENTIC_CONVERSATION_CHECK_SYSTEM):
+            self.assertIn("A bad answer counts as not answered", prompt)
+            self.assertIn("not found, not available, not explicit", prompt)
+        self.assertIn("The earlier answer that the agent would use is bad.",
+                      LLM_Model._AGENTIC_CONVERSATION_CHECK_SYSTEM)
+        for prompt in (LLM_Model._AGENTIC_PLANNER_SYSTEM, LLM_Model._AGENTIC_AGENT_SYSTEM):
+            self.assertIn("retrieve again with a different or wider approach", prompt)
+
     def test_answer_prompt_explains_the_conversation_context(self):
         self.assertIn('"earlier_conversation"', LLM_Model._CHATBOT_RESPONSE_SYSTEM)
+        self.assertIn("not evidence that it does not exist", LLM_Model._CHATBOT_RESPONSE_SYSTEM)
 
 
 if __name__ == "__main__":

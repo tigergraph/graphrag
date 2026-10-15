@@ -40,6 +40,7 @@ from supportai.retrievers import (HybridRetriever, SimilarityRetriever,
 from tools import MapQuestionToSchemaException
 from typing_extensions import TypedDict
 from common.utils.query_results import is_empty_result
+from tools.generate_cypher import CYPHER_MAX_ATTEMPTS, generate_and_run_cypher
 
 from common.logs.log import req_id_cv
 from common.metrics.prometheus_metrics import metrics as pmetrics
@@ -361,48 +362,34 @@ class TigerGraphAgentGraph:
 
     def generate_cypher(self, state):
         """
-        Run the agent cypher generator.
+        Run the agent cypher generator: generate, check and run the query
+        (see ``generate_and_run_cypher``).
         """
         self.emit_progress("Generating the query to answer your question")
-        gen_history = []
-        response_json = None
-        cypher = None
-        json_str = None
-        response = None
-
-        for i in range(3):
-            try:
-                cypher = self.cypher_gen._run(state["question"], gen_history)
-            except ValueError as e:
-                logger.warning(f"Cypher generation failed: {e}")
-                gen_history.append(f"{i}: Error: {e}\n")
-                continue
-            response = self.db_connection.gsql(cypher)
-            response_lines = response.split("\n")
-            json_str = "\n".join(response_lines[1:])
-            try:
-                response_json = json.loads(json_str)
-                break
-            except Exception as e:
-                gen_history.append(f"{i}: {cypher}\n\tError: {json_str}\n")
-        if response_json and not self.is_query_result_empty(response_json["results"][0]):
+        attempts: list = []
+        cfg = getattr(self, "_graphrag_cfg", None) or {}
+        cypher, first = generate_and_run_cypher(
+            self.cypher_gen, self.db_connection, state["question"],
+            cfg.get("cypher_max_attempts", CYPHER_MAX_ATTEMPTS), attempts,
+        )
+        if cypher is not None and first is not None:
             state["context"] = {
-                "result": response_json["results"][0],
+                "result": first,
                 "cypher": cypher,
                 "reasoning": "The following OpenCypher query was executed to answer the question. {}".format(
                     cypher
                 ),
             }
         else:
+            last = attempts[-1] if attempts else {}
             state["context"] = {
                 "error": True,
-                "cypher": cypher,
-                "result": json_str
+                "cypher": cypher or last.get("query"),
+                "result": last.get("error") or last.get("outcome") or "",
             }
             if "error_history" not in state or state["error_history"] is None:
                 state["error_history"] = []
-            
-            error_msg = response if response else "LLM failed to produce a valid Cypher query after 3 attempts"
+            error_msg = last.get("error") or last.get("outcome") or "LLM failed to produce a valid Cypher query"
             state["error_history"].append({"error_message": error_msg, "error_step": "generate_cypher"})
 
         state["lookup_source"] = "cypher"
