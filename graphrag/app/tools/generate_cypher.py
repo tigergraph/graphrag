@@ -13,6 +13,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+import re
 from typing import Iterable
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -25,6 +26,34 @@ from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
 
 logger = logging.getLogger(__name__)
+
+# Language names a model may put on the first line of a code block.
+_FENCE_LANGUAGES = {"cypher", "opencypher", "gsql", "sql", "graphql"}
+
+
+def strip_code_fence(text: str) -> str:
+    """The query inside a model reply: without a code fence (```cypher,
+    ```opencypher, plain ```) and without a line that has only a language
+    name."""
+    t = (text or "").strip()
+    m = re.match(r"^```[^\n]*\n(.*?)\n?```\s*$", t, re.S)
+    if m:
+        t = m.group(1).strip()
+    else:
+        t = t.strip("`").strip()
+    lines = t.split("\n", 1)
+    if lines[0].strip().lower() in _FENCE_LANGUAGES:
+        t = lines[1].strip() if len(lines) > 1 else ""
+    return t
+
+
+def run_cypher(conn, cypher: str) -> list:
+    """Run an openCypher query in interpreted mode on the graph of ``conn``
+    and return its result blocks. Raises the connection's exception with
+    TigerGraph's message when the query fails."""
+    return conn.runInterpretedQuery(
+        "INTERPRET OPENCYPHER QUERY () FOR GRAPH $graphname {\n" + cypher + "\n}"
+    ) or []
 
 
 class GenerateCypher(BaseTool):
@@ -98,7 +127,8 @@ class GenerateCypher(BaseTool):
             PROMPT, StrOutputParser(),
             {"question": question, "schema": schema, "history": history},
             caller_name="generate_cypher",
-        ).strip("```cypher").strip("```").strip()
+        )
+        out = strip_code_fence(out)
 
         # Validate the LLM output looks like a Cypher query
         out_upper = out.upper()
@@ -106,11 +136,8 @@ class GenerateCypher(BaseTool):
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_cypher - LLM did not produce a valid Cypher query")
             raise ValueError(f"LLM did not produce a valid Cypher query: {out[:200]}")
 
-        query_header = "USE GRAPH " + self.conn.graphname + " "+ "\n" + "INTERPRET OPENCYPHER QUERY () {" + "\n"
-        query_footer = "\n}"
-        cypher = query_header + out + query_footer
-        LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_cypher with:\n{cypher}")
-        return cypher
+        LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_cypher with:\n{out}")
+        return out
 
     def _run(self, question: str, history: Iterable[str]):
         """Run the GenerateCypher tool.

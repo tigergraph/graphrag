@@ -25,7 +25,7 @@ class TestResultIsEmpty(unittest.TestCase):
 
 
 _FUNC = "getVertexCount('Document')"
-_CYPHER = "USE GRAPH g\nINTERPRET OPENCYPHER QUERY () {\nMATCH (d:Document) RETURN d\n}"
+_CYPHER = "MATCH (d:Document) RETURN d"
 
 
 def _ctx(gen_result, use_cypher=False, cypher_runs=()):
@@ -41,7 +41,8 @@ def _ctx(gen_result, use_cypher=False, cypher_runs=()):
     cypher_gen = mock.Mock()
     cypher_gen._run.side_effect = [c for c, _ in cypher_runs] or [_CYPHER]
     conn = mock.Mock()
-    conn.gsql.side_effect = [r for _, r in cypher_runs] or ["header\n{}"]
+    # runInterpretedQuery returns result blocks, or raises with TigerGraph's message.
+    conn.runInterpretedQuery.side_effect = [r for _, r in cypher_runs] or [[]]
     return types.SimpleNamespace(
         emit=lambda *a, **k: None, conversation=[], use_cypher=use_cypher,
         mq2s=mock.Mock(_run=mock.Mock(return_value=mapping)),
@@ -50,7 +51,8 @@ def _ctx(gen_result, use_cypher=False, cypher_runs=()):
 
 
 def _gsql(results):
-    return "header\n" + json.dumps({"results": results})
+    """What runInterpretedQuery returns: the query's result blocks."""
+    return results
 
 
 class TestStructuralRetrieveQuery(unittest.TestCase):
@@ -72,7 +74,7 @@ class TestStructuralRetrieveQuery(unittest.TestCase):
 
     def test_cypher_rows_report_the_query_and_earlier_attempts(self):
         ctx = _ctx({"function_call": _FUNC, "result": "[]"}, use_cypher=True,
-                   cypher_runs=[("BAD", "header\nnot json"), (_CYPHER, _gsql([{"VS": [{"v_id": "d1"}]}]))])
+                   cypher_runs=[("BAD", RuntimeError("syntax error")), (_CYPHER, _gsql([{"VS": [{"v_id": "d1"}]}]))])
         out = gt.structural_retrieve(ctx, "q")
         self.assertTrue(out["ok"])
         self.assertEqual(out["query"], _CYPHER)
@@ -129,6 +131,39 @@ class TestEmptyFunctionRegistry(unittest.TestCase):
         out = gen._run("How many documents?", ["Document"], None, None, None, None)
         self.assertEqual(out["function_call"], "getVertexCount('Document')")
         self.assertEqual(json.loads(out["result"]), 4)
+
+
+class TestCypherText(unittest.TestCase):
+    """The generated query is the Cypher only (GML-2336)."""
+
+    def test_fences_and_language_lines_are_removed(self):
+        from tools.generate_cypher import strip_code_fence
+        q = "MATCH (i:JiraIssue) RETURN i"
+        for reply in (q, f"```cypher\n{q}\n```", f"```opencypher\n{q}\n```", f"```\n{q}\n```",
+                      f"opencypher\n{q}", f"```Cypher\n{q}```", f"`{q}`"):
+            self.assertEqual(strip_code_fence(reply), q, reply)
+
+    def test_query_runs_interpreted_on_the_connection_graph(self):
+        from tools.generate_cypher import run_cypher
+        conn = mock.Mock()
+        conn.runInterpretedQuery.return_value = [{"T": {"n": 4}}]
+        self.assertEqual(run_cypher(conn, "MATCH (d:Document) RETURN count(d) AS n"), [{"T": {"n": 4}}])
+        text = conn.runInterpretedQuery.call_args[0][0]
+        self.assertTrue(text.startswith("INTERPRET OPENCYPHER QUERY () FOR GRAPH $graphname {"))
+        self.assertNotIn("USE GRAPH", text)
+        conn.gsql.assert_not_called()
+
+    def test_classic_engine_uses_the_same_runner(self):
+        from agent.agent_graph import TigerGraphAgentGraph
+        node = object.__new__(TigerGraphAgentGraph)
+        node.emit_progress = lambda *a, **k: None
+        node.cypher_gen = mock.Mock(_run=mock.Mock(return_value="MATCH (d:Document) RETURN count(d) AS n"))
+        node.db_connection = mock.Mock()
+        node.db_connection.runInterpretedQuery.return_value = [{"T": {"n": 4}}]
+        state = node.generate_cypher({"question": "How many documents?"})
+        self.assertEqual(state["context"]["result"], {"T": {"n": 4}})
+        self.assertEqual(state["context"]["cypher"], "MATCH (d:Document) RETURN count(d) AS n")
+        node.db_connection.gsql.assert_not_called()
 
 
 class TestTraceShowsTheQuery(unittest.TestCase):

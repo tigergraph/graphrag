@@ -28,12 +28,12 @@ clamped by ``tool_guards``. Execution runs through the per-user
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
 from common.utils.query_results import is_empty_result
+from tools.generate_cypher import run_cypher
 from common.utils.retrieval_stats import describe_retrieval
 from tools import tool_guards as guards
 from tools.validation_utils import MapQuestionToSchemaException
@@ -216,15 +216,12 @@ def _cypher_retrieve(ctx: GraphRAGToolContext, question: str, attempts: Optional
             gen_history.append(f"{i}: Error: {exc}\n")
             attempts.append(_attempt(error=exc))
             continue
-        response = ctx.conn.gsql(cypher)
-        json_str = "\n".join(response.split("\n")[1:])
         try:
-            parsed = json.loads(json_str)
-        except Exception:
-            gen_history.append(f"{i}: {cypher}\n\tError: {json_str}\n")
-            attempts.append(_attempt(cypher, json_str or response))
+            rows = run_cypher(ctx.conn, cypher)
+        except Exception as exc:
+            gen_history.append(f"{i}: {cypher}\n\tError: {exc}\n")
+            attempts.append(_attempt(cypher, exc))
             continue
-        rows = parsed.get("results", [{}])
         first = rows[0] if rows else None
         if not _result_is_empty(first):
             return _ok(

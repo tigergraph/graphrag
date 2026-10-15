@@ -40,6 +40,7 @@ from supportai.retrievers import (HybridRetriever, SimilarityRetriever,
 from tools import MapQuestionToSchemaException
 from typing_extensions import TypedDict
 from common.utils.query_results import is_empty_result
+from tools.generate_cypher import run_cypher
 
 from common.logs.log import req_id_cv
 from common.metrics.prometheus_metrics import metrics as pmetrics
@@ -377,15 +378,15 @@ class TigerGraphAgentGraph:
                 logger.warning(f"Cypher generation failed: {e}")
                 gen_history.append(f"{i}: Error: {e}\n")
                 continue
-            response = self.db_connection.gsql(cypher)
-            response_lines = response.split("\n")
-            json_str = "\n".join(response_lines[1:])
             try:
-                response_json = json.loads(json_str)
+                response_json = {"results": run_cypher(self.db_connection, cypher)}
+                json_str = json.dumps(response_json)
                 break
             except Exception as e:
-                gen_history.append(f"{i}: {cypher}\n\tError: {json_str}\n")
-        if response_json and not self.is_query_result_empty(response_json["results"][0]):
+                response = str(e)
+                json_str = response
+                gen_history.append(f"{i}: {cypher}\n\tError: {response}\n")
+        if response_json and response_json["results"] and not self.is_query_result_empty(response_json["results"][0]):
             state["context"] = {
                 "result": response_json["results"][0],
                 "cypher": cypher,
