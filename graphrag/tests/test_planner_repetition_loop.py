@@ -44,6 +44,21 @@ class TestPlanTextFields(unittest.TestCase):
         out = _collapse_repeats(_LOOP)
         self.assertEqual(out.count("lifecycle flow initialization"), 1)
 
+    def test_character_run_is_cut_where_it_starts(self):
+        """A single character repeated in place (seen live on a Jira graph)."""
+        value = ("Query the structured graph to count Jira issues created on or after "
+                 "August 2026." + "0" * 3000)
+        plan = Plan(strategy=value, steps=[PlanStep(id="A", kind="answer", tool="")])
+        self.assertEqual(plan.strategy,
+                         "Query the structured graph to count Jira issues created on or after August 2026")
+
+    def test_repeated_short_unit_is_cut(self):
+        self.assertEqual(_collapse_repeats("Count the tickets " + "ab" * 50), "Count the tickets")
+
+    def test_numbers_in_normal_text_are_kept(self):
+        text = "Count tickets with ids 1000 to 1000000, then answer."
+        self.assertEqual(_collapse_repeats(text), text)
+
     def test_collapse_leaves_normal_text_alone(self):
         text = ("Search the documents for the policy, then search the documents "
                 "for the exceptions, then answer from the documents.")
