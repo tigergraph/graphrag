@@ -25,7 +25,7 @@ import logging
 import time
 
 from agent.agentic_executor import execute_plan, fit_for_trace, with_trace_note, _run_step, _usage_since
-from agent.agentic_planner import check_conversation, plan_question
+from agent.agentic_planner import check_conversation, plan_question, schema_summary
 from agent.agentic_synthesizer import _gather, has_context, synthesize, with_conversation
 from common.llm_services.base_llm import get_collected_usage
 from common.py_schemas import GraphRAGResponse, Plan, PlanStep
@@ -97,9 +97,11 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     max_replans = int(_cfg.get("agent_max_replans", MAX_REPLANS))
     max_total_steps = int(_cfg.get("agent_max_total_steps", MAX_TOTAL_STEPS))
 
-    # The schema is loaded lazily by the query tools at run time, so a question
-    # that needs no graph data does not trigger a schema read.
     emit("Planning an approach")
+    # The planner decides from the schema whether the question needs
+    # structural retrieval. Questions that need no data are answered by triage
+    # before this point.
+    schema = schema_summary(getattr(ctx, "conn", None))
 
     results: dict = {}
     agent_steps: list = []
@@ -107,11 +109,12 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     # plan (timed + usage-attributed for the trace)
     _u0 = len(get_collected_usage() or [])
     _t0 = time.time()
-    plan = plan_question(llm, question, conversation, ctx=ctx)
+    plan = plan_question(llm, question, conversation, schema_rep=schema, ctx=ctx)
     agent_steps.append({
         "node": "plan", "kind": "plan",
         "duration_s": round(time.time() - _t0, 3),
-        "input": {"question": question, "conversation": conversation or []},
+        "input": {"question": question, "conversation": conversation or [],
+                  "graph_schema": schema},
         "output": _plan_output(plan),
         "usage": _usage_since(_u0),
     })
@@ -135,7 +138,7 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
             emit("Refining the plan")
             _u0 = len(get_collected_usage() or [])
             _t0 = time.time()
-            plan = plan_question(llm, question, conversation, ctx=ctx,
+            plan = plan_question(llm, question, conversation, schema_rep=schema, ctx=ctx,
                                  missing_from_conversation=check.missing or "some facts the question asks for")
             agent_steps.append({
                 "node": "replan (conversation check)", "kind": "plan",
@@ -187,7 +190,8 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
         ]
         _u0 = len(get_collected_usage() or [])
         _t0 = time.time()
-        plan = plan_question(llm, question, conversation, prior_results=prior, ctx=ctx)
+        plan = plan_question(llm, question, conversation, schema_rep=schema,
+                             prior_results=prior, ctx=ctx)
         agent_steps.append({
             "node": f"replan {replans}", "kind": "plan",
             "duration_s": round(time.time() - _t0, 3),

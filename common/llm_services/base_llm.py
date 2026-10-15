@@ -1158,7 +1158,7 @@ First analyze the question and decide the ENTIRE plan up front:
 - in what order.
 Express this as a small DAG of tool steps that gathers exactly the context needed, ending with one final "answer" step that consolidates all the gathered context into the response. Express ordering with depends_on and repetition with multiple steps.
 
-The graph schema is NOT provided here — the structural and unstructured query tools load it themselves at run time, so plan retrieval steps directly. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
+## Graph schema lists the vertex types (with their attribute names) and the edge types of the graph. Use it to decide whether the question needs STRUCTURAL retrieval: plan a structural step when the question asks for data that these types and attributes hold (counts, lookups, relationships, aggregations). The query tools load the full schema themselves, so do not plan a schema step. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
 
 Before you plan retrieval, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. Then:
 - Every fact is stated (for example, the same question was already asked and answered): plan only the final answer step. Do not retrieve those facts again.
