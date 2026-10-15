@@ -28,6 +28,7 @@ clamped by ``tool_guards``. Execution runs through the per-user
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
@@ -84,11 +85,55 @@ def _empty(summary: str) -> dict:
 
 
 def _result_is_empty(result: Any) -> bool:
+    """True when ``result`` holds no rows.
+
+    Query results arrive as JSON text (pyTigerGraph) or nested containers
+    (openCypher, e.g. ``{"VS_XXX": []}``), so both are read through. A
+    container is empty when every value in it is empty. A scalar such as a
+    count of 0 is an answer, not an empty result.
+    """
     if result is None:
         return True
-    if isinstance(result, (list, dict, str)) and len(result) == 0:
-        return True
+    if isinstance(result, str):
+        text = result.strip()
+        if not text:
+            return True
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            return False
+        return _result_is_empty(parsed) if isinstance(parsed, (list, dict)) or parsed is None else False
+    if isinstance(result, dict):
+        return all(_result_is_empty(v) for v in result.values())
+    if isinstance(result, list):
+        return all(_result_is_empty(v) for v in result)
     return False
+
+
+# Longest error text kept for one query attempt in the trace.
+_ATTEMPT_ERROR_CHARS = 500
+
+
+def _attempt(query: str = "", error: str = "", outcome: str = "") -> dict:
+    """One query attempt as shown in the trace."""
+    entry = {}
+    if query:
+        entry["query"] = query
+    if error:
+        entry["error"] = str(error)[:_ATTEMPT_ERROR_CHARS]
+    if outcome:
+        entry["outcome"] = outcome
+    return entry
+
+
+def _with_queries(out: dict, query: str = "", attempts: Optional[list] = None) -> dict:
+    """Add the query that produced the result, and the attempts that did
+    not, to a tool output. The executor shows both in the trace."""
+    if query:
+        out["query"] = query
+    if attempts:
+        out["attempts"] = attempts
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -141,6 +186,7 @@ def structural_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
         return _empty(f"schema mapping failed: {exc}")
 
     ctx.emit("Generating a query to answer the question")
+    attempts: list = []
     try:
         step = ctx.gen_func._run(
             question,
@@ -153,22 +199,36 @@ def structural_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
     except Exception as exc:
         logger.warning(f"structural_retrieve generate_function failed: {exc}")
         step = None
+        attempts.append(_attempt(error=exc))
 
     result = step.get("result") if isinstance(step, dict) else None
+    func_call = step.get("function_call", "") if isinstance(step, dict) else ""
     if not _result_is_empty(result):
-        return _ok("structural query returned rows", step)
+        return _with_queries(_ok("structural query returned rows", step), func_call)
+    if isinstance(step, dict):
+        attempts.append(_attempt(func_call, step.get("error", ""),
+                                 "" if step.get("error") else "no rows"))
+    elif isinstance(step, Exception):
+        # generate_function returns (rather than raises) some errors.
+        attempts.append(_attempt(error=step))
 
     # Optional cypher fallback when configured and available.
     if ctx.use_cypher and ctx.cypher_gen is not None:
-        cy = _cypher_retrieve(ctx, question)
+        cy = _cypher_retrieve(ctx, question, attempts)
         if cy["ok"]:
-            return cy
+            return _with_queries(cy, cy["context"].get("cypher", ""), attempts)
 
-    return _empty("structural query returned no rows")
+    return _with_queries(_empty("structural query returned no rows"), attempts=attempts)
 
 
-def _cypher_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
-    import json
+def _cypher_retrieve(ctx: GraphRAGToolContext, question: str, attempts: Optional[list] = None) -> dict:
+    """Generate and run an openCypher query, retrying on errors.
+
+    Each attempt that does not produce rows is appended to ``attempts``. A
+    query that runs and returns no rows is a valid answer, so it is not
+    retried.
+    """
+    attempts = [] if attempts is None else attempts
     ctx.emit("Generating a graph query")
     gen_history: list = []
     for i in range(3):
@@ -176,6 +236,7 @@ def _cypher_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
             cypher = ctx.cypher_gen._run(question, gen_history)
         except ValueError as exc:
             gen_history.append(f"{i}: Error: {exc}\n")
+            attempts.append(_attempt(error=exc))
             continue
         response = ctx.conn.gsql(cypher)
         json_str = "\n".join(response.split("\n")[1:])
@@ -183,6 +244,7 @@ def _cypher_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
             parsed = json.loads(json_str)
         except Exception:
             gen_history.append(f"{i}: {cypher}\n\tError: {json_str}\n")
+            attempts.append(_attempt(cypher, json_str or response))
             continue
         rows = parsed.get("results", [{}])
         first = rows[0] if rows else None
@@ -192,6 +254,8 @@ def _cypher_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
                 {"result": first, "cypher": cypher,
                  "reasoning": f"The following openCypher query was executed:\n{cypher}"},
             )
+        attempts.append(_attempt(cypher, outcome="no rows"))
+        return _empty("graph query returned no rows")
     return _empty("graph query returned no rows after retries")
 
 

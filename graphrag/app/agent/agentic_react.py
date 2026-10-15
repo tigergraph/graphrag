@@ -169,11 +169,15 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
                 content=json.dumps(obs, default=str),
                 tool_call_id=tc_id or "",
             ))
-            per_call_traces.append({
+            call_trace = {
                 "tool": name, "args": cap_for_trace(args),
                 "ok": bool(out.get("ok")), "summary": out.get("summary", ""),
                 "duration_s": tool_dur,
-            })
+            }
+            for key in ("query", "attempts"):
+                if out.get(key):
+                    call_trace[key] = out[key]
+            per_call_traces.append(call_trace)
             # Record the chunk ids this tool fetched (the agent's bookkeeping,
             # harvested from the context the tool returned), de-duped in order.
             for cid in retrieved_chunk_ids(out.get("context")):

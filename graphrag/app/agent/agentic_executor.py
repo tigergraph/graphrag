@@ -202,6 +202,11 @@ def _run_step(step, args, ctx, results, traces):
     # Input and output keep the tool's own data; a value shortened to fit the
     # trace gets a ``note`` saying so next to it.
     trace_output = {"summary": out.get("summary", "")}
+    # Structured query tools report the query they ran (and the attempts
+    # that returned nothing or failed). Kept out of the trace size limit.
+    for key in ("query", "attempts"):
+        if out.get(key):
+            trace_output[key] = out[key]
     if out.get("context") is not None:
         trace_output["result"], cut = fit_for_trace(out.get("context"))
         trace_output = with_trace_note(trace_output, cut)
