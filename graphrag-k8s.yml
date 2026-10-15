@@ -32,6 +32,13 @@ spec:
               value: "INFO"
             - name: USE_CYPHER
               value: "true"
+            - name: GRAPHRAG_MEMORY_ENABLED
+              value: "true"
+            - name: GRAPHRAG_MEMORY_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: graphrag-postgres
+                  key: database-url
           volumeMounts:
             - name: configs
               mountPath: /code/configs
@@ -106,53 +113,81 @@ spec:
       targetPort: 8001
 
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: graphrag-postgres
+  namespace: graphrag
+type: Opaque
+stringData:
+  password: change-me
+  database-url: postgresql+psycopg://graphrag:change-me@postgres:5432/graphrag
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: graphrag-postgres
+  namespace: graphrag
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: chat-history
+  name: postgres
   namespace: graphrag
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: chat-history
+      app: postgres
   template:
     metadata:
       labels:
-        app: chat-history
+        app: postgres
     spec:
       containers:
-        - name: chat-history
-          image: tigergraph/chat-history:latest
+        - name: postgres
+          image: postgres:16-alpine
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8002
+            - containerPort: 5432
           env:
-            - name: CONFIG_FILES
-              value: "/configs/server_config.json"
-            - name: LOGLEVEL
-              value: "INFO"
+            - name: POSTGRES_DB
+              value: graphrag
+            - name: POSTGRES_USER
+              value: graphrag
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: graphrag-postgres
+                  key: password
           volumeMounts:
-            - name: configs
-              mountPath: /configs
+            - name: data
+              mountPath: /var/lib/postgresql/data
       volumes:
-        - name: configs
-          hostPath:
-            path: /path/to/graphrag/configs
-            type: DirectoryOrCreate
+        - name: data
+          persistentVolumeClaim:
+            claimName: graphrag-postgres
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: chat-history
+  name: postgres
   namespace: graphrag
 spec:
   selector:
-    app: chat-history
+    app: postgres
   ports:
-    - port: 8002
-      targetPort: 8002
+    - port: 5432
+      targetPort: 5432
 
 ---
 apiVersion: apps/v1

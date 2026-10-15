@@ -58,9 +58,10 @@ import { useConfirm } from "@/hooks/useConfirm";
 import { useAlert } from "@/hooks/useAlert";
 import { useNavigate } from "react-router-dom";
 
-// TODO make dynamic
-const WS_HISTORY_URL = "/ui/user";
-const WS_CONVO_URL = "/ui/conversation";
+const historyUrl = () =>
+  `/ui/${encodeURIComponent(sessionStorage.getItem("selectedGraph") || "")}/user`;
+const conversationUrl = () =>
+  `/ui/${encodeURIComponent(sessionStorage.getItem("selectedGraph") || "")}/conversation`;
 // How many conversations to load at a time. Only the visible ones have their
 // messages fetched, so a long history can't flood the browser with requests.
 const PAGE_SIZE = 10;
@@ -132,7 +133,7 @@ const SideMenu = ({
       method: "GET",
       headers: { Authorization: creds, "Content-Type": "application/json" },
     };
-    const response = await fetch(`${WS_HISTORY_URL}/${username}`, settings);
+    const response = await fetch(`${historyUrl()}/${username}`, settings);
     if (!response.ok) return [];
     const data = await safeJson(response);
     if (!Array.isArray(data) || data.length === 0) return [];
@@ -155,7 +156,7 @@ const SideMenu = ({
     const results = await Promise.all(
       items.map(async (item: any) => {
         try {
-          const r = await fetch(`${WS_CONVO_URL}/${item.conversation_id}`, settings);
+          const r = await fetch(`${conversationUrl()}/${item.conversation_id}`, settings);
           if (!r.ok) return null;
           const content = await safeJson(r);
           let lastUpdateTime = item.update_ts || item.create_ts;
@@ -234,7 +235,7 @@ const SideMenu = ({
         const chunk = older.slice(i, i + BATCH);
         await Promise.all(
           chunk.map((c: any) =>
-            fetch(`${WS_CONVO_URL}/${c.conversation_id}`, settings).catch(() => {})
+            fetch(`${conversationUrl()}/${c.conversation_id}`, settings).catch(() => {})
           )
         );
       }
@@ -269,7 +270,7 @@ const SideMenu = ({
     for (let i = 0; i < ids.length; i += BATCH) {
       const results = await Promise.all(
         ids.slice(i, i + BATCH).map((id) =>
-          fetch(`${WS_CONVO_URL}/${id}`, settings)
+          fetch(`${conversationUrl()}/${id}`, settings)
             .then((r) => (r.ok ? id : null))
             .catch(() => null)
         )
@@ -420,7 +421,7 @@ const SideMenu = ({
         }
       }
 
-      const response = await fetch(`${WS_CONVO_URL}/${id}`, settings);
+      const response = await fetch(`${conversationUrl()}/${id}`, settings);
       if (!response.ok) {
         return;
       }

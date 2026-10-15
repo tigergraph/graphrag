@@ -104,7 +104,7 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
     catalog = _catalog_text(ctx)
     user_parts = [
         f"## Question\n{question}",
-        f"## Conversation\n{json.dumps(conversation or [])[:2000]}",
+        f"## Conversation\n{json.dumps(conversation or [])}",
     ]
     # Schema is normally not pre-loaded (the query tools load it themselves);
     # include it only if a caller explicitly supplied one.

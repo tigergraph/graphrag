@@ -368,6 +368,40 @@ def get_mcp_servers(graphname=None):
     return resolve_mcp_servers(global_list, graph_list)
 
 
+def get_memory_config(graphname=None):
+    """Return validated global + per-graph agent-memory settings.
+
+    Secrets stay in the environment; non-secret tuning lives in the existing
+    server config. Per-graph values override global values.
+    """
+    value = dict(server_config.get("memory_config") or {})
+    value.update(_load_graph_config(graphname).get("memory_config") or {})
+    database_url = os.getenv("GRAPHRAG_MEMORY_DATABASE_URL") or value.get(
+        "database_url"
+    )
+    env_enabled = os.getenv("GRAPHRAG_MEMORY_ENABLED")
+    enabled = (
+        env_enabled.lower() in {"1", "true", "yes"}
+        if env_enabled is not None
+        else bool(value.get("enabled", database_url))
+    )
+    context = int(value.get("stm_context_tokens", 6000))
+    if context <= 0:
+        raise ValueError("stm_context_tokens must be greater than 0")
+    return {
+        **value,
+        "enabled": enabled and bool(database_url),
+        "database_url": database_url,
+        "stm_context_tokens": context,
+        "ltm_top_k": max(1, int(value.get("ltm_top_k", 8))),
+        "ltm_score_threshold": float(value.get("ltm_score_threshold", 0.2)),
+        "fact_extract_async": bool(value.get("fact_extract_async", True)),
+        "max_facts_per_scope": max(1, int(value.get("max_facts_per_scope", 1000))),
+        "retry_limit": max(1, int(value.get("retry_limit", 8))),
+        "embedding_dimension": int(value.get("embedding_dimension", embedding_dimension)),
+    }
+
+
 PATH_PREFIX = os.getenv("PATH_PREFIX", "")
 PRODUCTION = os.getenv("PRODUCTION", "false").lower() == "true"
 

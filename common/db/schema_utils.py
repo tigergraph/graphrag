@@ -74,6 +74,7 @@ GRAPHRAG_STRUCTURAL_VERTEX_TYPES: frozenset = frozenset({
     "Content",
     "Community",
     "Image",
+    "MemoryEmbedding",
 })
 
 
@@ -219,6 +220,11 @@ def is_structural_type(name: str) -> bool:
     if folded in structural:
         return True
     return is_reserved_word(name)
+
+
+def is_hidden_memory_type(name: str) -> bool:
+    """Internal memory index types never belong in agent-visible schema."""
+    return bool(name) and name.casefold() == "memoryembedding"
 
 
 # -----------------------------------------------------------------------------
@@ -1251,6 +1257,7 @@ def render_schema_rep(conn, exclude_structural: bool = False) -> AllowedSchema:
         all_verts = conn.getVertexTypes() or []
     except Exception:
         all_verts = []
+    all_verts = [v for v in all_verts if not is_hidden_memory_type(v)]
     domain_verts = (
         [v for v in all_verts if not is_structural_type(v)]
         if exclude_structural else list(all_verts)
@@ -1400,6 +1407,7 @@ async def render_schema_rep_async(
         all_verts = await conn.getVertexTypes() or []
     except Exception:
         all_verts = []
+    all_verts = [v for v in all_verts if not is_hidden_memory_type(v)]
     domain_verts = (
         [v for v in all_verts if not is_structural_type(v)]
         if exclude_structural else list(all_verts)
