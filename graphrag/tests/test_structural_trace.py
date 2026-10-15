@@ -88,6 +88,49 @@ class TestStructuralRetrieveQuery(unittest.TestCase):
         self.assertEqual(out["attempts"][-1], {"query": _CYPHER, "outcome": "no rows"})
 
 
+class TestEmptyFunctionRegistry(unittest.TestCase):
+    """Without registered functions, no function call is generated."""
+
+    def test_structural_tool_records_the_stop_and_runs_cypher(self):
+        from tools.validation_utils import NoRegisteredFunctionsException
+        ctx = _ctx(NoRegisteredFunctionsException("No pyTigerGraph functions are registered."),
+                   use_cypher=True, cypher_runs=[(_CYPHER, _gsql([{"VS": [{"v_id": "d1"}]}]))])
+        out = gt.structural_retrieve(ctx, "q")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["query"], _CYPHER)
+        self.assertEqual(out["attempts"], [{"error": "No pyTigerGraph functions are registered."}])
+
+    def _gen(self, registered, llm=None):
+        from tools.generate_function import GenerateFunction
+        store = mock.Mock()
+        store.list_registered_documents.return_value = registered
+        return GenerateFunction(mock.Mock(), llm or mock.Mock(), mock.Mock(), store), store
+
+    def test_generator_stops_before_any_model_call(self):
+        from tools.validation_utils import NoRegisteredFunctionsException
+        llm = mock.Mock()
+        gen, store = self._gen([], llm)
+        with self.assertRaises(NoRegisteredFunctionsException):
+            gen._run("q", ["Document"], None, None, None, None)
+        llm.invoke_with_parser.assert_not_called()
+        store.retrieve_similar.assert_not_called()
+
+    def test_mapping_without_edges_does_not_fail(self):
+        """target_edge_types=None used to raise 'NoneType' object is not iterable."""
+        from langchain_core.documents import Document
+        llm = mock.Mock(generate_function_prompt="{question}", query_guidance_block="")
+        llm.invoke_with_parser.return_value = types.SimpleNamespace(
+            connection_func_call="getVertexCount('Document')", func_call_reasoning="count")
+        gen, store = self._gen([{"function_header": "getVertexCount"}], llm)
+        store.retrieve_similar.return_value = [Document(page_content="getVertexCount docs")]
+        gen.conn.getVertexTypes.return_value = ["Document"]
+        gen.conn.getEndpoints.return_value = []
+        gen.conn.getVertexCount.return_value = 4
+        out = gen._run("How many documents?", ["Document"], None, None, None, None)
+        self.assertEqual(out["function_call"], "getVertexCount('Document')")
+        self.assertEqual(json.loads(out["result"]), 4)
+
+
 class TestTraceShowsTheQuery(unittest.TestCase):
     def test_query_and_attempts_lead_the_step_output(self):
         out = {"ok": True, "summary": "graph query returned rows", "context": {"result": [1]},
