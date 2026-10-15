@@ -697,6 +697,8 @@ In the `llm_config` section of `configs/server_config.json` file, copy JSON conf
 | `base_url` | string | No | — | Custom API endpoint URL. |
 | `token_limit` | int | No | inherited from top-level | Hard cap on token count for a prompt carrying retrieved context, prompt included. Context beyond it is truncated. `0` or omitted uses the model's own input limit when known, otherwise no cap. |
 
+> **Gemini 3 models:** the agentic engine plans with temperature `1.0` when `model_kwargs` sets a lower one, as Google recommends for these models. Answers and knowledge graph building use the configured temperature.
+
 **`embedding_service` parameters:**
 
 | Parameter | Type | Required | Default | Description |

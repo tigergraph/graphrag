@@ -663,6 +663,35 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
                 return llm.model_copy(update={name: limit})
         return llm
 
+    # Models already logged as getting the structured-output temperature.
+    _structured_temperature_logged: set = set()
+
+    def with_structured_temperature(self, llm):
+        """``llm`` at the temperature structured output needs.
+
+        Gemini 3 models can loop below temperature 1.0, so their structured
+        calls (planner, conversation check, triage) use 1.0 when the
+        configured temperature is lower. A per-call copy: answer generation
+        and ECC keep the configured temperature, and other models are
+        returned unchanged.
+        """
+        from common.llm_services.capabilities import (
+            GEMINI_3_TEMPERATURE, gemini_loops_below_default_temperature,
+        )
+        model = ((getattr(self, "config", None) or {}).get("llm_model") or "")
+        if not gemini_loops_below_default_temperature(model) or not hasattr(llm, "model_copy"):
+            return llm
+        current = getattr(llm, "temperature", None)
+        if current is not None and current >= GEMINI_3_TEMPERATURE:
+            return llm
+        if model not in LLM_Model._structured_temperature_logged:
+            LLM_Model._structured_temperature_logged.add(model)
+            logger.info(
+                f"{model}: structured output uses temperature {GEMINI_3_TEMPERATURE} "
+                f"instead of {current} (Gemini 3 can loop below it)"
+            )
+        return llm.model_copy(update={"temperature": GEMINI_3_TEMPERATURE})
+
     def invoke_structured(
         self,
         messages: list,
@@ -682,6 +711,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         this call (see ``with_output_limit``).
         """
         llm = self.with_output_limit(max_output_tokens) if max_output_tokens else self.llm
+        llm = LLM_Model.with_structured_temperature(self, llm)
         usage_data = {}
         with get_openai_callback() as cb:
             try:
