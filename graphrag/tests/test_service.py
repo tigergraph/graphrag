@@ -9,7 +9,17 @@ from rapidfuzz.distance import JaroWinkler
 import time
 from pygit2 import Repository, Commit
 
-branch_name = os.getenv("PR_NUMBER", Repository(".").head.shorthand)
+def _git_branch() -> str:
+    """The current git branch, or "unknown" outside a git checkout (e.g. when
+    the unit suite runs from another directory). Only the LLM regression runs
+    report it."""
+    try:
+        return Repository(".").head.shorthand
+    except Exception:
+        return "unknown"
+
+
+branch_name = os.getenv("PR_NUMBER") or _git_branch()
 
 EPS = 0.001
 

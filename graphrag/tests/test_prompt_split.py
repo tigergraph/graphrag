@@ -97,6 +97,10 @@ def test_repair_json_escapes():
     assert m._repair_json_escapes(r'{"s":"a\nb\t\\x"}') == r'{"s":"a\nb\t\\x"}'
 
 
-def test_get_user_portion_default_empty_when_no_file():
+def test_get_user_portion_default_when_no_file():
+    """Without an override file, the editor shows the built-in default."""
+    from common.utils.prompt_validation import sanitize_user_portion
     m = _model()
-    assert m.get_user_portion("chatbot_response.txt") == ""
+    expected = sanitize_user_portion(m._CHATBOT_RESPONSE_USER_DEFAULT).strip()
+    assert expected  # the answer prompt ships with default guidance
+    assert m.get_user_portion("chatbot_response.txt") == expected
