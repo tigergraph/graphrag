@@ -360,7 +360,7 @@ const ExpandableRow: FC<{
       </div>
       {open && content && (
         <div className="px-4 pb-3 text-sm text-muted-foreground border-t border-border pt-3">
-          <pre className="whitespace-pre-wrap font-sans overflow-auto max-h-[500px]">{content}</pre>
+          <pre className="whitespace-pre-wrap [overflow-wrap:anywhere] font-sans overflow-auto max-h-[500px]">{content}</pre>
         </div>
       )}
     </div>
@@ -391,7 +391,7 @@ const PlanPanel: FC<{ trace: TraceData }> = ({ trace }) => {
       {plan.strategy && (
         <div className="mb-4 rounded-lg border border-border bg-muted/40 px-4 py-3">
           <span className="text-xs font-semibold text-muted-foreground">Strategy</span>
-          <p className="text-sm mt-1 whitespace-pre-wrap">{plan.strategy}</p>
+          <p className="text-sm mt-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{plan.strategy}</p>
         </div>
       )}
       <ol className="space-y-2">
@@ -553,7 +553,7 @@ const ToolCallExpandable: FC<{ tc: ToolCallEntry }> = ({ tc }) => {
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
               Input
             </p>
-            <pre className="bg-[#1e1e2e] dark:bg-[#0d1117] text-emerald-300 text-xs rounded-lg p-4 overflow-auto max-h-[500px] whitespace-pre-wrap">
+            <pre className="bg-[#1e1e2e] dark:bg-[#0d1117] text-emerald-300 text-xs rounded-lg p-4 overflow-auto max-h-[500px] whitespace-pre-wrap [overflow-wrap:anywhere]">
               {tc.input || "N/A"}
             </pre>
           </div>
@@ -561,7 +561,7 @@ const ToolCallExpandable: FC<{ tc: ToolCallEntry }> = ({ tc }) => {
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
               Output
             </p>
-            <pre className="bg-[#1e1e2e] dark:bg-[#0d1117] text-blue-300 text-xs rounded-lg p-4 overflow-auto max-h-[500px] whitespace-pre-wrap">
+            <pre className="bg-[#1e1e2e] dark:bg-[#0d1117] text-blue-300 text-xs rounded-lg p-4 overflow-auto max-h-[500px] whitespace-pre-wrap [overflow-wrap:anywhere]">
               {tc.output || "N/A"}
             </pre>
           </div>
@@ -868,7 +868,7 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
       return (
         <Dialog open onOpenChange={(o) => !o && onClose && onClose()}>
           <DialogContent
-            className="w-fit min-w-[400px] max-w-[min(95vw,768px)] max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] p-0"
+            className="w-fit min-w-[400px] max-w-[min(95vw,768px)] max-h-[90vh] overflow-y-auto overflow-x-hidden bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] p-0"
             onInteractOutside={(e) => e.preventDefault()}
             onOpenAutoFocus={(e) => e.preventDefault()}
           >
@@ -1076,8 +1076,12 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
 
         {/* Footer — Download (primary action style) + Close (outline,
             matches other dialogs). Replaces the top-right Download in
-            dialog mode so the dialog can size to content. */}
-        <div className="flex justify-end gap-2 pt-2">
+            dialog mode so the dialog can size to content. In the dialog it
+            stays at the bottom while the trace scrolls, so Close is always
+            visible. */}
+        <div className={isDialog
+          ? "sticky bottom-0 -mx-6 px-6 py-3 flex justify-end gap-2 bg-white dark:bg-background border-t border-gray-200 dark:border-[#3D3D3D]"
+          : "flex justify-end gap-2 pt-2"}>
           {isDialog && (
             <Button onClick={handleDownload} className="gradient text-white">
               <LuDownload className="w-4 h-4 mr-1.5" />
