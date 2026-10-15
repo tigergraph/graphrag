@@ -1136,12 +1136,13 @@ Start by analyzing the question and reasoning (1-2 sentences) about what it need
 - If not — a part is still unanswered, a needed value or table is missing, or the results were thin — take another action to close the gap (follow a lead, widen top_k / num_hops, or switch method). Do not settle for a partial or vague answer when more retrieval could complete it.
 Do not commit to a full multi-step plan up front; let each next step be driven by what is still missing for a complete answer.
 
-Before your first tool call, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. Then:
-- Every fact is stated (for example, the same question was already asked and answered): give the final answer without calling a tool.
+Before your first tool call, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. First judge each earlier answer that you would use. A bad answer counts as not answered, and a fact in a bad answer is not stated. An answer is bad when it says that the information was not found, not available, not explicit or not in the context; when it hedges or guesses (for example "but", "may", "it seems", "it is unclear"); when it gives only part of what was asked, or an approximate value; or when it answers a different question. Then:
+- Every fact is stated (for example, the same question was already asked and answered well): give the final answer without calling a tool.
 - Some facts are stated: call tools only for the missing facts. Do not retrieve again what ## Conversation already states. Combine both in the final answer.
 - No fact is stated: retrieve as described below.
 This decision comes before the "Retrieval Strategy" below.
 Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
+When an earlier answer to the same question was bad, retrieve again with a different or wider approach than a single search (for example both structural and unstructured retrieval, or a higher top_k).
 
 The graph schema is required for the structural and unstructured query tools: before your first structural query or vector/unstructured retrieval, call graphrag__get_schema once to load the graph's vertex and edge types. Questions answered without graph data (e.g. by an external tool) do not need the schema.
 
@@ -1190,12 +1191,13 @@ Express this as a small DAG of tool steps that gathers exactly the context neede
 
 ## Graph schema lists the vertex types (with their attribute names) and the edge types of the graph. Use it to decide whether the question needs STRUCTURAL retrieval: plan a structural step when the question asks for data that these types and attributes hold (counts, lookups, relationships, aggregations). The query tools load the full schema themselves, so do not plan a schema step. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
 
-Before you plan retrieval, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. Then:
-- Every fact is stated (for example, the same question was already asked and answered): plan only the final answer step. Do not retrieve those facts again.
+Before you plan retrieval, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. First judge each earlier answer that you would use. A bad answer counts as not answered, and a fact in a bad answer is not stated. An answer is bad when it says that the information was not found, not available, not explicit or not in the context; when it hedges or guesses (for example "but", "may", "it seems", "it is unclear"); when it gives only part of what was asked, or an approximate value; or when it answers a different question. Then:
+- Every fact is stated (for example, the same question was already asked and answered well): plan only the final answer step. Do not retrieve those facts again.
 - Some facts are stated: plan retrieval steps only for the missing facts. Do not retrieve again what ## Conversation already states. The answer step combines both.
 - No fact is stated: plan the retrieval steps as described below.
 This decision comes before the "Retrieval Strategy" below.
 Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
+When an earlier answer to the same question was bad, retrieve again with a different or wider approach than a single search (for example both structural and unstructured retrieval, or a higher top_k).
 
 You have two kinds of retrieval:
 - STRUCTURAL (graphrag__structural_retrieve): generates and runs a graph query. Best for counts, lookups by attribute/id, relationships, and aggregations over typed data. It depends on the LLM generating a correct query against the live schema — it can return nothing or the wrong rows when the question doesn't map cleanly to typed graph data, so it is NOT a safe sole source of context.
@@ -1222,14 +1224,15 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
     _AGENTIC_CONVERSATION_CHECK_SYSTEM = """\
 You check one decision of a question-answering agent. The agent plans to answer the question from ## Conversation only, without new retrieval.
 
-List the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough.
+List the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. First judge each earlier answer that the agent would use. A bad answer counts as not answered, and a fact in a bad answer is not stated. An answer is bad when it says that the information was not found, not available, not explicit or not in the context; when it hedges or guesses (for example "but", "may", "it seems", "it is unclear"); when it gives only part of what was asked, or an approximate value; or when it answers a different question.
 
 Set "needs_retrieval" to true when one of these is correct:
 - ## Conversation does not state a fact that the question asks for.
+- The earlier answer that the agent would use is bad.
 - The question asks for the current or latest state (for example "now", "current", "latest", "again").
 - The user says that an earlier answer was wrong or incomplete.
 
-Set "needs_retrieval" to false when ## Conversation states every fact, or when the question needs no data (for example a greeting or thanks).
+Set "needs_retrieval" to false when a good earlier answer in ## Conversation states every fact, or when the question needs no data (for example a greeting or thanks).
 
 In "missing", name the facts that ## Conversation does not state. Return ONLY the structured result.
 """
@@ -1325,7 +1328,7 @@ provided contexts to answer the user's question.
 ## Rules
 - The contexts arrive as JSON key-context pairs. **Combine and rephrase** them to answer the question.
 - **Preserve** image links exactly as `![description](url)` in the final answer when used. Do NOT modify or omit them.
-- The context "earlier_conversation", when present, holds earlier questions and answers from this chat. Use it to resolve references, and to answer when it holds the answer. When it conflicts with another context, the other context is correct.
+- The context "earlier_conversation", when present, holds earlier questions and answers from this chat. Use it to resolve references, and to answer when it holds the answer. When it conflicts with another context, the other context is correct. An earlier answer that says information was not found is not evidence that it does not exist.
 
 ## Inputs
 - **Question**: {question}

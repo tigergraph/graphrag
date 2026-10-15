@@ -148,6 +148,9 @@ class PlanStep(BaseModel):
 
 class Plan(BaseModel):
     steps: List[PlanStep] = []
+    # Steps the planner wrote that named an unknown tool and were dropped.
+    # Shown in the trace only; never part of the model's output schema.
+    _dropped_steps: list = PrivateAttr(default_factory=list)
     strategy: str = Field(
         "",
         description="One short sentence (under 25 words) on the approach. "
