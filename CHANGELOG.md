@@ -8,6 +8,8 @@
 - **Failed answers show their error in Trace Logs.** When GraphRAG cannot answer, the trace log ends with an Error step that states the error, even when no other step ran. The error appears only in Trace Logs, which only the asking superuser can open; the chat message stays generic and now asks to rephrase the question instead of the prompt.
 - **Trace Logs show the structured query that ran.** Each structured query step lists the query at the top of its output, followed by any attempts that returned nothing or failed, with their errors. Before, the query was buried in the result, and it was missing entirely when the query returned no rows — the case where it is most needed.
 
+- **Routine requests log less.** Loading conversations, opening traces and similar requests each wrote four INFO lines; they now write only the audit entry. The per-request entry line and the HTTP client's request lines are logged at DEBUG (`LOGLEVEL=DEBUG` brings them back), and the web server's access log is off, since the audit entry records each request.
+
 ### Fixed
 - **Agentic plans no longer come back without steps.** The plan format required no fields, so a model could return a plan with a summary but no steps, which ran no retrieval; this happened regularly with Gemini. The plan's review, steps and summary are now required.
 - **The agentic planner plans from the graph schema.** Since 2.0.0 the planner made its plan without knowing the graph's vertex and edge types, so it could only guess from the wording of a question whether structural retrieval would help. It now gets a compact summary of the schema — type names, attribute names, edge endpoints and descriptions — cached per graph and refreshed when the schema changes.
