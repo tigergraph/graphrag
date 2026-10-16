@@ -14,6 +14,18 @@ ROWS = [0, "0", 4, "4", False, '{"count": 0}', {"count": 0}, [{"v_id": "x"}],
         '[{"v_id": "x"}]', {"VS_XXX": [{"v_id": "x"}]}, "not json text", [0]]
 
 
+class TestCountRows(unittest.TestCase):
+    def test_shapes(self):
+        from common.utils.query_results import count_rows, describe_rows
+        cases = [({"VS_XXX": [{"a": 1}] * 4}, 4), ({"T": {"document_count": 4}}, 1),
+                 ([{"T_1": [{"t": 1}, {"t": 2}]}], 2), ('[{"v": 1}, {"v": 2}, {"v": 3}]', 3),
+                 ("4", 1), ({"VS": []}, 0), ([], 0), (None, 0)]
+        for value, n in cases:
+            self.assertEqual(count_rows(value), n, repr(value))
+        self.assertEqual(describe_rows("graph query", {"VS": [{"a": 1}]}),
+                         'graph query returned 1 row, 18 chars')
+
+
 class TestIsEmptyResult(unittest.TestCase):
     def test_empty(self):
         for value in EMPTY:
