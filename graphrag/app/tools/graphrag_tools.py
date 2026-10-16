@@ -32,7 +32,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 
-from common.utils.query_results import is_empty_result
+from common.utils.query_results import describe_rows, is_empty_result
 from tools.generate_cypher import CYPHER_MAX_ATTEMPTS, generate_and_run_cypher
 from common.utils.retrieval_stats import describe_retrieval
 from tools import tool_guards as guards
@@ -182,7 +182,7 @@ def structural_retrieve(ctx: GraphRAGToolContext, question: str) -> dict:
     result = step.get("result") if isinstance(step, dict) else None
     func_call = step.get("function_call", "") if isinstance(step, dict) else ""
     if not _result_is_empty(result):
-        return _with_queries(_ok("structural query returned rows", step), func_call)
+        return _with_queries(_ok(describe_rows("structural query", result), step), func_call)
     if isinstance(step, dict):
         attempts.append(_attempt(func_call, step.get("error", ""),
                                  "" if step.get("error") else "no rows"))
@@ -212,7 +212,7 @@ def _cypher_retrieve(ctx: GraphRAGToolContext, question: str, attempts: Optional
     if first is None:
         return _empty("graph query returned no rows")
     return _ok(
-        "graph query returned rows",
+        describe_rows("graph query", first),
         {"result": first, "cypher": cypher,
          "reasoning": f"The following openCypher query was executed:\n{cypher}"},
     )

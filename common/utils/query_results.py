@@ -48,3 +48,37 @@ def is_empty_result(result: Any) -> bool:
     if isinstance(result, (list, tuple, set, frozenset, range)):
         return all(is_empty_result(v) for v in result)
     return False
+
+
+def count_rows(result: Any) -> int:
+    """How many rows a graph query result holds, for summaries.
+
+    A list holds one row per item, except that a list of result blocks
+    (``[{"VS": [...]}]``) is counted through. A dict holding lists
+    (``{"VS_XXX": [...]}``) counts the list items; a dict of plain values
+    (``{"T": {"n": 4}}``) is one row. JSON text is read first.
+    """
+    if result is None:
+        return 0
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except ValueError:
+            return 1 if result.strip() else 0
+    if isinstance(result, list):
+        if result and all(isinstance(r, dict) and any(isinstance(v, list) for v in r.values()) for r in result):
+            return sum(count_rows(r) for r in result)
+        return len(result)
+    if isinstance(result, dict):
+        lists = [v for v in result.values() if isinstance(v, list)]
+        if lists:
+            return sum(len(v) for v in lists)
+        return 0 if is_empty_result(result) else 1
+    return 1
+
+
+def describe_rows(source: str, result: Any) -> str:
+    """A one-line summary like "graph query returned 4 rows, 1,234 chars"."""
+    n = count_rows(result)
+    text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+    return f"{source} returned {n:,} row{'' if n == 1 else 's'}, {len(text):,} chars"
