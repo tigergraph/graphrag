@@ -1196,17 +1196,18 @@ First analyze the question and decide the ENTIRE plan up front:
 - in what order.
 Express this as a small DAG of tool steps that gathers exactly the context needed, ending with one final "answer" step that consolidates all the gathered context into the response. Express ordering with depends_on and repetition with multiple steps.
 
-## Graph schema lists the vertex types (with their attribute names) and the edge types of the graph. Use it to decide whether the question needs STRUCTURAL retrieval: plan a structural step when the question asks for data that these types and attributes hold (counts, lookups, relationships, aggregations). The query tools load the full schema themselves, so do not plan a schema step. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
+## Graph schema lists the vertex types (with their attribute names) and the edge types of the graph. Use it to decide whether the question needs STRUCTURAL retrieval: plan a structural step when the question asks for data that these types and attributes hold (counts, lookups, relationships, aggregations). The query tools load the full schema themselves, so do not plan a schema step. The schema itself answers questions about the knowledge base (what data, datasets, types or sources it has, what the graph is about): its type names and descriptions are the answer, so such a question needs no retrieval step: list the facts it gives in stated_by_context. The schema never answers questions about values in the data (counts, names, dates of records). A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
 
-Before you plan, write "conversation_review" (it comes first in your output). Judge ## Conversation strictly, as a reviewer would:
-- needs_data: false only when the question needs no data from the graph or a tool.
+Before you plan, write "context_review" (it comes first in your output). Judge the context you were given strictly, as a reviewer would. Each context section has its key in its heading, for example "## Graph schema (context: graph_schema)":
+- needs_data: false only when the question needs no information at all (for example a calculation or a greeting). A question answered from ## Conversation or ## Graph schema needs data: set true, and let stated_by_context and coverage show that the context has it.
 - facts_asked: the facts the question asks for (values, names, dates).
 - earlier_answer: the quality of the earlier answer you would reuse. It is "bad" when it says that the information was not found, not available, not explicit or not in the context; when it hedges or guesses (for example "but", "may", "it seems", "it is unclear"); when it gives only part of what was asked or an approximate value; when it uses a different attribute than the question asks for (for example an updated date for a created date); or when it answers a different question. It is "none" when no earlier answer is about this question.
-- stated_by_good_answer: only the facts that a good earlier answer states explicitly. A fact in a bad answer is not stated. A related topic or a similar question is not enough.
-- coverage: "all", "part" or "none".
+- stated_by_context: only the facts that a context section states explicitly: a good earlier answer in ## Conversation, ## Graph schema (for questions about the knowledge base itself), or another section. A fact in a bad answer is not stated. A related topic or a similar question is not enough.
+- coverage: how many of facts_asked the context states: "all", "part" or "none".
 Then plan:
-- Plan only the final answer step ONLY when coverage is "all" and earlier_answer is "good", or when needs_data is false.
-- When coverage is "part", plan retrieval steps only for the missing facts. Do not retrieve again what a good earlier answer states. The answer step combines both.
+- Plan only the final answer step ONLY when coverage is "all" and earlier_answer is not "bad", or when needs_data is false.
+- When coverage is "part", plan retrieval steps only for the missing facts. Do not retrieve again what the context states. The answer step combines both.
+- Set the answer step's args.context to the keys of the context sections that state facts for the answer, for example {"context": ["graph_schema"]}. For ## Conversation, name each good earlier turn that states facts for the answer by its "turn" number, for example {"context": ["conversation#2"]}, or {"context": ["conversation#1", "conversation#3"]} when several turns are needed. The answer step gets those sections and turns as you see them. A plan with only the answer step must set it.
 - Otherwise plan the retrieval steps as described below. If you are not sure, retrieve.
 Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
 When an earlier answer to the same question was bad, retrieve again with a different or wider approach than a single search (for example both structural and unstructured retrieval, or a higher top_k).
@@ -1221,7 +1222,7 @@ Plan mechanics (fixed):
 - Retrieval params (top_k, num_hops, community_level) are optional; omit them to use defaults, or set higher values when you expect a broad answer.
 - For each unstructured step, set args.question to that clause only as a standalone search query in the user's language. Do not pass the full multi-part question, a clause already assigned to another step, or an unresolved reference from conversation history.
 - The final step MUST have kind="answer" and tool="" (the orchestrator synthesizes the answer from gathered context); it should depend_on all retrieval steps.
-- Write "conversation_review" first, then every step. Then set "strategy" to one short sentence (under 25 words). Give each step a one-sentence "rationale".
+- Write "context_review" first, then every step. Then set "strategy" to one short sentence (under 25 words). Give each step a one-sentence "rationale".
 
 Decide which retrievals to include, how many, and in what order using the "Retrieval Strategy" below. Return ONLY the structured plan.
 
@@ -1325,6 +1326,8 @@ provided contexts to answer the user's question.
 - **Preserve** image links exactly as `![description](url)` in the final answer when used. Do NOT modify or omit them.
 - When the contexts do not answer the question, or a part of it, say so plainly for that part instead of guessing. Then ask the user to rephrase the question with more specific information or a narrower scope, for example the exact name, time period, or document. Write this in the user's language.
 - The context "earlier_conversation", when present, holds earlier questions and answers from this chat. Use it to resolve references, and to answer when it holds the answer. When it conflicts with another context, the other context is correct. An earlier answer that says information was not found is not evidence that it does not exist.
+- The context "conversation_selected", when present, holds the earlier turns from "earlier_conversation" that state the facts for this answer. Answer from them; use the other turns only to resolve references.
+- The context "graph_schema", when present, describes the graph this chat uses: its name, and its vertex and edge types with their descriptions. Use it to answer questions about the knowledge base itself (what data or datasets it has, what the graph is about) from the type names and descriptions. Describe the data in plain words. Do not list GraphRAG's own types (Document, DocumentChunk, Content, Entity, EntityType, RelationshipType, Community, Image) one by one: together they are the uploaded documents and the knowledge extracted from them. Do not state counts or values that the schema does not give.
 
 ## Inputs
 - **Question**: {question}

@@ -11,7 +11,7 @@ try:
     from agent.agentic_planner import plan_question
     from agent.conversation_window import CONVERSATION_CHARS, recent_conversation, recent_turns
     from common.llm_services.base_llm import LLM_Model
-    from common.py_schemas import ConversationReview, GraphRAGResponse, Plan, PlanStep, StepResult
+    from common.py_schemas import ContextReview, GraphRAGResponse, Plan, PlanStep, StepResult
 except ImportError as exc:  # needs the app environment
     raise unittest.SkipTest(f"app environment unavailable: {exc}")
 
@@ -57,12 +57,12 @@ def _synth(*a, **k):
                             answered_question=True, response_type="agentic")
 
 
-def _answer_only(**review):
-    return Plan(conversation_review=ConversationReview(**review),
-                steps=[PlanStep(id="A", kind="answer", tool="")])
+def _answer_only(context=("conversation",), **review):
+    return Plan(context_review=ContextReview(**review),
+                steps=[PlanStep(id="A", kind="answer", tool="", args={"context": list(context)})])
 
 
-_REUSE = dict(facts_asked=["iPhone net sales"], stated_by_good_answer=["iPhone net sales"],
+_REUSE = dict(facts_asked=["iPhone net sales"], stated_by_context=["iPhone net sales"],
               earlier_answer="good", coverage="all")
 _BAD = dict(facts_asked=["iPad net sales"], earlier_answer="bad", coverage="none")
 _IPAD_SEARCH = Plan(steps=[PlanStep(id="S1", kind="unstructured", tool="graphrag__hybrid_search",
@@ -72,7 +72,7 @@ _FOUND = {"S1": StepResult(step_id="S1", ok=True, summary="rows", context={"resu
 
 
 class TestPlanCheck(unittest.TestCase):
-    """Every plan retrieves, or its conversation_review justifies answering
+    """Every plan retrieves, or its context_review justifies answering
     without retrieval; otherwise one replan, then the fallback plan."""
 
     def _run(self, plans, conversation=None, exec_results=None):
@@ -91,8 +91,69 @@ class TestPlanCheck(unittest.TestCase):
         run_step.assert_not_called()
         steps = resp.query_sources["agent_steps"]
         self.assertEqual(steps[0]["output"]["routing"], "answered without retrieval")
-        self.assertEqual(steps[0]["output"]["conversation_review"]["coverage"], "all")
+        self.assertEqual(steps[0]["output"]["context_review"]["coverage"], "all")
         self.assertIn("earlier_conversation", steps[-1]["input"])
+
+    def test_schema_answers_a_question_about_the_knowledge_base(self):
+        schema = "Graph: JiraTest\nVertex types (attributes):\n- JiraIssue(issue_key): A Jira work item"
+        review = dict(facts_asked=["datasets in the graph"], stated_by_context=["datasets in the graph"],
+                      earlier_answer="none", coverage="all")
+        with mock.patch.object(g, "schema_summary", return_value=schema):
+            resp, planner, execute, _ = self._run([_answer_only(context=["graph_schema"], **review)],
+                                                  conversation=[])
+        self.assertEqual(planner.call_count, 1)
+        execute.assert_not_called()
+        steps = resp.query_sources["agent_steps"]
+        self.assertEqual(steps[0]["output"]["routing"], "answered without retrieval")
+        self.assertEqual(steps[-1]["input"]["graph_schema"], schema)  # the answer step sees the schema
+
+    def test_only_named_context_reaches_the_answer(self):
+        with mock.patch.object(g, "schema_summary", return_value="Graph: G"):
+            resp, *_ = self._run([_IPAD_SEARCH])
+        self.assertNotIn("graph_schema", resp.query_sources["agent_steps"][-1]["input"])
+        # A retrieval plan may also name planner context for the answer.
+        both = _IPAD_SEARCH.model_copy(deep=True)
+        both.steps[-1].args = {"context": ["graph_schema", "unknown_key"]}
+        with mock.patch.object(g, "schema_summary", return_value="Graph: G"):
+            resp, *_ = self._run([both])
+        answer_input = resp.query_sources["agent_steps"][-1]["input"]
+        self.assertEqual(answer_input["graph_schema"], "Graph: G")
+        self.assertNotIn("unknown_key", answer_input)
+
+    def test_named_turns_reach_the_answer_in_order(self):
+        plan = _answer_only(context=["conversation#3", "conversation#1", "conversation#9"], **_REUSE)
+        resp, *_ = self._run([plan], conversation=_turns(3))
+        answer_input = resp.query_sources["agent_steps"][-1]["input"]
+        selected = answer_input["conversation_selected"]
+        self.assertEqual([t["query"] for t in selected], ["question 2", "question 0"])  # unknown turn 9 dropped
+        self.assertEqual(len(answer_input["earlier_conversation"]), 3)  # all turns still there for references
+
+    def test_current_state_question_does_not_reuse_an_earlier_answer(self):
+        with mock.patch.object(g, "plan_question", side_effect=[_answer_only(**_REUSE), _IPAD_SEARCH]) as planner, \
+             mock.patch.object(g, "execute_plan", return_value=(_FOUND, [])) as execute, \
+             mock.patch.object(g, "synthesize", side_effect=_synth):
+            g.run_agentic(_Ctx(), llm=object(), question="How many issues are there now?",
+                          conversation=_turns(1))
+        self.assertEqual(planner.call_count, 2)
+        self.assertIn("current state", planner.call_args.kwargs["plan_problem"])
+        execute.assert_called_once()
+        # The schema may still answer a current-state question about the graph itself.
+        schema_plan = _answer_only(context=["graph_schema"], facts_asked=["data"],
+                                   stated_by_context=["data"], coverage="all")
+        self.assertTrue(g._answer_only_is_justified(schema_plan, "What data do we have now?"))
+
+    def test_answer_only_plan_must_name_its_context(self):
+        review = dict(facts_asked=["datasets"], stated_by_context=["datasets"], coverage="all")
+        _, planner, execute, _ = self._run([_answer_only(context=[], **review), _IPAD_SEARCH])
+        self.assertEqual(planner.call_count, 2)
+        self.assertIn("args.context", planner.call_args.kwargs["plan_problem"])
+
+    def test_bad_earlier_answer_is_never_reused(self):
+        review = dict(facts_asked=["iPad net sales"], stated_by_context=["iPad net sales"],
+                      earlier_answer="bad", coverage="all")
+        _, planner, _, _ = self._run([_answer_only(**review), _IPAD_SEARCH])
+        self.assertEqual(planner.call_count, 2)
+        self.assertIn("earlier answer about this question was bad", planner.call_args.kwargs["plan_problem"])
 
     def test_no_data_question_answers_without_retrieval(self):
         _, planner, execute, _ = self._run([_answer_only(needs_data=False)])
@@ -159,16 +220,16 @@ class TestPlanCheck(unittest.TestCase):
 class TestPlanSchema(unittest.TestCase):
     def test_model_must_write_review_steps_and_strategy(self):
         schema = Plan.model_json_schema()
-        self.assertEqual(schema["required"], ["conversation_review", "steps", "strategy"])
-        self.assertEqual(list(schema["properties"])[:2], ["conversation_review", "steps"])
-        review = schema["$defs"]["ConversationReview"]["properties"]
+        self.assertEqual(schema["required"], ["context_review", "steps", "strategy"])
+        self.assertEqual(list(schema["properties"])[:2], ["context_review", "steps"])
+        review = schema["$defs"]["ContextReview"]["properties"]
         self.assertEqual(set(review["coverage"]["enum"]), {"all", "part", "none"})
 
     def test_python_code_can_still_build_plans(self):
-        self.assertEqual(Plan().conversation_review.coverage, "none")
+        self.assertEqual(Plan().context_review.coverage, "none")
 
     def test_review_values_are_bounded(self):
-        rv = ConversationReview(facts_asked=["x" * 500] * 20, coverage="ALL", earlier_answer="unknown")
+        rv = ContextReview(facts_asked=["x" * 500] * 20, coverage="ALL", earlier_answer="unknown")
         self.assertEqual(len(rv.facts_asked), 8)
         self.assertEqual(len(rv.facts_asked[0]), 120)
         self.assertEqual((rv.coverage, rv.earlier_answer), ("all", "none"))
@@ -205,6 +266,16 @@ class TestAnswerStepSeesTheConversation(unittest.TestCase):
         resp, _ = self._synthesize({}, plan, _turns(1))
         self.assertTrue(resp.answered_question)
 
+    def test_schema_answer_counts_as_answered(self):
+        plan = Plan(steps=[PlanStep(id="A", kind="answer", tool="")])
+        with mock.patch.object(syn, "TigerGraphAgentGenerator") as gen:
+            gen.return_value.generate_answer.return_value = types.SimpleNamespace(
+                generated_answer="a", citation=[])
+            resp = syn.synthesize(object(), "q", {}, plan=plan, conversation=[],
+                                  context={"graph_schema": "Graph: G"})
+        self.assertEqual(gen.return_value.generate_answer.call_args[0][1]["graph_schema"], "Graph: G")
+        self.assertTrue(resp.answered_question)
+
     def test_no_conversation_no_key(self):
         plan = Plan(steps=[PlanStep(id="A", kind="answer", tool="")])
         resp, ctx = self._synthesize({}, plan, [])
@@ -225,9 +296,11 @@ class TestPrompts(unittest.TestCase):
 
     def test_bad_earlier_answers_count_as_not_answered(self):
         planner, react = LLM_Model._AGENTIC_PLANNER_SYSTEM, LLM_Model._AGENTIC_AGENT_SYSTEM
-        self.assertIn('Before you plan, write "conversation_review"', planner)
+        self.assertIn('Before you plan, write "context_review"', planner)
         self.assertIn("uses a different attribute than the question asks for", planner)
-        self.assertIn('ONLY when coverage is "all" and earlier_answer is "good"', planner)
+        self.assertIn('ONLY when coverage is "all" and earlier_answer is not "bad"', planner)
+        self.assertIn("The schema itself answers questions about the knowledge base", planner)
+        self.assertIn("The schema never answers questions about values in the data", planner)
         self.assertIn("A bad answer counts as not answered", react)
         for prompt in (planner, react):
             self.assertIn("not found, not available, not explicit", prompt)
@@ -236,6 +309,7 @@ class TestPrompts(unittest.TestCase):
     def test_answer_prompt_explains_the_conversation_context(self):
         self.assertIn('"earlier_conversation"', LLM_Model._CHATBOT_RESPONSE_SYSTEM)
         self.assertIn("not evidence that it does not exist", LLM_Model._CHATBOT_RESPONSE_SYSTEM)
+        self.assertIn('"graph_schema"', LLM_Model._CHATBOT_RESPONSE_SYSTEM)
 
 
 if __name__ == "__main__":
