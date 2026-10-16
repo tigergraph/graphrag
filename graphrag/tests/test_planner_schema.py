@@ -108,15 +108,24 @@ class TestPlannerGetsTheSchema(unittest.TestCase):
         return seen["user"]
 
     def test_schema_in_the_planner_input(self):
-        self.assertIn("## Graph schema\nVertex types", self._user_text("Vertex types (attributes):\n- Ticket(status)"))
+        self.assertIn("## Graph schema (context: graph_schema)\nVertex types", self._user_text("Vertex types (attributes):\n- Ticket(status)"))
 
     def test_missing_schema_is_stated(self):
-        self.assertIn("## Graph schema\nNot available", self._user_text(""))
+        self.assertIn("## Graph schema (context: graph_schema)\nNot available", self._user_text(""))
+
+    def test_every_context_section_states_its_key(self):
+        text = self._user_text("Vertex types (attributes):\n- Ticket(status)")
+        self.assertIn("## Conversation (context: conversation)\n", text)
+        self.assertEqual(set(ap.context_sections([], "S")), {"conversation", "graph_schema"})
+        turns = [{"query": "q1", "response": "a1"}, {"query": "q2", "response": "a2"}]
+        heading, text, parts = ap.context_sections(turns, "S")["conversation"]
+        self.assertIn('"turn": 2', text)
+        self.assertEqual(parts["2"], turns[1])
 
     def test_engine_passes_the_schema_to_every_plan(self):
         ctx = types.SimpleNamespace(graphrag_cfg={}, emit=lambda *a, **k: None, conn=object())
-        from common.py_schemas import ConversationReview
-        answer_only = Plan(conversation_review=ConversationReview(needs_data=False),
+        from common.py_schemas import ContextReview
+        answer_only = Plan(context_review=ContextReview(needs_data=False),
                            steps=[PlanStep(id="A", kind="answer", tool="")])
         with mock.patch.object(g, "schema_summary", return_value="SCHEMA") as summ, \
              mock.patch.object(g, "plan_question", return_value=answer_only) as planner, \

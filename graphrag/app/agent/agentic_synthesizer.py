@@ -116,14 +116,17 @@ def _final_retrieval(ctx) -> dict:
     return fr if isinstance(fr, dict) else {}
 
 
-def with_conversation(combined: dict, conversation) -> dict:
-    """The answer model's context: ``combined`` plus the recent turns.
+def with_conversation(combined: dict, conversation, context: dict = None) -> dict:
+    """The answer model's context: ``combined``, the planner context the plan
+    passes to the answer step (``{key: text}``, e.g. ``graph_schema``), and
+    the recent turns.
 
     The turns go last: when the context is too large, trimming starts from
     the end, so they are cut before any retrieved context.
     """
+    ctx = {**combined, **(context or {})}
     earlier = recent_turns(conversation)
-    return {**combined, "earlier_conversation": earlier} if earlier else combined
+    return {**ctx, "earlier_conversation": earlier} if earlier else ctx
 
 
 def has_context(results: dict) -> bool:
@@ -131,20 +134,24 @@ def has_context(results: dict) -> bool:
     return bool(g["structural"] or g["unstructured"])
 
 
-def synthesize(llm, question, results: dict, plan=None, conversation=None) -> GraphRAGResponse:
-    """Produce the final answer from gathered step contexts."""
+def synthesize(llm, question, results: dict, plan=None, conversation=None,
+               context: dict = None) -> GraphRAGResponse:
+    """Produce the final answer from gathered step contexts. ``context`` is
+    the planner context the plan passes to the answer step, ``{key: text}``."""
     combined = _gather(results, log=True)
-    answer_ctx = with_conversation(combined, conversation)
+    answer_ctx = with_conversation(combined, conversation, context)
     generator = TigerGraphAgentGenerator(llm)
     answer = generator.generate_answer(question, answer_ctx)
 
     nl = getattr(answer, "generated_answer", None) or str(answer)
     citations = getattr(answer, "citation", []) or []
     retrieved = bool(combined["structural"] or combined["unstructured"])
-    # A plan with no retrieval steps answers from the conversation.
-    from_conversation = (plan is not None and "earlier_conversation" in answer_ctx
-                         and not any(s.kind != "answer" and s.tool for s in plan.steps))
-    answered = retrieved or from_conversation
+    # A plan with no retrieval steps answers from the context the planner was
+    # given: the conversation, or the sections it passed to the answer step.
+    from_context = (plan is not None
+                    and ("earlier_conversation" in answer_ctx or bool(context))
+                    and not any(s.kind != "answer" and s.tool for s in plan.steps))
+    answered = retrieved or from_context
 
     # Chunk ids the plan FETCHED (across all unstructured steps), de-duped in
     # order — the agent's record of what was retrieved, distinct from the

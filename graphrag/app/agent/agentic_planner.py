@@ -22,13 +22,14 @@ receives the results-so-far and may append follow-up steps (bounded by the
 orchestrator).
 """
 
+import json
 import logging
 import threading
 import time
 
 from common.llm_services.capabilities import model_capabilities
 from common.py_schemas import Plan
-from agent.conversation_window import recent_conversation
+from agent.conversation_window import recent_turns
 from tools import tool_registry as registry
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,11 @@ def schema_summary(conn) -> str:
         from common.db.schema_utils import render_schema_rep
         rep = render_schema_rep(conn)
         text = render_schema_summary(rep)
+        graphname = getattr(conn, "graphname", "")
+        if graphname:
+            # Names the graph the chat is scoped to, for questions such as
+            # "what graphs do we have".
+            text = f"Graph: {graphname}\n{text}"
         with _schema_cache_lock:
             _schema_cache[key] = {
                 "checked": now,
@@ -194,6 +200,26 @@ def _planner_output_limit(llm, ctx) -> int:
     return limit
 
 
+def context_sections(conversation=None, schema_rep: str = "") -> dict:
+    """The context the planner is given, as ``{key: (heading, text, parts)}``.
+
+    The planner reviews all of it, and names in the answer step's
+    ``args.context`` the sections that answer the question (``key``), or one
+    numbered part of a section (``key#n``, e.g. ``conversation#2`` for the
+    second turn shown). The engine passes those to the answer step as the
+    planner saw them. ``parts`` maps a part number to its content, empty for
+    a section without parts. A new kind of planner context is one more entry
+    here.
+    """
+    turns = recent_turns(conversation)
+    numbered = [{"turn": i, **t} for i, t in enumerate(turns, 1)]
+    return {
+        "conversation": ("Conversation", json.dumps(numbered, ensure_ascii=False),
+                         {str(i): t for i, t in enumerate(turns, 1)}),
+        "graph_schema": ("Graph schema", schema_rep[:_SCHEMA_SUMMARY_MAX_CHARS + 100], {}),
+    }
+
+
 def plan_question(llm, question, conversation=None, schema_rep="", prior_results=None, ctx=None,
                   plan_problem: str = "") -> Plan:
     """Draft (or extend) a plan for ``question``.
@@ -206,14 +232,9 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
     is just the built-ins.
     """
     catalog = _catalog_text(ctx)
-    user_parts = [
-        f"## Question\n{question}",
-        f"## Conversation\n{recent_conversation(conversation)}",
-    ]
-    user_parts.append(
-        f"## Graph schema\n{schema_rep[:_SCHEMA_SUMMARY_MAX_CHARS + 100]}" if schema_rep
-        else "## Graph schema\nNot available. Decide from the question."
-    )
+    user_parts = [f"## Question\n{question}"]
+    for key, (heading, text, _) in context_sections(conversation, schema_rep).items():
+        user_parts.append(f"## {heading} (context: {key})\n{text or 'Not available.'}")
     user_parts.append(f"## Tools\n{catalog}")
     if plan_problem:
         user_parts.append(

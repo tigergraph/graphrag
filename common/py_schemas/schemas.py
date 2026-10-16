@@ -158,16 +158,17 @@ def _short_items(value):
     return [str(v)[:_REVIEW_ITEM_CHARS] for v in value[:_REVIEW_MAX_ITEMS]]
 
 
-class ConversationReview(BaseModel):
-    """The planner's review of ## Conversation, written before the steps.
+class ContextReview(BaseModel):
+    """The planner's review of the context it was given (## Conversation,
+    ## Graph schema and any other section), written before the steps.
 
-    It decides whether the plan may skip retrieval: only when a good earlier
-    answer states every fact asked for, or the question needs no data.
+    It decides whether the plan may skip retrieval: only when the context
+    states every fact asked for, or the question needs no data.
     """
     needs_data: bool = Field(
         True,
-        description="False only when the question needs no data from the graph or a tool "
-                    "(for example a calculation).",
+        description="False only when the question needs no information at all (for example a "
+                    "calculation). True when the answer comes from the conversation or the schema.",
     )
     facts_asked: List[str] = Field(
         default_factory=list,
@@ -179,17 +180,18 @@ class ConversationReview(BaseModel):
         description="The quality of the earlier answer you would reuse: good, bad, or none "
                     "when no earlier answer is about this question.",
     )
-    stated_by_good_answer: List[str] = Field(
+    stated_by_context: List[str] = Field(
         default_factory=list,
-        description="The facts from facts_asked that a GOOD earlier answer states explicitly.",
+        description="The facts from facts_asked that the context states explicitly: a GOOD "
+                    "earlier answer, the graph schema, or another section you were given.",
         json_schema_extra={"maxItems": _REVIEW_MAX_ITEMS},
     )
     coverage: Literal["all", "part", "none"] = Field(
         "none",
-        description="all: a good earlier answer states every fact asked; part: some; none: no fact.",
+        description="all: the context states every fact asked; part: some; none: no fact.",
     )
 
-    @field_validator("facts_asked", "stated_by_good_answer", mode="before")
+    @field_validator("facts_asked", "stated_by_context", mode="before")
     @classmethod
     def _short_lists(cls, v):
         return _short_items(v)
@@ -205,16 +207,16 @@ class ConversationReview(BaseModel):
 def _require_plan_fields(schema: dict) -> None:
     # The model must write all three: a provider may leave out optional fields,
     # and a plan without its steps cannot run (GML-2325).
-    schema["required"] = ["conversation_review", "steps", "strategy"]
+    schema["required"] = ["context_review", "steps", "strategy"]
 
 
 class Plan(BaseModel):
     # Field order is the order the model writes them: review, steps, strategy.
     model_config = ConfigDict(json_schema_extra=_require_plan_fields)
 
-    conversation_review: ConversationReview = Field(
-        default_factory=ConversationReview,
-        description="Write this first: your review of ## Conversation before you plan.",
+    context_review: ContextReview = Field(
+        default_factory=ContextReview,
+        description="Write this first: your review of the context you were given, before you plan.",
     )
     steps: List[PlanStep] = Field(
         default_factory=list,
