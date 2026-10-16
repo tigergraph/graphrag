@@ -64,6 +64,7 @@ from common.utils.text_extractors import (
 )
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
+from common.utils.user_messages import NO_ANSWER
 from common.metrics.prometheus_metrics import metrics as pmetrics
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.utils.graph_locks import acquire_graph_lock, release_graph_lock, acquire_rebuild_lock, release_rebuild_lock, get_rebuilding_graph, get_current_operation
@@ -2851,7 +2852,8 @@ def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
         return f"Error: {error_msg}. Please check the knowledge graph name and try again."
     generic = (
         "GraphRAG had an issue answering your question. "
-        "Please try again, or rephrase your question."
+        "Please try again, or rephrase your question with more specific "
+        "information or a narrower scope."
     )
     # Never return raw exception text to the client. It can carry sensitive
     # configuration, URLs, request fragments, or credentials, and the chat
@@ -2898,7 +2900,7 @@ async def run_agent(
 
     except MapQuestionToSchemaException as e:
         resp.natural_language_response = (
-            "A schema mapping error occurred. Please try rephrasing your question."
+            NO_ANSWER
         )
         resp.query_sources = {}
         resp._error = _trace_error_text(e)

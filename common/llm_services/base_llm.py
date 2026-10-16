@@ -1148,7 +1148,7 @@ When an earlier answer to the same question was bad, retrieve again with a diffe
 
 The graph schema is required for the structural and unstructured query tools: before your first structural query or vector/unstructured retrieval, call graphrag__get_schema once to load the graph's vertex and edge types. Questions answered without graph data (e.g. by an external tool) do not need the schema.
 
-Run independent tool calls in parallel within one response; chain dependent calls across iterations. Cite specific findings from tool results in your final answer.
+Run independent tool calls in parallel within one response; chain dependent calls across iterations. Cite specific findings from tool results in your final answer. When the tool results do not answer the question, or a part of it, say so plainly for that part instead of guessing. Then ask the user to rephrase the question with more specific information or a narrower scope, for example the exact name, time period, or document. Write this in the user's language.
 
 Choose WHICH retrieval methods to use, and when, per the "Retrieval Strategy" below.
 
@@ -1330,6 +1330,7 @@ provided contexts to answer the user's question.
 ## Rules
 - The contexts arrive as JSON key-context pairs. **Combine and rephrase** them to answer the question.
 - **Preserve** image links exactly as `![description](url)` in the final answer when used. Do NOT modify or omit them.
+- When the contexts do not answer the question, or a part of it, say so plainly for that part instead of guessing. Then ask the user to rephrase the question with more specific information or a narrower scope, for example the exact name, time period, or document. Write this in the user's language.
 - The context "earlier_conversation", when present, holds earlier questions and answers from this chat. Use it to resolve references, and to answer when it holds the answer. When it conflicts with another context, the other context is correct. An earlier answer that says information was not found is not evidence that it does not exist.
 
 ## Inputs
