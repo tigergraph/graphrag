@@ -25,7 +25,7 @@ import logging
 import time
 
 from agent.agentic_executor import execute_plan, fit_for_trace, with_trace_note, _run_step, _usage_since
-from agent.agentic_planner import check_conversation, plan_question, schema_summary
+from agent.agentic_planner import plan_question, schema_summary
 from agent.agentic_synthesizer import _gather, has_context, synthesize, with_conversation
 from common.llm_services.base_llm import get_collected_usage
 from common.py_schemas import GraphRAGResponse, Plan, PlanStep
@@ -64,10 +64,10 @@ def _search_plan(question: str) -> Plan:
         steps=[
             PlanStep(id="S1", kind="structural", tool=_STRUCTURAL_TOOL,
                      args={"question": question},
-                     rationale="The conversation does not hold the answer."),
+                     rationale="The plan had no usable retrieval steps, so query the graph."),
             PlanStep(id="S2", kind="unstructured", tool=_HYBRID_TOOL,
                      args={"question": question},
-                     rationale="The conversation does not hold the answer."),
+                     rationale="The plan had no usable retrieval steps, so search the documents."),
             PlanStep(id="A", kind="answer", tool="", depends_on=["S1", "S2"],
                      rationale="Answer from the retrieved context."),
         ],
@@ -76,13 +76,40 @@ def _search_plan(question: str) -> Plan:
 
 def _plan_output(plan) -> dict:
     """A plan as shown in the trace."""
-    out = {"strategy": plan.strategy, "steps": [s.model_dump() for s in plan.steps]}
+    review = getattr(plan, "conversation_review", None)
+    out = {
+        "conversation_review": review.model_dump() if review is not None else None,
+        "strategy": plan.strategy,
+        "steps": [s.model_dump() for s in plan.steps],
+    }
     dropped = getattr(plan, "_dropped_steps", None)
     if dropped:
         out["dropped_steps"] = dropped
     if not _retrieves(plan):
-        out["routing"] = "no retrieval steps"
+        out["routing"] = ("answered without retrieval" if _answer_only_is_justified(plan)
+                          else "no retrieval steps")
     return out
+
+
+def _answer_only_is_justified(plan) -> bool:
+    """A plan with no retrieval steps is a decision only when its review
+    backs it: a good earlier answer states every fact asked for, or the
+    question needs no data. Anything else is an incomplete plan."""
+    review = getattr(plan, "conversation_review", None)
+    if review is None:
+        return False
+    if not review.needs_data:
+        return True
+    return review.coverage == "all" and review.earlier_answer == "good"
+
+
+def _plan_problem(plan) -> str:
+    """Why a plan cannot be used as it is, for the replan request."""
+    review = plan.conversation_review
+    missing = [f for f in review.facts_asked if f not in review.stated_by_good_answer]
+    detail = f" ## Conversation does not answer: {'; '.join(missing)}." if missing else ""
+    return ("The previous plan had no retrieval steps, but its conversation_review does not "
+            "support answering without retrieval." + detail)
 
 
 def _retrieves(plan) -> bool:
@@ -126,46 +153,32 @@ def run_agentic(ctx, llm, question, conversation=None) -> GraphRAGResponse:
         "output": _plan_output(plan),
         "usage": _usage_since(_u0),
     })
-    # A plan that skips retrieval relies on the conversation alone. A second,
-    # narrow check catches the cases where the planner judged that wrongly
-    # (a fact the conversation does not state, or a request for fresh data).
-    # It also runs without a conversation: a data question planned without
-    # retrieval would otherwise be answered with nothing.
-    if not _retrieves(plan):
+    # Every plan must either retrieve or justify answering without retrieval
+    # (its conversation_review). An incomplete plan gets one replan; if that
+    # is incomplete too, the fallback plan retrieves.
+    if not _retrieves(plan) and not _answer_only_is_justified(plan):
+        problem = _plan_problem(plan)
+        emit("Refining the plan")
         _u0 = len(get_collected_usage() or [])
         _t0 = time.time()
-        check = check_conversation(llm, question, conversation, ctx=ctx)
+        plan = plan_question(llm, question, conversation, schema_rep=schema, ctx=ctx,
+                             plan_problem=problem)
         agent_steps.append({
-            "node": "conversation check", "kind": "plan",
+            "node": "replan (incomplete plan)", "kind": "plan",
             "duration_s": round(time.time() - _t0, 3),
-            "input": {"question": question},
-            "output": check.model_dump() if check else {"error": "check failed; plan kept"},
+            "input": {"problem": problem},
+            "output": _plan_output(plan),
             "usage": _usage_since(_u0),
         })
-        if check is not None and check.needs_retrieval:
-            emit("Refining the plan")
-            _u0 = len(get_collected_usage() or [])
-            _t0 = time.time()
-            plan = plan_question(llm, question, conversation, schema_rep=schema, ctx=ctx,
-                                 missing_from_conversation=check.missing or "some facts the question asks for")
+        if not _retrieves(plan) and not _answer_only_is_justified(plan):
+            logger.info("agentic: replan is incomplete too; using the fallback plan")
+            plan = _search_plan(question)
             agent_steps.append({
-                "node": "replan (conversation check)", "kind": "plan",
-                "duration_s": round(time.time() - _t0, 3),
-                "input": {"missing_from_conversation": check.missing},
+                "node": "fallback plan", "kind": "plan", "duration_s": 0,
+                "input": {"reason": "The plan had no usable retrieval steps after a replan."},
                 "output": _plan_output(plan),
-                "usage": _usage_since(_u0),
+                "usage": {},
             })
-            if not _retrieves(plan):
-                # The planner skipped retrieval twice for a question the check
-                # says needs data: retrieve instead of answering with nothing.
-                logger.info("agentic: replan still has no retrieval; using the fallback plan")
-                plan = _search_plan(question)
-                agent_steps.append({
-                    "node": "fallback plan", "kind": "plan", "duration_s": 0,
-                    "input": {"reason": "The question needs data, and the plan has no retrieval steps."},
-                    "output": _plan_output(plan),
-                    "usage": {},
-                })
 
     if plan.strategy:
         emit(plan.strategy)

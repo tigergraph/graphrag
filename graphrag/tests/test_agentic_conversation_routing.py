@@ -11,7 +11,7 @@ try:
     from agent.agentic_planner import plan_question
     from agent.conversation_window import CONVERSATION_CHARS, recent_conversation, recent_turns
     from common.llm_services.base_llm import LLM_Model
-    from common.py_schemas import ConversationCheck, GraphRAGResponse, Plan, PlanStep, StepResult
+    from common.py_schemas import ConversationReview, GraphRAGResponse, Plan, PlanStep, StepResult
 except ImportError as exc:  # needs the app environment
     raise unittest.SkipTest(f"app environment unavailable: {exc}")
 
@@ -57,79 +57,82 @@ def _synth(*a, **k):
                             answered_question=True, response_type="agentic")
 
 
-class TestAnswerOnlyPlan(unittest.TestCase):
-    def _run(self, plans, check=ConversationCheck(needs_retrieval=False)):
-        with mock.patch.object(g, "check_conversation", return_value=check), \
-             mock.patch.object(g, "plan_question", side_effect=plans) as planner, \
-             mock.patch.object(g, "execute_plan", return_value=({}, [])) as execute, \
-             mock.patch.object(g, "synthesize", side_effect=_synth), \
-             mock.patch.object(g, "_run_step") as run_step:
-            resp = g.run_agentic(_Ctx(), llm=object(), question="q", conversation=_turns(1))
-        return resp, planner, execute, run_step
-
-    def test_answer_only_plan_skips_retrieval_and_replanning(self):
-        answer_only = Plan(steps=[PlanStep(id="A", kind="answer", tool="")])
-        resp, planner, execute, run_step = self._run([answer_only])
-        self.assertEqual(planner.call_count, 1)
-        execute.assert_not_called()
-        run_step.assert_not_called()
-        steps = resp.query_sources["agent_steps"]
-        self.assertEqual(steps[0]["output"]["routing"], "no retrieval steps")
-        self.assertIn("earlier_conversation", steps[-1]["input"])
-
-    def test_empty_retrieval_still_replans(self):
-        search = Plan(steps=[PlanStep(id="S1", kind="unstructured", tool=g._HYBRID_TOOL),
-                             PlanStep(id="A", kind="answer", tool="", depends_on=["S1"])])
-        _, planner, execute, _ = self._run([search] * 10)
-        self.assertGreater(planner.call_count, 1)
-        self.assertGreater(execute.call_count, 1)
-
-    def test_trace_marks_the_decision(self):
-        answer_only = Plan(steps=[PlanStep(id="A", kind="answer", tool="")])
-        self.assertEqual(g._plan_output(answer_only)["routing"], "no retrieval steps")
-        search = Plan(steps=[PlanStep(id="S1", kind="unstructured", tool=g._HYBRID_TOOL)])
-        self.assertNotIn("routing", g._plan_output(search))
+def _answer_only(**review):
+    return Plan(conversation_review=ConversationReview(**review),
+                steps=[PlanStep(id="A", kind="answer", tool="")])
 
 
-_ANSWER_ONLY = Plan(steps=[PlanStep(id="A", kind="answer", tool="")])
+_REUSE = dict(facts_asked=["iPhone net sales"], stated_by_good_answer=["iPhone net sales"],
+              earlier_answer="good", coverage="all")
+_BAD = dict(facts_asked=["iPad net sales"], earlier_answer="bad", coverage="none")
 _IPAD_SEARCH = Plan(steps=[PlanStep(id="S1", kind="unstructured", tool="graphrag__hybrid_search",
                                     args={"question": "iPad net sales"}),
                            PlanStep(id="A", kind="answer", tool="", depends_on=["S1"])])
 _FOUND = {"S1": StepResult(step_id="S1", ok=True, summary="rows", context={"result": [{"row": 1}]})}
 
 
-class TestConversationCheck(unittest.TestCase):
-    """A plan that skips retrieval gets a second check."""
+class TestPlanCheck(unittest.TestCase):
+    """Every plan retrieves, or its conversation_review justifies answering
+    without retrieval; otherwise one replan, then the fallback plan."""
 
-    def _run(self, plans, check=None, conversation=None, check_side_effect=None):
-        with mock.patch.object(g, "check_conversation", return_value=check,
-                               side_effect=check_side_effect) as checker, \
-             mock.patch.object(g, "plan_question", side_effect=plans) as planner, \
-             mock.patch.object(g, "execute_plan", return_value=(_FOUND, [])) as execute, \
-             mock.patch.object(g, "synthesize", side_effect=_synth):
+    def _run(self, plans, conversation=None, exec_results=None):
+        with mock.patch.object(g, "plan_question", side_effect=plans) as planner, \
+             mock.patch.object(g, "execute_plan", return_value=(exec_results if exec_results is not None else _FOUND, [])) as execute, \
+             mock.patch.object(g, "synthesize", side_effect=_synth), \
+             mock.patch.object(g, "_run_step") as run_step:
             resp = g.run_agentic(_Ctx(), llm=object(), question="Add iPad.",
                                  conversation=_turns(1) if conversation is None else conversation)
-        return resp, checker, planner, execute
+        return resp, planner, execute, run_step
 
-    def test_missing_fact_replans_with_the_gap(self):
-        check = ConversationCheck(missing="iPad net sales", needs_retrieval=True)
-        resp, checker, planner, execute = self._run([_ANSWER_ONLY, _IPAD_SEARCH], check)
+    def test_justified_reuse_answers_without_retrieval(self):
+        resp, planner, execute, run_step = self._run([_answer_only(**_REUSE)])
+        self.assertEqual(planner.call_count, 1)
+        execute.assert_not_called()
+        run_step.assert_not_called()
+        steps = resp.query_sources["agent_steps"]
+        self.assertEqual(steps[0]["output"]["routing"], "answered without retrieval")
+        self.assertEqual(steps[0]["output"]["conversation_review"]["coverage"], "all")
+        self.assertIn("earlier_conversation", steps[-1]["input"])
+
+    def test_no_data_question_answers_without_retrieval(self):
+        _, planner, execute, _ = self._run([_answer_only(needs_data=False)])
+        self.assertEqual(planner.call_count, 1)
+        execute.assert_not_called()
+
+    def test_unjustified_answer_only_plan_is_replanned(self):
+        resp, planner, execute, _ = self._run([_answer_only(**_BAD), _IPAD_SEARCH])
         self.assertEqual(planner.call_count, 2)
-        self.assertEqual(planner.call_args.kwargs["missing_from_conversation"], "iPad net sales")
+        self.assertIn("iPad net sales", planner.call_args.kwargs["plan_problem"])
         execute.assert_called_once()
         nodes = [s["node"] for s in resp.query_sources["agent_steps"]]
-        self.assertEqual(nodes[:3], ["plan", "conversation check", "replan (conversation check)"])
+        self.assertEqual(nodes[:2], ["plan", "replan (incomplete plan)"])
+        self.assertEqual(resp.query_sources["agent_steps"][0]["output"]["routing"], "no retrieval steps")
 
-    def test_second_skip_retrieves_anyway(self):
-        check = ConversationCheck(missing="iPhone net sales", needs_retrieval=True)
-        resp, _, planner, execute = self._run([_ANSWER_ONLY, _ANSWER_ONLY], check)
+    def test_empty_plan_is_replanned(self):
+        """No steps at all (the default review) is never a decision."""
+        _, planner, execute, _ = self._run([Plan(), _IPAD_SEARCH], conversation=[])
         self.assertEqual(planner.call_count, 2)
         execute.assert_called_once()
+
+    def test_second_incomplete_plan_uses_the_fallback(self):
+        resp, planner, execute, _ = self._run([_answer_only(**_BAD), _answer_only(**_BAD)])
+        self.assertEqual(planner.call_count, 2)
         plan = execute.call_args[0][0]
         self.assertEqual([s.tool for s in plan.steps], [g._STRUCTURAL_TOOL, g._HYBRID_TOOL, ""])
         self.assertEqual(plan.steps[0].args, {"question": "Add iPad."})
+        self.assertIn("no usable retrieval steps", plan.steps[0].rationale)
         nodes = [s["node"] for s in resp.query_sources["agent_steps"]]
-        self.assertEqual(nodes[:4], ["plan", "conversation check", "replan (conversation check)", "fallback plan"])
+        self.assertEqual(nodes[:3], ["plan", "replan (incomplete plan)", "fallback plan"])
+
+    def test_retrieval_plan_is_used_as_is(self):
+        _, planner, execute, _ = self._run([_IPAD_SEARCH])
+        self.assertEqual(planner.call_count, 1)
+        execute.assert_called_once()
+
+    def test_empty_retrieval_still_replans(self):
+        _, planner, execute, _ = self._run([_IPAD_SEARCH] * 10, exec_results={})
+        self.assertGreater(planner.call_count, 1)
+        self.assertGreater(execute.call_count, 1)
 
     def test_dropped_steps_are_shown_in_the_trace(self):
         from agent.agentic_planner import _sanitize
@@ -141,34 +144,7 @@ class TestConversationCheck(unittest.TestCase):
         self.assertEqual(out["routing"], "no retrieval steps")
         self.assertNotIn("_dropped_steps", plan.model_dump())
 
-    def test_confirmed_plan_answers_without_retrieval(self):
-        _, _, planner, execute = self._run([_ANSWER_ONLY], ConversationCheck(needs_retrieval=False))
-        self.assertEqual(planner.call_count, 1)
-        execute.assert_not_called()
-
-    def test_failed_check_keeps_the_plan(self):
-        _, _, planner, execute = self._run([_ANSWER_ONLY], None)
-        self.assertEqual(planner.call_count, 1)
-        execute.assert_not_called()
-
-    def test_check_runs_without_conversation(self):
-        """A data question planned without retrieval still gets retrieval."""
-        check = ConversationCheck(missing="iPhone net sales", needs_retrieval=True)
-        _, checker, planner, execute = self._run([_ANSWER_ONLY, _IPAD_SEARCH], check, conversation=[])
-        checker.assert_called_once()
-        self.assertEqual(planner.call_count, 2)
-        execute.assert_called_once()
-
-    def test_no_check_for_a_retrieval_plan(self):
-        _, checker, _, execute = self._run([_IPAD_SEARCH])
-        checker.assert_not_called()
-        execute.assert_called_once()
-
-    def test_check_errors_keep_the_plan(self):
-        from agent.agentic_planner import check_conversation
-        self.assertIsNone(check_conversation(object(), "q", _turns(1)))
-
-    def test_planner_is_told_what_is_missing(self):
+    def test_planner_is_told_what_was_wrong(self):
         seen = {}
 
         def invoke(messages, schema, **kw):
@@ -176,11 +152,26 @@ class TestConversationCheck(unittest.TestCase):
             return _IPAD_SEARCH
 
         llm = types.SimpleNamespace(agentic_planner_prompt="sys", config={}, invoke_structured=invoke)
-        plan_question(llm, "Add iPad.", _turns(1), missing_from_conversation="iPad net sales")
-        self.assertIn("## Conversation does not state: iPad net sales", seen["user"])
+        plan_question(llm, "Add iPad.", _turns(1), plan_problem="The previous plan had no retrieval steps.")
+        self.assertIn("## Previous plan\nThe previous plan had no retrieval steps.", seen["user"])
 
-    def test_check_prompt_covers_fresh_data_requests(self):
-        self.assertIn('"now"', LLM_Model._AGENTIC_CONVERSATION_CHECK_SYSTEM)
+
+class TestPlanSchema(unittest.TestCase):
+    def test_model_must_write_review_steps_and_strategy(self):
+        schema = Plan.model_json_schema()
+        self.assertEqual(schema["required"], ["conversation_review", "steps", "strategy"])
+        self.assertEqual(list(schema["properties"])[:2], ["conversation_review", "steps"])
+        review = schema["$defs"]["ConversationReview"]["properties"]
+        self.assertEqual(set(review["coverage"]["enum"]), {"all", "part", "none"})
+
+    def test_python_code_can_still_build_plans(self):
+        self.assertEqual(Plan().conversation_review.coverage, "none")
+
+    def test_review_values_are_bounded(self):
+        rv = ConversationReview(facts_asked=["x" * 500] * 20, coverage="ALL", earlier_answer="unknown")
+        self.assertEqual(len(rv.facts_asked), 8)
+        self.assertEqual(len(rv.facts_asked[0]), 120)
+        self.assertEqual((rv.coverage, rv.earlier_answer), ("all", "none"))
 
 
 class TestAnswerStepSeesTheConversation(unittest.TestCase):
@@ -223,20 +214,23 @@ class TestAnswerStepSeesTheConversation(unittest.TestCase):
 
 class TestPrompts(unittest.TestCase):
     def test_planner_and_react_check_the_conversation_first(self):
-        for prompt in (LLM_Model._AGENTIC_PLANNER_SYSTEM, LLM_Model._AGENTIC_AGENT_SYSTEM):
-            self.assertIn("list the facts the question asks for", prompt)
-            self.assertIn("Some facts are stated", prompt)
+        react = LLM_Model._AGENTIC_AGENT_SYSTEM
+        self.assertIn("list the facts the question asks for", react)
+        self.assertIn("Some facts are stated", react)
+        planner = LLM_Model._AGENTIC_PLANNER_SYSTEM
+        self.assertIn('When coverage is "part", plan retrieval steps only for the missing facts', planner)
+        for prompt in (planner, react):
             self.assertIn("A related topic or a similar question is not enough", prompt)
             self.assertIn('"now"', prompt)
 
     def test_bad_earlier_answers_count_as_not_answered(self):
-        for prompt in (LLM_Model._AGENTIC_PLANNER_SYSTEM, LLM_Model._AGENTIC_AGENT_SYSTEM,
-                       LLM_Model._AGENTIC_CONVERSATION_CHECK_SYSTEM):
-            self.assertIn("A bad answer counts as not answered", prompt)
+        planner, react = LLM_Model._AGENTIC_PLANNER_SYSTEM, LLM_Model._AGENTIC_AGENT_SYSTEM
+        self.assertIn('Before you plan, write "conversation_review"', planner)
+        self.assertIn("uses a different attribute than the question asks for", planner)
+        self.assertIn('ONLY when coverage is "all" and earlier_answer is "good"', planner)
+        self.assertIn("A bad answer counts as not answered", react)
+        for prompt in (planner, react):
             self.assertIn("not found, not available, not explicit", prompt)
-        self.assertIn("The earlier answer that the agent would use is bad.",
-                      LLM_Model._AGENTIC_CONVERSATION_CHECK_SYSTEM)
-        for prompt in (LLM_Model._AGENTIC_PLANNER_SYSTEM, LLM_Model._AGENTIC_AGENT_SYSTEM):
             self.assertIn("retrieve again with a different or wider approach", prompt)
 
     def test_answer_prompt_explains_the_conversation_context(self):

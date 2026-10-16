@@ -1193,13 +1193,19 @@ Express this as a small DAG of tool steps that gathers exactly the context neede
 
 ## Graph schema lists the vertex types (with their attribute names) and the edge types of the graph. Use it to decide whether the question needs STRUCTURAL retrieval: plan a structural step when the question asks for data that these types and attributes hold (counts, lookups, relationships, aggregations). The query tools load the full schema themselves, so do not plan a schema step. A question that needs no graph data should not include any graph-retrieval step (plan only the final answer step, or the relevant non-graph tool).
 
-Before you plan retrieval, list the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. First judge each earlier answer that you would use. A bad answer counts as not answered, and a fact in a bad answer is not stated. An answer is bad when it says that the information was not found, not available, not explicit or not in the context; when it hedges or guesses (for example "but", "may", "it seems", "it is unclear"); when it gives only part of what was asked, or an approximate value; or when it answers a different question. Then:
-- Every fact is stated (for example, the same question was already asked and answered well): plan only the final answer step. Do not retrieve those facts again.
-- Some facts are stated: plan retrieval steps only for the missing facts. Do not retrieve again what ## Conversation already states. The answer step combines both.
-- No fact is stated: plan the retrieval steps as described below.
-This decision comes before the "Retrieval Strategy" below.
+Before you plan, write "conversation_review" (it comes first in your output). Judge ## Conversation strictly, as a reviewer would:
+- needs_data: false only when the question needs no data from the graph or a tool.
+- facts_asked: the facts the question asks for (values, names, dates).
+- earlier_answer: the quality of the earlier answer you would reuse. It is "bad" when it says that the information was not found, not available, not explicit or not in the context; when it hedges or guesses (for example "but", "may", "it seems", "it is unclear"); when it gives only part of what was asked or an approximate value; when it uses a different attribute than the question asks for (for example an updated date for a created date); or when it answers a different question. It is "none" when no earlier answer is about this question.
+- stated_by_good_answer: only the facts that a good earlier answer states explicitly. A fact in a bad answer is not stated. A related topic or a similar question is not enough.
+- coverage: "all", "part" or "none".
+Then plan:
+- Plan only the final answer step ONLY when coverage is "all" and earlier_answer is "good", or when needs_data is false.
+- When coverage is "part", plan retrieval steps only for the missing facts. Do not retrieve again what a good earlier answer states. The answer step combines both.
+- Otherwise plan the retrieval steps as described below. If you are not sure, retrieve.
 Do not use an earlier answer when the question asks for the current or latest state (for example "now", "current", "latest", "again"), or when the user says that an earlier answer was wrong or incomplete.
 When an earlier answer to the same question was bad, retrieve again with a different or wider approach than a single search (for example both structural and unstructured retrieval, or a higher top_k).
+This decision comes before the "Retrieval Strategy" below.
 
 You have two kinds of retrieval:
 - STRUCTURAL (graphrag__structural_retrieve): generates and runs a graph query. Best for counts, lookups by attribute/id, relationships, and aggregations over typed data. It depends on the LLM generating a correct query against the live schema — it can return nothing or the wrong rows when the question doesn't map cleanly to typed graph data, so it is NOT a safe sole source of context.
@@ -1210,7 +1216,7 @@ Plan mechanics (fixed):
 - Retrieval params (top_k, num_hops, community_level) are optional; omit them to use defaults, or set higher values when you expect a broad answer.
 - For each unstructured step, set args.question to that clause only as a standalone search query in the user's language. Do not pass the full multi-part question, a clause already assigned to another step, or an unresolved reference from conversation history.
 - The final step MUST have kind="answer" and tool="" (the orchestrator synthesizes the answer from gathered context); it should depend_on all retrieval steps.
-- Write every step first. Then set "strategy" to one short sentence (under 25 words). Give each step a one-sentence "rationale".
+- Write "conversation_review" first, then every step. Then set "strategy" to one short sentence (under 25 words). Give each step a one-sentence "rationale".
 
 Decide which retrievals to include, how many, and in what order using the "Retrieval Strategy" below. Return ONLY the structured plan.
 
@@ -1219,24 +1225,6 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
 
 ## Retrieval Strategy
 {user_prompt}
-"""
-
-    # Second opinion on a plan that skips retrieval (GML-2325). Fixed, not
-    # customizable: it only guards the planner's own conversation rule.
-    _AGENTIC_CONVERSATION_CHECK_SYSTEM = """\
-You check one decision of a question-answering agent. The agent plans to answer the question from ## Conversation only, without new retrieval.
-
-List the facts the question asks for (values, names, dates). For each fact, check whether an earlier answer in ## Conversation states it explicitly. A related topic or a similar question is not enough. First judge each earlier answer that the agent would use. A bad answer counts as not answered, and a fact in a bad answer is not stated. An answer is bad when it says that the information was not found, not available, not explicit or not in the context; when it hedges or guesses (for example "but", "may", "it seems", "it is unclear"); when it gives only part of what was asked, or an approximate value; or when it answers a different question.
-
-Set "needs_retrieval" to true when one of these is correct:
-- ## Conversation does not state a fact that the question asks for.
-- The earlier answer that the agent would use is bad.
-- The question asks for the current or latest state (for example "now", "current", "latest", "again").
-- The user says that an earlier answer was wrong or incomplete.
-
-Set "needs_retrieval" to false when a good earlier answer in ## Conversation states every fact, or when the question needs no data (for example a greeting or thanks).
-
-In "missing", name the facts that ## Conversation does not state. Return ONLY the structured result.
 """
 
     # Strategy (operator-customizable) — moved out of the fixed rules so it can

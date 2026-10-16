@@ -115,10 +115,11 @@ class TestPlannerGetsTheSchema(unittest.TestCase):
 
     def test_engine_passes_the_schema_to_every_plan(self):
         ctx = types.SimpleNamespace(graphrag_cfg={}, emit=lambda *a, **k: None, conn=object())
-        answer_only = Plan(steps=[PlanStep(id="A", kind="answer", tool="")])
+        from common.py_schemas import ConversationReview
+        answer_only = Plan(conversation_review=ConversationReview(needs_data=False),
+                           steps=[PlanStep(id="A", kind="answer", tool="")])
         with mock.patch.object(g, "schema_summary", return_value="SCHEMA") as summ, \
              mock.patch.object(g, "plan_question", return_value=answer_only) as planner, \
-             mock.patch.object(g, "check_conversation", return_value=None), \
              mock.patch.object(g, "synthesize", return_value=GraphRAGResponse(
                  natural_language_response="ok", answered_question=True, response_type="agentic")):
             resp = g.run_agentic(ctx, llm=object(), question="q")
