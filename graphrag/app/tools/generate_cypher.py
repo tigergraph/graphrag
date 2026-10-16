@@ -72,6 +72,26 @@ _HINTS = (
 )
 
 
+# Run errors that pass the check, with the query construct that causes them.
+# TigerGraph 4.3 fails a query that has a null test and STARTS WITH, CONTAINS
+# or CASE, and its message does not name the construct.
+_NULL_TEST = re.compile(r"\bIS\s+(NOT\s+)?NULL\b", re.I)
+_RUN_HINTS = (
+    (re.compile(r"instruction mode and legacy mode", re.I), _NULL_TEST,
+     'TigerGraph cannot run IS NULL / IS NOT NULL in this query. An attribute that the schema '
+     'does not mark NULLABLE is never NULL: compare with the default of its type instead '
+     '(= "" or <> "" for STRING, = 0 or <> 0 for numbers).'),
+)
+
+
+def run_error_hints(error: str, cypher: str) -> list:
+    """Hints for a run error of ``cypher``: the construct that likely caused
+    it and how to write it instead."""
+    query = _STRING_LITERAL.sub('""', cypher)
+    return [hint for err_pattern, query_pattern, hint in _RUN_HINTS
+            if err_pattern.search(error) and query_pattern.search(query)]
+
+
 def check_cypher(conn, cypher: str):
     """Errors in ``cypher`` found without running it, as readable lines.
 
@@ -140,8 +160,9 @@ def generate_and_run_cypher(cypher_gen, conn, question: str, max_attempts: int =
         try:
             rows = run_cypher(conn, cypher)
         except Exception as exc:
-            history.append(f"{i}: {cypher}\n\tError: {exc}\n")
-            attempts.append({"query": cypher, "error": str(exc)[:500]})
+            message = "\n".join([str(exc)] + run_error_hints(str(exc), cypher))
+            history.append(f"{i}: {cypher}\n\tError: {message}\n")
+            attempts.append({"query": cypher, "error": message[:500]})
             continue
         first = rows[0] if rows else None
         if is_empty_result(first):
