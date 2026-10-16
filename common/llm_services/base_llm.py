@@ -957,17 +957,22 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
 - Always include the entity from the `WHERE` clause in the final `RETURN`. Use vertex name over ID when available.
 - Always use **undirected** edge patterns. Ensure edges connect correct vertex types per schema.
 - Use **double quotes** for strings.
-- For string comparisons in `WHERE`, convert with `toLower()`.
+- For string comparisons in `WHERE` (`=`, `<>`, `IN`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`), apply `toLower()` to the attribute and write the literal in lower case, e.g. `toLower(i.status) = "done"`. Empty-value tests (`= ""`, `<> ""`) need no `toLower()`.
 - Use multi-word, underscore-joined aliases for `ORDER BY`. Aliases / attributes used in `ORDER BY` must be in `RETURN`. Always specify `ASC` / `DESC` based on data type.
 - For "summarize" / "write a summary" questions, fetch all neighbour nodes and edges.
 - For dates and times, use `to_datetime("YYYY-MM-DD hh:mm:ss")` (a date alone also works, e.g. `WHERE n.created >= to_datetime("2025-08-01")`). TigerGraph does not support `datetime()` or `date()`.
+- Use `IS NULL` / `IS NOT NULL` only on an attribute that the schema marks `NULLABLE`. Any other attribute is never NULL: a value that is not set holds the default of its type. To test for a missing value on such an attribute, compare with that default:
+  - STRING: `= ""` / `<> ""`
+  - numbers: `= 0` / `<> 0`
+  - BOOL: `= false`
+  - DATETIME: `< to_datetime("1971-01-01")` / `>= to_datetime("1971-01-01")` (the default is 1970-01-01 00:00:00)
 - Avoid invalid queries based on errors in the history above. Each error gives the line and column of the problem.
 
 ## Supported
 - **Clauses**: `MATCH`, `OPTIONAL MATCH`, `MANDATORY MATCH`, `WHERE`, `RETURN`, `WITH`, `ORDER BY`, `SKIP`, `LIMIT`
 - **Operators**:
   - Math: `+`, `-`, `*`, `/`, `%`, `^`
-  - Comparison: `=`, `<`, `<=`, `>`, `>=`, `<>`, `IS NULL`, `IS NOT NULL`
+  - Comparison: `=`, `<`, `<=`, `>`, `>=`, `<>`, `IS NULL` and `IS NOT NULL` (`NULLABLE` attributes only)
   - Boolean: `AND`, `OR`, `NOT`, `XOR`
   - String / list: `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `IN`, `DISTINCT`, `[ ]`, `.`
 - **Functions**:

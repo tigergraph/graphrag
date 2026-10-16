@@ -1403,3 +1403,16 @@ def test_to_from_dict_preserves_directed_flag():
     p2 = SchemaProposal.from_dict(data)
     assert p2.find_edge("E1").directed is True
     assert p2.find_edge("E2").directed is False
+
+
+def test_collect_attrs_marks_nullable_attributes():
+    from common.db.schema_utils import _collect_attrs
+    attrs = [
+        {"AttributeName": "id", "AttributeType": {"Name": "STRING"}},
+        {"AttributeName": "name", "AttributeType": {"Name": "STRING"}},
+        {"AttributeName": "note", "AttributeType": {"Name": "STRING"},
+         "isNullable": True, "isDefaultNull": True},
+    ]
+    attrs_map, lines = _collect_attrs(attrs, "id")
+    assert attrs_map == {"name": "STRING", "note": "STRING"}
+    assert lines == ["name of type STRING", "note of type STRING NULLABLE"]

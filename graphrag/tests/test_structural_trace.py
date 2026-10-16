@@ -220,6 +220,25 @@ class TestCheckBeforeRun(unittest.TestCase):
         conn.checkQuerySemantic.return_value = {"errors": []}
         self.assertEqual(check_cypher(conn, 'MATCH (n {name: "set to delete"}) RETURN n'), [])
 
+    def test_null_test_run_error_gets_a_hint(self):
+        from tools.generate_cypher import generate_and_run_cypher, run_error_hints
+        bad = 'MATCH (i:JiraIssue)\nWHERE i.issue_key STARTS WITH "GML-" AND i.resolution IS NOT NULL\nRETURN i.issue_key AS k'
+        good = 'MATCH (i:JiraIssue)\nWHERE i.issue_key STARTS WITH "GML-" AND i.resolution <> ""\nRETURN i.issue_key AS k'
+        err = RuntimeError("Semantic Check Fails: Query [null] cannot be executed in both "
+                           "instruction mode and legacy mode at the same time.")
+        conn = self._conn([{"errors": []}] * 2, [err, [{"T": [{"k": "GML-1"}]}]])
+        gen = self._gen([bad, good])
+        attempts = []
+        cypher, first = generate_and_run_cypher(gen, conn, "q", 10, attempts)
+        self.assertEqual(cypher, good)
+        self.assertIn("NULLABLE", attempts[0]["error"])
+        history = gen._run.call_args_list[1][0][1]
+        self.assertIn('<> ""', history[0])  # the null hint went back to the generator
+        # No hint when the query has no null test, or a null test only inside a string.
+        self.assertEqual(run_error_hints(str(err), 'MATCH (i) WHERE i.k STARTS WITH "x" RETURN i'), [])
+        self.assertEqual(run_error_hints(str(err), 'MATCH (i) WHERE i.k = "IS NULL" RETURN i'), [])
+        self.assertEqual(run_error_hints("other error", bad), [])
+
     def test_unavailable_check_runs_the_query(self):
         from tools.generate_cypher import generate_and_run_cypher
         conn = self._conn(RuntimeError("only on TigerGraph >= 4.0"))
@@ -242,6 +261,8 @@ class TestCheckBeforeRun(unittest.TestCase):
         supported = prompt.split("## Supported")[1].split("## Unsupported")[0]
         self.assertNotIn("DELETE", supported)
         self.assertIn("`DETACH DELETE`", prompt.split("## Unsupported")[1])
+        self.assertIn("only on an attribute that the schema marks `NULLABLE`", prompt)
+        self.assertIn("write the literal in lower case", prompt)
 
 
 class TestTraceShowsTheQuery(unittest.TestCase):
