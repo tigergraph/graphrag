@@ -15,9 +15,9 @@
 import enum
 import logging
 import re
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 
 class ConversationTurn(BaseModel):
@@ -146,8 +146,80 @@ class PlanStep(BaseModel):
         return _short_plan_text(v, "rationale")
 
 
+# Bounds for the planner's conversation review (hints in the schema; longer
+# values are cut, never rejected).
+_REVIEW_MAX_ITEMS = 8
+_REVIEW_ITEM_CHARS = 120
+
+
+def _short_items(value):
+    if not isinstance(value, list):
+        return value
+    return [str(v)[:_REVIEW_ITEM_CHARS] for v in value[:_REVIEW_MAX_ITEMS]]
+
+
+class ConversationReview(BaseModel):
+    """The planner's review of ## Conversation, written before the steps.
+
+    It decides whether the plan may skip retrieval: only when a good earlier
+    answer states every fact asked for, or the question needs no data.
+    """
+    needs_data: bool = Field(
+        True,
+        description="False only when the question needs no data from the graph or a tool "
+                    "(for example a calculation).",
+    )
+    facts_asked: List[str] = Field(
+        default_factory=list,
+        description="The facts the question asks for (values, names, dates), each in a few words.",
+        json_schema_extra={"maxItems": _REVIEW_MAX_ITEMS},
+    )
+    earlier_answer: Literal["good", "bad", "none"] = Field(
+        "none",
+        description="The quality of the earlier answer you would reuse: good, bad, or none "
+                    "when no earlier answer is about this question.",
+    )
+    stated_by_good_answer: List[str] = Field(
+        default_factory=list,
+        description="The facts from facts_asked that a GOOD earlier answer states explicitly.",
+        json_schema_extra={"maxItems": _REVIEW_MAX_ITEMS},
+    )
+    coverage: Literal["all", "part", "none"] = Field(
+        "none",
+        description="all: a good earlier answer states every fact asked; part: some; none: no fact.",
+    )
+
+    @field_validator("facts_asked", "stated_by_good_answer", mode="before")
+    @classmethod
+    def _short_lists(cls, v):
+        return _short_items(v)
+
+    @field_validator("earlier_answer", "coverage", mode="before")
+    @classmethod
+    def _known_value(cls, v, info):
+        allowed = {"earlier_answer": ("good", "bad", "none"), "coverage": ("all", "part", "none")}
+        v = str(v or "").strip().lower()
+        return v if v in allowed[info.field_name] else "none"
+
+
+def _require_plan_fields(schema: dict) -> None:
+    # The model must write all three: a provider may leave out optional fields,
+    # and a plan without its steps cannot run (GML-2325).
+    schema["required"] = ["conversation_review", "steps", "strategy"]
+
+
 class Plan(BaseModel):
-    steps: List[PlanStep] = []
+    # Field order is the order the model writes them: review, steps, strategy.
+    model_config = ConfigDict(json_schema_extra=_require_plan_fields)
+
+    conversation_review: ConversationReview = Field(
+        default_factory=ConversationReview,
+        description="Write this first: your review of ## Conversation before you plan.",
+    )
+    steps: List[PlanStep] = Field(
+        default_factory=list,
+        description="The plan steps, ending with the final answer step.",
+    )
     # Steps the planner wrote that named an unknown tool and were dropped.
     # Shown in the trace only; never part of the model's output schema.
     _dropped_steps: list = PrivateAttr(default_factory=list)
@@ -162,20 +234,6 @@ class Plan(BaseModel):
     @classmethod
     def _short_strategy(cls, v):
         return _short_plan_text(v, "strategy")
-
-
-class ConversationCheck(BaseModel):
-    """Whether a plan that skips retrieval can answer from the conversation."""
-    missing: str = Field(
-        "",
-        description="The facts the question asks for that the conversation does "
-                    "not state. Empty when it states all of them.",
-    )
-    needs_retrieval: bool = Field(
-        False,
-        description="True when the answer needs a fact the conversation does not "
-                    "state, or the question asks for the current or latest state.",
-    )
 
 
 class StepResult(BaseModel):

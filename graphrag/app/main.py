@@ -135,7 +135,9 @@ async def get_basic_auth_credentials(request: Request):
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     req_id = str(uuid.uuid4())
-    LogWriter.info(f"{request.url.path} ENTRY request_id={req_id}")
+    # Every request (conversation loads, trace views, polls) would log here;
+    # the audit entry below records it at INFO when it finishes.
+    logger.debug(f"{request.url.path} ENTRY request_id={req_id}")
     req_id_cv.set(req_id)
     start_time = time.time()
     response = await call_next(request)

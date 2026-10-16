@@ -40,6 +40,7 @@ from supportai.retrievers import (HybridRetriever, SimilarityRetriever,
 from tools import MapQuestionToSchemaException
 from typing_extensions import TypedDict
 from common.utils.query_results import is_empty_result
+from common.utils.user_messages import NO_ANSWER
 from tools.generate_cypher import CYPHER_MAX_ATTEMPTS, generate_and_run_cypher
 
 from common.logs.log import req_id_cv
@@ -204,7 +205,7 @@ class TigerGraphAgentGraph:
         """
         self.emit_progress(DONE)
         state["answer"] = GraphRAGResponse(
-            natural_language_response="I'm sorry, there isn't enough context to answer your question. Please try rephrasing it.",
+            natural_language_response=NO_ANSWER,
             answered_question=False,
             response_type="error",
             query_sources={"error": True, "error_history": state["error_history"]},
@@ -705,14 +706,7 @@ class TigerGraphAgentGraph:
             # honest "couldn't find" answer instead of letting the LLM
             # hallucinate from empty context.
             if isinstance(state.get("context"), dict) and state["context"].get("out_of_corpus"):
-                method = state.get("chosen_retriever") or self.supportai_retriever
-                label = self._METHOD_DISPLAY_NAMES.get(method, method)
-                ooc_msg = (
-                    "I couldn't find relevant information about this topic in "
-                    "the knowledge graph (using "
-                    f"{label} search). The corpus may not cover this question — "
-                    "try rephrasing or asking about a topic the documents discuss."
-                )
+                ooc_msg = NO_ANSWER
                 resp = GraphRAGResponse(
                     natural_language_response=ooc_msg,
                     answered_question=False,
@@ -785,7 +779,7 @@ class TigerGraphAgentGraph:
             )
         except Exception as e:
             resp = GraphRAGResponse(
-                natural_language_response="I'm sorry, I don't know the answer to that question.",
+                natural_language_response=NO_ANSWER,
                 answered_question=False,
                 response_type=state["lookup_source"],
                 query_sources={"error": True, "error_history": state["error_history"]},

@@ -199,8 +199,8 @@ This line can be changed to support different logging levels.
 | `CRITICAL` | A serious error. |
 | `ERROR` | Failing to perform functions. |
 | `WARNING` | Indication of unexpected problems, e.g. failure to map a user’s question to the graph schema. |
-| `INFO` | Confirming that the service is performing as expected. |
-| `DEBUG` | Detailed information, e.g. the functions retrieved during the `GenerateFunction` step, etc. |
+| `INFO` | Confirming that the service is performing as expected. Each request is recorded once, by its audit entry. |
+| `DEBUG` | Detailed information, e.g. the functions retrieved during the `GenerateFunction` step, each request's entry line, and the HTTP calls GraphRAG makes to other services. |
 | `DEBUG_PII` | Finer-grained information that could potentially include `PII`, such as a user’s question, the complete function call (with parameters), and the LLM’s natural language response. |
 | NOTSET | All messages are processed. |
 

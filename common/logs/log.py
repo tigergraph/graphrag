@@ -91,5 +91,9 @@ for p in log_file_paths.values():
 
 
 logging.basicConfig(level=LOGLEVEL, handlers=handlers)
+# httpx logs every outgoing request (chat history loads, LLM provider calls) at
+# INFO; keep those for DEBUG so request logs stay readable.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.DEBUG if LOGLEVEL == "DEBUG" else logging.WARNING)
 
 req_id_cv = contextvars.ContextVar("req_id", default=None)

@@ -22,6 +22,7 @@ from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
 from common.utils.token_calculator import get_token_calculator
 from common.py_schemas import GraphRAGAnswerOutput
+from common.utils.user_messages import ANSWER_FAILED
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +86,7 @@ class TigerGraphAgentGenerator:
             logger.warning(f"generate_answer: generation failed: {type(e).__name__}: {e}")
             logger.debug("generate_answer: generation failure traceback", exc_info=True)
             generation = GraphRAGAnswerOutput(
-                generated_answer=(
-                    "I wasn't able to generate an answer for this question. "
-                    "Try asking again, or rephrase it to be more specific or "
-                    "focused on a single topic. If the problem continues, "
-                    "contact your administrator for more details."
-                ),
+                generated_answer=ANSWER_FAILED,
                 citation=[],
             )
 
