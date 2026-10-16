@@ -44,13 +44,19 @@ def _json_size(obj) -> int:
     return len(json.dumps(obj, ensure_ascii=False, default=str))
 
 
+# Query text a structured step ran. It is short and is what a reader of the
+# trace needs, so it is never cut with the rows it returned.
+_UNCAPPED_KEYS = frozenset({"cypher", "gsql", "query", "reasoning"})
+
+
 def _cap_strings(obj, max_len: int):
     if isinstance(obj, str):
         if len(obj) <= max_len:
             return obj
         return f"{obj[:max_len]}…(+{len(obj) - max_len:,} chars)"
     if isinstance(obj, dict):
-        return {k: _cap_strings(v, max_len) for k, v in obj.items()}
+        return {k: v if k in _UNCAPPED_KEYS and isinstance(v, str) else _cap_strings(v, max_len)
+                for k, v in obj.items()}
     if isinstance(obj, list):
         return [_cap_strings(v, max_len) for v in obj]
     return obj
