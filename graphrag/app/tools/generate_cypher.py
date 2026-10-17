@@ -73,14 +73,23 @@ _HINTS = (
 
 
 # Run errors that pass the check, with the query construct that causes them.
-# TigerGraph 4.3 fails a query that has a null test and STARTS WITH, CONTAINS
-# or CASE, and its message does not name the construct.
+# TigerGraph 4.3 fails a query that has STARTS WITH or CONTAINS together with
+# a null test, CASE or OPTIONAL MATCH, and its message names none of them.
+_MIXED_MODE = re.compile(r"instruction mode and legacy mode", re.I)
 _NULL_TEST = re.compile(r"\bIS\s+(NOT\s+)?NULL\b", re.I)
 _RUN_HINTS = (
-    (re.compile(r"instruction mode and legacy mode", re.I), _NULL_TEST,
+    (_MIXED_MODE, _NULL_TEST,
      'TigerGraph cannot run IS NULL / IS NOT NULL in this query. An attribute that the schema '
      'does not mark NULLABLE is never NULL: compare with the default of its type instead '
      '(= "" or <> "" for STRING, = 0 or <> 0 for numbers).'),
+    (_MIXED_MODE, re.compile(r"\bOPTIONAL\s+MATCH\b", re.I),
+     "TigerGraph cannot run OPTIONAL MATCH in this query. Use MATCH: a WHERE after "
+     "OPTIONAL MATCH does not filter the rows anyway."),
+    (_MIXED_MODE, re.compile(r"\bCASE\b", re.I),
+     "TigerGraph cannot run CASE in this query. Filter with WHERE instead."),
+    (_MIXED_MODE, re.compile(r"\b(STARTS\s+WITH|ENDS\s+WITH|CONTAINS)\b", re.I),
+     "TigerGraph cannot run STARTS WITH, ENDS WITH or CONTAINS together with OPTIONAL MATCH, "
+     "CASE, IS NULL or IS NOT NULL. Keep the string match and remove those."),
 )
 
 
@@ -120,6 +129,9 @@ def check_cypher(conn, cypher: str):
 
 
 CYPHER_MAX_ATTEMPTS = 10
+# Queries that TigerGraph keeps failing with the same error stop early: the
+# generator is not getting closer, and each attempt costs a model call.
+SAME_RUN_ERROR_LIMIT = 3
 
 
 def generate_and_run_cypher(cypher_gen, conn, question: str, max_attempts: int = CYPHER_MAX_ATTEMPTS,
@@ -128,7 +140,8 @@ def generate_and_run_cypher(cypher_gen, conn, question: str, max_attempts: int =
 
     A query that fails the check is not run: the errors go back to the
     generator for the next attempt. Stops at ``max_attempts``, or early when
-    the generator repeats a query it already wrote. Every attempt that did not
+    the generator repeats a query it already wrote or TigerGraph returns the
+    same run error ``SAME_RUN_ERROR_LIMIT`` times in a row. Every attempt that did not
     return rows is appended to ``attempts`` as ``{query, error, outcome}``.
 
     Returns ``(cypher, first_result_block)`` for the query that ran (the block
@@ -140,6 +153,7 @@ def generate_and_run_cypher(cypher_gen, conn, question: str, max_attempts: int =
     attempts = [] if attempts is None else attempts
     history: list = []
     seen: set = set()
+    last_run_error, same_run_errors = None, 0
     for i in range(max(1, int(max_attempts or CYPHER_MAX_ATTEMPTS))):
         try:
             cypher = cypher_gen._run(question, history)
@@ -163,7 +177,13 @@ def generate_and_run_cypher(cypher_gen, conn, question: str, max_attempts: int =
             message = "\n".join([str(exc)] + run_error_hints(str(exc), cypher))
             history.append(f"{i}: {cypher}\n\tError: {message}\n")
             attempts.append({"query": cypher, "error": message[:500]})
+            same_run_errors = same_run_errors + 1 if str(exc) == last_run_error else 1
+            last_run_error = str(exc)
+            if same_run_errors >= SAME_RUN_ERROR_LIMIT:
+                attempts[-1]["outcome"] = f"same run error {same_run_errors} times in a row; stopped"
+                break
             continue
+        last_run_error, same_run_errors = None, 0
         first = rows[0] if rows else None
         if is_empty_result(first):
             attempts.append({"query": cypher, "outcome": "no rows"})
