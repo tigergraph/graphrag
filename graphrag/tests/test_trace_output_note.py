@@ -63,6 +63,21 @@ class TestFitForTrace(unittest.TestCase):
         value, _ = ex.fit_for_trace(ctx)
         self.assertEqual(value["result"]["final_retrieval"]["short_chunk_0"], ["brief"])
 
+    def test_query_text_is_not_cut_with_the_rows(self):
+        cypher = ("MATCH (i:JiraIssue)-[:JIRA_BELONGS_TO]-(p:JiraProject)\n"
+                  'WHERE toLower(p.project_key) = "gml"\n'
+                  "RETURN i.issue_key AS issue_key, i.summary AS issue_summary\n"
+                  "ORDER BY issue_key ASC")
+        rows = [{"issue_key": f"GML-{i}", "issue_summary": "s" * 300} for i in range(200)]
+        ctx = {"result": {"T": rows}, "cypher": cypher,
+               "reasoning": f"The following openCypher query was executed:\n{cypher}"}
+        value, cut = ex.fit_for_trace(ctx)
+        self.assertIsNotNone(cut)
+        self.assertLessEqual(_size(value), ex._TRACE_FIELD_CAP)
+        self.assertEqual(value["cypher"], cypher)
+        self.assertEqual(value["reasoning"], ctx["reasoning"])
+        self.assertIn("…(+", value["result"]["T"][0]["issue_summary"])  # the rows are still cut
+
     def test_note_wording(self):
         self.assertEqual(
             ex.trace_note({"full_chars": 68331, "shown_chars": 11958}),

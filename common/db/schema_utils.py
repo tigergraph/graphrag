@@ -1332,7 +1332,9 @@ def _collect_attrs(attr_list, skip_name: str) -> Tuple[dict, List[str]]:
     """Walk an ``Attributes`` array from ``getVertexType`` /
     ``getEdgeType`` and return ``({attr_name: tg_type}, ["name of type
     type", ...])``. ``skip_name`` is the primary-id attribute that
-    shouldn't appear in the user-facing schema rep.
+    shouldn't appear in the user-facing schema rep. A NULLABLE attribute
+    gets a " NULLABLE" suffix, so query generation knows which attributes
+    can hold NULL.
     """
     attrs_map: dict = {}
     lines: List[str] = []
@@ -1342,7 +1344,8 @@ def _collect_attrs(attr_list, skip_name: str) -> Tuple[dict, List[str]]:
         if not a_name or a_name == skip_name:
             continue
         attrs_map[a_name] = a_type
-        lines.append(f"{a_name} of type {a_type}")
+        nullable = " NULLABLE" if a.get("isNullable") else ""
+        lines.append(f"{a_name} of type {a_type}{nullable}")
     return attrs_map, lines
 
 

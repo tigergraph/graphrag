@@ -68,6 +68,7 @@
 ---
 
 ## Releases
+* **10/15/2026**: GraphRAG v2.0.4 released. Agentic answers reuse what the conversation and the graph schema already hold and plan from the graph's schema, Trace Logs show the structured queries that ran and the error of a failed answer, external MCP servers load again, and fixed planning and structured-query issues. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.4) for details.
 * **10/12/2026**: GraphRAG v2.0.3 released. Improved agentic answers to multi-part and follow-up questions, kept answers within the chat model's input limit, added deleting chat conversations individually, in groups, or all at once, made the Migration Assistant check a graph's schema before repairing it, and fixed document retrieval, ingestion, and contextual search issues. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.3) for details.
 * **8/28/2026**: GraphRAG v2.0.2 released. Added Migration Assistant data-integrity checks with targeted re-embedding of missing embeddings and re-summarization of incomplete community summaries, made agentic chat work with current and future tool-calling models automatically, and fixed rebuild, PDF extraction, and chat issues. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.2) for details.
 * **7/22/2026**: GraphRAG v2.0.1 released. Fixed a chat error with models that return structured content (such as Gemini 3), and hardened knowledge-graph rebuild so it no longer hangs when the language model is unreachable. Relicensed from Apache 2.0 to AGPL-3.0. See [Release Notes](https://github.com/tigergraph/graphrag/releases/tag/v2.0.1) for details.
@@ -198,8 +199,8 @@ This line can be changed to support different logging levels.
 | `CRITICAL` | A serious error. |
 | `ERROR` | Failing to perform functions. |
 | `WARNING` | Indication of unexpected problems, e.g. failure to map a user’s question to the graph schema. |
-| `INFO` | Confirming that the service is performing as expected. |
-| `DEBUG` | Detailed information, e.g. the functions retrieved during the `GenerateFunction` step, etc. |
+| `INFO` | Confirming that the service is performing as expected. Each request is recorded once, by its audit entry. |
+| `DEBUG` | Detailed information, e.g. the functions retrieved during the `GenerateFunction` step, each request's entry line, and the HTTP calls GraphRAG makes to other services. |
 | `DEBUG_PII` | Finer-grained information that could potentially include `PII`, such as a user’s question, the complete function call (with parameters), and the LLM’s natural language response. |
 | NOTSET | All messages are processed. |
 
@@ -389,12 +390,12 @@ GraphRAG offers two chat engines, chosen from the chat menu (or set as a per-gra
 
 ### Agentic
 
-The agent decides its **own** retrieval instead of following a fixed pipeline: it picks which methods to use (structural graph queries, vector search, community search), can call external [MCP tools](#mcp-servers-agentic-tools), answers greetings and questions about itself directly, and cites the chunks and queries it used. It comes in two styles:
+The agent decides its **own** retrieval instead of following a fixed pipeline: it picks which methods to use (structural graph queries, vector search, community search), can call external [MCP tools](#mcp-servers-agentic-tools), answers greetings and questions about itself directly, reuses what the conversation already answers and retrieves only what is missing, and cites the chunks and queries it used. It comes in two styles:
 
-- **Planned** *(default)* — analyzes the question up front and lays out the whole retrieval plan (which methods, how many, in what order) as a small DAG, executes it, then synthesizes one grounded answer. Predictable and efficient; a strong fit for most questions, including multi-part ones.
+- **Planned** *(default)* — analyzes the question against the graph's schema up front, answers directly when the conversation or the schema already holds the answer (for example "what data do we have?"), and otherwise lays out the whole retrieval plan (which methods, how many, in what order) as a small DAG, executes it, then synthesizes one grounded answer. Predictable and efficient; a strong fit for most questions, including multi-part ones.
 - **Reactive** — reasons and acts one step at a time, deciding each next retrieval from what the previous step returned, and keeps going until it can answer completely and accurately. More adaptive to what it finds, at the cost of more steps (and tokens) on complex questions.
 
-Both styles send trivial/conversational messages straight to a direct answer, and record their retrieval in the admin **Trace** — the plan/steps and reasoning, which chunks were retrieved, and which the agent selected for the answer.
+Both styles send trivial/conversational messages straight to a direct answer, and record their retrieval in the admin **Trace** — the plan/steps and reasoning, the structured queries that ran, which chunks were retrieved, which the agent selected for the answer, and the error when an answer fails.
 
 **Selecting an engine.** In the chat UI, use the engine/style picker (Classic, or Agentic → Planned / Reactive). To set a per-graph default, configure `agent_style` (`auto` follows the configured default; `planned` or `reactive` force a style) — see [GraphRAG configuration](#graphrag-configuration). Depth is bounded by `agent_max_iterations` (Reactive) and `agent_max_replans` / `agent_max_total_steps` (Planned).
 
@@ -546,6 +547,8 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `agent_style` | string | `"planned"` | Default agentic engine style: `"planned"` (plan the whole retrieval up front) or `"reactive"` (decide each step from the last result). The chat menu can override per request. See [Chat Engines and Agents](#chat-engines-and-agents). |
 | `agent_max_iterations` | int | `30` | Reactive agent only: maximum reason-act-observe steps before it must answer. |
 | `agent_max_replans` | int | `3` | Planned agent only: how many times the planner may extend its plan when the gathered context is insufficient. |
+| `cypher_max_attempts` | int | `10` | How many times a structured graph query may be generated for one question before GraphRAG gives up on it. |
+| `planner_max_output_tokens` | int | `4000` | Planned agent only: the most output tokens the planner may use for one plan. Reasoning models use at least `16000`. |
 | `agent_max_total_steps` | int | `20` | Planned agent only: hard cap on executed retrieval steps across all replans. |
 | `chunk_only` | bool | `true` | If true, hybrid search only retrieves document chunks, excluding entity data. |
 | `doc_only` | bool | `false` | If true, hybrid search retrieves whole documents instead of chunks. Significantly increases context size. |
@@ -694,6 +697,8 @@ In the `llm_config` section of `configs/server_config.json` file, copy JSON conf
 | `prompt_path` | string | No | `"./common/prompts/openai_gpt4/"` | Path to prompt template files. |
 | `base_url` | string | No | — | Custom API endpoint URL. |
 | `token_limit` | int | No | inherited from top-level | Hard cap on token count for a prompt carrying retrieved context, prompt included. Context beyond it is truncated. `0` or omitted uses the model's own input limit when known, otherwise no cap. |
+
+> **Gemini 3 models:** the agentic engine plans with temperature `1.0` when `model_kwargs` sets a lower one, as Google recommends for these models. Answers and knowledge graph building use the configured temperature.
 
 **`embedding_service` parameters:**
 

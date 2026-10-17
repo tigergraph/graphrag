@@ -93,6 +93,21 @@ def _openai_thinking(model: str) -> bool:
     )
 
 
+# Gemini 3 models are tuned to sample at temperature 1.0. Below it they can
+# loop, e.g. write a run of zeros where a JSON string should close (GML-2335).
+GEMINI_3_TEMPERATURE = 1.0
+
+
+def gemini_loops_below_default_temperature(model: str) -> bool:
+    """Gemini 3 models, which Google says can loop below temperature 1.0
+    ("Gemini 3 developer guide"). Case-insensitive; accepts a ``models/``
+    prefix."""
+    m = (model or "").strip().lower()
+    if m.startswith("models/"):
+        m = m[len("models/"):]
+    return m.startswith("gemini-3")
+
+
 def openai_rejects_temperature(model: str) -> bool:
     """OpenAI o-series reasoning models (o1/o3/o4) reject a custom
     ``temperature`` — only the default value is accepted, and sending the

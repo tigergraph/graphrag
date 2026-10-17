@@ -19,4 +19,6 @@ ENV SERVER_CONFIG="/server_config.json"
 ENV LOGLEVEL="INFO"
 
 EXPOSE 8000
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--ws", "websockets-sansio"]
+# The request audit entry (main.py) already logs each request, so uvicorn's
+# per-request access log is off.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--ws", "websockets-sansio", "--no-access-log"]

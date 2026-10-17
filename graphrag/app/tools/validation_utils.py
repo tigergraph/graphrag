@@ -23,6 +23,11 @@ class InvalidFunctionCallException(Exception):
     pass
 
 
+class NoRegisteredFunctionsException(Exception):
+    """The embedding store has no pyTigerGraph functions registered, so no
+    generated function call can pass validation."""
+
+
 def validate_schema(conn, v_types, e_types, v_attrs, e_attrs):
     LogWriter.info(f"request_id={req_id_cv.get()} ENTRY validate_schema()")
     if v_types:

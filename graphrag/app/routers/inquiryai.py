@@ -14,6 +14,7 @@ from tools.validation_utils import MapQuestionToSchemaException
 from common.config import get_embedding_service, get_embedding_store, session_handler, service_status
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
+from common.utils.user_messages import NO_ANSWER
 from common.metrics.prometheus_metrics import metrics as pmetrics
 from common.py_schemas.schemas import (GraphRAGResponse, GSQLQueryInfo,
                                        GSQLQueryList, NaturalLanguageQuery,
@@ -140,7 +141,7 @@ def retrieve_answer(
         pmetrics.llm_success_response_total.labels(get_embedding_service().model_name).inc()
     except MapQuestionToSchemaException:
         resp.natural_language_response = (
-            "A schema mapping error occurred. Please try rephrasing your question."
+            NO_ANSWER
         )
         resp.query_sources = {}
         resp.answered_question = False
@@ -223,7 +224,7 @@ def retrieve_answer_with_chathistory(
 
     except MapQuestionToSchemaException:
         resp.natural_language_response = (
-            "A schema mapping error occurred. Please try rephrasing your question."
+            NO_ANSWER
         )
         resp.query_sources = {}
         resp.answered_question = False

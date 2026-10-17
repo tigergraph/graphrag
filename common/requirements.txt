@@ -184,10 +184,11 @@ wrapt>=1.17.2
 yarl>=1.20.1
 zipp>=3.23.0
 
-# Agentic engine (v2.0) — MCP + tigergraph-mcp for in-process, per-user
-# tool execution. Requires the fastapi/starlette bump above (mcp pulls
-# starlette>=0.49).
-mcp>=1.27.1
+# Agentic engine (v2.0) — MCP client for add-on MCP servers. tigergraph-mcp
+# is kept for the planned built-in in-process server (GML-2330). Requires the
+# fastapi/starlette bump above (mcp pulls starlette>=0.49). mcp 2.x changes
+# the client API that mcp_addons uses.
+mcp>=1.27.1,<2
 tigergraph-mcp>=1.0.4
 sse-starlette>=3.4.4
 httpx-sse>=0.4.3

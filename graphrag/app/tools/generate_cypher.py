@@ -13,6 +13,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import logging
+import re
 from typing import Iterable
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -25,6 +26,170 @@ from common.logs.logwriter import LogWriter
 from common.logs.log import req_id_cv
 
 logger = logging.getLogger(__name__)
+
+# Language names a model may put on the first line of a code block.
+_FENCE_LANGUAGES = {"cypher", "opencypher", "gsql", "sql", "graphql"}
+
+
+def strip_code_fence(text: str) -> str:
+    """The query inside a model reply: without a code fence (```cypher,
+    ```opencypher, plain ```) and without a line that has only a language
+    name."""
+    t = (text or "").strip()
+    m = re.match(r"^```[^\n]*\n(.*?)\n?```\s*$", t, re.S)
+    if m:
+        t = m.group(1).strip()
+    else:
+        t = t.strip("`").strip()
+    lines = t.split("\n", 1)
+    if lines[0].strip().lower() in _FENCE_LANGUAGES:
+        t = lines[1].strip() if len(lines) > 1 else ""
+    return t
+
+
+def _interpreted(conn, cypher: str) -> str:
+    return ("INTERPRET OPENCYPHER QUERY () FOR GRAPH " + str(conn.graphname)
+            + " {\n" + cypher + "\n}")
+
+
+def run_cypher(conn, cypher: str) -> list:
+    """Run an openCypher query in interpreted mode on the graph of ``conn``
+    and return its result blocks. Raises the connection's exception with
+    TigerGraph's message when the query fails."""
+    return conn.runInterpretedQuery(_interpreted(conn, cypher)) or []
+
+
+# Clauses that change data. Retrieval only reads, whatever the model writes.
+_WRITE_CLAUSE = re.compile(r"\b(CREATE|MERGE|SET|REMOVE|DELETE)\b", re.I)
+_STRING_LITERAL = re.compile(r"\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'")
+
+# TigerGraph limits worth a direct hint when the check reports them.
+_HINTS = (
+    (re.compile(r"\bdatetime\s*\(", re.I),
+     'TigerGraph does not support datetime(). Use to_datetime("YYYY-MM-DD hh:mm:ss").'),
+    (re.compile(r"\bdate\s*\(", re.I),
+     'TigerGraph does not support date(). Use to_datetime("YYYY-MM-DD").'),
+)
+
+
+# Run errors that pass the check, with the query construct that causes them.
+# TigerGraph 4.3 fails a query that has STARTS WITH or CONTAINS together with
+# a null test, CASE or OPTIONAL MATCH, and its message names none of them.
+_MIXED_MODE = re.compile(r"instruction mode and legacy mode", re.I)
+_NULL_TEST = re.compile(r"\bIS\s+(NOT\s+)?NULL\b", re.I)
+_RUN_HINTS = (
+    (_MIXED_MODE, _NULL_TEST,
+     'TigerGraph cannot run IS NULL / IS NOT NULL in this query. An attribute that the schema '
+     'does not mark NULLABLE is never NULL: compare with the default of its type instead '
+     '(= "" or <> "" for STRING, = 0 or <> 0 for numbers).'),
+    (_MIXED_MODE, re.compile(r"\bOPTIONAL\s+MATCH\b", re.I),
+     "TigerGraph cannot run OPTIONAL MATCH in this query. Use MATCH: a WHERE after "
+     "OPTIONAL MATCH does not filter the rows anyway."),
+    (_MIXED_MODE, re.compile(r"\bCASE\b", re.I),
+     "TigerGraph cannot run CASE in this query. Filter with WHERE instead."),
+    (_MIXED_MODE, re.compile(r"\b(STARTS\s+WITH|ENDS\s+WITH|CONTAINS)\b", re.I),
+     "TigerGraph cannot run STARTS WITH, ENDS WITH or CONTAINS together with OPTIONAL MATCH, "
+     "CASE, IS NULL or IS NOT NULL. Keep the string match and remove those."),
+)
+
+
+def run_error_hints(error: str, cypher: str) -> list:
+    """Hints for a run error of ``cypher``: the construct that likely caused
+    it and how to write it instead."""
+    query = _STRING_LITERAL.sub('""', cypher)
+    return [hint for err_pattern, query_pattern, hint in _RUN_HINTS
+            if err_pattern.search(error) and query_pattern.search(query)]
+
+
+def check_cypher(conn, cypher: str):
+    """Errors in ``cypher`` found without running it, as readable lines.
+
+    Uses TigerGraph's query check (TigerGraph 4.0 and later). Returns [] for
+    a valid query, or None when the check is not available, so the caller
+    runs the query to find out.
+    """
+    if _WRITE_CLAUSE.search(_STRING_LITERAL.sub('""', cypher)):
+        return ["The query changes data. Write a query that only reads (MATCH ... RETURN)."]
+    try:
+        result = conn.checkQuerySemantic(_interpreted(conn, cypher))
+    except Exception as exc:
+        logger.info(f"generate_cypher: query check unavailable ({exc}); running the query instead")
+        return None
+    if not isinstance(result, dict):
+        return None
+    errors = []
+    for err in result.get("errors") or []:
+        # The check counts the INTERPRET wrapper as line 1; report query lines.
+        line = err.get("line")
+        where = f"line {line - 1}, column {err.get('charpositioninline')}: " if isinstance(line, int) and line > 1 else ""
+        errors.append(where + str(err.get("msg", "")).strip())
+    if errors:
+        errors.extend(hint for pattern, hint in _HINTS if pattern.search(cypher))
+    return errors
+
+
+CYPHER_MAX_ATTEMPTS = 10
+# Queries that TigerGraph keeps failing with the same error stop early: the
+# generator is not getting closer, and each attempt costs a model call.
+SAME_RUN_ERROR_LIMIT = 3
+
+
+def generate_and_run_cypher(cypher_gen, conn, question: str, max_attempts: int = CYPHER_MAX_ATTEMPTS,
+                            attempts=None):
+    """Generate an openCypher query for ``question``, check it, and run it.
+
+    A query that fails the check is not run: the errors go back to the
+    generator for the next attempt. Stops at ``max_attempts``, or early when
+    the generator repeats a query it already wrote or TigerGraph returns the
+    same run error ``SAME_RUN_ERROR_LIMIT`` times in a row. Every attempt that did not
+    return rows is appended to ``attempts`` as ``{query, error, outcome}``.
+
+    Returns ``(cypher, first_result_block)`` for the query that ran (the block
+    is None when the query returned no rows), or ``(None, None)`` when no query
+    ran successfully.
+    """
+    from common.utils.query_results import is_empty_result
+
+    attempts = [] if attempts is None else attempts
+    history: list = []
+    seen: set = set()
+    last_run_error, same_run_errors = None, 0
+    for i in range(max(1, int(max_attempts or CYPHER_MAX_ATTEMPTS))):
+        try:
+            cypher = cypher_gen._run(question, history)
+        except ValueError as exc:
+            history.append(f"{i}: Error: {exc}\n")
+            attempts.append({"error": str(exc)[:500]})
+            continue
+        if cypher in seen:
+            attempts.append({"query": cypher, "outcome": "repeated an earlier query; stopped"})
+            break
+        seen.add(cypher)
+        errors = check_cypher(conn, cypher)
+        if errors:
+            message = "\n".join(errors)
+            history.append(f"{i}: {cypher}\n\tError: {message}\n")
+            attempts.append({"query": cypher, "error": message[:500], "outcome": "failed check"})
+            continue
+        try:
+            rows = run_cypher(conn, cypher)
+        except Exception as exc:
+            message = "\n".join([str(exc)] + run_error_hints(str(exc), cypher))
+            history.append(f"{i}: {cypher}\n\tError: {message}\n")
+            attempts.append({"query": cypher, "error": message[:500]})
+            same_run_errors = same_run_errors + 1 if str(exc) == last_run_error else 1
+            last_run_error = str(exc)
+            if same_run_errors >= SAME_RUN_ERROR_LIMIT:
+                attempts[-1]["outcome"] = f"same run error {same_run_errors} times in a row; stopped"
+                break
+            continue
+        last_run_error, same_run_errors = None, 0
+        first = rows[0] if rows else None
+        if is_empty_result(first):
+            attempts.append({"query": cypher, "outcome": "no rows"})
+            return cypher, None
+        return cypher, first
+    return None, None
 
 
 class GenerateCypher(BaseTool):
@@ -98,7 +263,8 @@ class GenerateCypher(BaseTool):
             PROMPT, StrOutputParser(),
             {"question": question, "schema": schema, "history": history},
             caller_name="generate_cypher",
-        ).strip("```cypher").strip("```").strip()
+        )
+        out = strip_code_fence(out)
 
         # Validate the LLM output looks like a Cypher query
         out_upper = out.upper()
@@ -106,11 +272,8 @@ class GenerateCypher(BaseTool):
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_cypher - LLM did not produce a valid Cypher query")
             raise ValueError(f"LLM did not produce a valid Cypher query: {out[:200]}")
 
-        query_header = "USE GRAPH " + self.conn.graphname + " "+ "\n" + "INTERPRET OPENCYPHER QUERY () {" + "\n"
-        query_footer = "\n}"
-        cypher = query_header + out + query_footer
-        LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_cypher with:\n{cypher}")
-        return cypher
+        LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_cypher with:\n{out}")
+        return out
 
     def _run(self, question: str, history: Iterable[str]):
         """Run the GenerateCypher tool.
