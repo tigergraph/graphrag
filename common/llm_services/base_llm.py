@@ -992,6 +992,8 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
   - Path variables (`p = (...)`) not supported.
   - `MATCH` must reference variables from prior `WITH`.
   - Disconnected `MATCH` fragments not supported.
+  - Do not combine `STARTS WITH`, `ENDS WITH` or `CONTAINS` with `OPTIONAL MATCH`, `CASE`, `IS NULL` or `IS NOT NULL` in one query: TigerGraph cannot run it.
+  - Use `MATCH`, not `OPTIONAL MATCH`, when the question filters on the related vertex: a `WHERE` after `OPTIONAL MATCH` does not filter the rows.
 
 ## Output
 - The query must return both the entity from the question AND the requested data.

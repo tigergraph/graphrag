@@ -234,10 +234,38 @@ class TestCheckBeforeRun(unittest.TestCase):
         self.assertIn("NULLABLE", attempts[0]["error"])
         history = gen._run.call_args_list[1][0][1]
         self.assertIn('<> ""', history[0])  # the null hint went back to the generator
-        # No hint when the query has no null test, or a null test only inside a string.
-        self.assertEqual(run_error_hints(str(err), 'MATCH (i) WHERE i.k STARTS WITH "x" RETURN i'), [])
+        # No hint when the query has none of the constructs, or has them only inside a string.
+        self.assertEqual(run_error_hints(str(err), 'MATCH (i) WHERE i.k = "x" RETURN i'), [])
         self.assertEqual(run_error_hints(str(err), 'MATCH (i) WHERE i.k = "IS NULL" RETURN i'), [])
         self.assertEqual(run_error_hints("other error", bad), [])
+
+    def test_optional_match_run_error_gets_a_hint(self):
+        from tools.generate_cypher import run_error_hints
+        err = "Query [null] cannot be executed in both instruction mode and legacy mode at the same time."
+        q = ('MATCH (i:JiraIssue) WITH i OPTIONAL MATCH (i)-[:JIRA_BELONGS_TO]-(p:JiraProject) '
+             'WHERE toLower(i.issue_key) STARTS WITH "gpe" RETURN count(DISTINCT i) AS n')
+        hints = run_error_hints(err, q)
+        self.assertTrue(any("Use MATCH" in h for h in hints))
+        self.assertTrue(any("Keep the string match" in h for h in hints))
+        self.assertFalse(any("IS NULL / IS NOT NULL in this query" in h for h in hints))
+
+    def test_same_run_error_stops_early(self):
+        from tools.generate_cypher import generate_and_run_cypher, SAME_RUN_ERROR_LIMIT
+        err = RuntimeError("cannot be executed in both instruction mode and legacy mode")
+        conn = self._conn([{"errors": []}] * 10, [err] * 10)
+        gen = self._gen([f"MATCH (n{i}) RETURN n{i}" for i in range(10)])
+        attempts = []
+        self.assertEqual(generate_and_run_cypher(gen, conn, "q", 10, attempts), (None, None))
+        self.assertEqual(gen._run.call_count, SAME_RUN_ERROR_LIMIT)
+        self.assertIn("same run error 3 times in a row", attempts[-1]["outcome"])
+
+    def test_different_run_errors_keep_trying(self):
+        from tools.generate_cypher import generate_and_run_cypher
+        errs = [RuntimeError(f"error {i}") for i in range(4)]
+        conn = self._conn([{"errors": []}] * 5, errs + [[{"T": {"n": 1}}]])
+        gen = self._gen([f"MATCH (n{i}) RETURN n{i}" for i in range(5)])
+        cypher, first = generate_and_run_cypher(gen, conn, "q", 10, [])
+        self.assertEqual(first, {"T": {"n": 1}})
 
     def test_unavailable_check_runs_the_query(self):
         from tools.generate_cypher import generate_and_run_cypher
@@ -263,6 +291,7 @@ class TestCheckBeforeRun(unittest.TestCase):
         self.assertIn("`DETACH DELETE`", prompt.split("## Unsupported")[1])
         self.assertIn("only on an attribute that the schema marks `NULLABLE`", prompt)
         self.assertIn("write the literal in lower case", prompt)
+        self.assertIn("Do not combine `STARTS WITH`, `ENDS WITH` or `CONTAINS` with `OPTIONAL MATCH`", prompt)
 
 
 class TestTraceShowsTheQuery(unittest.TestCase):
