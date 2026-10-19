@@ -83,7 +83,12 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     # consistent — only the guidance text, never a role or JSON wrapper.
     answer_parser = PydanticOutputParser(pydantic_object=GraphRAGAnswerOutput)
     try:
+        from connectors.prompt_selection import guidance_for
+
         answer_style = llm.get_user_portion("chatbot_response.txt")
+        connector_guidance = guidance_for(question, "answer")
+        if connector_guidance:
+            answer_style = f"{answer_style}\n\n{connector_guidance}".strip()
     except Exception:
         answer_style = ""
     final_answer_block = [

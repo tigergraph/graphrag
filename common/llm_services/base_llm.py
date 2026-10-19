@@ -294,7 +294,7 @@ class LLM_Model:
             "_AGENTIC_TRIAGE_SYSTEM", "_AGENTIC_TRIAGE_USER_DEFAULT"),
     }
 
-    def _compose_prompt(self, filename):
+    def _compose_prompt(self, filename, extra_user=""):
         """Inject the resolved user portion into the ``{user_prompt}`` slot of
         the hardcoded system prompt for *filename*.
 
@@ -317,7 +317,19 @@ class LLM_Model:
         ):
             user_portion = getattr(self, def_attr, "")
         user_portion = sanitize_user_portion(user_portion).strip()
+        extra = sanitize_user_portion(extra_user or "").strip()
+        if extra:
+            user_portion = f"{user_portion}\n\n{extra}".strip()
         return system_prompt.replace("{user_prompt}", user_portion)
+
+    def prompt_for(self, filename, question, step):
+        """Compose one existing prompt with guidance for this question and step."""
+        from connectors.prompt_selection import guidance_for
+
+        return self._compose_prompt(
+            filename,
+            extra_user=guidance_for(question, step),
+        )
 
     def _is_legacy_full_prompt(self, on_disk_text, system_prompt):
         """Detect a pre-split full-prompt override (vs. a clean user portion).
@@ -999,7 +1011,9 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
 - The query must return both the entity from the question AND the requested data.
 - Validate syntax before responding.
 - Aliases must NOT match vertex / edge types, operator / function names, or reserved keywords. Use multi-word underscore identifiers.
-- Output ONLY the OpenCypher query — no explanation."""
+- Output ONLY the OpenCypher query — no explanation.
+
+{query_guidance}"""
 
     @property
     def generate_gsql_prompt(self):
@@ -1600,6 +1614,16 @@ Example output (illustrative — pick names that fit your documents):
             "## Domain Hints\n"
             f"{text}\n"
         )
+
+    def query_guidance_for(self, question: str) -> str:
+        """Existing query guidance plus the connector guidance for this question."""
+        from connectors.prompt_selection import guidance_for
+
+        base = self.query_guidance_block
+        extra = guidance_for(question, "query")
+        if not extra:
+            return base
+        return f"{base}\n{extra}".strip()
 
     # Generation-style prompt: ends with a "## Standalone Question" cue the model
     # continues from, so the user portion + Authority sit ABOVE the inputs.

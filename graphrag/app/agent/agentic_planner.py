@@ -271,7 +271,10 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
         )
     # Use the customizable planner prompt (fixed DAG-planning rules + the
     # editable "Additional Instructions" portion); the default lives in base_llm.
-    messages = [("system", llm.agentic_planner_prompt), ("user", "\n\n".join(user_parts))]
+    messages = [
+        ("system", llm.prompt_for("agentic_planner.txt", question, "planner")),
+        ("user", "\n\n".join(user_parts)),
+    ]
     try:
         # Plan steps carry free-form ``args`` maps. Where a provider's default
         # structured output is strict JSON schema (the OpenAI family), it

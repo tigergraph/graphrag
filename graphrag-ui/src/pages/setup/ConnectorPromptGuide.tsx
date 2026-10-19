@@ -1,8 +1,6 @@
-import React, { useState } from "react";
+import React from "react";
 import { Link } from "react-router-dom";
-import { BookOpen, Check, ChevronDown, Copy } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { BookOpen, CheckCircle2, GitBranch, SlidersHorizontal } from "lucide-react";
 
 interface ExamplePrompt {
   id: string;
@@ -72,7 +70,36 @@ Otherwise answer the question they asked.
 
 Prefer a structured value when the same field also appears in a passage. Do not invent a person, date, status, or release.`;
 
+const ZENDESK_PLANNER_EXAMPLE = `## Zendesk tickets
+A Zendesk ticket is a ZendeskTicket vertex. Its id is zendesk:<subdomain>:ticket:<id>, which is never a Jira issue key.
+
+- Structural (graphrag__structural_retrieve): ticket_id, subject, status, and url. The requester is a ZendeskUser reached by ZENDESK_REQUESTED_BY. Comment text is ZendeskComment.body reached by ZENDESK_COMMENT_ON.
+- Unstructured (graphrag__hybrid_search): chunks for the subject, description, and comments. A chunk starts with the ticket id.
+
+When the question names a Jira issue and a Zendesk ticket, retrieve both and follow CROSS_SOURCE_LINK between JiraIssue and ZendeskTicket. Do not treat a ticket number as a Jira issue key.
+
+If the question says ticket, issue, status, or assignee and does not say whether it means Jira or Zendesk, ask which source the user means.`;
+
 const GUIDES: Record<string, ConnectorGuide> = {
+  zendesk: {
+    title: "Zendesk",
+    summary:
+      "Add a short Zendesk section to this graph's prompts. The connector loads that section only when the question is about Zendesk, and loads both sections when the question names Jira and Zendesk.",
+    points: [
+      "A Zendesk ticket id is not a Jira issue key. Keep the two records separate.",
+      "Structural search returns the ticket, requester, and comment records. Hybrid search returns the description and comment text.",
+      "A question that names both a Jira issue and a Zendesk ticket should follow CROSS_SOURCE_LINK.",
+      "If the question could mean either source, ask the user which one they mean.",
+    ],
+    examples: [
+      {
+        id: "zendesk_planner",
+        name: "Agentic Planner",
+        where: "Customize Prompts → Agentic Planner, on this graph",
+        text: ZENDESK_PLANNER_EXAMPLE,
+      },
+    ],
+  },
   jira_cloud: {
     title: "Jira Cloud",
     summary:
@@ -117,22 +144,15 @@ const ConnectorPromptGuide: React.FC<{ connectorType: string }> = ({
   connectorType,
 }) => {
   const guide = GUIDES[connectorType];
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-
   if (!guide) return null;
 
-  const copyExample = async (example: ExamplePrompt) => {
-    try {
-      await navigator.clipboard.writeText(example.text);
-      setCopiedId(example.id);
-      window.setTimeout(() => {
-        setCopiedId((current) => (current === example.id ? null : current));
-      }, 2000);
-    } catch {
-      setCopiedId(null);
-    }
-  };
+  const isJira = connectorType === "jira_cloud";
+  const detection = isJira
+    ? 'Selected when the question contains “Jira” or a Jira key such as GML-2186.'
+    : 'Selected when the question contains “Zendesk” or a zendesk.com ticket URL.';
+  const schemaScope = isJira
+    ? "Planner and query generation receive only Jira connector guidance and Jira graph types."
+    : "Planner and query generation receive only Zendesk connector guidance and Zendesk graph types.";
 
   return (
     <div className="mt-2 border-t border-gray-200 dark:border-[#3D3D3D] pt-5 space-y-4 min-w-0 max-w-full">
@@ -140,92 +160,74 @@ const ConnectorPromptGuide: React.FC<{ connectorType: string }> = ({
         <BookOpen className="h-4 w-4 mt-1 shrink-0 text-black dark:text-white" />
         <div className="min-w-0">
           <h3 className="font-medium text-black dark:text-white">
-            4. Prompt guide
+            4. Automatic prompt guidance
           </h3>
           <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
-            How to write the {guide.title} prompt for this graph.
+            {guide.title} guidance is selected by the backend for each question.
+            No connector prompt needs to be copied into this graph.
           </p>
         </div>
       </div>
 
-      <div className="min-w-0 space-y-2">
-        <h4 className="text-sm font-medium text-black dark:text-white">
-          How to build the prompt
-        </h4>
-        <p className="text-sm text-gray-700 dark:text-gray-300">{guide.summary}</p>
-        <ul className="text-sm text-gray-700 dark:text-gray-300 list-disc pl-5 space-y-1">
-          {guide.points.map((point) => (
-            <li key={point}>{point}</li>
-          ))}
-        </ul>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="rounded-md border border-gray-200 dark:border-[#3D3D3D] p-3">
+          <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400 mb-2" />
+          <h4 className="text-sm font-medium text-black dark:text-white">
+            Source detection
+          </h4>
+          <p className="mt-1 text-xs leading-5 text-gray-600 dark:text-gray-400">
+            {detection}
+          </p>
+        </div>
+        <div className="rounded-md border border-gray-200 dark:border-[#3D3D3D] p-3">
+          <SlidersHorizontal className="h-4 w-4 text-blue-600 dark:text-blue-400 mb-2" />
+          <h4 className="text-sm font-medium text-black dark:text-white">
+            Step-specific guidance
+          </h4>
+          <p className="mt-1 text-xs leading-5 text-gray-600 dark:text-gray-400">
+            {schemaScope} The answer step receives the matching response rules.
+          </p>
+        </div>
+        <div className="rounded-md border border-gray-200 dark:border-[#3D3D3D] p-3">
+          <GitBranch className="h-4 w-4 text-tigerOrange mb-2" />
+          <h4 className="text-sm font-medium text-black dark:text-white">
+            Multiple sources
+          </h4>
+          <p className="mt-1 text-xs leading-5 text-gray-600 dark:text-gray-400">
+            A question naming Jira and Zendesk loads both sets of guidance.
+            Relationship questions also receive CROSS_SOURCE_LINK rules.
+          </p>
+        </div>
       </div>
 
-      <div className="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200">
-        These examples are an addition, not a replacement. Open{" "}
+      <div className="rounded-md border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200 space-y-2">
+        <div className="font-medium">What graph owners should configure</div>
+        <p>
+          Use{" "}
         <Link to="/setup/prompts" className="font-medium underline">
           Customize Prompts
         </Link>
-        , select this graph, and open the prompt named on the example. Leave
-        the instructions already in that prompt, scroll to the end, and paste
-        the example there. Then save. Do not delete the existing prompt text.
+          {" "}only for graph-wide business rules, terminology, tone, or output
+          format that should apply regardless of the source. Do not paste Jira
+          or Zendesk schema instructions there; doing so bypasses selective
+          loading and sends those instructions with unrelated questions.
+        </p>
       </div>
 
-      <div className="min-w-0 space-y-3">
-        <h4 className="text-sm font-medium text-black dark:text-white">
-          Example prompts
+      <div className="rounded-md border border-gray-200 dark:border-[#3D3D3D] p-4 text-sm">
+        <h4 className="font-medium text-black dark:text-white">
+          Guidance ownership
         </h4>
-        {guide.examples.map((example) => {
-          const open = openId === example.id;
-          return (
-            <div
-              key={example.id}
-              className="min-w-0 max-w-full border border-gray-200 dark:border-[#3D3D3D] rounded-md"
-            >
-              <div className="flex flex-wrap items-center justify-between gap-3 p-3">
-                <button
-                  type="button"
-                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                  aria-expanded={open}
-                  onClick={() => setOpenId(open ? null : example.id)}
-                >
-                  <ChevronDown
-                    className={cn(
-                      "h-4 w-4 shrink-0 transition-transform",
-                      open && "rotate-180"
-                    )}
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-sm font-medium text-black dark:text-white">
-                      {example.name}
-                    </span>
-                    <span className="block text-xs text-gray-500 dark:text-gray-400 break-words">
-                      Paste into {example.where}
-                    </span>
-                  </span>
-                </button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0"
-                  onClick={() => copyExample(example)}
-                >
-                  {copiedId === example.id ? (
-                    <Check className="h-4 w-4 mr-2" />
-                  ) : (
-                    <Copy className="h-4 w-4 mr-2" />
-                  )}
-                  {copiedId === example.id ? "Copied" : "Copy"}
-                </Button>
-              </div>
-              {open && (
-                <pre className="mx-3 mb-3 max-h-80 max-w-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-gray-200 bg-gray-50 p-3 text-xs leading-5 text-gray-800 dark:border-[#3D3D3D] dark:bg-background dark:text-gray-200">
-                  {example.text}
-                </pre>
-              )}
-            </div>
-          );
-        })}
+        <p className="mt-1 text-gray-600 dark:text-gray-400">
+          Connector guidance is product-managed and currently lives in
+          <code className="mx-1 rounded bg-gray-100 dark:bg-background px-1 py-0.5 text-xs">
+            connectors/prompt_selection.py
+          </code>
+          as separate planner, query, and answer rules. There is currently no
+          user-editable connector-guidance field. If one is added later, it
+          must keep those three steps separate and remain scoped to its
+          connector instead of being appended to the global prompt.
+        </p>
       </div>
     </div>
   );

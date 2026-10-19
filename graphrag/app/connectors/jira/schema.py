@@ -6,6 +6,8 @@ from typing import Any
 
 from common.db.schema_utils import SchemaProposal, read_existing_schema
 
+from connectors.cross_source import CROSS_SOURCE_EDGE, add_pending_reference_schema
+
 
 JIRA_PROJECT_EDGE = "JIRA_BELONGS_TO"
 JIRA_ASSIGNEE_EDGE = "JIRA_ASSIGNED_TO"
@@ -48,7 +50,9 @@ def _edge_pairs(metadata: dict[str, Any]) -> set[tuple[str, str]]:
     return pairs
 
 
-def jira_schema_proposal() -> SchemaProposal:
+def jira_schema_proposal(
+    existing_vertices: set[str] | None = None,
+) -> SchemaProposal:
     """Return the bounded Jira schema consumed by GraphRAG."""
     proposal = SchemaProposal(domain_label="Jira Cloud")
     proposal.add_vertex(
@@ -209,13 +213,28 @@ def jira_schema_proposal() -> SchemaProposal:
         "JiraUser",
         "The Atlassian account that made the change.",
     )
+    add_pending_reference_schema(proposal, "JiraIssue")
+    folded = {name.casefold() for name in (existing_vertices or set())}
+    if "zendeskticket" in folded:
+        proposal.add_edge_pair(
+            CROSS_SOURCE_EDGE,
+            "JiraIssue",
+            "ZendeskTicket",
+            "A source reference or shared identity resolved during ingestion.",
+        )
+        proposal.add_edge_pair(
+            CROSS_SOURCE_EDGE,
+            "ZendeskTicket",
+            "JiraIssue",
+            "A source reference or shared identity resolved during ingestion.",
+        )
     return proposal
 
 
 def jira_schema_status(conn) -> dict[str, Any]:
     """Inspect whether the one current Jira schema is fully installed."""
-    proposal = jira_schema_proposal()
     existing = read_existing_schema(conn)
+    proposal = jira_schema_proposal(existing.vertex_types)
     conflicts: list[str] = []
     missing_vertices: list[str] = []
     missing_edges: list[str] = []
