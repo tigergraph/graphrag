@@ -29,6 +29,32 @@ export interface JiraSource {
   };
 }
 
+export interface ZendeskSource {
+  id: string;
+  type: "zendesk";
+  enabled: boolean;
+  display_name: string;
+  connection: {
+    subdomain: string;
+    email: string;
+    api_token: string;
+  };
+  scope: {
+    updated_after?: string | null;
+    statuses?: Array<"new" | "open" | "pending" | "hold" | "solved" | "closed">;
+    include_comments: boolean;
+  };
+  sync: {
+    overlap_seconds: number;
+    checkpoint?: string | null;
+    last_tested_at?: string | null;
+    last_started_at?: string | null;
+    last_completed_at?: string | null;
+    last_error?: string | null;
+    last_ticket_count: number;
+  };
+}
+
 export interface JiraSchemaStatus {
   status:
     | "not_initialized"

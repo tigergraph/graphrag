@@ -178,6 +178,7 @@ class JiraSyncService:
                     changed_docs, changed_comms, deleted = self._upsert_issue_records(
                         mapped, existing_hashes, existing_comment_hashes
                     )
+                    self._link_cross_source_references(mapped)
                     recovery_docs.extend(changed_docs)
                     recovery_comments.extend(changed_comms)
                     documents_loaded += len(changed_docs)
@@ -213,6 +214,7 @@ class JiraSyncService:
                         existing_comment_hashes,
                     )
                 )
+                self._link_cross_source_references(mapped)
                 pending_docs.extend(changed_docs)
                 pending_comments.extend(changed_comms)
                 documents_loaded += len(changed_docs)
@@ -631,6 +633,21 @@ class JiraSyncService:
 
         self._upsert_records(list(all_vertices.values()), all_edges)
         return changed_documents, changed_comments, comments_deleted
+
+    def _link_cross_source_references(self, mapped: list[MappedIssue]) -> None:
+        from connectors.cross_source import TigerGraphLinkGraph, link_text
+
+        graph = TigerGraphLinkGraph(self.conn)
+        for item in mapped:
+            texts = [fact.chunk.text for fact in item.facts]
+            for comment in item.comments:
+                texts.extend(chunk.text for chunk in comment.chunks)
+            link_text(
+                graph,
+                "JiraIssue",
+                item.issue_vertex_id,
+                "\n".join(texts),
+            )
 
     def _finalize_batch(
         self,

@@ -83,7 +83,7 @@ class GenerateGSQL(BaseTool):
             partial_variables={
                 # Pre-bind the Query Guidance partial; empty when no
                 # override is configured.
-                "query_guidance": self.llm.query_guidance_block,
+                "query_guidance": self.llm.query_guidance_for(question),
             },
         )
 

@@ -1127,6 +1127,8 @@ def test_schema_is_bounded():
         "JiraIssue",
         "JiraProject",
         "JiraUser",
+        "PendingRef",
+        "PendingLink",
     }
     assert {edge.name for edge in proposal.edges} == {
         JIRA_PROJECT_EDGE,
@@ -1140,6 +1142,7 @@ def test_schema_is_bounded():
         JIRA_COMMENT_AFTER_EDGE,
         JIRA_CHANGE_EDGE,
         JIRA_CHANGE_AUTHOR_EDGE,
+        "PENDING_REF",
     }
 
 
@@ -1215,8 +1218,9 @@ class SchemaConnection:
                 for vertex in proposal.vertices
             },
         }
-        self.edges = {
-            edge.name: {
+        self.edges = {}
+        for edge in proposal.edges:
+            metadata = {
                 "FromVertexTypeName": edge.pairs[0][0],
                 "ToVertexTypeName": edge.pairs[0][1],
                 "IsDirected": edge.directed,
@@ -1228,8 +1232,13 @@ class SchemaConnection:
                     for attribute in edge.attributes
                 ],
             }
-            for edge in proposal.edges
-        }
+            if len(edge.pairs) > 1:
+                metadata["FromVertexTypeName"] = "*"
+                metadata["ToVertexTypeName"] = "*"
+                metadata["EdgePairs"] = [
+                    {"From": source, "To": target} for source, target in edge.pairs
+                ]
+            self.edges[edge.name] = metadata
         self.edges["CONTAINS_ENTITY"] = {
             "FromVertexTypeName": "*",
             "ToVertexTypeName": "*",
