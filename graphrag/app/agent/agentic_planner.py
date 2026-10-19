@@ -22,6 +22,7 @@ receives the results-so-far and may append follow-up steps (bounded by the
 orchestrator).
 """
 
+import hashlib
 import json
 import logging
 import threading
@@ -39,7 +40,8 @@ logger = logging.getLogger(__name__)
 # names, edge endpoints and descriptions. The query tools still load the
 # full schema themselves.
 _SCHEMA_SUMMARY_MAX_CHARS = 12000
-# How long a cached summary is used before the schema version is read again.
+# How long a cached summary is used before the schema version and the type
+# descriptions are read again.
 _SCHEMA_RECHECK_SECONDS = 60
 _schema_cache: dict = {}
 _schema_cache_lock = threading.Lock()
@@ -79,6 +81,18 @@ def render_schema_summary(rep) -> str:
     return text
 
 
+def _descriptions_fingerprint(conn) -> str:
+    """A short hash of the graph's type descriptions, or "" when they cannot
+    be read."""
+    try:
+        from common.db.schema_utils import read_type_metadata
+        entity_descs, rel_defs = read_type_metadata(conn)
+    except Exception:
+        return ""
+    text = json.dumps([entity_descs, rel_defs], sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
 def schema_summary(conn) -> str:
     """The planner's schema summary for the graph of ``conn``.
 
@@ -97,7 +111,11 @@ def schema_summary(conn) -> str:
     try:
         from common.db.connections import get_schema_ver
         version = get_schema_ver(conn)
-        if entry and version is not None and version == entry["version"]:
+        # Descriptions can change without a schema version change (a
+        # connector names its projects after a sync, for example).
+        descriptions = _descriptions_fingerprint(conn)
+        if (entry and version is not None and version == entry["version"]
+                and descriptions == entry.get("descriptions")):
             with _schema_cache_lock:
                 entry["checked"] = now
             return entry["text"]
@@ -113,6 +131,7 @@ def schema_summary(conn) -> str:
             _schema_cache[key] = {
                 "checked": now,
                 "version": rep.schema_version if rep.schema_version is not None else version,
+                "descriptions": descriptions,
                 "text": text,
             }
         return text

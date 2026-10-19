@@ -52,11 +52,14 @@ class TestCache(unittest.TestCase):
     def setUp(self):
         ap._schema_cache.clear()
         self.conn = types.SimpleNamespace(host="h", graphname="g")
+        self.descriptions = ({"JiraProject": "A Jira project."}, {})
 
     def _summary(self, versions, now):
         with mock.patch("common.db.connections.get_schema_ver", side_effect=versions) as ver, \
              mock.patch("common.db.schema_utils.render_schema_rep",
                         side_effect=lambda c: _rep(version=versions_seen[-1])) as render, \
+             mock.patch("common.db.schema_utils.read_type_metadata",
+                        side_effect=lambda c: self.descriptions), \
              mock.patch.object(ap.time, "time", return_value=now):
             return ap.schema_summary(self.conn), ver, render
 
@@ -81,6 +84,15 @@ class TestCache(unittest.TestCase):
         self._summary([1], 1000.0)
         versions_seen = [2]
         _, ver, render = self._summary([2], 1100.0)
+        self.assertEqual(render.call_count, 1)
+
+    def test_new_descriptions_are_rebuilt(self):
+        """A connector can change a description without a schema change."""
+        global versions_seen
+        versions_seen = [1]
+        self._summary([1], 1000.0)
+        self.descriptions = ({"JiraProject": "A Jira project. Projects in this graph: GML."}, {})
+        _, ver, render = self._summary([1], 1100.0)
         self.assertEqual(render.call_count, 1)
 
     def test_read_error_keeps_the_last_summary(self):

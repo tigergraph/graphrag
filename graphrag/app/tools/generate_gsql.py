@@ -55,18 +55,16 @@ class GenerateGSQL(BaseTool):
         self.schema_ver = 0
     
     def _generate_schema_rep(self):
-        # Schema rendering is shared with generate_cypher + the
-        # question-mapping tools via ``schema_utils.render_schema_rep``;
-        # we only keep the per-instance cache here.
+        # Schema rendering is shared with the other query tools via
+        # ``schema_utils.render_schema_rep``. The text is rendered fresh on
+        # every call: type descriptions can change without a schema version
+        # change (a connector names its projects after a sync, for example).
         snap = render_schema_rep(self.conn)
-        text, schema_ver = snap.schema_rep, snap.schema_version
-        if self.schema_rep and self.schema_ver == schema_ver:
-            logger.info(f"Reusing existing schema rep for schema version {schema_ver}")
-            return self.schema_rep
-        self.schema_rep = text
-        self.schema_ver = schema_ver if schema_ver is not None else 0
+        self.schema_rep = snap.schema_rep
+        if snap.schema_version is not None:
+            self.schema_ver = snap.schema_version
         return self.schema_rep
-        
+
     def generate_gsql(self, question: str, history: Iterable[str]) -> str:
         """Generate GSQL query for the question.
         Args:
