@@ -116,10 +116,16 @@ async def regenerate_embeddings(graphname, conn):
                 skipped += 1
                 continue
             try:
-                await store.aadd_embeddings([(text, [])], [{"vertex_id": (vid, vt)}])
-                regenerated += 1
+                # The store logs an embedding or write failure and returns
+                # nothing; only a returned result means the embedding was saved.
+                written = await store.aadd_embeddings([(text, [])], [{"vertex_id": (vid, vt)}])
             except Exception as e:
                 logger.warning(f"regen_embeddings: re-embed failed {vt} {vid}: {e}")
+                written = None
+            if written:
+                regenerated += 1
+            else:
+                logger.warning(f"regen_embeddings: no embedding saved for {vt} {vid}")
                 skipped += 1
     logger.info(
         f"regenerate_embeddings({graphname}): "
@@ -191,12 +197,19 @@ async def regenerate_summaries(graphname, conn):
                 "Community", pid,
                 attributes={"description": summary, "iteration": i},
             )
-            await store.aadd_embeddings(
+            written = await store.aadd_embeddings(
                 [(summary, [])], [{"vertex_id": (pid, "Community")}]
             )
-            resummarized += 1
         except Exception as e:
             logger.warning(f"regen_summaries: upsert/embed failed {cid}: {e}")
+            skipped += 1
+            continue
+        if written:
+            resummarized += 1
+        else:
+            # The new summary is saved, but its embedding is not: the community
+            # still needs Regenerate embeddings, so it is not counted as done.
+            logger.warning(f"regen_summaries: summary saved but no embedding for {cid}")
             skipped += 1
     logger.info(
         f"regenerate_summaries({graphname}): "
