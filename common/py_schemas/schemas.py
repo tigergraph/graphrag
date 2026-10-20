@@ -79,8 +79,7 @@ class GraphRAGResponse(BaseModel):
 
 logger = logging.getLogger(__name__)
 
-# Length bound for the planner's free-text fields. Without a purpose and a
-# bound, a model can write these as an endless repetition loop (GML-2324).
+# Length bound for the planner's free-text fields (GML-2324).
 _PLAN_TEXT_MAX = 200
 
 
@@ -205,8 +204,7 @@ class ContextReview(BaseModel):
 
 
 def _require_plan_fields(schema: dict) -> None:
-    # The model must write all three: a provider may leave out optional fields,
-    # and a plan without its steps cannot run (GML-2325).
+    # All three are required: a plan without its steps cannot run (GML-2325).
     schema["required"] = ["context_review", "steps", "strategy"]
 
 

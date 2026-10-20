@@ -116,8 +116,7 @@ async def regenerate_embeddings(graphname, conn):
                 skipped += 1
                 continue
             try:
-                # The store logs an embedding or write failure and returns
-                # nothing; only a returned result means the embedding was saved.
+                # Only a returned result means the embedding was saved (GML-2345).
                 written = await store.aadd_embeddings([(text, [])], [{"vertex_id": (vid, vt)}])
             except Exception as e:
                 logger.warning(f"regen_embeddings: re-embed failed {vt} {vid}: {e}")
@@ -207,8 +206,7 @@ async def regenerate_summaries(graphname, conn):
         if written:
             resummarized += 1
         else:
-            # The new summary is saved, but its embedding is not: the community
-            # still needs Regenerate embeddings, so it is not counted as done.
+            # A summary saved without its embedding is not counted as done (GML-2345).
             logger.warning(f"regen_summaries: summary saved but no embedding for {cid}")
             skipped += 1
     logger.info(

@@ -1,8 +1,5 @@
-"""ECC regenerate actions count a vertex only when its embedding is saved.
-
-The embedding store logs an embedding or write failure and returns nothing, so
-a run that reported success could leave a vertex without an embedding.
-"""
+"""ECC regenerate actions count a vertex only when its embedding is saved
+(GML-2345)."""
 import asyncio
 import os
 import sys

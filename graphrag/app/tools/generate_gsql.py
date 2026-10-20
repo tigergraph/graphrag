@@ -55,10 +55,8 @@ class GenerateGSQL(BaseTool):
         self.schema_ver = 0
     
     def _generate_schema_rep(self):
-        # Schema rendering is shared with the other query tools via
-        # ``schema_utils.render_schema_rep``. The text is rendered fresh on
-        # every call: type descriptions can change without a schema version
-        # change (a connector names its projects after a sync, for example).
+        # Rendered fresh on every call, so description changes apply at once
+        # (GML-2331).
         snap = render_schema_rep(self.conn)
         self.schema_rep = snap.schema_rep
         if snap.schema_version is not None:

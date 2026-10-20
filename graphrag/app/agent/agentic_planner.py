@@ -111,8 +111,7 @@ def schema_summary(conn) -> str:
     try:
         from common.db.connections import get_schema_ver
         version = get_schema_ver(conn)
-        # Descriptions can change without a schema version change (a
-        # connector names its projects after a sync, for example).
+        # Descriptions can change without a schema version change (GML-2331).
         descriptions = _descriptions_fingerprint(conn)
         if (entry and version is not None and version == entry["version"]
                 and descriptions == entry.get("descriptions")):
@@ -201,9 +200,7 @@ def _sanitize(plan: Plan, ctx=None) -> Plan:
     return plan
 
 
-# A normal plan is a few hundred tokens; the cap only ends a runaway
-# generation early (GML-2324). Reasoning models spend output tokens on
-# thinking, so they get a higher floor.
+# Output cap for one plan (GML-2324); reasoning models get a higher floor.
 _PLANNER_MAX_OUTPUT_TOKENS = 4000
 _REASONING_PLANNER_MIN_OUTPUT_TOKENS = 16000
 

@@ -72,9 +72,7 @@ _HINTS = (
 )
 
 
-# Run errors that pass the check, with the query construct that causes them.
-# TigerGraph 4.3 fails a query that has STARTS WITH or CONTAINS together with
-# a null test, CASE or OPTIONAL MATCH, and its message names none of them.
+# Hints for run errors that pass the query check (GML-2341).
 _MIXED_MODE = re.compile(r"instruction mode and legacy mode", re.I)
 _NULL_TEST = re.compile(r"\bIS\s+(NOT\s+)?NULL\b", re.I)
 _RUN_HINTS = (
@@ -129,8 +127,7 @@ def check_cypher(conn, cypher: str):
 
 
 CYPHER_MAX_ATTEMPTS = 10
-# Queries that TigerGraph keeps failing with the same error stop early: the
-# generator is not getting closer, and each attempt costs a model call.
+# Generation stops when the same run error repeats this often (GML-2341).
 SAME_RUN_ERROR_LIMIT = 3
 
 
@@ -220,10 +217,8 @@ class GenerateCypher(BaseTool):
         self.schema_ver = -1
 
     def _generate_schema_rep(self):
-        # Schema rendering is shared with the other query tools via
-        # ``schema_utils.render_schema_rep``. The text is rendered fresh on
-        # every call: type descriptions can change without a schema version
-        # change (a connector names its projects after a sync, for example).
+        # Rendered fresh on every call, so description changes apply at once
+        # (GML-2331).
         snap = render_schema_rep(self.conn)
         self.schema_rep = snap.schema_rep
         if snap.schema_version is not None:

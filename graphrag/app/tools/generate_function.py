@@ -110,8 +110,7 @@ class GenerateFunction(BaseTool):
         target_edge_types = target_edge_types or []
         target_edge_attributes = target_edge_attributes or {}
 
-        # Validation accepts only registered functions. With none registered,
-        # no generated call can pass, so stop before any model call.
+        # Stop before any model call when no functions are registered (GML-2327).
         valid_function_calls = [
             x["function_header"]
             for x in (self.embedding_store.list_registered_documents(

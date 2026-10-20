@@ -93,8 +93,7 @@ def _openai_thinking(model: str) -> bool:
     )
 
 
-# Gemini 3 models are tuned to sample at temperature 1.0. Below it they can
-# loop, e.g. write a run of zeros where a JSON string should close (GML-2335).
+# Gemini 3 models loop in structured output below this temperature (GML-2335).
 GEMINI_3_TEMPERATURE = 1.0
 
 

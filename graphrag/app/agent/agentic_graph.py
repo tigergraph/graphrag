@@ -109,9 +109,8 @@ def _answer_only_is_justified(plan, question: str = "") -> bool:
     return review.coverage == "all" and review.earlier_answer != "bad" and bool(keys)
 
 
-# Words that ask for the current state. An earlier answer may be out of date
-# for such a question, so it is never reused (the planner prompt says the
-# same; this holds when a model does not follow it).
+# Words that ask for the current state: an earlier answer is not reused for
+# such a question (GML-2325).
 _CURRENT_STATE = re.compile(
     r"\b(now|right now|current|currently|latest|today|still|so far|at the moment|"
     r"up to date|again)\b", re.I)
