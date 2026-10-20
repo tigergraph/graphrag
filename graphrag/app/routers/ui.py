@@ -2916,7 +2916,7 @@ async def run_agent(
     except Exception as e:
         resp.natural_language_response = _agent_error_text(e, is_superadmin)
         # Preserve the steps the agent completed before failing so the
-        # (superuser-only) trace log shows how far it got (GML-2136), and the
+        # (superuser-only) trace log shows how far it got, and the
         # error that stopped it.
         partial_steps = getattr(agent, "_last_agent_steps", None)
         resp.query_sources = {"agent_steps": partial_steps} if partial_steps else {}

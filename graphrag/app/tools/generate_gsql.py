@@ -55,8 +55,7 @@ class GenerateGSQL(BaseTool):
         self.schema_ver = 0
     
     def _generate_schema_rep(self):
-        # Rendered fresh on every call, so description changes apply at once
-        # (GML-2331).
+        # Rendered fresh on every call, so description changes apply at once.
         snap = render_schema_rep(self.conn)
         self.schema_rep = snap.schema_rep
         if snap.schema_version is not None:

@@ -110,7 +110,7 @@ def _answer_only_is_justified(plan, question: str = "") -> bool:
 
 
 # Words that ask for the current state: an earlier answer is not reused for
-# such a question (GML-2325).
+# such a question.
 _CURRENT_STATE = re.compile(
     r"\b(now|right now|current|currently|latest|today|still|so far|at the moment|"
     r"up to date|again)\b", re.I)

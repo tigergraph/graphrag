@@ -110,7 +110,7 @@ class GenerateFunction(BaseTool):
         target_edge_types = target_edge_types or []
         target_edge_attributes = target_edge_attributes or {}
 
-        # Stop before any model call when no functions are registered (GML-2327).
+        # Stop before any model call when no functions are registered.
         valid_function_calls = [
             x["function_header"]
             for x in (self.embedding_store.list_registered_documents(

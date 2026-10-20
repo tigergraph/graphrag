@@ -93,7 +93,7 @@ def _openai_thinking(model: str) -> bool:
     )
 
 
-# Gemini 3 models loop in structured output below this temperature (GML-2335).
+# Gemini 3 models loop in structured output below this temperature.
 GEMINI_3_TEMPERATURE = 1.0
 
 

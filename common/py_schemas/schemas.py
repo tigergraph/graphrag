@@ -79,7 +79,7 @@ class GraphRAGResponse(BaseModel):
 
 logger = logging.getLogger(__name__)
 
-# Length bound for the planner's free-text fields (GML-2324).
+# Length bound for the planner's free-text fields.
 _PLAN_TEXT_MAX = 200
 
 
@@ -204,7 +204,7 @@ class ContextReview(BaseModel):
 
 
 def _require_plan_fields(schema: dict) -> None:
-    # All three are required: a plan without its steps cannot run (GML-2325).
+    # All three are required: a plan without its steps cannot run.
     schema["required"] = ["context_review", "steps", "strategy"]
 
 

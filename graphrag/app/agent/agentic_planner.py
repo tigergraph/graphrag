@@ -36,7 +36,7 @@ from tools import tool_registry as registry
 logger = logging.getLogger(__name__)
 
 # The planner decides from the schema whether a question needs structural
-# retrieval (GML-2331). It gets a compact summary: type names, attribute
+# retrieval. It gets a compact summary: type names, attribute
 # names, edge endpoints and descriptions. The query tools still load the
 # full schema themselves.
 _SCHEMA_SUMMARY_MAX_CHARS = 12000
@@ -111,7 +111,7 @@ def schema_summary(conn) -> str:
     try:
         from common.db.connections import get_schema_ver
         version = get_schema_ver(conn)
-        # Descriptions can change without a schema version change (GML-2331).
+        # Descriptions can change without a schema version change.
         descriptions = _descriptions_fingerprint(conn)
         if (entry and version is not None and version == entry["version"]
                 and descriptions == entry.get("descriptions")):
@@ -200,7 +200,7 @@ def _sanitize(plan: Plan, ctx=None) -> Plan:
     return plan
 
 
-# Output cap for one plan (GML-2324); reasoning models get a higher floor.
+# Output cap for one plan; reasoning models get a higher floor.
 _PLANNER_MAX_OUTPUT_TOKENS = 4000
 _REASONING_PLANNER_MIN_OUTPUT_TOKENS = 16000
 

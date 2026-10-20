@@ -72,7 +72,7 @@ _HINTS = (
 )
 
 
-# Hints for run errors that pass the query check (GML-2341).
+# Hints for run errors that pass the query check.
 _MIXED_MODE = re.compile(r"instruction mode and legacy mode", re.I)
 _NULL_TEST = re.compile(r"\bIS\s+(NOT\s+)?NULL\b", re.I)
 _RUN_HINTS = (
@@ -127,7 +127,7 @@ def check_cypher(conn, cypher: str):
 
 
 CYPHER_MAX_ATTEMPTS = 10
-# Generation stops when the same run error repeats this often (GML-2341).
+# Generation stops when the same run error repeats this often.
 SAME_RUN_ERROR_LIMIT = 3
 
 
@@ -217,8 +217,7 @@ class GenerateCypher(BaseTool):
         self.schema_ver = -1
 
     def _generate_schema_rep(self):
-        # Rendered fresh on every call, so description changes apply at once
-        # (GML-2331).
+        # Rendered fresh on every call, so description changes apply at once.
         snap = render_schema_rep(self.conn)
         self.schema_rep = snap.schema_rep
         if snap.schema_version is not None:

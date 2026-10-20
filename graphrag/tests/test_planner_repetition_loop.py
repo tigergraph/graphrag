@@ -7,7 +7,7 @@ try:
 except ImportError as exc:  # needs the app environment
     raise unittest.SkipTest(f"app environment unavailable: {exc}")
 
-# The cycle seen in a real trace (GML-2324), repeated as the model wrote it.
+# The cycle seen in a real trace, repeated as the model wrote it.
 _CYCLE = ("here cleanly built step by step DAG design plan configuration object "
           "instance declaration format correctly structured now ready for "
           "evaluation execution lifecycle flow initialization now complete ")
