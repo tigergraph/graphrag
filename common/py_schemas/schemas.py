@@ -13,9 +13,11 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import enum
-from typing import Dict, List, Optional, Union
+import logging
+import re
+from typing import Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 
 class ConversationTurn(BaseModel):
@@ -68,9 +70,54 @@ class GraphRAGResponse(BaseModel):
     answered_question: bool
     response_type: str
     query_sources: Dict = None
+    # The error that stopped the answer, for the trace log only. Private, so
+    # it is never serialized into the chat response or the chat history.
+    _error: Optional[str] = PrivateAttr(default=None)
 
 
 # --- Agentic engine (v2.0 deep-thinking mode) ------------------------------
+
+logger = logging.getLogger(__name__)
+
+# Length bound for the planner's free-text fields.
+_PLAN_TEXT_MAX = 200
+
+
+# A unit of 1-8 characters repeated 12+ times in a row, e.g. "2026.0000…".
+_CHAR_RUN = re.compile(r"(.{1,8}?)\1{11,}", re.S)
+
+
+def _collapse_repeats(text: str, min_words: int = 4, max_words: int = 60) -> str:
+    """Cut ``text`` at the first runaway repetition.
+
+    Two shapes are caught: a short run of characters repeated in place
+    ("2026.0000…"), cut where the run starts; and a phrase of
+    ``min_words``–``max_words`` words that repeats three times in a row,
+    keeping one copy of it.
+    """
+    run = _CHAR_RUN.search(text)
+    if run:
+        text = text[:run.start()].rstrip(" .,;:-")
+    words = text.split()
+    for i in range(len(words)):
+        for n in range(min_words, max_words + 1):
+            if i + 3 * n > len(words):
+                break
+            if words[i:i + n] == words[i + n:i + 2 * n] == words[i + 2 * n:i + 3 * n]:
+                return " ".join(words[:i + n])
+    return text
+
+
+def _short_plan_text(value, field: str):
+    """Shorten an overlong plan text instead of rejecting the whole plan."""
+    if not isinstance(value, str) or len(value) <= _PLAN_TEXT_MAX:
+        return value
+    text = _collapse_repeats(value)
+    if len(text) > _PLAN_TEXT_MAX:
+        text = text[:_PLAN_TEXT_MAX - 1].rstrip() + "…"
+    logger.warning(f"agentic plan: shortened {field} from {len(value):,} to {len(text):,} chars")
+    return text
+
 
 class PlanStep(BaseModel):
     """One step in an agentic plan DAG.
@@ -86,12 +133,107 @@ class PlanStep(BaseModel):
     args: Dict = {}
     arg_bindings: Dict[str, str] = {}
     depends_on: List[str] = []
-    rationale: str = ""
+    rationale: str = Field(
+        "",
+        description="One short sentence on why this step is needed.",
+        json_schema_extra={"maxLength": _PLAN_TEXT_MAX},
+    )
+
+    @field_validator("rationale", mode="before")
+    @classmethod
+    def _short_rationale(cls, v):
+        return _short_plan_text(v, "rationale")
+
+
+# Bounds for the planner's conversation review (hints in the schema; longer
+# values are cut, never rejected).
+_REVIEW_MAX_ITEMS = 8
+_REVIEW_ITEM_CHARS = 120
+
+
+def _short_items(value):
+    if not isinstance(value, list):
+        return value
+    return [str(v)[:_REVIEW_ITEM_CHARS] for v in value[:_REVIEW_MAX_ITEMS]]
+
+
+class ContextReview(BaseModel):
+    """The planner's review of the context it was given (## Conversation,
+    ## Graph schema and any other section), written before the steps.
+
+    It decides whether the plan may skip retrieval: only when the context
+    states every fact asked for, or the question needs no data.
+    """
+    needs_data: bool = Field(
+        True,
+        description="False only when the question needs no information at all (for example a "
+                    "calculation). True when the answer comes from the conversation or the schema.",
+    )
+    facts_asked: List[str] = Field(
+        default_factory=list,
+        description="The facts the question asks for (values, names, dates), each in a few words.",
+        json_schema_extra={"maxItems": _REVIEW_MAX_ITEMS},
+    )
+    earlier_answer: Literal["good", "bad", "none"] = Field(
+        "none",
+        description="The quality of the earlier answer you would reuse: good, bad, or none "
+                    "when no earlier answer is about this question.",
+    )
+    stated_by_context: List[str] = Field(
+        default_factory=list,
+        description="The facts from facts_asked that the context states explicitly: a GOOD "
+                    "earlier answer, the graph schema, or another section you were given.",
+        json_schema_extra={"maxItems": _REVIEW_MAX_ITEMS},
+    )
+    coverage: Literal["all", "part", "none"] = Field(
+        "none",
+        description="all: the context states every fact asked; part: some; none: no fact.",
+    )
+
+    @field_validator("facts_asked", "stated_by_context", mode="before")
+    @classmethod
+    def _short_lists(cls, v):
+        return _short_items(v)
+
+    @field_validator("earlier_answer", "coverage", mode="before")
+    @classmethod
+    def _known_value(cls, v, info):
+        allowed = {"earlier_answer": ("good", "bad", "none"), "coverage": ("all", "part", "none")}
+        v = str(v or "").strip().lower()
+        return v if v in allowed[info.field_name] else "none"
+
+
+def _require_plan_fields(schema: dict) -> None:
+    # All three are required: a plan without its steps cannot run.
+    schema["required"] = ["context_review", "steps", "strategy"]
 
 
 class Plan(BaseModel):
-    steps: List[PlanStep] = []
-    strategy: str = ""           # one-line, user-facing summary
+    # Field order is the order the model writes them: review, steps, strategy.
+    model_config = ConfigDict(json_schema_extra=_require_plan_fields)
+
+    context_review: ContextReview = Field(
+        default_factory=ContextReview,
+        description="Write this first: your review of the context you were given, before you plan.",
+    )
+    steps: List[PlanStep] = Field(
+        default_factory=list,
+        description="The plan steps, ending with the final answer step.",
+    )
+    # Steps the planner wrote that named an unknown tool and were dropped.
+    # Shown in the trace only; never part of the model's output schema.
+    _dropped_steps: list = PrivateAttr(default_factory=list)
+    strategy: str = Field(
+        "",
+        description="One short sentence (under 25 words) on the approach. "
+                    "Write it after the steps.",
+        json_schema_extra={"maxLength": _PLAN_TEXT_MAX},
+    )
+
+    @field_validator("strategy", mode="before")
+    @classmethod
+    def _short_strategy(cls, v):
+        return _short_plan_text(v, "strategy")
 
 
 class StepResult(BaseModel):

@@ -1,5 +1,34 @@
 # Changelog
 
+## [2.0.4]
+
+### Changed
+- **Agentic answers reuse what the conversation and the graph schema already hold.** The agentic engines searched again for questions the conversation had already answered, and answered questions about the knowledge base itself, such as "what data do we have", from a document search. They now answer from the conversation or the graph schema when it already holds the answer, search only for the parts it does not, and search again when an earlier answer found nothing, was incomplete, or the question asks for the current or latest state. Trace Logs show this review in the plan step.
+- **A question without an answer tells the user how to ask again.** When the retrieved information does not answer a question, or part of it, the answer says so and suggests asking again with more specific details. The fixed no-answer messages use the same wording.
+- **Failed answers show their error in Trace Logs.** When GraphRAG cannot answer, the trace ends with a step that states the error. The chat message stays generic and asks the user to rephrase the question.
+- **Trace Logs show the structured query that ran.** Each structured query step shows the query, any failed attempts with their errors, and the number of rows returned, also when the query returned no rows.
+- **Routine requests log less.** Loading conversations, opening traces and similar requests write one line to the service log instead of four, and the web server's access log is off. `LOGLEVEL=DEBUG` restores the detailed lines.
+
+### Fixed
+- **Regenerating embeddings no longer loses an embedding while reporting success.** With the OpenAI provider, a later Regenerate embeddings or Regenerate summaries run could fail to save an embedding and still count it as regenerated. The `openai` package is now held below version 3, and a vertex counts as regenerated only when its embedding is saved.
+- **Agentic plans no longer come back without steps.** A model, often Gemini, could return a plan with no steps, so nothing was retrieved. Every plan now either retrieves or answers from what the conversation and schema already hold.
+- **The agentic planner plans from the graph schema.** The planner did not know the graph's types, so it guessed from the question's wording whether a structured query would help. It now plans from the graph's schema and type descriptions, and picks up changes to them without a restart.
+- **Structured queries no longer start with a step that cannot succeed.** Each structured query first ran a step that always failed before the query was generated. That step is now skipped, saving a model call per structured query.
+- **The Trace Logs window keeps long content inside it.** A long line, such as a URL or a query, widened the window past the screen and hid the Close button. Long lines now wrap, and Download and Close stay visible.
+- **Generated graph queries succeed more often.** Questions that filter by date or ask about missing values could fail on every attempt or return wrong rows, and some queries that TigerGraph rejects were retried until all attempts were used. Each generated query is now checked by TigerGraph before it runs (TigerGraph 4.0 and later), failed checks are corrected and tried again up to `cypher_max_attempts` times, dates and missing values follow TigerGraph's rules, and queries that would change data are rejected.
+- **An empty structured query result no longer counts as data.** A query that returned no rows was treated as an answer, so the document search did not run. It now runs, in both the agentic and the classic engine.
+- **External MCP servers load again.** New images installed MCP SDK 2, and the agent then skipped every server configured on the MCP Servers page. The SDK is now held below version 2.
+- **The agentic planner and reactive agent see the most recent conversation turns.** They received the oldest turns, so a long earlier answer could hide the turns a follow-up refers to. They now receive the most recent turns.
+- **Gemini 3 planning no longer loops at temperature 0.** Gemini 3 models could repeat text in the plan instead of finishing it. Agentic planning now uses temperature 1.0 for Gemini 3 when a lower value is configured, as Google recommends; answers, knowledge-graph building and other models keep the configured temperature.
+- **Agentic planning no longer gets stuck writing its plan summary.** A model could repeat a phrase in the plan summary until it reached its output limit, which cost time and tokens and sometimes the plan. The summary is now kept short and the planner's output is capped.
+
+### Removed
+- **The `tg_run_query` and `tg_get_neighbors` agent tools.** Structured retrieval writes and runs graph queries for the agent. Custom planner or agent prompts that name these tools should drop them.
+
+### Added
+- **`cypher_max_attempts` setting.** How many times a structured graph query may be generated for one question (default `10`).
+- **`planner_max_output_tokens` setting.** The most output tokens the planner may use for one plan (default `4000`; reasoning models use at least `16000`).
+
 ## [2.0.3]
 
 ### Added

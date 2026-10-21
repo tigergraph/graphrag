@@ -39,6 +39,9 @@ from supportai.retrievers import (HybridRetriever, SimilarityRetriever,
                                   SiblingRetriever, CommunityRetriever)
 from tools import MapQuestionToSchemaException
 from typing_extensions import TypedDict
+from common.utils.query_results import is_empty_result
+from common.utils.user_messages import NO_ANSWER
+from tools.generate_cypher import CYPHER_MAX_ATTEMPTS, generate_and_run_cypher
 
 from common.logs.log import req_id_cv
 from common.metrics.prometheus_metrics import metrics as pmetrics
@@ -202,7 +205,7 @@ class TigerGraphAgentGraph:
         """
         self.emit_progress(DONE)
         state["answer"] = GraphRAGResponse(
-            natural_language_response="I'm sorry, there isn't enough context to answer your question. Please try rephrasing it.",
+            natural_language_response=NO_ANSWER,
             answered_question=False,
             response_type="error",
             query_sources={"error": True, "error_history": state["error_history"]},
@@ -360,48 +363,34 @@ class TigerGraphAgentGraph:
 
     def generate_cypher(self, state):
         """
-        Run the agent cypher generator.
+        Run the agent cypher generator: generate, check and run the query
+        (see ``generate_and_run_cypher``).
         """
         self.emit_progress("Generating the query to answer your question")
-        gen_history = []
-        response_json = None
-        cypher = None
-        json_str = None
-        response = None
-
-        for i in range(3):
-            try:
-                cypher = self.cypher_gen._run(state["question"], gen_history)
-            except ValueError as e:
-                logger.warning(f"Cypher generation failed: {e}")
-                gen_history.append(f"{i}: Error: {e}\n")
-                continue
-            response = self.db_connection.gsql(cypher)
-            response_lines = response.split("\n")
-            json_str = "\n".join(response_lines[1:])
-            try:
-                response_json = json.loads(json_str)
-                break
-            except Exception as e:
-                gen_history.append(f"{i}: {cypher}\n\tError: {json_str}\n")
-        if response_json and not self.is_query_result_empty(response_json["results"][0]):
+        attempts: list = []
+        cfg = getattr(self, "_graphrag_cfg", None) or {}
+        cypher, first = generate_and_run_cypher(
+            self.cypher_gen, self.db_connection, state["question"],
+            cfg.get("cypher_max_attempts", CYPHER_MAX_ATTEMPTS), attempts,
+        )
+        if cypher is not None and first is not None:
             state["context"] = {
-                "result": response_json["results"][0],
+                "result": first,
                 "cypher": cypher,
                 "reasoning": "The following OpenCypher query was executed to answer the question. {}".format(
                     cypher
                 ),
             }
         else:
+            last = attempts[-1] if attempts else {}
             state["context"] = {
                 "error": True,
-                "cypher": cypher,
-                "result": json_str
+                "cypher": cypher or last.get("query"),
+                "result": last.get("error") or last.get("outcome") or "",
             }
             if "error_history" not in state or state["error_history"] is None:
                 state["error_history"] = []
-            
-            error_msg = response if response else "LLM failed to produce a valid Cypher query after 3 attempts"
+            error_msg = last.get("error") or last.get("outcome") or "LLM failed to produce a valid Cypher query"
             state["error_history"].append({"error_message": error_msg, "error_step": "generate_cypher"})
 
         state["lookup_source"] = "cypher"
@@ -717,14 +706,7 @@ class TigerGraphAgentGraph:
             # honest "couldn't find" answer instead of letting the LLM
             # hallucinate from empty context.
             if isinstance(state.get("context"), dict) and state["context"].get("out_of_corpus"):
-                method = state.get("chosen_retriever") or self.supportai_retriever
-                label = self._METHOD_DISPLAY_NAMES.get(method, method)
-                ooc_msg = (
-                    "I couldn't find relevant information about this topic in "
-                    "the knowledge graph (using "
-                    f"{label} search). The corpus may not cover this question — "
-                    "try rephrasing or asking about a topic the documents discuss."
-                )
+                ooc_msg = NO_ANSWER
                 resp = GraphRAGResponse(
                     natural_language_response=ooc_msg,
                     answered_question=False,
@@ -797,7 +779,7 @@ class TigerGraphAgentGraph:
             )
         except Exception as e:
             resp = GraphRAGResponse(
-                natural_language_response="I'm sorry, I don't know the answer to that question.",
+                natural_language_response=NO_ANSWER,
                 answered_question=False,
                 response_type=state["lookup_source"],
                 query_sources={"error": True, "error_history": state["error_history"]},
@@ -904,16 +886,7 @@ class TigerGraphAgentGraph:
         """
         Check if the query result is empty or contains empty values.
         """
-        if query_result in ("", [], {}, (), set(), range(0), None):
-            return True
-
-        if isinstance(query_result, (list, set)):
-            return all(self.is_query_result_empty(item) for item in query_result)
-
-        if isinstance(query_result, dict):
-            return all(self.is_query_result_empty(v) for v in query_result.values())
-
-        return False
+        return is_empty_result(query_result)
 
     # remove halucinaton check, always return grounded
     def check_answer_for_hallucinations(self, state):

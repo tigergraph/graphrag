@@ -64,6 +64,7 @@ from common.utils.text_extractors import (
 )
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
+from common.utils.user_messages import NO_ANSWER
 from common.metrics.prometheus_metrics import metrics as pmetrics
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.utils.graph_locks import acquire_graph_lock, release_graph_lock, acquire_rebuild_lock, release_rebuild_lock, get_rebuilding_graph, get_current_operation
@@ -128,8 +129,19 @@ def _save_trace_log(message_id: str, conversation_id: str, user_query: str, resp
             result = {k: v for k, v in result.items() if k != "final_retrieval"}
             query_sources = {**query_sources, "result": result}
 
+        # The error that stopped the answer goes into the trace log only
+        # (superuser- and owner-gated), never into the chat response.
+        error = getattr(resp, "_error", None)
+        if error:
+            query_sources["agent_steps"] = list(query_sources.get("agent_steps") or []) + [{
+                "node": "error", "kind": "error", "duration_s": 0,
+                "input": {"question": user_query},
+                "output": {"error": error},
+            }]
+
         trace_data = {
             "message_id": message_id,
+            "error": error,
             "conversation_id": conversation_id,
             "username": username,
             "user_query": user_query,
@@ -2818,18 +2830,30 @@ def _is_superadmin(global_roles: list[str]) -> bool:
     return any(r in SUPERADMIN_ROLES for r in (global_roles or []))
 
 
-def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
-    # asyncio.TaskGroup wraps a failing sub-task in an ExceptionGroup whose
-    # message is only "unhandled errors in a TaskGroup (N sub-exception(s))".
-    # Unwrap to the underlying cause so the admin detail shows the real error.
+def _root_error(e: BaseException) -> BaseException:
+    """The underlying error. asyncio.TaskGroup wraps a failing sub-task in an
+    ExceptionGroup whose message is only "unhandled errors in a TaskGroup
+    (N sub-exception(s))"."""
     while isinstance(e, BaseExceptionGroup) and e.exceptions:
         e = e.exceptions[0]
+    return e
+
+
+def _trace_error_text(e: BaseException) -> str:
+    """The error as recorded in the trace log."""
+    e = _root_error(e)
+    return f"{type(e).__name__}: {e}"
+
+
+def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
+    e = _root_error(e)
     error_msg = str(e)
     if "does not exist" in error_msg or "not found" in error_msg.lower():
         return f"Error: {error_msg}. Please check the knowledge graph name and try again."
     generic = (
         "GraphRAG had an issue answering your question. "
-        "Please try again, or rephrase your prompt."
+        "Please try again, or rephrase your question with more specific "
+        "information or a narrower scope."
     )
     # Never return raw exception text to the client. It can carry sensitive
     # configuration, URLs, request fragments, or credentials, and the chat
@@ -2839,7 +2863,7 @@ def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
     if is_superadmin and error_msg:
         ref = req_id_cv.get() or "n/a"
         logger.error(f"agent error [ref={ref}]: {error_msg}")
-        return f"{generic}\n\n(Admin reference ID: {ref} — see server logs for details.)"
+        return f"{generic}\n\n(Admin reference ID: {ref}. The trace log and the server logs show the error.)"
     return generic
 
 
@@ -2874,11 +2898,12 @@ async def run_agent(
         if ws:
             agent.q.clear()
 
-    except MapQuestionToSchemaException:
+    except MapQuestionToSchemaException as e:
         resp.natural_language_response = (
-            "A schema mapping error occurred. Please try rephrasing your question."
+            NO_ANSWER
         )
         resp.query_sources = {}
+        resp._error = _trace_error_text(e)
         resp.answered_question = False
         LogWriter.warning(
             f"/{graphname}/ui/chat request_id={req_id_cv.get()} agent execution failed due to MapQuestionToSchemaException"
@@ -2891,9 +2916,11 @@ async def run_agent(
     except Exception as e:
         resp.natural_language_response = _agent_error_text(e, is_superadmin)
         # Preserve the steps the agent completed before failing so the
-        # (superuser-only) trace log shows how far it got (GML-2136).
+        # (superuser-only) trace log shows how far it got, and the
+        # error that stopped it.
         partial_steps = getattr(agent, "_last_agent_steps", None)
         resp.query_sources = {"agent_steps": partial_steps} if partial_steps else {}
+        resp._error = _trace_error_text(e)
         resp.answered_question = False
         LogWriter.warning(
             f"/{graphname}/ui/chat request_id={req_id_cv.get()} agent execution failed due to exception: {e}"

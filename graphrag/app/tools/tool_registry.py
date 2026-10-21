@@ -73,18 +73,6 @@ class CommunitySearchArgs(BaseModel):
     with_chunk: Optional[bool] = Field(default=None, description="Also return chunks linked to the communities.")
 
 
-class TgRunQueryArgs(BaseModel):
-    query_text: str = Field(description="A complete interpreted GSQL query body to execute (read-only).")
-
-
-class TgGetNeighborsArgs(BaseModel):
-    vertex_type: str = Field(description="Vertex type of the starting vertex.")
-    vertex_id: str = Field(description="Id of the starting vertex.")
-    edge_type: Optional[str] = Field(default=None, description="Restrict expansion to this edge type.")
-    target_vertex_type: Optional[str] = Field(default=None, description="Restrict neighbors to this vertex type.")
-    limit: Optional[int] = Field(default=None, description="Max neighbors to return.")
-
-
 @dataclass
 class ToolSpec:
     """One callable tool the planner / react loop can dispatch.
@@ -198,29 +186,6 @@ _register(
     "Search thematic community summaries. Use for broad / aggregative / 'overall' questions.",
     CommunitySearchArgs, gt.community_search,
 )
-
-# tigergraph-mcp read tools — registered only when the package is
-# installed (import-guarded). These run as the logged-in user via the
-# per-request connection shim in tg_mcp_tools.
-try:
-    from tools import tg_mcp_tools as tgm
-    if tgm.AVAILABLE:
-        _register(
-            "tg_run_query",
-            "Execute an interpreted (dynamic) read-only GSQL query against the graph "
-            "and return the rows. Use when a precise graph query is needed.",
-            TgRunQueryArgs, tgm.tg_run_query,
-        )
-        _register(
-            "tg_get_neighbors",
-            "Return the neighbors of a given vertex (optionally filtered by edge / target "
-            "type) without writing GSQL.",
-            TgGetNeighborsArgs, tgm.tg_get_neighbors,
-        )
-        logger.info("tigergraph-mcp read tools registered")
-except Exception as exc:  # pragma: no cover - import guard
-    logger.info(f"tigergraph-mcp tools not registered: {exc}")
-
 
 def tool_names(ctx=None) -> list[str]:
     return list(_merged_specs(ctx).keys())

@@ -33,6 +33,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.output_parsers import PydanticOutputParser
 
 from agent.agentic_executor import cap_for_trace, retrieved_chunk_ids, _usage_since
+from agent.conversation_window import recent_conversation
 from common.llm_services.base_llm import get_collected_usage
 from common.py_schemas import GraphRAGAnswerOutput, GraphRAGResponse
 from tools import tool_registry as registry
@@ -51,7 +52,6 @@ _TOOL_LABELS = {
     "graphrag__contextual_search": "Searching the documents",
     "graphrag__similarity_search": "Searching the documents",
     "graphrag__community_search": "Searching community summaries",
-    "tg_run_query": "Running a graph query",
 }
 
 
@@ -70,7 +70,7 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
     # other tools (e.g. external MCP tools) skip the schema read entirely.
     user = (
         f"## Question\n{question}\n\n"
-        f"## Conversation\n{json.dumps(conversation or [])[:2000]}"
+        f"## Conversation\n{recent_conversation(conversation)}"
     )
     # Customizable system prompt (fixed rules + user "Additional Instructions");
     # the default lives in base_llm.
@@ -168,11 +168,15 @@ def run_react(ctx, llm, question, conversation=None) -> GraphRAGResponse:
                 content=json.dumps(obs, default=str),
                 tool_call_id=tc_id or "",
             ))
-            per_call_traces.append({
+            call_trace = {
                 "tool": name, "args": cap_for_trace(args),
                 "ok": bool(out.get("ok")), "summary": out.get("summary", ""),
                 "duration_s": tool_dur,
-            })
+            }
+            for key in ("query", "attempts"):
+                if out.get(key):
+                    call_trace[key] = out[key]
+            per_call_traces.append(call_trace)
             # Record the chunk ids this tool fetched (the agent's bookkeeping,
             # harvested from the context the tool returned), de-duped in order.
             for cid in retrieved_chunk_ids(out.get("context")):

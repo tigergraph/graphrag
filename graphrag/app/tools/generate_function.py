@@ -33,6 +33,7 @@ from .validation_utils import (
     InvalidFunctionCallException,
     MapQuestionToSchemaException,
     NoDocumentsFoundException,
+    NoRegisteredFunctionsException,
     validate_function_call,
     validate_schema,
 )
@@ -100,6 +101,26 @@ class GenerateFunction(BaseTool):
                 The dictionary of edge attributes the question mentions, in the form {"edge_type": ["attr1", "attr2"]}
         """
         LogWriter.info(f"request_id={req_id_cv.get()} ENTRY GenerateFunction._run()")
+
+        # The mapping's optional fields can arrive as None (e.g. no edges in
+        # the question); every use below expects a list or dict.
+        target_vertex_types = target_vertex_types or []
+        target_vertex_attributes = target_vertex_attributes or {}
+        target_vertex_ids = target_vertex_ids or {}
+        target_edge_types = target_edge_types or []
+        target_edge_attributes = target_edge_attributes or {}
+
+        # Stop before any model call when no functions are registered.
+        valid_function_calls = [
+            x["function_header"]
+            for x in (self.embedding_store.list_registered_documents(
+                output_fields=["function_header"]
+            ) or [])
+        ]
+        if not valid_function_calls:
+            raise NoRegisteredFunctionsException(
+                "No pyTigerGraph functions are registered in the embedding store."
+            )
 
         if target_vertex_types == [] and target_edge_types == []:
             return {
@@ -170,13 +191,6 @@ class GenerateFunction(BaseTool):
 
         # Prioritize pyTigerGraph docs over custom docs
         docs = pytg_docs + custom_docs
-
-        valid_function_calls = [
-            x["function_header"]
-            for x in self.embedding_store.list_registered_documents(
-                output_fields=["function_header"]
-            )
-        ]
 
         if len(docs) == 0:
             LogWriter.warning(f"request_id={req_id_cv.get()} WARN no documents found")
