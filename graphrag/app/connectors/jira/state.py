@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from urllib.parse import urlparse
 
 from common.config import _config_file_lock, validate_graphname
-
-from connectors.source_file import replace_sources, source_ids
 
 from .config import JiraDataSource, JiraSourceFile, JiraSyncState
 
@@ -40,11 +39,23 @@ class JiraSourceStore:
         return JiraSourceFile.model_validate(payload)
 
     def save(self, graphname: str, config: JiraSourceFile) -> None:
+        path = self.path(graphname)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         payload = config.model_dump(mode="json")
         for source in payload["sources"]:
             if not source["connection"].get("api_token"):
                 source["connection"].pop("api_token", None)
-        replace_sources(self.path(graphname), "sources", payload["sources"])
+        with _config_file_lock:
+            try:
+                with tmp.open("w", encoding="utf-8") as stream:
+                    json.dump(payload, stream, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(tmp, path)
+            finally:
+                if tmp.exists():
+                    tmp.unlink()
 
     def list(self, graphname: str, *, redact: bool = True) -> list[dict]:
         sources = self.load(graphname).sources
@@ -57,8 +68,6 @@ class JiraSourceStore:
         raise KeyError(source_id)
 
     def upsert(self, graphname: str, submitted: JiraDataSource) -> JiraDataSource:
-        if submitted.id in source_ids(self.path(graphname), "zendesk_sources"):
-            raise ValueError("id is already used by a Zendesk data source")
         hostname = urlparse(submitted.connection.site_url).hostname
         if hostname and hostname.lower() in NON_TENANT_ATLASSIAN_HOSTS:
             raise ValueError(
