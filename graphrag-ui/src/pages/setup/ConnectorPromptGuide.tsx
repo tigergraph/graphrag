@@ -194,8 +194,9 @@ const ConnectorPromptGuide: React.FC<{ connectorType: string }> = ({
             Multiple sources
           </h4>
           <p className="mt-1 text-xs leading-5 text-gray-600 dark:text-gray-400">
-            A question naming Jira and Zendesk loads both sets of guidance.
-            Relationship questions also receive CROSS_SOURCE_LINK rules.
+            Jira summaries automatically include Zendesk references visible in
+            Jira. When the Zendesk source is also ingested, those references
+            resolve through CROSS_SOURCE_LINK to the full ticket details.
           </p>
         </div>
       </div>

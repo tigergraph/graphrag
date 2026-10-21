@@ -10,6 +10,9 @@ from __future__ import annotations
 import re
 
 _JIRA_KEY = re.compile(r"\b[A-Za-z][A-Za-z0-9]+-\d+\b")
+_SPACED_JIRA_KEY = re.compile(
+    r"\b([A-Za-z][A-Za-z0-9]+)\s*-\s*(\d+)\b"
+)
 _ZENDESK_URL = re.compile(
     r"zendesk\.com/\S*?/tickets/\d+|\bzendesk\b",
     re.IGNORECASE,
@@ -40,7 +43,9 @@ _GUIDANCE = {
             "changes. Include the exact issue key in retrieval questions.\n"
             "- For a broad issue summary, plan structural retrieval for the "
             "current record, assignee, reporter, and project, plus hybrid "
-            "search for the description and recent activity. For history or "
+            "search for the description and recent activity. Include a focused "
+            "structural traversal for Jira-visible ZendeskTicketRef records and "
+            "resolved ZendeskTicket records. For history or "
             "who-did-what questions, retrieve JiraChange events and comments "
             "with their authors. For release questions, retrieve fix_versions, "
             "due, status, and resolution plus any release text in passages.\n"
@@ -65,7 +70,11 @@ _GUIDANCE = {
             "created, and changer via JIRA_HAS_CHANGE and JIRA_CHANGE_BY.\n"
             "- Query JIRA_HAS_PARENT and JIRA_LINKS_TO only when requested, in "
             "a separate traversal. Return the related issue_key and requested "
-            "edge attributes rather than the edge object."
+            "edge attributes rather than the edge object.\n"
+            "- For linked support records, traverse JIRA_REFERENCES_ZENDESK to "
+            "ZendeskTicketRef and CROSS_SOURCE_LINK to ZendeskTicket. Return "
+            "ticket_id, source_hint, URL, label, subject, and status fields "
+            "that actually exist."
         ),
         "answer": (
             "## Jira answer guidance\n"
@@ -78,7 +87,9 @@ _GUIDANCE = {
             "say the name is unavailable.\n"
             "- A broad question should include the issue key, summary, URL, "
             "current fields, description, and relevant recent comments or "
-            "changes. A history question should present changes in time order "
+            "changes. Identify retrieved ZendeskTicketRef records as "
+            "Jira-visible references and ZendeskTicket records as full "
+            "Zendesk tickets. A history question should present changes in time order "
             "and state the current status. A release question must not invent "
             "a release when fix_versions, due date, and supporting text do not "
             "provide one.\n"
@@ -168,9 +179,16 @@ _CLARIFY = (
     "not apply either connector's rules until the source is known."
 )
 
+def normalize_connector_question(text: str) -> str:
+    """Normalize qualified connector identifiers without changing bare ids."""
+    return _SPACED_JIRA_KEY.sub(
+        lambda match: f"{match.group(1).upper()}-{match.group(2)}",
+        text or "",
+    )
+
 
 def selected_connectors(question: str) -> set[str]:
-    text = question or ""
+    text = normalize_connector_question(question)
     selected: set[str] = set()
     if _JIRA_KEY.search(text) or re.search(r"\bjira\b", text, re.IGNORECASE):
         selected.add("jira")
@@ -203,6 +221,8 @@ def allows_type(type_name: str, selected: set[str]) -> bool:
     if name in {"Document", "DocumentChunk", "Content", "PendingRef", "PendingLink"}:
         return True
     if "jira" in selected and name.startswith("Jira"):
+        return True
+    if "jira" in selected and name in {"ZendeskTicketRef", "ZendeskTicket"}:
         return True
     if "zendesk" in selected and name.startswith("Zendesk"):
         return True
