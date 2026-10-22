@@ -681,11 +681,26 @@ def test_mapper_writes_small_schema_and_searchable_document():
         JIRA_COMMENT_AFTER_EDGE,
     }
     fact_text = "\n".join(fact.chunk.text for fact in mapped.facts)
+    description_text = mapped.facts[0].chunk.text
+    issue_vertex = next(
+        vertex
+        for vertex in mapped.vertices
+        if vertex.vertex_type == "JiraIssue"
+        and vertex.attributes.get("issue_key") == "PAY-123"
+    )
     assert fact_text.startswith("Issue: PAY-123")
+    assert "Summary: Login timeout" in description_text
+    assert "Timeout at checkout" in description_text
+    assert issue_vertex.attributes["created"] == "2026-09-01 10:00:00"
+    assert issue_vertex.attributes["updated"] == "2026-09-20 14:03:00"
+    assert "Created:" not in fact_text
+    assert "Assignee:" not in fact_text
+    assert "Reporter:" not in fact_text
+    assert "Project:" not in fact_text
     assert "Login timeout" in fact_text
     assert "Increase the gateway timeout." not in fact_text
     assert "1970" not in fact_text
-    assert "Fix versions" not in fact_text
+    assert "Fix Versions" not in fact_text
     comment_vertex = next(
         vertex
         for vertex in mapped.vertices

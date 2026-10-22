@@ -569,16 +569,11 @@ class JiraIssueMapper:
         facts = self._facts(
             issue_vertex_id,
             [
-                (
-                    self._record_text(
-                        issue_key=issue_key,
-                        issue_url=issue_url,
-                        fields=fields,
-                        project=project,
-                    ),
-                    (),
+                *self._description_parts(
+                    issue_key,
+                    str(issue_attrs.get("summary") or ""),
+                    description,
                 ),
-                *self._description_parts(issue_key, description),
                 *change_parts,
             ],
         )
@@ -630,59 +625,22 @@ class JiraIssueMapper:
             return cleaned
         return f"{prefix}\n{cleaned}"
 
-    def _record_text(
-        self,
-        *,
-        issue_key: str,
-        issue_url: str,
-        fields: dict[str, Any],
-        project: dict[str, Any],
-    ) -> str:
-        status = fields.get("status") or {}
-        status_category = status.get("statusCategory") or {}
-        issue_type = fields.get("issuetype") or {}
-        priority = fields.get("priority") or {}
-        resolution = fields.get("resolution") or {}
-        project_line = (
-            f"{project.get('key') or ''} {project.get('name') or ''}".strip()
-        )
-        status_name = str(status.get("name") or "")
-        category = str(status_category.get("key") or "")
-        status_line = (
-            f"{status_name} ({category})".strip()
-            if category
-            else status_name
-        )
-        lines = [f"Issue: {issue_key}"]
-        for label, value in (
-            ("Summary", fields.get("summary")),
-            ("URL", issue_url),
-            ("Project", project_line),
-            ("Type", issue_type.get("name")),
-            ("Status", status_line),
-            ("Priority", priority.get("name")),
-            ("Resolution", resolution.get("name")),
-            ("Assignee", _display_name(fields.get("assignee")) or "Unassigned"),
-            ("Reporter", _display_name(fields.get("reporter"))),
-            ("Labels", _comma_names(fields.get("labels"))),
-            ("Components", _comma_names(fields.get("components"))),
-            ("Fix versions", _comma_names(fields.get("fixVersions"))),
-            ("Due", _datetime(fields.get("duedate"))),
-            ("Updated", _datetime(fields.get("updated"))),
-        ):
-            text = str(value or "").strip()
-            if text:
-                lines.append(f"{label}: {text}")
-        return "\n".join(lines)
-
     def _description_parts(
         self,
         issue_key: str,
+        summary: str,
         description: str,
     ) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
-        if not description or not description.strip():
+        summary = summary.strip()
+        description = description.strip()
+        if not summary and not description:
             return []
-        source_text = f"Issue: {issue_key}\nDescription:\n{description.strip()}"
+        lines = [f"Issue: {issue_key}"]
+        if summary:
+            lines.append(f"Summary: {summary}")
+        if description:
+            lines.append(f"Description:\n{description}")
+        source_text = "\n".join(lines)
         return [
             (self._lead_with_issue(issue_key, str(piece)), ())
             for piece in self.comment_chunker.chunk(source_text)
