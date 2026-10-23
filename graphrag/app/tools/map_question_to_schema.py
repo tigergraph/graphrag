@@ -96,7 +96,7 @@ class MapQuestionToSchema(BaseTool):
                 # picks up the current per-graph / global override.
                 # ``query_guidance_block`` is empty when no override is
                 # configured, leaving the template effectively unchanged.
-                "query_guidance": self.llm.query_guidance_block,
+                "query_guidance": self.llm.query_guidance_for(query),
             },
         )
 
@@ -135,7 +135,14 @@ class MapQuestionToSchema(BaseTool):
             d = desc_map.get(name)
             return f"{name} ({d})" if d else name
 
-        vertices_for_llm = [_label(v, entity_descs) for v in self.vertices]
+        from connectors.prompt_selection import allows_type, selected_connectors
+
+        selected = selected_connectors(query)
+        vertices_for_llm = [
+            _label(v, entity_descs)
+            for v in self.vertices
+            if not selected or allows_type(v, selected)
+        ]
         edges_for_llm = [_label(e, rel_defs) for e in self.edges]
 
         parsed_q = self.llm.invoke_with_parser(

@@ -59,7 +59,11 @@ class TigerGraphAgentGenerator:
 
         answer_parser = PydanticOutputParser(pydantic_object=GraphRAGAnswerOutput)
         prompt = PromptTemplate(
-            template=self.llm.chatbot_response_prompt,
+            template=self.llm.prompt_for(
+                "chatbot_response.txt",
+                question,
+                "answer",
+            ),
             input_variables=["question", "context", "query"],
             partial_variables={
                 "format_instructions": answer_parser.get_format_instructions()

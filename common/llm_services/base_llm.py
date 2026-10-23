@@ -294,7 +294,7 @@ class LLM_Model:
             "_AGENTIC_TRIAGE_SYSTEM", "_AGENTIC_TRIAGE_USER_DEFAULT"),
     }
 
-    def _compose_prompt(self, filename):
+    def _compose_prompt(self, filename, extra_user=""):
         """Inject the resolved user portion into the ``{user_prompt}`` slot of
         the hardcoded system prompt for *filename*.
 
@@ -317,7 +317,19 @@ class LLM_Model:
         ):
             user_portion = getattr(self, def_attr, "")
         user_portion = sanitize_user_portion(user_portion).strip()
+        extra = sanitize_user_portion(extra_user or "").strip()
+        if extra:
+            user_portion = f"{user_portion}\n\n{extra}".strip()
         return system_prompt.replace("{user_prompt}", user_portion)
+
+    def prompt_for(self, filename, question, step):
+        """Compose one existing prompt with guidance for this question and step."""
+        from connectors.prompt_selection import guidance_for
+
+        return self._compose_prompt(
+            filename,
+            extra_user=guidance_for(question, step),
+        )
 
     def _is_legacy_full_prompt(self, on_disk_text, system_prompt):
         """Detect a pre-split full-prompt override (vs. a clean user portion).
@@ -999,7 +1011,9 @@ You are an expert in OpenCypher. Generate the best query that retrieves the answ
 - The query must return both the entity from the question AND the requested data.
 - Validate syntax before responding.
 - Aliases must NOT match vertex / edge types, operator / function names, or reserved keywords. Use multi-word underscore identifiers.
-- Output ONLY the OpenCypher query — no explanation."""
+- Output ONLY the OpenCypher query — no explanation.
+
+{query_guidance}"""
 
     @property
     def generate_gsql_prompt(self):
@@ -1241,6 +1255,7 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
 - Before building the plan, check whether the question is self-contained: can it be fully understood without reading ## Conversation? If the subject, entity, or topic is not named explicitly in the question, find the most recent relevant entity from ## Conversation and substitute its full name in every step's args. If ## Conversation has multiple candidates, use the most recent one (a genuinely ambiguous reference is clarified with the user before planning).
 - When a question has multiple clauses, assign each clause to its own retrieval step. If another clause still needs passages or typed graph facts after one is covered, plan hybrid/community/structural for that clause too.
 - Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
+- Route business-key lookups (for example Jira keys such as `ABC-123` or Zendesk ticket IDs) to graphrag__structural_retrieve and preserve the user's wording.
 - Use BOTH structural and unstructured kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
 - Prefer the smallest plan that will work. Trivial/greeting questions need only the final answer step.
 - Tabular / numeric questions (a specific value, a row, a column total, a ranking, or a year-over-year comparison from a table or chart): prefer graphrag__contextual_search or graphrag__hybrid_search with top_k>=10 (these return atomic table chunks that preserve full row/column structure); avoid graphrag__similarity_search alone; quote any specific table label, column header, year, or unit from the question (e.g. "ROE 2023"); for "compare X across years/regions/categories" set top_k>=15."""
@@ -1599,6 +1614,16 @@ Example output (illustrative — pick names that fit your documents):
             "## Domain Hints\n"
             f"{text}\n"
         )
+
+    def query_guidance_for(self, question: str) -> str:
+        """Existing query guidance plus the connector guidance for this question."""
+        from connectors.prompt_selection import guidance_for
+
+        base = self.query_guidance_block
+        extra = guidance_for(question, "query")
+        if not extra:
+            return base
+        return f"{base}\n{extra}".strip()
 
     # Generation-style prompt: ends with a "## Standalone Question" cue the model
     # continues from, so the user portion + Authority sit ABOVE the inputs.
