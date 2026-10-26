@@ -21,6 +21,7 @@ import { safeJson } from "@/utils/safeJson";
 import { pauseIdleTimer, pingIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
 import type { JiraSchemaStatus, JiraSource } from "@/types/dataSources";
 import ConnectorPromptGuide from "@/pages/setup/ConnectorPromptGuide";
+import ZendeskSourcesCard from "@/pages/setup/ZendeskSourcesCard";
 
 const editingSourceKey = (graph: string) =>
   `graphrag:jira-editing-source:${graph}`;
@@ -973,6 +974,7 @@ const DataSourcesConfig: React.FC = () => {
             </Button>
           </div>
         </div>
+        <ZendeskSourcesCard graph={selectedGraph} />
       </div>
 
       <Dialog open={jiraDialogOpen} onOpenChange={setJiraDialogOpen}>

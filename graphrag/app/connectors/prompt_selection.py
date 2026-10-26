@@ -43,9 +43,9 @@ _GUIDANCE = {
             "changes. Include the exact issue key in retrieval questions.\n"
             "- For a broad issue summary, plan structural retrieval for the "
             "current record, assignee, reporter, and project, plus hybrid "
-            "search for the description and recent activity. Include a focused "
-            "structural traversal for Jira-visible ZendeskTicketRef records and "
-            "resolved ZendeskTicket records. For history or "
+            "search for the description and recent activity. When the question "
+            "asks for a linked Zendesk ticket, traverse ZENDESK_LINKS_TO_JIRA "
+            "from ZendeskTicket to this JiraIssue. For history or "
             "who-did-what questions, retrieve JiraChange events and comments "
             "with their authors. For release questions, retrieve fix_versions, "
             "due, status, and resolution plus any release text in passages.\n"
@@ -71,10 +71,9 @@ _GUIDANCE = {
             "- Query JIRA_HAS_PARENT and JIRA_LINKS_TO only when requested, in "
             "a separate traversal. Return the related issue_key and requested "
             "edge attributes rather than the edge object.\n"
-            "- For linked support records, traverse JIRA_REFERENCES_ZENDESK to "
-            "ZendeskTicketRef and CROSS_SOURCE_LINK to ZendeskTicket. Return "
-            "ticket_id, source_hint, URL, label, subject, and status fields "
-            "that actually exist."
+            "- For a linked Zendesk ticket, traverse ZENDESK_LINKS_TO_JIRA from "
+            "ZendeskTicket to JiraIssue. Return ticket_id, subject, status, "
+            "and url. Do not join issue_key to a number found in text."
         ),
         "answer": (
             "## Jira answer guidance\n"
@@ -87,9 +86,9 @@ _GUIDANCE = {
             "say the name is unavailable.\n"
             "- A broad question should include the issue key, summary, URL, "
             "current fields, description, and relevant recent comments or "
-            "changes. Identify retrieved ZendeskTicketRef records as "
-            "Jira-visible references and ZendeskTicket records as full "
-            "Zendesk tickets. A history question should present changes in time order "
+            "changes. A linked Zendesk ticket is a ZendeskTicket reached by "
+            "ZENDESK_LINKS_TO_JIRA. If that edge is absent, say no Zendesk "
+            "link was ingested. A history question should present changes in time order "
             "and state the current status. A release question must not invent "
             "a release when fix_versions, due date, and supporting text do not "
             "provide one.\n"
@@ -101,7 +100,8 @@ _GUIDANCE = {
         "planner": (
             "## Zendesk guidance\n"
             "Apply this section only to ZendeskTicket, ZendeskComment, "
-            "ZendeskUser, ZENDESK_REQUESTED_BY, and ZENDESK_COMMENT_ON.\n"
+            "ZendeskUser, ZENDESK_REQUESTED_BY, ZENDESK_COMMENT_ON, and "
+            "ZENDESK_LINKS_TO_JIRA.\n"
             "- A Zendesk ticket is identified by its ticket_id together with "
             "the configured Zendesk source. Do not apply Jira issue-key rules "
             "or rewrite a ticket number as a Jira key. A bare ticket number is "
@@ -117,6 +117,10 @@ _GUIDANCE = {
             "conversation. For status or requester questions, use structural "
             "retrieval. For what-happened or discussion questions, combine the "
             "ticket state with relevant comment passages.\n"
+            "- A link to Jira is ZENDESK_LINKS_TO_JIRA from ZendeskTicket to "
+            "JiraIssue. Use it only when the question asks how the ticket "
+            "relates to a Jira issue. Do not invent a link from a key, URL, "
+            "or number in the description or a comment.\n"
             "- Do not request assignee, priority, dates, tags, or other fields "
             "that are not present in the installed Zendesk schema."
         ),
@@ -128,8 +132,9 @@ _GUIDANCE = {
             "- Retrieve requester user_id and display_name through "
             "ZENDESK_REQUESTED_BY. Retrieve comment_id and body from "
             "ZendeskComment through ZENDESK_COMMENT_ON.\n"
-            "- A Zendesk ticket number is not a Jira issue key. Do not query "
-            "JiraIssue unless the question explicitly selects Jira too."
+            "- A Zendesk ticket number is not a Jira issue key. Traverse "
+            "ZENDESK_LINKS_TO_JIRA only when the question asks for the linked "
+            "Jira issue. Do not infer that edge from text."
         ),
         "answer": (
             "## Zendesk answer guidance\n"
@@ -150,7 +155,7 @@ _CROSS = {
     "planner": (
         "## Jira and Zendesk relationship guidance\n"
         "Plan focused retrievals for both records and traverse "
-        "CROSS_SOURCE_LINK between JiraIssue and ZendeskTicket. Retrieve each "
+        "ZENDESK_LINKS_TO_JIRA from ZendeskTicket to JiraIssue. Retrieve each "
         "record's current structured fields and use source-specific hybrid "
         "search only when description or comment evidence is needed. The edge "
         "must exist; do not infer a relationship from similar numbers, titles, "
@@ -158,16 +163,16 @@ _CROSS = {
     ),
     "query": (
         "## Jira and Zendesk relationship query guidance\n"
-        "Traverse CROSS_SOURCE_LINK only between JiraIssue and ZendeskTicket. "
+        "Traverse ZENDESK_LINKS_TO_JIRA from ZendeskTicket to JiraIssue. "
         "Match each endpoint with its own identifier and return named fields "
         "from both endpoints. Do not join issue_key to ticket_id and do not "
         "infer an edge from matching text."
     ),
     "answer": (
         "## Jira and Zendesk relationship answer guidance\n"
-        "If CROSS_SOURCE_LINK is present, identify both records and explain "
+        "If ZENDESK_LINKS_TO_JIRA is present, identify both records and explain "
         "their source-specific facts separately before describing the link. "
-        "If the edge is absent, say that no explicit cross-source link was "
+        "If the edge is absent, say that no explicit Zendesk Jira link was "
         "found. Do not claim a relationship from similar content alone."
     ),
 }
@@ -218,13 +223,12 @@ def guidance_for(question: str, step: str) -> str:
 def allows_type(type_name: str, selected: set[str]) -> bool:
     """Keep core types plus the vertex types owned by the selected connectors."""
     name = type_name.split(" ", 1)[0]
-    if name in {"Document", "DocumentChunk", "Content", "PendingRef", "PendingLink"}:
+    if name in {"Document", "DocumentChunk", "Content"}:
         return True
-    if "jira" in selected and name.startswith("Jira"):
+    zendesk_types = {"ZendeskTicket", "ZendeskUser", "ZendeskComment"}
+    if "jira" in selected and (name.startswith("Jira") or name == "ZendeskTicket"):
         return True
-    if "jira" in selected and name in {"ZendeskTicketRef", "ZendeskTicket"}:
-        return True
-    if "zendesk" in selected and name.startswith("Zendesk"):
+    if "zendesk" in selected and (name in zendesk_types or name == "JiraIssue"):
         return True
     if not selected:
         return True

@@ -76,7 +76,7 @@ A Zendesk ticket is a ZendeskTicket vertex. Its id is zendesk:<subdomain>:ticket
 - Structural (graphrag__structural_retrieve): ticket_id, subject, status, and url. The requester is a ZendeskUser reached by ZENDESK_REQUESTED_BY. Comment text is ZendeskComment.body reached by ZENDESK_COMMENT_ON.
 - Unstructured (graphrag__hybrid_search): chunks for the subject, description, and comments. A chunk starts with the ticket id.
 
-When the question names a Jira issue and a Zendesk ticket, retrieve both and follow CROSS_SOURCE_LINK between JiraIssue and ZendeskTicket. Do not treat a ticket number as a Jira issue key.
+When the question names a Jira issue and a Zendesk ticket, retrieve both and follow ZENDESK_LINKS_TO_JIRA from ZendeskTicket to JiraIssue. Do not treat a ticket number as a Jira issue key, and do not infer a link from a URL or number in the description.
 
 If the question says ticket, issue, status, or assignee and does not say whether it means Jira or Zendesk, ask which source the user means.`;
 
@@ -88,7 +88,7 @@ const GUIDES: Record<string, ConnectorGuide> = {
     points: [
       "A Zendesk ticket id is not a Jira issue key. Keep the two records separate.",
       "Structural search returns the ticket, requester, and comment records. Hybrid search returns the description and comment text.",
-      "A question that names both a Jira issue and a Zendesk ticket should follow CROSS_SOURCE_LINK.",
+      "A question that names both a Jira issue and a Zendesk ticket should follow ZENDESK_LINKS_TO_JIRA from the ticket to the issue.",
       "If the question could mean either source, ask the user which one they mean.",
     ],
     examples: [
@@ -194,9 +194,9 @@ const ConnectorPromptGuide: React.FC<{ connectorType: string }> = ({
             Multiple sources
           </h4>
           <p className="mt-1 text-xs leading-5 text-gray-600 dark:text-gray-400">
-            Jira summaries automatically include Zendesk references visible in
-            Jira. When the Zendesk source is also ingested, those references
-            resolve through CROSS_SOURCE_LINK to the full ticket details.
+            A Zendesk ticket links to a Jira issue only through
+            ZENDESK_LINKS_TO_JIRA, and only when Zendesk's Jira integration
+            lists that pair. A matching number or URL in the text is not a link.
           </p>
         </div>
       </div>
