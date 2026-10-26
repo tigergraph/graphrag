@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from common.db.schema_utils import SchemaProposal, read_existing_schema
+from common.db.schema_utils import SchemaProposal
+from connectors.schema_status import evaluate_proposal
 
 
 JIRA_PROJECT_EDGE = "JIRA_BELONGS_TO"
@@ -20,32 +21,14 @@ JIRA_CHANGE_EDGE = "JIRA_HAS_CHANGE"
 JIRA_CHANGE_AUTHOR_EDGE = "JIRA_CHANGE_BY"
 
 
-def _attribute_types(metadata: dict[str, Any]) -> dict[str, str]:
-    attributes: dict[str, str] = {}
-    primary_id = (metadata.get("PrimaryId") or {}).get("AttributeName")
-    for attribute in metadata.get("Attributes") or []:
-        name = attribute.get("AttributeName")
-        if not name or name == primary_id:
-            continue
-        attribute_type = (
-            (attribute.get("AttributeType") or {}).get("Name") or "STRING"
-        )
-        attributes[str(name).casefold()] = str(attribute_type).upper()
-    return attributes
-
-
-def _edge_pairs(metadata: dict[str, Any]) -> set[tuple[str, str]]:
-    pairs: set[tuple[str, str]] = set()
-    source = metadata.get("FromVertexTypeName")
-    target = metadata.get("ToVertexTypeName")
-    if source and target and source != "*" and target != "*":
-        pairs.add((str(source).casefold(), str(target).casefold()))
-    for pair in metadata.get("EdgePairs") or []:
-        source = pair.get("From")
-        target = pair.get("To")
-        if source and target:
-            pairs.add((str(source).casefold(), str(target).casefold()))
-    return pairs
+_CONTAINS_ENTITY_PAIRS = (
+    ("CONTAINS_ENTITY", "Document", "JiraIssue"),
+    ("CONTAINS_ENTITY", "DocumentChunk", "JiraIssue"),
+    ("CONTAINS_ENTITY", "Document", "JiraComment"),
+    ("CONTAINS_ENTITY", "DocumentChunk", "JiraComment"),
+    ("CONTAINS_ENTITY", "Document", "JiraChange"),
+    ("CONTAINS_ENTITY", "DocumentChunk", "JiraChange"),
+)
 
 
 def jira_schema_proposal() -> SchemaProposal:
@@ -214,100 +197,8 @@ def jira_schema_proposal() -> SchemaProposal:
 
 def jira_schema_status(conn) -> dict[str, Any]:
     """Inspect whether the one current Jira schema is fully installed."""
-    proposal = jira_schema_proposal()
-    existing = read_existing_schema(conn)
-    conflicts: list[str] = []
-    missing_vertices: list[str] = []
-    missing_edges: list[str] = []
-    missing_pairs: list[str] = []
-
-    required_core = ("Document", "DocumentChunk", "Content")
-    missing_core = [name for name in required_core if not existing.has_vertex(name)]
-    required_core_edges = ("CONTAINS_ENTITY", "HAS_CHILD", "HAS_CONTENT")
-    missing_core_edges = [
-        name for name in required_core_edges if not existing.has_edge(name)
-    ]
-    if missing_core or missing_core_edges:
-        return {
-            "status": "not_initialized",
-            "missing": {
-                "core_vertices": missing_core,
-                "core_edges": missing_core_edges,
-            },
-            "conflicts": [],
-        }
-
-    for vertex in proposal.vertices:
-        if not existing.has_vertex(vertex.name):
-            missing_vertices.append(vertex.name)
-            continue
-        metadata = conn.getVertexType(vertex.name) or {}
-        actual = _attribute_types(metadata)
-        for attribute in vertex.attributes:
-            actual_type = actual.get(attribute.name.casefold())
-            if actual_type is None:
-                conflicts.append(
-                    f"{vertex.name}.{attribute.name} is missing"
-                )
-            elif actual_type != attribute.type.upper():
-                conflicts.append(
-                    f"{vertex.name}.{attribute.name} must be "
-                    f"{attribute.type.upper()}, found {actual_type}"
-                )
-
-    for edge in proposal.edges:
-        if not existing.has_edge(edge.name):
-            missing_edges.append(edge.name)
-            continue
-        metadata = conn.getEdgeType(edge.name) or {}
-        if bool(metadata.get("IsDirected")) != edge.directed:
-            expected = "directed" if edge.directed else "undirected"
-            conflicts.append(f"{edge.name} must be {expected}")
-        actual_attributes = _attribute_types(metadata)
-        for attribute in edge.attributes:
-            actual_type = actual_attributes.get(attribute.name.casefold())
-            if actual_type is None:
-                conflicts.append(f"{edge.name}.{attribute.name} is missing")
-            elif actual_type != attribute.type.upper():
-                conflicts.append(
-                    f"{edge.name}.{attribute.name} must be "
-                    f"{attribute.type.upper()}, found {actual_type}"
-                )
-        actual_pairs = _edge_pairs(metadata)
-        for source, target in edge.pairs:
-            if (source.casefold(), target.casefold()) not in actual_pairs:
-                missing_pairs.append(f"{edge.name}: {source} -> {target}")
-
-    required_links = (
-        ("CONTAINS_ENTITY", "Document", "JiraIssue"),
-        ("CONTAINS_ENTITY", "DocumentChunk", "JiraIssue"),
-        ("CONTAINS_ENTITY", "Document", "JiraComment"),
-        ("CONTAINS_ENTITY", "DocumentChunk", "JiraComment"),
-        ("CONTAINS_ENTITY", "Document", "JiraChange"),
-        ("CONTAINS_ENTITY", "DocumentChunk", "JiraChange"),
+    return evaluate_proposal(
+        conn,
+        jira_schema_proposal(),
+        _CONTAINS_ENTITY_PAIRS,
     )
-    for edge, source, target in required_links:
-        if not existing.has_edge_pair(edge, source, target):
-            missing_pairs.append(f"{edge}: {source} -> {target}")
-
-    missing = {
-        "vertices": missing_vertices,
-        "edges": missing_edges,
-        "pairs": missing_pairs,
-    }
-    if conflicts:
-        status = "conflict"
-    elif not any(missing.values()):
-        status = "installed"
-    elif any(
-        existing.has_vertex(vertex.name) for vertex in proposal.vertices
-    ):
-        status = "incomplete"
-    else:
-        status = "not_installed"
-
-    return {
-        "status": status,
-        "missing": missing,
-        "conflicts": conflicts,
-    }

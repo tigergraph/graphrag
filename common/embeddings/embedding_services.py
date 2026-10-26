@@ -146,6 +146,48 @@ class EmbeddingModel(Embeddings):
         LogWriter.info(f"request_id={req_id_cv.get()} EXIT aembed_query()")
         # metrics.llm_success_response_total.labels(self.model_name).inc()
         return query_embedding
+
+    async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Embed a batch of documents in one provider request."""
+        start_time = time.time()
+        metrics.llm_inprogress_requests.labels(self.model_name).inc()
+        try:
+            LogWriter.info(
+                f"request_id={req_id_cv.get()} ENTRY aembed_documents() count={len(texts)}"
+            )
+            if not self.token_calculator.is_unlimited_tokens():
+                max_context_tokens = self.token_calculator.get_max_context_tokens()
+                texts = [
+                    self.token_calculator.truncate_to_token_limit(text, max_context_tokens)
+                    if (
+                        len(text) > max_context_tokens
+                        and self.token_calculator.count_tokens(text) > max_context_tokens
+                    )
+                    else text
+                    for text in texts
+                ]
+            if isinstance(self.embeddings, GoogleGenerativeAIEmbeddings):
+                docs = await self.embeddings.aembed_documents(
+                    texts,
+                    output_dimensionality=self.dimensions,
+                )
+            else:
+                docs = await self.embeddings.aembed_documents(texts)
+            LogWriter.info(
+                f"request_id={req_id_cv.get()} EXIT aembed_documents() count={len(docs)}"
+            )
+            metrics.llm_success_response_total.labels(self.model_name).inc()
+            return docs
+        except Exception as e:
+            metrics.llm_query_error_total.labels(self.model_name).inc()
+            raise e
+        finally:
+            metrics.llm_request_total.labels(self.model_name).inc()
+            metrics.llm_inprogress_requests.labels(self.model_name).dec()
+            duration = time.time() - start_time
+            metrics.llm_request_duration_seconds.labels(self.model_name).observe(
+                duration
+            )
         # except Exception as e:
         #     # metrics.llm_query_error_total.labels(self.model_name).inc()
         #     raise e

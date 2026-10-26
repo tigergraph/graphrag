@@ -9,11 +9,19 @@ import {
 } from "lucide-react";
 import ConfigScopeToggle from "@/components/ConfigScopeToggle";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { safeJson } from "@/utils/safeJson";
 import { pauseIdleTimer, pingIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
 import type { JiraSchemaStatus, JiraSource } from "@/types/dataSources";
 import ConnectorPromptGuide from "@/pages/setup/ConnectorPromptGuide";
+import ZendeskSourcesCard from "@/pages/setup/ZendeskSourcesCard";
 
 const editingSourceKey = (graph: string) =>
   `graphrag:jira-editing-source:${graph}`;
@@ -119,6 +127,7 @@ const DataSourcesConfig: React.FC = () => {
     useState<ActionFeedback | null>(null);
   const [syncFeedback, setSyncFeedbackRaw] =
     useState<ActionFeedback | null>(null);
+  const [jiraOpen, setJiraOpen] = useState(false);
 
   const setSyncFeedback = (
     feedback: ActionFeedback | null,
@@ -713,6 +722,11 @@ const DataSourcesConfig: React.FC = () => {
           project.name.toLowerCase().includes(normalizedProjectSearch)
       )
     : projects;
+  const jiraSummary = !sources.length
+    ? "No connections yet"
+    : schema?.status === "installed"
+      ? `${sources.length} connection${sources.length === 1 ? "" : "s"} · Schema installed`
+      : `${sources.length} connection${sources.length === 1 ? "" : "s"} · Schema not installed`;
 
   return (
     <div className="p-6 max-w-5xl mx-auto">
@@ -725,8 +739,8 @@ const DataSourcesConfig: React.FC = () => {
             Data sources
           </h1>
           <p className="text-sm text-gray-600 dark:text-[#D9D9D9]">
-            Connect, configure, ingest, and monitor external sources for the
-            selected knowledge graph.
+            Connect external systems to this knowledge graph. Use one source or
+            several. Each source keeps its own connection, schema, and ingest.
           </p>
         </div>
       </div>
@@ -758,8 +772,55 @@ const DataSourcesConfig: React.FC = () => {
         </div>
       )}
 
-      {selectedGraph && (
-        <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 space-y-6">
+      {selectedGraph ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+            <div className="mb-4">
+              <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
+                <DatabaseZap className="h-6 w-6 text-tigerOrange" />
+              </div>
+              <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
+                Jira Cloud
+              </h2>
+              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
+                Select projects, install the Jira schema, and ingest issues,
+                comments, and changes.
+              </p>
+              <p className="text-sm text-black dark:text-white">{jiraSummary}</p>
+            </div>
+            <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
+              <Button
+                onClick={() => setJiraOpen(true)}
+                className="gradient w-full text-white"
+              >
+                <DatabaseZap className="h-4 w-4 mr-2" />
+                Set up Jira
+              </Button>
+            </div>
+          </div>
+          <ZendeskSourcesCard graph={selectedGraph} />
+        </div>
+      ) : (
+        <p className="text-sm text-gray-600 dark:text-[#D9D9D9]">
+          Select a knowledge graph to connect data sources.
+        </p>
+      )}
+
+      <Dialog open={jiraOpen} onOpenChange={setJiraOpen}>
+        <DialogContent
+          className="sm:max-w-4xl max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+          onInteractOutside={(event) => event.preventDefault()}
+        >
+          <DialogHeader>
+            <DialogTitle className="text-black dark:text-white">
+              Jira Cloud
+            </DialogTitle>
+            <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
+              Connect Jira, choose projects, install its schema, then ingest
+              issues into {selectedGraph || "this graph"}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="flex items-start gap-3">
               <div className="w-10 h-10 rounded-lg bg-blue-50 dark:bg-blue-900/20 flex items-center justify-center">
@@ -1406,8 +1467,9 @@ const DataSourcesConfig: React.FC = () => {
               <ConnectorPromptGuide connectorType="jira_cloud" />
             </div>
           )}
-        </div>
-      )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

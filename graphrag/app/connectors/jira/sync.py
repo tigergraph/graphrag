@@ -8,12 +8,12 @@ import logging
 import queue
 import threading
 import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from common.config import get_embedding_store
 from common.db.health import embedding_coverage
+from connectors.upsert import upsert_payload
 
 from .client import JiraCloudClient
 from .config import JiraDataSource
@@ -66,35 +66,11 @@ EMBEDDING_BATCH_SIZE = 32
 DOC_LOAD_BATCH_PAGES = 10
 
 
-def _attrs(attributes: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {
-        key: {"value": value}
-        for key, value in attributes.items()
-        if value is not None
-    }
-
-
 def _upsert_payload(
     vertices: list[VertexRecord],
     edges: list[EdgeRecord],
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "vertices": defaultdict(dict),
-        "edges": defaultdict(
-            lambda: defaultdict(
-                lambda: defaultdict(lambda: defaultdict(dict))
-            )
-        ),
-    }
-    for vertex in vertices:
-        payload["vertices"][vertex.vertex_type][vertex.vertex_id] = _attrs(
-            vertex.attributes
-        )
-    for edge in edges:
-        payload["edges"][edge.source_type][edge.source_id][edge.edge_type][
-            edge.target_type
-        ][edge.target_id] = _attrs(edge.attributes)
-    return payload
+    return upsert_payload(vertices, edges)
 
 
 class JiraSyncService:
@@ -1136,10 +1112,7 @@ class JiraSyncService:
         store = get_embedding_store(graphname=self.graphname)
 
         async def embed_batches() -> None:
-            # Cap at 5 concurrent aadd_embeddings calls. Each call makes ~32
-            # sequential Gemini requests; 20 concurrent was causing traffic
-            # spikes that trigger Gemini 500 INTERNAL (server overload).
-            # 5 concurrent × ~32 requests = ~160 in-flight, safe for the API.
+            # Five batches at a time. Each batch is one embedding request.
             sem = asyncio.Semaphore(5)
 
             async def _run_batch(batch: list) -> None:

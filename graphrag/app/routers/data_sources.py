@@ -26,16 +26,29 @@ from connectors.jira.schema import (
 )
 from connectors.jira.state import JiraSourceStore
 from connectors.jira.sync import JiraSyncService
+from connectors.zendesk.config import ZendeskDataSource, ZendeskScope
+from connectors.zendesk.service import (
+    ConnectorCallError,
+    count_tickets as count_zendesk_tickets,
+    install_schema as install_zendesk_schema,
+    schema_status as zendesk_schema_status,
+    sync as sync_zendesk,
+    test_connection as test_zendesk_connection,
+)
+from connectors.zendesk.state import ZendeskSourceStore
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Data Sources"])
 route_prefix = "/ui"
 store = JiraSourceStore()
+zendesk_store = ZendeskSourceStore()
 
 _sync_state: dict[str, dict[str, Any]] = {}
 _sync_state_lock = threading.Lock()
 _jira_tokens: dict[tuple[str, str], str] = {}
 _jira_tokens_lock = threading.Lock()
+_zendesk_tokens: dict[tuple[str, str], str] = {}
+_zendesk_tokens_lock = threading.Lock()
 
 
 def _ui_basic_auth():
@@ -576,3 +589,384 @@ def get_sync_status(
     ):
         raise HTTPException(status_code=404, detail="Sync run not found.")
     return state
+
+
+def _zendesk_or_404(graphname: str, source_id: str) -> ZendeskDataSource:
+    try:
+        return zendesk_store.get(graphname, source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Data source not found.")
+
+
+def _zendesk_with_credentials(graphname: str, source_id: str) -> ZendeskDataSource:
+    source = _zendesk_or_404(graphname, source_id)
+    with _zendesk_tokens_lock:
+        token = _zendesk_tokens.get((graphname, source_id))
+    token = token or source.connection.api_token
+    if not token:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Zendesk API token is not available. Test the connection again "
+                "and provide the token."
+            ),
+        )
+    resolved = source.model_copy(deep=True)
+    resolved.connection.api_token = token
+    return resolved
+
+
+def _zendesk_call_error(exc: ConnectorCallError) -> HTTPException:
+    status_code = 400 if 400 <= exc.status_code < 500 else 502
+    return HTTPException(status_code=status_code, detail=exc.detail)
+
+
+@router.get(f"{route_prefix}/{{graphname}}/data-sources/zendesk")
+def list_zendesk_sources(
+    graphname: str,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    return {"sources": zendesk_store.list(graphname)}
+
+
+@router.put(f"{route_prefix}/{{graphname}}/data-sources/zendesk/{{source_id}}")
+def save_zendesk_source(
+    graphname: str,
+    source_id: str,
+    source: ZendeskDataSource,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    if source.id != source_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Path source id must match the request body.",
+        )
+    try:
+        saved = zendesk_store.upsert(graphname, source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"source": zendesk_store.redact(saved)}
+
+
+@router.delete(f"{route_prefix}/{{graphname}}/data-sources/zendesk/{{source_id}}")
+def delete_zendesk_source(
+    graphname: str,
+    source_id: str,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    try:
+        zendesk_store.delete(graphname, source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Data source not found.")
+    with _zendesk_tokens_lock:
+        _zendesk_tokens.pop((graphname, source_id), None)
+    return {"status": "deleted"}
+
+
+@router.post(f"{route_prefix}/{{graphname}}/data-sources/zendesk/{{source_id}}/test")
+def test_zendesk_source(
+    graphname: str,
+    source_id: str,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+    candidate: ZendeskDataSource | None = None,
+):
+    _require_access(graphname, auth)
+    if candidate is None or not candidate.connection.api_token.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Enter the Zendesk API token before testing the connection.",
+        )
+    if candidate.id != source_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Path source id must match the request body.",
+        )
+    token = candidate.connection.api_token.strip()
+    try:
+        tested = test_zendesk_connection(candidate)
+    except ConnectorCallError as exc:
+        raise _zendesk_call_error(exc)
+    try:
+        source = zendesk_store.upsert(graphname, candidate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    with _zendesk_tokens_lock:
+        _zendesk_tokens[(graphname, source_id)] = token
+    source.sync.last_tested_at = datetime.now(timezone.utc)
+    zendesk_store.update_runtime_state(graphname, source)
+    return {
+        "status": "connected",
+        "account": tested["account"],
+        "link_error": tested["link_error"],
+        "tested_at": source.sync.last_tested_at.isoformat(),
+        "source": zendesk_store.redact(source),
+    }
+
+
+@router.post(
+    f"{route_prefix}/{{graphname}}/data-sources/zendesk/{{source_id}}/tickets/count"
+)
+def preview_zendesk_ticket_count(
+    graphname: str,
+    source_id: str,
+    scope: ZendeskScope,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    source = _zendesk_with_credentials(graphname, source_id)
+    if source.sync.last_tested_at is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Test this Zendesk connection before previewing tickets.",
+        )
+    preview = source.model_copy(deep=True)
+    preview.scope = scope
+    try:
+        count = count_zendesk_tickets(preview)
+    except ConnectorCallError as exc:
+        raise _zendesk_call_error(exc)
+    return {"count": count}
+
+
+@router.get(f"{route_prefix}/{{graphname}}/data-sources/zendesk/schema")
+def get_zendesk_schema_status(
+    graphname: str,
+    request: Request,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    return zendesk_schema_status(_connection(request, graphname))
+
+
+@router.post(f"{route_prefix}/{{graphname}}/data-sources/zendesk/schema/install")
+def install_zendesk_schema_route(
+    graphname: str,
+    request: Request,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    sources = zendesk_store.load(graphname).zendesk_sources
+    if not sources:
+        raise HTTPException(
+            status_code=409,
+            detail="Save a Zendesk connection before installing its schema.",
+        )
+    if not any(source.sync.last_tested_at for source in sources):
+        raise HTTPException(
+            status_code=409,
+            detail="Test a Zendesk connection before installing its schema.",
+        )
+    operation = "install_zendesk_schema"
+    if not acquire_graph_lock(graphname, operation):
+        current = get_current_operation(graphname) or "another operation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is busy with '{current}'.",
+        )
+    try:
+        conn = _connection(request, graphname)
+        before = zendesk_schema_status(conn)
+        if before["status"] == "not_initialized":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Initialize the knowledge graph before installing "
+                    "the Zendesk connector schema."
+                ),
+            )
+        if before["status"] == "conflict":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Existing graph schema conflicts with Zendesk schema.",
+                    "conflicts": before["conflicts"],
+                },
+            )
+        result = install_zendesk_schema(conn, graphname)
+        if result.get("status") == "error":
+            raise HTTPException(
+                status_code=500,
+                detail=result.get("error") or "Zendesk schema installation failed.",
+            )
+        retrievers = result.get("retrievers") or {}
+        if retrievers.get("status") == "error":
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "Zendesk schema was applied, but retriever installation failed: "
+                    f"{retrievers.get('error', 'unknown error')}"
+                ),
+            )
+        verification_conn = _connection(request, graphname)
+        after = zendesk_schema_status(verification_conn)
+        if after["status"] != "installed":
+            logger.error(
+                "Zendesk schema verification failed for graph %s: %s",
+                graphname,
+                after,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": (
+                        "Zendesk schema installation completed, but verification "
+                        "did not find a compatible schema."
+                    ),
+                    "missing": after.get("missing"),
+                    "conflicts": after.get("conflicts"),
+                },
+            )
+        return {
+            "status": "installed",
+            "schema": after,
+            "migration": {
+                "status": result.get("status"),
+                "statements": result.get("statements") or [],
+                "summary": result.get("summary") or {},
+                "retrievers": retrievers,
+            },
+        }
+    finally:
+        release_graph_lock(graphname, operation)
+
+
+@router.post(
+    f"{route_prefix}/{{graphname}}/data-sources/zendesk/{{source_id}}/sync"
+)
+def start_zendesk_sync(
+    graphname: str,
+    source_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    source = _zendesk_with_credentials(graphname, source_id)
+    if not source.enabled:
+        raise HTTPException(status_code=409, detail="Zendesk data source is disabled.")
+    if source.sync.last_tested_at is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Test this Zendesk connection before synchronization.",
+        )
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+    conn = _connection(request, graphname)
+    schema = zendesk_schema_status(conn)
+    if schema["status"] != "installed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Zendesk schema is not installed for this graph. "
+                "Install it from Data Sources before synchronization."
+            ),
+        )
+    operation = f"zendesk_sync:{source_id}"
+    if not acquire_graph_lock(graphname, operation):
+        current = get_current_operation(graphname) or "another operation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is busy with '{current}'.",
+        )
+    run_id = uuid.uuid4().hex
+    try:
+        _set_sync_state(
+            run_id,
+            run_id=run_id,
+            graphname=graphname,
+            source_id=source_id,
+            status="queued",
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:
+        release_graph_lock(graphname, operation)
+        raise
+
+    def run() -> None:
+        result: dict[str, Any] | None = None
+        error: Exception | None = None
+        try:
+            _set_sync_state(run_id, status="running")
+            from routers.ui import ws_basic_auth
+
+            _, fresh_conn = ws_basic_auth(authorization, graphname)
+            fresh_source = _zendesk_with_credentials(graphname, source_id)
+            result = sync_zendesk(
+                graphname,
+                fresh_source,
+                fresh_conn,
+                store=zendesk_store,
+            )
+        except Exception as exc:
+            error = exc
+            logger.exception(
+                "Zendesk data-source sync failed graph=%s source=%s",
+                graphname,
+                source_id,
+            )
+        finally:
+            release_graph_lock(graphname, operation)
+        if error is not None:
+            _set_sync_state(
+                run_id,
+                status="failed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=str(error)[:1000],
+            )
+        else:
+            _set_sync_state(
+                run_id,
+                status="completed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                result=result,
+            )
+
+    try:
+        background_tasks.add_task(run)
+    except Exception:
+        release_graph_lock(graphname, operation)
+        raise
+    return {"status": "submitted", "run_id": run_id}
+
+
+@router.get(
+    f"{route_prefix}/{{graphname}}/data-sources/zendesk/{{source_id}}/sync/{{run_id}}"
+)
+def get_zendesk_sync_status(
+    graphname: str,
+    source_id: str,
+    run_id: str,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    return get_sync_status(graphname, source_id, run_id, auth)
