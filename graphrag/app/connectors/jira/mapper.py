@@ -12,6 +12,7 @@ from dateutil import parser as date_parser
 
 from common.chunkers.structured import StructuredChunker
 from common.config import get_graphrag_config
+from connectors.records import EdgeRecord, VertexRecord
 
 from .adf import adf_to_markdown
 from .config import JiraDataSource
@@ -23,23 +24,6 @@ from .schema import (
     RELATES_TO_EDGE,
     REPORTED_EDGE,
 )
-
-
-@dataclass(frozen=True)
-class VertexRecord:
-    vertex_type: str
-    vertex_id: str
-    attributes: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class EdgeRecord:
-    source_type: str
-    source_id: str
-    edge_type: str
-    target_type: str
-    target_id: str
-    attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
