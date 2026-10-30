@@ -13,6 +13,20 @@ from .config import ZendeskDataSource
 from .schema import ZENDESK_COMMENT_ON, ZENDESK_REQUESTED_BY
 
 
+def _user_name_email(value) -> tuple[str, str]:
+    if isinstance(value, dict):
+        return str(value.get("name") or ""), str(value.get("email") or "").strip()
+    return str(value or ""), ""
+
+
+def _user_attributes(user_id: str, value) -> dict[str, str]:
+    name, email = _user_name_email(value)
+    attributes = {"user_id": user_id, "display_name": name}
+    if email:
+        attributes["email"] = email.casefold()
+    return attributes
+
+
 @dataclass
 class MappedChunk:
     chunk_id: str
@@ -73,13 +87,28 @@ class ZendeskMapper:
         self,
         ticket: dict,
         comments: list[dict],
-        users_by_id: dict[str, str],
+        users_by_id: dict[str, str | dict],
+        organizations_by_id: dict[str, str] | None = None,
+        groups_by_id: dict[str, str] | None = None,
     ) -> MappedTicket:
+        organizations_by_id = organizations_by_id or {}
+        groups_by_id = groups_by_id or {}
         ticket_id = str(ticket.get("id"))
         vertex_id = ticket_vertex_id(self.subdomain, ticket_id)
         subject = str(ticket.get("subject") or "")
         description = str(ticket.get("description") or "")
         status = str(ticket.get("status") or "")
+        priority = str(ticket.get("priority") or "")
+        organization_id = ticket.get("organization_id")
+        group_id = ticket.get("group_id")
+        organization_name = (
+            organizations_by_id.get(str(organization_id), "")
+            if organization_id is not None
+            else ""
+        )
+        group_name = (
+            groups_by_id.get(str(group_id), "") if group_id is not None else ""
+        )
         url = str(ticket.get("url") or "") or (
             f"https://{self.subdomain}.zendesk.com/agent/tickets/{ticket_id}"
         )
@@ -91,6 +120,9 @@ class ZendeskMapper:
                     "ticket_id": ticket_id,
                     "subject": subject,
                     "status": status,
+                    "priority": priority,
+                    "organization_name": organization_name,
+                    "group_name": group_name,
                     "url": url,
                 },
             )
@@ -104,10 +136,7 @@ class ZendeskMapper:
                 VertexRecord(
                     "ZendeskUser",
                     user_id,
-                    {
-                        "user_id": requester,
-                        "display_name": users_by_id.get(requester, ""),
-                    },
+                    _user_attributes(requester, users_by_id.get(requester)),
                 )
             )
             edges.append(
@@ -132,16 +161,13 @@ class ZendeskMapper:
             author_name = ""
             if author_id is not None and str(author_id).strip():
                 author = str(author_id)
-                author_name = users_by_id.get(author, "")
+                author_name, _author_email = _user_name_email(users_by_id.get(author))
                 author_vertex = user_vertex_id(self.subdomain, author)
                 vertices.append(
                     VertexRecord(
                         "ZendeskUser",
                         author_vertex,
-                        {
-                            "user_id": author,
-                            "display_name": author_name,
-                        },
+                        _user_attributes(author, users_by_id.get(author)),
                     )
                 )
             edges.append(

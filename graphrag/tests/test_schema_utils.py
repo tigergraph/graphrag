@@ -426,6 +426,22 @@ def test_emit_skips_pair_already_on_edge():
     assert stmts == []  # everything already exists
 
 
+def test_emit_adds_attributes_that_are_missing_on_an_existing_vertex():
+    proposal = SchemaProposal()
+    proposal.add_vertex(
+        "ZendeskTicket",
+        attributes=[("priority", "STRING"), ("subject", "STRING")],
+    )
+    existing = ExistingSchema(
+        vertex_types={"ZendeskTicket"},
+        vertex_attributes={"ZendeskTicket": {"subject": "STRING"}},
+    )
+    stmts = emit_add_statements(proposal, existing=existing)
+    assert stmts == [
+        "ALTER VERTEX ZendeskTicket ADD ATTRIBUTE (priority STRING)"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Preview rendering
 # ---------------------------------------------------------------------------
