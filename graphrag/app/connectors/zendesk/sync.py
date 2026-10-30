@@ -18,6 +18,7 @@ from .client import COMMENT_FETCH_WORKERS, ZendeskAPIError, ZendeskClient
 from .config import ZendeskDataSource
 from .linking import LinkReconciliationResult, reconcile_links
 from .mapper import MappedChunk, MappedTicket, ZendeskMapper
+from .same_person import edges_for_zendesk_users
 from .schema import zendesk_schema_status
 from .state import ZendeskSourceStore
 
@@ -227,18 +228,66 @@ class ZendeskSyncService:
                 if author is not None:
                     user_ids.append(str(author))
         users_by_id = {
-            str(user.get("id")): str(user.get("name") or "")
+            str(user.get("id")): {
+                "name": str(user.get("name") or ""),
+                "email": str(user.get("email") or ""),
+            }
             for user in self.client.users(user_ids)
             if user.get("id") is not None
         }
-        return [
+        organization_ids = [
+            str(ticket.get("organization_id"))
+            for ticket in tickets
+            if ticket.get("organization_id") is not None
+        ]
+        group_ids = [
+            str(ticket.get("group_id"))
+            for ticket in tickets
+            if ticket.get("group_id") is not None
+        ]
+        organizations_by_id = {
+            str(row.get("id")): str(row.get("name") or "")
+            for row in self.client.organizations(organization_ids)
+            if row.get("id") is not None
+        }
+        groups_by_id = {
+            str(row.get("id")): str(row.get("name") or "")
+            for row in self.client.groups(group_ids)
+            if row.get("id") is not None
+        }
+        mapped = [
             mapper.map_ticket(
                 ticket,
                 comments.get(str(ticket.get("id")), []),
                 users_by_id,
+                organizations_by_id,
+                groups_by_id,
             )
             for ticket in tickets
         ]
+        self._add_same_person(mapped)
+        return mapped
+
+    def _add_same_person(self, mapped: list[MappedTicket]) -> None:
+        users: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for item in mapped:
+            for vertex in item.vertices:
+                if vertex.vertex_type != "ZendeskUser" or vertex.vertex_id in seen:
+                    continue
+                email = str(vertex.attributes.get("email") or "")
+                if not email:
+                    continue
+                seen.add(vertex.vertex_id)
+                users.append((vertex.vertex_id, email))
+        by_user: dict[str, list[EdgeRecord]] = {}
+        for edge in edges_for_zendesk_users(self.conn, users):
+            by_user.setdefault(edge.source_id, []).append(edge)
+        if not by_user:
+            return
+        for item in mapped:
+            for vertex in item.vertices:
+                item.edges.extend(by_user.get(vertex.vertex_id, []))
 
     def _write_mapped(self, mapped: list[MappedTicket]) -> int:
         ticket_hashes = self._stored_hashes(

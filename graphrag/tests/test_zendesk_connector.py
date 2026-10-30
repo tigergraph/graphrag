@@ -19,8 +19,11 @@ from connectors.zendesk.client import (
 from connectors.zendesk.config import ZendeskDataSource
 from connectors.zendesk.linking import normalized_link, reconcile_links
 from connectors.zendesk.mapper import ZendeskMapper
+from connectors.records import VertexRecord
+from connectors.zendesk.same_person import edges_for_jira_users
 from connectors.zendesk.schema import (
     ZENDESK_LINKS_TO_JIRA,
+    ZENDESK_SAME_PERSON,
     zendesk_schema_proposal,
     zendesk_schema_status,
 )
@@ -151,6 +154,20 @@ class Graph:
         self.present.add((vertex_type, vertex_id))
         self.attrs.setdefault((vertex_type, vertex_id), {}).update(attributes or {})
 
+    def getVertices(self, vertex_type, where="", **kwargs):
+        needle = ""
+        if isinstance(where, str) and 'email="' in where:
+            needle = where.split('email="', 1)[1].split('"', 1)[0].casefold()
+        rows = []
+        for (stored_type, vertex_id), attributes in self.attrs.items():
+            if stored_type != vertex_type or (stored_type, vertex_id) not in self.present:
+                continue
+            email = str(attributes.get("email") or "").casefold()
+            if needle and email != needle:
+                continue
+            rows.append({"v_id": vertex_id, "attributes": attributes})
+        return rows
+
     def link_targets(self, ticket_vertex_id):
         return {
             target_id
@@ -253,10 +270,12 @@ class Embeddings:
 
 
 class FakeClient:
-    def __init__(self, pages, comments=None, users=None, links=None, fail_comments=()):
+    def __init__(self, pages, comments=None, users=None, links=None, fail_comments=(), organizations=None, groups=None):
         self.pages = pages
         self.comments_by_ticket = comments or {}
         self.user_rows = users or []
+        self.organization_rows = organizations or []
+        self.group_rows = groups or []
         self.link_pages = links if links is not None else [[]]
         self.fail_comments = {str(ticket_id) for ticket_id in fail_comments}
         self.ticket_calls = []
@@ -285,6 +304,14 @@ class FakeClient:
         wanted = {str(user_id) for user_id in user_ids}
         return [user for user in self.user_rows if str(user["id"]) in wanted]
 
+    def organizations(self, organization_ids):
+        wanted = {str(item_id) for item_id in organization_ids}
+        return [row for row in self.organization_rows if str(row["id"]) in wanted]
+
+    def groups(self, group_ids):
+        wanted = {str(item_id) for item_id in group_ids}
+        return [row for row in self.group_rows if str(row["id"]) in wanted]
+
     def iter_jira_link_pages(self):
         if isinstance(self.link_pages, Exception):
             raise self.link_pages
@@ -302,9 +329,13 @@ def test_schema_keeps_ticket_separate_and_adds_jira_edge_only_when_installed():
         "ZendeskComment",
     }
     assert ZENDESK_LINKS_TO_JIRA not in {edge.name for edge in proposal.edges}
+    assert ZENDESK_SAME_PERSON not in {edge.name for edge in proposal.edges}
     linked = zendesk_schema_proposal({"JiraIssue"})
     edge = next(edge for edge in linked.edges if edge.name == ZENDESK_LINKS_TO_JIRA)
     assert edge.pairs == [("ZendeskTicket", "JiraIssue")]
+    same_person = zendesk_schema_proposal({"JiraUser"})
+    same_edge = next(edge for edge in same_person.edges if edge.name == ZENDESK_SAME_PERSON)
+    assert same_edge.pairs == [("ZendeskUser", "JiraUser")]
     assert must_remain_separate("ZendeskTicket", "JiraIssue")
     assert not can_reuse_vertex(
         "ZendeskTicket",
@@ -337,6 +368,15 @@ def test_schema_status_reports_installed_conflict_and_uninitialized():
     assert partial["status"] == "incomplete"
     assert any(ZENDESK_LINKS_TO_JIRA in pair for pair in partial["missing"]["edges"])
     assert zendesk_schema_status(SchemaConnection(drop_document=True))["status"] == "not_initialized"
+    missing_priority = SchemaConnection()
+    missing_priority.vertices["ZendeskTicket"]["Attributes"] = [
+        attribute
+        for attribute in missing_priority.vertices["ZendeskTicket"]["Attributes"]
+        if attribute["AttributeName"] != "priority"
+    ]
+    partial_attributes = zendesk_schema_status(missing_priority)
+    assert partial_attributes["status"] == "incomplete"
+    assert "ZendeskTicket.priority" in partial_attributes["missing"]["attributes"]
 
 
 def test_client_uses_token_auth_and_documented_endpoints(monkeypatch):
@@ -542,7 +582,7 @@ def test_link_rows_require_an_issue_key_and_numeric_ticket():
     assert normalized_link({"issue_key": "jira_escalated", "ticket_id": "10"}) is None
 
 
-def test_reconcile_writes_edge_only_when_both_vertices_exist_and_replaces_stale_links():
+def test_reconcile_links_existing_issue_and_creates_a_placeholder_for_a_missing_one():
     ticket = "zendesk:acme:ticket:59326"
     issue = "jira:tse-1073:issue"
     other = "jira:pay-1:issue"
@@ -557,15 +597,29 @@ def test_reconcile_writes_edge_only_when_both_vertices_exist_and_replaces_stale_
     assert result.links_written == 1
     assert graph.link_targets(ticket) == {issue}
 
-    absent = Graph(vertices={("ZendeskTicket", ticket)})
-    skipped = reconcile_links(
+    missing_ticket = "zendesk:acme:ticket:1"
+    missing_issue = "jira:gle-9999:issue"
+    absent = Graph(vertices={("ZendeskTicket", missing_ticket)})
+    created = reconcile_links(
         absent,
+        "acme",
+        [[{"issue_key": "GLE-9999", "ticket_id": "1"}]],
+        [],
+    )
+    assert created.links_written == 1
+    assert absent.link_targets(missing_ticket) == {missing_issue}
+    assert absent.attrs[("JiraIssue", missing_issue)] == {"issue_key": "GLE-9999"}
+
+    filled = Graph(vertices={("ZendeskTicket", ticket), ("JiraIssue", issue)})
+    filled.attrs[("JiraIssue", issue)] = {"issue_key": "TSE-1073", "summary": "RCA"}
+    reconcile_links(
+        filled,
         "acme",
         [[{"issue_key": "TSE-1073", "ticket_id": "59326"}]],
         [],
     )
-    assert skipped.links_written == 0
-    assert absent.link_targets(ticket) == set()
+    assert filled.attrs[("JiraIssue", issue)]["summary"] == "RCA"
+    assert filled.link_targets(ticket) == {issue}
 
     removed = Graph(vertices={("ZendeskTicket", ticket), ("JiraIssue", issue)})
     removed.edges[("ZendeskTicket", ticket, ZENDESK_LINKS_TO_JIRA)] = {("JiraIssue", issue)}
@@ -640,6 +694,78 @@ def test_sync_writes_records_chunks_and_checkpoint_without_inferring_links(
     assert any("Tried again" in text and "Ada" in text for text in texts)
     assert store.get("TestGraph", "zendesk-acme").sync.checkpoint == datetime.fromtimestamp(
         1700000000, tz=timezone.utc
+    )
+
+
+def test_sync_writes_priority_org_group_and_same_person(tmp_path, monkeypatch):
+    _install_sync_patches(monkeypatch)
+    store = ZendeskSourceStore(str(tmp_path))
+    saved = store.upsert("TestGraph", source())
+    graph = Graph(
+        vertex_types=["ZendeskTicket", "ZendeskUser", "JiraUser", "JiraIssue"],
+        edge_types=[ZENDESK_LINKS_TO_JIRA, ZENDESK_SAME_PERSON],
+    )
+    graph.upsertVertex(
+        "JiraUser",
+        "jira:user:ada",
+        {"email": "ada@acme.com", "account_id": "ada"},
+    )
+    client = FakeClient(
+        pages=[
+            (
+                [_ticket(priority="high", organization_id=42, group_id=9)],
+                1700000000,
+                True,
+                None,
+            )
+        ],
+        users=[{"id": 7, "name": "Ada", "email": "Ada@acme.com"}],
+        organizations=[{"id": 42, "name": "Acme"}],
+        groups=[{"id": 9, "name": "Support"}],
+        links=[[]],
+    )
+    ZendeskSyncService(
+        "TestGraph", saved, graph, store=store, client=client
+    ).run()
+    ticket = graph.attrs[("ZendeskTicket", "zendesk:acme:ticket:10")]
+    assert ticket["priority"] == "high"
+    assert ticket["organization_name"] == "Acme"
+    assert ticket["group_name"] == "Support"
+    assert graph.attrs[("ZendeskUser", "zendesk:acme:user:7")]["email"] == "ada@acme.com"
+    assert ("JiraUser", "jira:user:ada") in graph.edges[
+        ("ZendeskUser", "zendesk:acme:user:7", ZENDESK_SAME_PERSON)
+    ]
+
+
+def test_jira_user_links_back_to_an_existing_zendesk_user():
+    graph = Graph(
+        vertex_types=["ZendeskUser", "JiraUser"],
+        edge_types=[ZENDESK_SAME_PERSON],
+    )
+    graph.upsertVertex(
+        "ZendeskUser",
+        "zendesk:acme:user:7",
+        {"email": "ada@acme.com"},
+    )
+    edges = edges_for_jira_users(
+        graph,
+        [
+            VertexRecord(
+                "JiraUser",
+                "jira:user:ada",
+                {"account_id": "ada", "email": "ada@acme.com"},
+            )
+        ],
+    )
+    assert [(edge.source_id, edge.target_id) for edge in edges] == [
+        ("zendesk:acme:user:7", "jira:user:ada")
+    ]
+    assert (
+        edges_for_jira_users(
+            graph,
+            [VertexRecord("JiraUser", "jira:user:other", {"email": "other@acme.com"})],
+        )
+        == []
     )
 
 
@@ -746,7 +872,17 @@ def test_source_ids_cannot_collide_and_jira_save_keeps_zendesk(tmp_path):
     assert "api_token" not in document["zendesk_sources"][0]["connection"]
 
 
-def test_prompt_guidance_uses_the_zendesk_jira_link_edge():
+def test_open_zendesk_question_is_search_and_an_unknown_field_is_refused():
+    planner = guidance_for("What went wrong on Zendesk for this customer?", "planner")
+    assert "Do not invent a schema filter" in planner
+    answer = guidance_for("Who is the assignee of Zendesk ticket 10?", "answer")
+    assert "not on the ticket" in answer
+    assert guidance_for("What is the ticket status?", "planner") == (
+        "The source system is ambiguous. Ask the user whether they mean a Jira "
+        "issue or a Zendesk ticket before answering, unless the conversation has "
+        "already established the source. Do not guess from a bare number, and do "
+        "not apply either connector's rules until the source is known."
+    )
     guidance = guidance_for(
         "How is Zendesk ticket 59326 linked to TSE-1073?",
         "query",

@@ -46,6 +46,7 @@ def evaluate_proposal(
     missing_vertices: list[str] = []
     missing_edges: list[str] = []
     missing_pairs: list[str] = []
+    missing_attributes: list[str] = []
 
     required_core = ("Document", "DocumentChunk", "Content")
     missing_core = [name for name in required_core if not existing.has_vertex(name)]
@@ -72,7 +73,7 @@ def evaluate_proposal(
         for attribute in vertex.attributes:
             actual_type = actual.get(attribute.name.casefold())
             if actual_type is None:
-                conflicts.append(f"{vertex.name}.{attribute.name} is missing")
+                missing_attributes.append(f"{vertex.name}.{attribute.name}")
             elif actual_type != attribute.type.upper():
                 conflicts.append(
                     f"{vertex.name}.{attribute.name} must be "
@@ -91,7 +92,7 @@ def evaluate_proposal(
         for attribute in edge.attributes:
             actual_type = actual_attributes.get(attribute.name.casefold())
             if actual_type is None:
-                conflicts.append(f"{edge.name}.{attribute.name} is missing")
+                missing_attributes.append(f"{edge.name}.{attribute.name}")
             elif actual_type != attribute.type.upper():
                 conflicts.append(
                     f"{edge.name}.{attribute.name} must be "
@@ -110,6 +111,7 @@ def evaluate_proposal(
         "vertices": missing_vertices,
         "edges": missing_edges,
         "pairs": missing_pairs,
+        "attributes": missing_attributes,
     }
     if conflicts:
         status = "conflict"

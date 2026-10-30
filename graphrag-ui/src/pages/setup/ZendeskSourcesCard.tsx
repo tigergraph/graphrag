@@ -307,9 +307,14 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
     throw new Error("Zendesk ingest is still running. Refresh this page to check it.");
   };
 
-  const sync = async (source: ZendeskSource) => {
+  const sync = async (source: ZendeskSource, resume = false) => {
     setBusy(`sync:${source.id}`);
-    setSyncFeedback({ type: "pending", text: `Ingesting ${source.display_name}...` });
+    setSyncFeedback({
+      type: "pending",
+      text: resume
+        ? `Resuming ${source.display_name}...`
+        : `Ingesting ${source.display_name}...`,
+    });
     try {
       const response = await fetch(
         `/ui/${graph}/data-sources/zendesk/${encodeURIComponent(source.id)}/sync`,
@@ -733,9 +738,9 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
         <div className="border-t border-gray-200 dark:border-[#3D3D3D] pt-5">
           <h3 className="font-medium text-black dark:text-white">3. Ingest and build</h3>
           <p className="text-sm text-gray-600 dark:text-gray-400 mt-1 mb-4">
-            Import Zendesk tickets into this graph. Links to Jira are written
-            only from Zendesk&apos;s Jira integration, and only when that Jira
-            issue is already in the graph.
+            Import Zendesk tickets into this graph. A Jira issue that is not
+            here yet is created with its issue key so the link can be stored.
+            Resume continues a failed ingest from the saved cursor.
           </p>
           {syncFeedback && (
             <div className="mb-4">
@@ -743,7 +748,11 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
             </div>
           )}
           <div className="space-y-3">
-            {sources.map((source) => (
+            {sources.map((source) => {
+              const needsResume = Boolean(
+                source.sync.last_error || source.sync.last_link_error
+              );
+              return (
               <div
                 key={source.id}
                 className="border border-gray-200 dark:border-[#3D3D3D] rounded-md p-4 flex flex-wrap items-center justify-between gap-4"
@@ -756,19 +765,26 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
                     Last ingestion: {source.sync.last_completed_at || "Never"} · Tickets:{" "}
                     {source.sync.last_ticket_count || 0}
                   </div>
+                  {source.sync.last_error && (
+                    <div className="text-xs text-red-600 mt-1">{source.sync.last_error}</div>
+                  )}
+                  {source.sync.last_link_error && (
+                    <div className="text-xs text-red-600 mt-1">{source.sync.last_link_error}</div>
+                  )}
                 </div>
                 <Button
                   size="sm"
-                  onClick={() => sync(source)}
+                  onClick={() => sync(source, needsResume)}
                   disabled={!!busy || !source.enabled || !source.sync.last_tested_at}
                 >
                   {busy === `sync:${source.id}` && (
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                   )}
-                  Ingest now
+                  {needsResume ? "Resume" : "Ingest now"}
                 </Button>
               </div>
-            ))}
+              );
+            })}
           </div>
           <ConnectorPromptGuide connectorType="zendesk" />
         </div>

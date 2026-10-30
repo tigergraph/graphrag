@@ -14,6 +14,7 @@ from typing import Any, Iterator
 from common.config import get_embedding_store
 from common.db.health import embedding_coverage
 from connectors.upsert import upsert_payload
+from connectors.zendesk.same_person import edges_for_jira_users
 
 from .client import JiraCloudClient
 from .config import JiraDataSource
@@ -695,6 +696,9 @@ class JiraSyncService:
         for comment in changed_comments:
             strip_content_hash("JiraComment", comment.comment_vertex_id)
 
+        all_edges.extend(
+            edges_for_jira_users(self.conn, list(all_vertices.values()))
+        )
         self._upsert_records(list(all_vertices.values()), all_edges)
         return changed_documents, changed_comments, comments_deleted
 
@@ -801,6 +805,9 @@ class JiraSyncService:
         for comment in changed_comments:
             strip_content_hash("JiraComment", comment.comment_vertex_id)
 
+        all_edges.extend(
+            edges_for_jira_users(self.conn, list(all_vertices.values()))
+        )
         self._upsert_records(list(all_vertices.values()), all_edges)
 
         documents_to_load: list[MappedIssue | MappedComment] = [
