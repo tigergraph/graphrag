@@ -11,6 +11,7 @@ from connectors.schema_status import attribute_types, evaluate_proposal
 ZENDESK_REQUESTED_BY = "ZENDESK_REQUESTED_BY"
 ZENDESK_COMMENT_ON = "ZENDESK_COMMENT_ON"
 ZENDESK_LINKS_TO_JIRA = "ZENDESK_LINKS_TO_JIRA"
+ZENDESK_SAME_PERSON = "ZENDESK_SAME_PERSON"
 
 _CONTAINS_TARGETS = ("ZendeskTicket", "ZendeskUser", "ZendeskComment")
 
@@ -26,6 +27,9 @@ def zendesk_schema_proposal(
             ("ticket_id", "STRING"),
             ("subject", "STRING"),
             ("status", "STRING"),
+            ("priority", "STRING"),
+            ("organization_name", "STRING"),
+            ("group_name", "STRING"),
             ("url", "STRING"),
             ("content_hash", "STRING"),
         ],
@@ -36,6 +40,7 @@ def zendesk_schema_proposal(
         [
             ("user_id", "STRING"),
             ("display_name", "STRING"),
+            ("email", "STRING"),
         ],
     )
     proposal.add_vertex(
@@ -66,6 +71,13 @@ def zendesk_schema_proposal(
             "ZendeskTicket",
             "JiraIssue",
             "This ticket is named by a Zendesk Jira-integration link row.",
+        )
+    if "jirauser" in folded:
+        proposal.add_edge_pair(
+            ZENDESK_SAME_PERSON,
+            "ZendeskUser",
+            "JiraUser",
+            "The same person, matched by email.",
         )
     return proposal
 

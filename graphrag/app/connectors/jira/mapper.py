@@ -202,13 +202,17 @@ class JiraIssueMapper:
         if not user or not user.get("accountId"):
             return None
         account_id = str(user["accountId"])
+        attributes = {
+            "account_id": account_id,
+            "display_name": _display_name(user),
+        }
+        email = str(user.get("emailAddress") or "").strip()
+        if email:
+            attributes["email"] = email.casefold()
         return VertexRecord(
             "JiraUser",
             self._id("user", account_id),
-            {
-                "account_id": account_id,
-                "display_name": _display_name(user),
-            },
+            attributes,
         )
 
     def map(self, issue: dict[str, Any]) -> MappedIssue:

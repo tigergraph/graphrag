@@ -84,6 +84,7 @@ def jira_schema_proposal() -> SchemaProposal:
         [
             ("account_id", "STRING"),
             ("display_name", "STRING"),
+            ("email", "STRING"),
         ],
     )
     proposal.add_vertex(

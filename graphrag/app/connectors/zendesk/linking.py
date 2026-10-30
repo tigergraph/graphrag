@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from connectors.records import EdgeRecord
+from connectors.records import EdgeRecord, VertexRecord
 from connectors.upsert import upsert_payload
 
 from .mapper import jira_issue_vertex_id, ticket_vertex_id
@@ -101,17 +101,45 @@ def _replace_edges(conn, ticket_vertex: str, issue_vertices: set[str]) -> None:
         raise RuntimeError("TigerGraph rejected a Zendesk link edge")
 
 
+def _ensure_issue_vertex(conn, issue_key: str) -> str:
+    """Return the Jira vertex id, creating it with issue_key only when missing.
+
+    An existing vertex is left unchanged so a later Jira sync can fill the
+    other attributes on the same id.
+    """
+    issue_vertex = jira_issue_vertex_id(issue_key)
+    if _vertex_exists(conn, "JiraIssue", issue_vertex):
+        return issue_vertex
+    conn.upsertData(
+        json.dumps(
+            upsert_payload(
+                [
+                    VertexRecord(
+                        "JiraIssue",
+                        issue_vertex,
+                        {"issue_key": issue_key},
+                    )
+                ],
+                [],
+            )
+        )
+    )
+    return issue_vertex
+
+
 def reconcile_links(
     conn,
     subdomain: str,
     pages,
     previously_linked: list[str],
 ) -> LinkReconciliationResult:
-    """Write link edges only when both the ticket and the Jira issue exist.
+    """Write a link for every inventory row whose Zendesk ticket is in the graph.
 
-    Inventory rows for one ticket replace that ticket's link edges. A ticket
-    that was linked on the previous run and is absent from this inventory has
-    its link edges removed. A missing Jira issue writes nothing for that row.
+    A missing Jira issue is created with issue_key only, and the edge is
+    written in the same pass. Inventory rows for one ticket replace that
+    ticket's link edges. A ticket that was linked on the previous run and is
+    absent from this inventory has its link edges removed. The Jira vertex
+    is not deleted.
     """
     if not _has_type(conn, "getVertexTypes", "JiraIssue"):
         return LinkReconciliationResult()
@@ -148,12 +176,8 @@ def reconcile_links(
             continue
         issue_vertices: set[str] = set()
         for issue_key in by_ticket.get(ticket_id, ()):
-            issue_vertex = jira_issue_vertex_id(issue_key)
-            if _vertex_exists(conn, "JiraIssue", issue_vertex):
-                issue_vertices.add(issue_vertex)
-                result.links_written += 1
-            else:
-                result.links_skipped += 1
+            issue_vertices.add(_ensure_issue_vertex(conn, issue_key))
+            result.links_written += 1
         _replace_edges(conn, ticket_vertex, issue_vertices)
         if issue_vertices:
             linked.append(ticket_id)

@@ -359,6 +359,33 @@ class ZendeskClient:
             found.extend(payload.get("users") or [])
         return found
 
+    def _show_many(self, path: str, ids: list[str], key: str) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        unique = list(dict.fromkeys(str(item_id) for item_id in ids if item_id))
+        for start in range(0, len(unique), 100):
+            batch = unique[start : start + 100]
+            payload = self._request(
+                "GET",
+                path,
+                params={"ids": ",".join(batch)},
+            ) or {}
+            found.extend(payload.get(key) or [])
+        return found
+
+    def organizations(self, organization_ids: list[str]) -> list[dict[str, Any]]:
+        return self._show_many(
+            "/api/v2/organizations/show_many.json",
+            organization_ids,
+            "organizations",
+        )
+
+    def groups(self, group_ids: list[str]) -> list[dict[str, Any]]:
+        return self._show_many(
+            "/api/v2/groups/show_many.json",
+            group_ids,
+            "groups",
+        )
+
     def iter_jira_link_pages(self) -> Iterator[list[dict[str, Any]]]:
         """Yield link pages from the configured integration, or the account default.
 
