@@ -95,7 +95,7 @@ langgraph-checkpoint>=3.0.0
 # Deep Agent chat engine (LangChain Deep Agents on LangGraph) and its on-prem
 # short/long-term memory (SQLite checkpointer + store). For Postgres memory
 # also install langgraph-checkpoint-postgres, psycopg[binary] and psycopg-pool.
-deepagents>=0.7.29,<0.8
+deepagents==0.7.32
 langgraph-checkpoint-sqlite>=3.1.2
 langsmith>=0.4.2
 Levenshtein>=0.27.1
