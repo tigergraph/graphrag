@@ -171,3 +171,99 @@ curl -u user:pass -X POST localhost:8000/MyGraph/agent/chat \
   -H 'Content-Type: application/json' \
   -d '{"query": "Which suppliers deliver to more than 3 plants?", "include_fields": ["query_sources"]}'
 ```
+
+## Calling the agent from another agent or service
+
+`/{graph}/agent/*` is served by the backend on port 8000. The bundled nginx also routes
+it on port 80, so `http://<host>/{graph}/agent/chat` and `http://<host>:8000/{graph}/agent/chat`
+are equivalent.
+
+### Instructions for the calling agent
+
+Paste this block into the calling agent's system prompt or tool documentation:
+
+```markdown
+## TigerGraph GraphRAG agent
+
+You can ask a GraphRAG agent questions about the TigerGraph knowledge graph "<GRAPH>".
+It searches the graph and the documents ingested into it, and answers with citations.
+Use it for any question about that data. Don't answer such questions from your own knowledge.
+
+Endpoint: POST http://<host>/<GRAPH>/agent/chat
+Auth: HTTP Basic with a TigerGraph user. Answers respect that user's TigerGraph permissions.
+Body (JSON):
+  query            (string, required)   the question, in natural language, any language
+  conversation_id  (string, optional)   omit for a new conversation; send the id from the previous
+                                        response to ask a follow-up ("what about them?")
+  include_fields   (list, optional)     ["query_sources"] to also get the trace (tool calls,
+                                        cited passage ids, token usage)
+Response (JSON):
+  conversation_id            reuse it for follow-ups on the same topic
+  natural_language_response  the answer (Markdown)
+  answered_question          false = the knowledge graph did not have the information
+  response_type              "deep_agent"
+  query_sources              only when requested
+
+Rules:
+- Ask one self-contained question per call. For follow-ups, pass the same conversation_id;
+  start a new conversation (omit the id) when the topic changes.
+- If answered_question is false, don't invent an answer: report that the knowledge graph doesn't
+  contain it, or rephrase the question more specifically and ask once more.
+- A call can take 10-120 seconds; use a timeout of at least 180 s.
+- Errors: 401 = bad credentials, 503 = database or vector store unavailable (retry later),
+  422 = malformed body. Agent failures return 200 with answered_question=false and a generic message.
+- The GraphRAG agent remembers stated preferences (e.g. "answer in Japanese") for this user across
+  conversations. Don't send such instructions unless you mean them to persist.
+```
+
+### Tool definition
+
+```json
+{
+  "name": "ask_graphrag",
+  "description": "Ask the TigerGraph GraphRAG agent a question about the knowledge graph and its documents. Returns a cited answer. Pass conversation_id from a previous answer to ask a follow-up.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": {"type": "string", "description": "Self-contained question in natural language."},
+      "conversation_id": {"type": "string", "description": "Id from a previous answer, to continue that conversation."}
+    },
+    "required": ["query"]
+  }
+}
+```
+
+### Examples
+
+```bash
+curl -s -u USER:PASS -X POST http://<host>/MyGraph/agent/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "How many publications are in the graph?"}'
+
+# follow-up in the same conversation
+curl -s -u USER:PASS -X POST http://<host>/MyGraph/agent/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "Which of them were issued by the FSA?", "conversation_id": "<id from the first answer>"}'
+```
+
+```python
+import requests
+
+def ask_graphrag(query, conversation_id=None, host="http://<host>", graph="MyGraph",
+                 auth=("USER", "PASS")):
+    body = {"query": query}
+    if conversation_id:
+        body["conversation_id"] = conversation_id
+    r = requests.post(f"{host}/{graph}/agent/chat", json=body, auth=auth, timeout=180)
+    r.raise_for_status()
+    return r.json()  # answer in natural_language_response; reuse conversation_id
+```
+
+### Things that behave differently than expected
+
+* With a token (`Authorization: Bearer`), `conversation_id` comes back `null`. Every call
+  is then stateless and nothing is remembered. Use Basic authentication for follow-ups.
+* Long-term memory is per TigerGraph user. Callers that share one account share its
+  stored preferences. Give each calling agent its own TigerGraph user if that matters.
+* The traffic is plain HTTP. Put TLS in front (or terminate it in nginx) before exposing
+  the endpoint beyond a trusted network, since requests carry Basic credentials.
