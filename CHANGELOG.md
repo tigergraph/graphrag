@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Agent mode runs on a LangChain Deep Agent.** One Deep Agent on LangGraph now handles each question. It decides whether tools are needed, plans multi-part questions with a todo list, delegates focused research to a graph-analyst or document-researcher subagent, and returns a structured answer with citations. It uses the existing GraphRAG retrievers and query generators, read-only TigerGraph tools (counts, vertex and edge lookups, installed queries, read-only openCypher) and the configured MCP add-on tools, all as the logged-in user. Knowledge-graph creation, ingestion and the Classic engine are unchanged. Set `graphrag_config.agent_engine` to `"legacy"` to use the previous planner/react engine. See `docs/DeepAgent.md`.
+
+### Added
+- **Agent conversations and memories persist on-prem.** Each chat conversation is a LangGraph thread kept by a checkpointer (short-term memory). Each user also has long-term memory per graph, held in a LangGraph store and loaded into every conversation, where the agent records lasting preferences. Both are stored in SQLite by default (`./data/deep_agent/` in docker-compose) or in Postgres, and are private to the user. Token logins that do not identify a user keep neither.
+- **Deep Agent REST API.** `POST /{graph}/agent/chat` continues a conversation by id. `/{graph}/agent/threads` lists, reads and deletes the caller's conversations, `/{graph}/agent/memories` lists, reads, writes and deletes their long-term memories, and `/{graph}/agent/tools` lists the tools available on a graph.
+
 ## [2.0.4]
 
 ### Changed

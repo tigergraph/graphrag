@@ -277,7 +277,8 @@ class TigerGraphAgent:
             )
 
 
-def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto", mode=None, agent_style="auto"):
+def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retriever="auto", mode=None, agent_style="auto",
+               conversation_id=None, user=None):
     """Build the chat agent for a graph.
 
     ``mode`` selects the engine: ``"agentic"`` (default) returns the
@@ -312,6 +313,20 @@ def make_agent(graphname, conn, use_cypher, ws: WebSocket = None, supportai_retr
     embedding_store = get_embedding_store()
 
     if agentic:
+        # Agent mode runs on the Deep Agent engine unless the graph config
+        # selects the legacy planner/react engine (agent_engine: "legacy").
+        from common.config import get_graphrag_config
+        from deep_agent.settings import use_deep_agent
+        if use_deep_agent(get_graphrag_config(graphname)):
+            from deep_agent import DeepGraphRAGAgent
+            agent = DeepGraphRAGAgent(
+                llm_provider, conn, embedding_service, embedding_store,
+                use_cypher=use_cypher, ws=ws,
+                conversation_id=conversation_id, user=user,
+            )
+            agent.engine_note = None
+            return agent
+
         from agent.agentic_agent import AgenticAgent
         agent = AgenticAgent(
             llm_provider, conn, embedding_service, embedding_store,

@@ -18,3 +18,7 @@ __pycache__/
 
 # Release docs
 /RELEASE_NOTES.md
+
+# Deep Agent memory (SQLite checkpointer + store)
+data/deep_agent/
+deep_agent_data/

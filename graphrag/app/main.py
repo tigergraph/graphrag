@@ -64,9 +64,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger(__name__).warning(f"agentic capability check skipped: {e}")
 
+    # Deep Agent memory (checkpointer + store): open the on-prem database now
+    # so a misconfiguration is logged at startup rather than on first chat.
+    try:
+        from common.config import get_graphrag_config
+        from deep_agent.memory import init_backends
+        from deep_agent.settings import memory_settings
+        init_backends(memory_settings(get_graphrag_config()))
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"deep_agent memory init failed: {e}")
+
     yield
 
     # --- shutdown ---
+    try:
+        from deep_agent.memory import close_backends
+        close_backends()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"deep_agent memory shutdown failed: {e}")
     # Close every cached external-MCP client and stop the dedicated event loop
     # so stdio subprocesses don't outlive the worker.
     try:
@@ -99,6 +114,7 @@ app.include_router(routers.supportai_router, prefix=PATH_PREFIX)
 app.include_router(routers.queryai_router, prefix=PATH_PREFIX)
 app.include_router(routers.ui_router, prefix=PATH_PREFIX)
 app.include_router(routers.mcp_servers_router, prefix=PATH_PREFIX)
+app.include_router(routers.deep_agent_router, prefix=PATH_PREFIX)
 
 
 excluded_metrics_paths = ("/docs", "/openapi.json", "/metrics")
