@@ -21,6 +21,7 @@ import { safeJson } from "@/utils/safeJson";
 import { pauseIdleTimer, pingIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
 import type { JiraSchemaStatus, JiraSource } from "@/types/dataSources";
 import ConnectorPromptGuide from "@/pages/setup/ConnectorPromptGuide";
+import RestoreApiTokenCard from "@/pages/setup/RestoreApiTokenCard";
 import ZendeskSourcesCard from "@/pages/setup/ZendeskSourcesCard";
 
 const editingSourceKey = (graph: string) =>
@@ -131,6 +132,7 @@ const DataSourcesConfig: React.FC = () => {
   );
   const [availableGraphs, setAvailableGraphs] = useState<string[]>([]);
   const [sources, setSources] = useState<JiraSource[]>([]);
+  const [tokenPromptFor, setTokenPromptFor] = useState<string | null>(null);
   const [editing, setEditing] = useState<JiraSource | null>(null);
   const [connectionVerified, setConnectionVerified] = useState(false);
   const [projectSelectionLoaded, setProjectSelectionLoaded] = useState(false);
@@ -720,7 +722,15 @@ const DataSourcesConfig: React.FC = () => {
     }
   };
 
+  const tokenMissing = (message: string) =>
+    message.toLowerCase().includes("api token is not available");
+
   const sync = async (source: JiraSource, resume = false) => {
+    if (source.token_available === false) {
+      setTokenPromptFor(source.id);
+      setSyncFeedback(null);
+      return;
+    }
     setBusy(`sync:${source.id}`);
     if (!resume) {
       setSources((current) =>
@@ -832,6 +842,11 @@ const DataSourcesConfig: React.FC = () => {
       } catch {
         // Keep the ingestion error below. Resume appears once last_error reloads.
       }
+      if (tokenMissing(error.message || "")) {
+        setTokenPromptFor(source.id);
+        setSyncFeedback(null);
+        return;
+      }
       setSyncFeedback({
         type: "error",
         text: `Jira ingestion failed: ${error.message}`,
@@ -886,6 +901,37 @@ const DataSourcesConfig: React.FC = () => {
           project.name.toLowerCase().includes(normalizedProjectSearch)
       )
     : projects;
+
+  const restoreJiraToken = async (source: JiraSource, token: string) => {
+    if (!selectedGraph) return;
+    setBusy(`token:${source.id}`);
+    try {
+      const response = await fetch(
+        `/ui/${selectedGraph}/data-sources/${encodeURIComponent(source.id)}/test`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: sessionStorage.getItem("auth") || "",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            ...source,
+            connection: { ...source.connection, api_token: token },
+          }),
+        }
+      );
+      const data = await safeJson(response);
+      if (!response.ok) {
+        throw new Error(
+          typeof data?.detail === "string" ? data.detail : `HTTP ${response.status}`
+        );
+      }
+      setTokenPromptFor(null);
+      await loadSources();
+    } finally {
+      setBusy("");
+    }
+  };
 
   const jiraCardStatus = !selectedGraph
     ? "Select a graph to set up Jira."
@@ -1069,7 +1115,8 @@ const DataSourcesConfig: React.FC = () => {
                           : "Connection not tested"}
                       </span>
                     </div>
-                    {source.sync.last_error && (
+                    {source.sync.last_error &&
+                      !tokenMissing(source.sync.last_error) && (
                       <div className="text-xs text-red-600 mt-1">{source.sync.last_error}</div>
                     )}
                   </div>
@@ -1587,8 +1634,9 @@ const DataSourcesConfig: React.FC = () => {
                 {sources.map((source) => (
                   <div
                     key={source.id}
-                    className="border border-gray-200 dark:border-[#3D3D3D] rounded-md p-4 flex flex-wrap items-center justify-between gap-4"
+                    className="border border-gray-200 dark:border-[#3D3D3D] rounded-md p-4"
                   >
+                    <div className="flex flex-wrap items-center justify-between gap-4">
                     <div>
                       <div className="font-medium text-black dark:text-white">
                         {source.display_name}
@@ -1598,14 +1646,16 @@ const DataSourcesConfig: React.FC = () => {
                         Issues: {source.sync.last_issue_count || 0}
                       </div>
                       {source.sync.last_error &&
-                        busy !== `sync:${source.id}` && (
+                        busy !== `sync:${source.id}` &&
+                        !tokenMissing(source.sync.last_error) && (
                         <div className="text-xs text-red-600 mt-1">
                           {source.sync.last_error}
                         </div>
                       )}
                     </div>
                     <div className="flex gap-2">
-                      {source.sync.last_error && (
+                      {source.sync.last_error &&
+                        !tokenMissing(source.sync.last_error) && (
                         <Button
                           size="sm"
                           variant="outline"
@@ -1640,6 +1690,17 @@ const DataSourcesConfig: React.FC = () => {
                         Ingest now
                       </Button>
                     </div>
+                    </div>
+                    {tokenPromptFor === source.id && (
+                      <div className="mt-3">
+                        <RestoreApiTokenCard
+                          name={source.display_name}
+                          detail={source.connection.site_url}
+                          busy={busy === `token:${source.id}`}
+                          onSave={(token) => restoreJiraToken(source, token)}
+                        />
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

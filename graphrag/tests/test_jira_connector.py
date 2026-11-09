@@ -63,6 +63,31 @@ def test_schema_status_keeps_a_running_install_visible_after_the_request_drops(m
         data_sources._install_state.pop(graph, None)
 
 
+def test_zendesk_schema_install_state_stays_off_the_jira_status(monkeypatch):
+    from routers import data_sources
+
+    graph = "InstallStateTest"
+    data_sources._install_state.pop(graph, None)
+    monkeypatch.setattr(
+        data_sources,
+        "jira_schema_status",
+        lambda conn: {"status": "installed", "missing": {}, "conflicts": []},
+    )
+    monkeypatch.setattr(data_sources, "get_current_operation", lambda graphname: None)
+    data_sources._set_install_state(
+        graph,
+        operation="install_zendesk_schema",
+        status="running",
+        error=None,
+    )
+    try:
+        payload = data_sources._schema_status_payload(object(), graph)
+        assert payload["install"] is None
+        assert data_sources._visible_install(graph, "install_zendesk_schema")["status"] == "running"
+    finally:
+        data_sources._install_state.pop(graph, None)
+
+
 def source(**overrides) -> JiraDataSource:
     payload = {
         "id": "jira-acme",

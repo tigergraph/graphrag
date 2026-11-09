@@ -162,14 +162,38 @@ def _install_snapshot(graphname: str) -> dict[str, Any] | None:
         return dict(state) if state else None
 
 
-def _schema_status_payload(conn, graphname: str) -> dict[str, Any]:
-    status = jira_schema_status(conn)
+def _visible_install(graphname: str, operation: str) -> dict[str, Any] | None:
     install = _install_snapshot(graphname)
-    if get_current_operation(graphname) == "install_jira_schema" and (
+    if get_current_operation(graphname) == operation and (
         not install or install.get("status") not in {"queued", "running"}
     ):
-        install = {"status": "running", **(install or {})}
-    status["install"] = install
+        install = {"status": "running", "operation": operation, **(install or {})}
+    if not install:
+        return None
+    recorded = install.get("operation")
+    if recorded is None:
+        return install if operation == "install_jira_schema" else None
+    if recorded != operation:
+        return None
+    return install
+
+
+def _with_token_availability(
+    graphname: str,
+    sources: list[dict],
+    tokens: dict[tuple[str, str], str],
+) -> list[dict]:
+    for source in sources:
+        stored = (source.get("connection") or {}).get("api_token")
+        source["token_available"] = bool(
+            tokens.get((graphname, source.get("id"))) or stored
+        )
+    return sources
+
+
+def _schema_status_payload(conn, graphname: str) -> dict[str, Any]:
+    status = jira_schema_status(conn)
+    status["install"] = _visible_install(graphname, "install_jira_schema")
     return status
 
 
@@ -182,7 +206,13 @@ def list_data_sources(
     ],
 ):
     _require_access(graphname, auth)
-    return {"sources": store.list(graphname)}
+    with _jira_tokens_lock:
+        tokens = dict(_jira_tokens)
+    return {
+        "sources": _with_token_availability(
+            graphname, store.list(graphname), tokens
+        )
+    }
 
 
 @router.put(f"{route_prefix}/{{graphname}}/data-sources/{{source_id}}")
@@ -263,6 +293,8 @@ def test_data_source(
         _jira_tokens[(graphname, source_id)] = token
     source.connection.cloud_id = cloud_id
     source.sync.last_tested_at = datetime.now(timezone.utc)
+    if source.sync.last_error and "API token is not available" in source.sync.last_error:
+        source.sync.last_error = None
     store.update_runtime_state(graphname, source)
     return {
         "status": "connected",
@@ -429,6 +461,7 @@ def install_jira_schema(
 
     install = _set_install_state(
         graphname,
+        operation=operation,
         status="queued",
         started_at=datetime.now(timezone.utc).isoformat(),
         completed_at=None,
@@ -699,7 +732,13 @@ def list_zendesk_sources(
     ],
 ):
     _require_access(graphname, auth)
-    return {"sources": zendesk_store.list(graphname)}
+    with _zendesk_tokens_lock:
+        tokens = dict(_zendesk_tokens)
+    return {
+        "sources": _with_token_availability(
+            graphname, zendesk_store.list(graphname), tokens
+        )
+    }
 
 
 @router.put(f"{route_prefix}/{{graphname}}/data-sources/zendesk/{{source_id}}")
@@ -777,6 +816,8 @@ def test_zendesk_source(
     with _zendesk_tokens_lock:
         _zendesk_tokens[(graphname, source_id)] = token
     source.sync.last_tested_at = datetime.now(timezone.utc)
+    if source.sync.last_error and "API token is not available" in source.sync.last_error:
+        source.sync.last_error = None
     zendesk_store.update_runtime_state(graphname, source)
     return {
         "status": "connected",
@@ -825,7 +866,9 @@ def get_zendesk_schema_status(
     ],
 ):
     _require_access(graphname, auth)
-    return zendesk_schema_status(_connection(request, graphname))
+    status = zendesk_schema_status(_connection(request, graphname))
+    status["install"] = _visible_install(graphname, "install_zendesk_schema")
+    return status
 
 
 @router.post(f"{route_prefix}/{{graphname}}/data-sources/zendesk/schema/install")
@@ -849,78 +892,109 @@ def install_zendesk_schema_route(
             status_code=409,
             detail="Test a Zendesk connection before installing its schema.",
         )
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
     operation = "install_zendesk_schema"
     if not acquire_graph_lock(graphname, operation):
         current = get_current_operation(graphname) or "another operation"
+        if current == operation:
+            return {
+                "status": "submitted",
+                "install": _install_snapshot(graphname) or {"status": "running"},
+            }
         raise HTTPException(
             status_code=409,
             detail=f"Graph '{graphname}' is busy with '{current}'.",
         )
-    try:
-        conn = _connection(request, graphname)
-        before = zendesk_schema_status(conn)
-        if before["status"] == "not_initialized":
-            raise HTTPException(
-                status_code=409,
-                detail=(
+
+    install = _set_install_state(
+        graphname,
+        operation=operation,
+        status="queued",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        completed_at=None,
+        error=None,
+    )
+
+    def run() -> None:
+        error: Exception | None = None
+        try:
+            _set_install_state(graphname, status="running")
+            from routers.ui import ws_basic_auth
+
+            _, conn = ws_basic_auth(authorization, graphname)
+            before = zendesk_schema_status(conn)
+            if before["status"] == "not_initialized":
+                raise RuntimeError(
                     "Initialize the knowledge graph before installing "
                     "the Zendesk connector schema."
-                ),
-            )
-        if before["status"] == "conflict":
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": "Existing graph schema conflicts with Zendesk schema.",
-                    "conflicts": before["conflicts"],
-                },
-            )
-        result = install_zendesk_schema(conn, graphname)
-        if result.get("status") == "error":
-            raise HTTPException(
-                status_code=500,
-                detail=result.get("error") or "Zendesk schema installation failed.",
-            )
-        retrievers = result.get("retrievers") or {}
-        if retrievers.get("status") == "error":
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Zendesk schema was applied, but retriever installation failed: "
-                    f"{retrievers.get('error', 'unknown error')}"
-                ),
-            )
-        verification_conn = _connection(request, graphname)
-        after = zendesk_schema_status(verification_conn)
-        if after["status"] != "installed":
-            logger.error(
-                "Zendesk schema verification failed for graph %s: %s",
+                )
+            if before["status"] == "conflict":
+                conflicts = "; ".join(before.get("conflicts") or [])
+                raise RuntimeError(
+                    "Existing graph schema conflicts with Zendesk schema."
+                    + (f" {conflicts}" if conflicts else "")
+                )
+            if before["status"] != "installed":
+                result = install_zendesk_schema(conn, graphname)
+                if result.get("status") == "error":
+                    raise RuntimeError(
+                        result.get("error") or "Zendesk schema installation failed."
+                    )
+                retrievers = result.get("retrievers") or {}
+                if retrievers.get("status") == "error":
+                    raise RuntimeError(
+                        "Zendesk schema was applied, but retriever installation failed: "
+                        f"{retrievers.get('error', 'unknown error')}"
+                    )
+            _, verification_conn = ws_basic_auth(authorization, graphname)
+            after = zendesk_schema_status(verification_conn)
+            if after["status"] != "installed":
+                logger.error(
+                    "Zendesk schema verification failed for graph %s: %s",
+                    graphname,
+                    after,
+                )
+                missing = after.get("missing") or {}
+                conflicts = "; ".join(after.get("conflicts") or [])
+                raise RuntimeError(
+                    "Zendesk schema installation completed, but verification "
+                    "did not find a compatible schema."
+                    + (f" Missing: {missing}." if missing else "")
+                    + (f" Conflicts: {conflicts}." if conflicts else "")
+                )
+        except Exception as exc:
+            error = exc
+            logger.exception("Zendesk schema installation failed graph=%s", graphname)
+        finally:
+            release_graph_lock(graphname, operation)
+
+        if error is not None:
+            _set_install_state(
                 graphname,
-                after,
+                status="failed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=str(error)[:1000],
             )
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "message": (
-                        "Zendesk schema installation completed, but verification "
-                        "did not find a compatible schema."
-                    ),
-                    "missing": after.get("missing"),
-                    "conflicts": after.get("conflicts"),
-                },
+        else:
+            _set_install_state(
+                graphname,
+                status="completed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=None,
             )
-        return {
-            "status": "installed",
-            "schema": after,
-            "migration": {
-                "status": result.get("status"),
-                "statements": result.get("statements") or [],
-                "summary": result.get("summary") or {},
-                "retrievers": retrievers,
-            },
-        }
-    finally:
+
+    try:
+        threading.Thread(
+            target=run,
+            name=f"zendesk-schema-install-{graphname}",
+            daemon=True,
+        ).start()
+    except Exception:
         release_graph_lock(graphname, operation)
+        raise
+    return {"status": "submitted", "install": install}
 
 
 @router.post(

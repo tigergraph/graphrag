@@ -18,7 +18,6 @@ from .client import COMMENT_FETCH_WORKERS, ZendeskAPIError, ZendeskClient
 from .config import ZendeskDataSource
 from .linking import LinkReconciliationResult, reconcile_links
 from .mapper import MappedChunk, MappedTicket, ZendeskMapper
-from .same_person import edges_for_zendesk_users
 from .schema import zendesk_schema_status
 from .state import ZendeskSourceStore
 
@@ -62,16 +61,26 @@ class ZendeskSyncService:
             self.store.update_runtime_state(self.graphname, self.source)
             mapper = ZendeskMapper(self.source, graphname=self.graphname)
             try:
-                tickets_upserted, comments_upserted = self._retry_pending_comments(
+                tickets_upserted, comments_upserted = self._retry_failed_tickets(
                     mapper
                 )
+                retried_tickets, retried_comments = self._retry_pending_comments(
+                    mapper
+                )
+                tickets_upserted += retried_tickets
+                comments_upserted += retried_comments
                 page_tickets, page_comments = self._sync_pages(mapper)
                 tickets_upserted += page_tickets
                 comments_upserted += page_comments
                 link_result = self._reconcile_links()
                 self.source.sync.last_ticket_count = tickets_upserted
                 self.source.sync.last_completed_at = datetime.now(timezone.utc)
-                self.source.sync.last_error = None
+                if self.source.sync.failed_ticket_ids:
+                    self.source.sync.last_error = (
+                        self.source.sync.last_error or "some tickets failed"
+                    )
+                else:
+                    self.source.sync.last_error = None
                 self.store.update_runtime_state(self.graphname, self.source)
                 return {
                     "tickets_upserted": tickets_upserted,
@@ -90,6 +99,30 @@ class ZendeskSyncService:
         finally:
             if self._owns_client:
                 self.client.close()
+
+    def _retry_failed_tickets(self, mapper: ZendeskMapper) -> tuple[int, int]:
+        pending = list(self.source.sync.failed_ticket_ids)
+        still_failed: list[str] = []
+        tickets_upserted = 0
+        comments_upserted = 0
+        for ticket_id in pending:
+            try:
+                ticket = self.client.ticket(ticket_id)
+                comments, failed = self._comments_for([ticket])
+                if failed:
+                    still_failed.append(str(ticket_id))
+                    continue
+                mapped = self._map_tickets(mapper, [ticket], comments)
+                comments_upserted += self._write_mapped(mapped)
+                tickets_upserted += len(mapped)
+            except Exception:
+                logger.warning(
+                    "Zendesk retry failed for ticket %s", ticket_id, exc_info=True
+                )
+                still_failed.append(str(ticket_id))
+        self.source.sync.failed_ticket_ids = still_failed
+        self.store.update_runtime_state(self.graphname, self.source)
+        return tickets_upserted, comments_upserted
 
     def _retry_pending_comments(self, mapper: ZendeskMapper) -> tuple[int, int]:
         pending = list(self.source.sync.pending_comment_ticket_ids)
@@ -120,25 +153,48 @@ class ZendeskSyncService:
     def _sync_pages(self, mapper: ZendeskMapper) -> tuple[int, int]:
         tickets_upserted = 0
         comments_upserted = 0
-        for tickets, end_time, _end_of_stream, after_cursor in self.client.iter_ticket_pages():
+        for tickets, _end_time, _end_of_stream, _after_cursor in self.client.iter_ticket_pages():
             kept = [ticket for ticket in tickets if self._keep(ticket)]
+            kept.sort(key=lambda ticket: (_ticket_sort_key(ticket), int(ticket.get("id") or 0)))
             comments, failed = self._comments_for(kept)
             pending = list(self.source.sync.pending_comment_ticket_ids)
             for ticket_id in failed:
                 if ticket_id not in pending:
                     pending.append(ticket_id)
-            mapped = self._map_tickets(mapper, kept, comments)
-            comments_upserted += self._write_mapped(mapped)
-            tickets_upserted += len(mapped)
-            if after_cursor:
-                self.source.sync.export_cursor = after_cursor
-            if end_time is not None:
-                self.source.sync.checkpoint = datetime.fromtimestamp(
-                    int(end_time),
-                    tz=timezone.utc,
-                )
             self.source.sync.pending_comment_ticket_ids = pending
-            self.store.update_runtime_state(self.graphname, self.source)
+            mapped = {
+                item.ticket_id: item
+                for item in self._map_tickets(mapper, kept, comments)
+            }
+            failed_ids = list(self.source.sync.failed_ticket_ids)
+            for ticket in kept:
+                ticket_id = str(ticket.get("id"))
+                item = mapped.get(ticket_id)
+                if item is None:
+                    continue
+                try:
+                    comments_upserted += self._write_mapped([item])
+                except Exception:
+                    logger.warning(
+                        "Zendesk write failed for ticket %s", ticket_id, exc_info=True
+                    )
+                    if ticket_id not in failed_ids:
+                        failed_ids.append(ticket_id)
+                    self.source.sync.failed_ticket_ids = failed_ids
+                    self.source.sync.last_error = f"ticket {ticket_id} failed"
+                    self.store.update_runtime_state(self.graphname, self.source)
+                    continue
+                tickets_upserted += 1
+                updated_at = ticket.get("updated_at")
+                if updated_at:
+                    self.source.sync.checkpoint = _parse_time(str(updated_at))
+                if str(ticket_id).isdigit():
+                    self.source.sync.last_ticket_id = int(ticket_id)
+                failed_ids = [
+                    failed_id for failed_id in failed_ids if failed_id != ticket_id
+                ]
+                self.source.sync.failed_ticket_ids = failed_ids
+                self.store.update_runtime_state(self.graphname, self.source)
         return tickets_upserted, comments_upserted
 
     def _reconcile_links(self):
@@ -218,6 +274,7 @@ class ZendeskSyncService:
         tickets: list[dict[str, Any]],
         comments: dict[str, list[dict[str, Any]]],
     ) -> list[MappedTicket]:
+        audits = self._audits_for(tickets)
         user_ids: list[str] = []
         for ticket in tickets:
             requester = ticket.get("requester_id")
@@ -227,10 +284,15 @@ class ZendeskSyncService:
                 author = comment.get("author_id")
                 if author is not None:
                     user_ids.append(str(author))
+            for audit in audits.get(str(ticket.get("id")), []):
+                author = audit.get("author_id")
+                if author is not None:
+                    user_ids.append(str(author))
         users_by_id = {
             str(user.get("id")): {
                 "name": str(user.get("name") or ""),
                 "email": str(user.get("email") or ""),
+                "organization_id": str(user.get("organization_id") or ""),
             }
             for user in self.client.users(user_ids)
             if user.get("id") is not None
@@ -245,49 +307,57 @@ class ZendeskSyncService:
             for ticket in tickets
             if ticket.get("group_id") is not None
         ]
-        organizations_by_id = {
-            str(row.get("id")): str(row.get("name") or "")
-            for row in self.client.organizations(organization_ids)
-            if row.get("id") is not None
-        }
+        organizations_by_id = {}
+        for row in self.client.organizations(organization_ids):
+            if row.get("id") is None:
+                continue
+            domains = row.get("domain_names") or []
+            organizations_by_id[str(row.get("id"))] = {
+                "name": str(row.get("name") or ""),
+                "domain": str(domains[0] or "") if domains else "",
+            }
         groups_by_id = {
             str(row.get("id")): str(row.get("name") or "")
             for row in self.client.groups(group_ids)
             if row.get("id") is not None
         }
-        mapped = [
+        return [
             mapper.map_ticket(
                 ticket,
                 comments.get(str(ticket.get("id")), []),
                 users_by_id,
                 organizations_by_id,
                 groups_by_id,
+                audits.get(str(ticket.get("id")), []),
             )
             for ticket in tickets
         ]
-        self._add_same_person(mapped)
-        return mapped
 
-    def _add_same_person(self, mapped: list[MappedTicket]) -> None:
-        users: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for item in mapped:
-            for vertex in item.vertices:
-                if vertex.vertex_type != "ZendeskUser" or vertex.vertex_id in seen:
+    def _audits_for(self, tickets: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        found: dict[str, list[dict[str, Any]]] = {}
+        missing: list[str] = []
+        for ticket in tickets:
+            ticket_id = str(ticket.get("id"))
+            try:
+                found[ticket_id] = self.client.audits(ticket_id)
+            except ZendeskAPIError as exc:
+                if exc.status_code == 404:
+                    found[ticket_id] = []
+                    missing.append(ticket_id)
                     continue
-                email = str(vertex.attributes.get("email") or "")
-                if not email:
-                    continue
-                seen.add(vertex.vertex_id)
-                users.append((vertex.vertex_id, email))
-        by_user: dict[str, list[EdgeRecord]] = {}
-        for edge in edges_for_zendesk_users(self.conn, users):
-            by_user.setdefault(edge.source_id, []).append(edge)
-        if not by_user:
-            return
-        for item in mapped:
-            for vertex in item.vertices:
-                item.edges.extend(by_user.get(vertex.vertex_id, []))
+                if exc.status_code in (401, 403):
+                    raise ZendeskAPIError(
+                        exc.status_code,
+                        "Zendesk rejected the API token while reading ticket history.",
+                    ) from exc
+                raise
+        if missing:
+            logger.info(
+                "Zendesk has no audit history for %s tickets. "
+                "Those tickets are stored without change rows.",
+                len(missing),
+            )
+        return found
 
     def _write_mapped(self, mapped: list[MappedTicket]) -> int:
         ticket_hashes = self._stored_hashes(
@@ -567,6 +637,13 @@ def _without_hash(vertex: VertexRecord) -> VertexRecord:
     attributes = dict(vertex.attributes)
     attributes.pop("content_hash", None)
     return VertexRecord(vertex.vertex_type, vertex.vertex_id, attributes)
+
+
+def _ticket_sort_key(ticket: dict[str, Any]) -> datetime:
+    raw = ticket.get("updated_at")
+    if not raw:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    return _parse_time(str(raw))
 
 
 def _parse_time(value: str) -> datetime:

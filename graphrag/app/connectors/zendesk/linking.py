@@ -1,4 +1,4 @@
-"""Write ZENDESK_LINKS_TO_JIRA from Zendesk's Jira integration inventory."""
+"""Write links_issue from Zendesk's Jira integration inventory."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from connectors.records import EdgeRecord, VertexRecord
 from connectors.upsert import upsert_payload
 
 from .mapper import jira_issue_vertex_id, ticket_vertex_id
-from .schema import ZENDESK_LINKS_TO_JIRA
+from .schema import LINKS_ISSUE
 
 _JIRA_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9]+-\d+$")
 _TICKET_ID = re.compile(r"^\d+$")
@@ -61,7 +61,7 @@ def _edge_targets(conn, ticket_vertex_id_value: str) -> set[str]:
         edges = conn.getEdges(
             "ZendeskTicket",
             ticket_vertex_id_value,
-            ZENDESK_LINKS_TO_JIRA,
+            LINKS_ISSUE,
         ) or []
     except Exception as exc:
         if "is not a valid vertex id" in str(exc):
@@ -80,7 +80,7 @@ def _replace_edges(conn, ticket_vertex: str, issue_vertices: set[str]) -> None:
         return
     if current:
         try:
-            conn.delEdges("ZendeskTicket", ticket_vertex, ZENDESK_LINKS_TO_JIRA)
+            conn.delEdges("ZendeskTicket", ticket_vertex, LINKS_ISSUE)
         except Exception as exc:
             if "is not a valid vertex id" not in str(exc):
                 raise
@@ -90,7 +90,7 @@ def _replace_edges(conn, ticket_vertex: str, issue_vertices: set[str]) -> None:
         EdgeRecord(
             "ZendeskTicket",
             ticket_vertex,
-            ZENDESK_LINKS_TO_JIRA,
+            LINKS_ISSUE,
             "JiraIssue",
             issue_vertex,
         )
@@ -101,15 +101,52 @@ def _replace_edges(conn, ticket_vertex: str, issue_vertices: set[str]) -> None:
         raise RuntimeError("TigerGraph rejected a Zendesk link edge")
 
 
-def _ensure_issue_vertex(conn, issue_key: str) -> str:
-    """Return the Jira vertex id, creating it with issue_key only when missing.
+def _ticket_attributes(conn, ticket_vertex: str) -> dict[str, Any]:
+    try:
+        found = conn.getVerticesById("ZendeskTicket", [ticket_vertex]) or []
+    except Exception:
+        return {}
+    for row in found:
+        if isinstance(row, dict):
+            attributes = row.get("attributes") or {}
+            if str(row.get("v_id") or row.get("id") or "") == ticket_vertex or attributes:
+                return attributes
+    return {}
 
-    An existing vertex is left unchanged so a later Jira sync can fill the
-    other attributes on the same id.
+
+def _public_comment_text(conn, ticket_id: str) -> str:
+    try:
+        rows = conn.getVertices("ZendeskComment", where=f'ticket_id="{ticket_id}"') or []
+    except Exception:
+        return ""
+    bodies: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        attributes = row.get("attributes") or {}
+        if str(attributes.get("visibility") or "public") != "public":
+            continue
+        body = str(attributes.get("body") or "").strip()
+        if body:
+            bodies.append(body)
+    return "\n".join(bodies)
+
+
+def _ensure_issue_vertex(conn, issue_key: str, ticket_vertex: str, ticket_id: str) -> str:
+    """Return the Jira vertex id, creating it when it is missing.
+
+    An existing vertex is left unchanged. A new vertex gets issue_key, summary
+    from the ticket subject, and description from the ticket description plus
+    the public comments.
     """
     issue_vertex = jira_issue_vertex_id(issue_key)
     if _vertex_exists(conn, "JiraIssue", issue_vertex):
         return issue_vertex
+    ticket_attributes = _ticket_attributes(conn, ticket_vertex)
+    description = str(ticket_attributes.get("description") or "").strip()
+    public_comments = _public_comment_text(conn, ticket_id)
+    if public_comments:
+        description = "\n".join(part for part in (description, public_comments) if part)
     conn.upsertData(
         json.dumps(
             upsert_payload(
@@ -117,7 +154,11 @@ def _ensure_issue_vertex(conn, issue_key: str) -> str:
                     VertexRecord(
                         "JiraIssue",
                         issue_vertex,
-                        {"issue_key": issue_key},
+                        {
+                            "issue_key": issue_key,
+                            "summary": str(ticket_attributes.get("subject") or ""),
+                            "description": description,
+                        },
                     )
                 ],
                 [],
@@ -143,10 +184,10 @@ def reconcile_links(
     """
     if not _has_type(conn, "getVertexTypes", "JiraIssue"):
         return LinkReconciliationResult()
-    if not _has_type(conn, "getEdgeTypes", ZENDESK_LINKS_TO_JIRA):
+    if not _has_type(conn, "getEdgeTypes", LINKS_ISSUE):
         raise RuntimeError(
-            "ZENDESK_LINKS_TO_JIRA is not installed. Install the Zendesk "
-            "schema again after the Jira schema."
+            "links_issue is not installed. Install the Zendesk schema again "
+            "after the Jira schema."
         )
 
     by_ticket: dict[str, set[str]] = {}
@@ -176,7 +217,9 @@ def reconcile_links(
             continue
         issue_vertices: set[str] = set()
         for issue_key in by_ticket.get(ticket_id, ()):
-            issue_vertices.add(_ensure_issue_vertex(conn, issue_key))
+            issue_vertices.add(
+                _ensure_issue_vertex(conn, issue_key, ticket_vertex, ticket_id)
+            )
             result.links_written += 1
         _replace_edges(conn, ticket_vertex, issue_vertices)
         if issue_vertices:
