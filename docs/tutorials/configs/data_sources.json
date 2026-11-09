@@ -1,0 +1,24 @@
+{
+  "sources": [
+    {
+      "id": "my-jira",
+      "type": "jira_cloud",
+      "enabled": true,
+      "display_name": "My Jira Project",
+      "connection": {
+        "site_url": "https://your-company.atlassian.net",
+        "email": "your-email@company.com",
+        "api_token": "YOUR_JIRA_API_TOKEN"
+      },
+      "scope": {
+        "project_keys": ["GML", "TSE"],
+        "created_after": null,
+        "updated_after": null,
+        "status_categories": ["new", "indeterminate", "done"],
+        "jql_extra": "",
+        "include_comments": true,
+        "story_points_field": null
+      }
+    }
+  ]
+}
