@@ -108,6 +108,8 @@ class JiraSourceStore:
                 submitted.sync.last_tested_at = None
             if submitted.scope != existing.scope:
                 submitted.sync.checkpoint = None
+                submitted.sync.failed_issue_keys = []
+                submitted.sync.last_error = None
         else:
             submitted.sync = JiraSyncState(overlap_seconds=overlap_seconds)
         sources = [source for source in sources if source.id != submitted.id]

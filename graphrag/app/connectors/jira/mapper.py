@@ -16,17 +16,12 @@ from common.config import get_graphrag_config
 from .adf import adf_to_markdown
 from .config import JiraDataSource
 from .schema import (
-    JIRA_ASSIGNEE_EDGE,
-    JIRA_CHANGE_AUTHOR_EDGE,
-    JIRA_CHANGE_EDGE,
-    JIRA_COMMENT_AFTER_EDGE,
-    JIRA_COMMENT_AUTHOR_EDGE,
-    JIRA_COMMENT_ISSUE_EDGE,
-    JIRA_COMMENT_REPLY_EDGE,
-    JIRA_LINK_EDGE,
-    JIRA_PARENT_EDGE,
-    JIRA_PROJECT_EDGE,
-    JIRA_REPORTER_EDGE,
+    ASSIGNED_TO_EDGE,
+    AUTHORED_EDGE,
+    CHANGED_EDGE,
+    PART_OF_EDGE,
+    RELATES_TO_EDGE,
+    REPORTED_EDGE,
 )
 
 
@@ -129,6 +124,59 @@ def _comma_names(values: list[Any] | None) -> str:
     return ", ".join(names)
 
 
+def _fix_versions(values: list[Any] | None) -> str:
+    """Version names, with the Jira release date when the API returns one."""
+    parts: list[str] = []
+    for value in values or []:
+        if isinstance(value, dict):
+            name = str(value.get("name") or "").strip()
+            release = str(value.get("releaseDate") or "").strip()
+        else:
+            name = str(value or "").strip()
+            release = ""
+        if not name:
+            continue
+        if release:
+            parts.append(f"{name} (release {release})")
+        else:
+            parts.append(name)
+    return ", ".join(parts)
+
+
+def _custom_value(value: Any) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        if value.get("type") == "doc":
+            return adf_to_markdown(value).strip()
+        for key in ("name", "value", "displayName"):
+            text = value.get(key)
+            if text not in (None, ""):
+                return str(text).strip()
+        return ""
+    if isinstance(value, list):
+        parts = [part for item in value if (part := _custom_value(item))]
+        return ", ".join(parts)
+    return ""
+
+
+def _custom_fields(fields: dict[str, Any], story_points_field: str | None) -> str:
+    lines: list[str] = []
+    for key, value in fields.items():
+        if not str(key).startswith("customfield_"):
+            continue
+        if story_points_field and key == story_points_field:
+            continue
+        text = _custom_value(value)
+        if text:
+            lines.append(f"{key}: {text}")
+    return "\n".join(lines)
+
+
 _FENCED_BLOCK_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _LOG_LINE_RE = re.compile(
     r"""(?ix)
@@ -212,19 +260,21 @@ class JiraIssueMapper:
         # are unique within a graph's connected Jira project scope.
         return f"jira:{issue_key}:issue".lower()
 
-    def _user_vertex(
+    def _person_vertex(
         self, user: dict[str, Any] | None
     ) -> VertexRecord | None:
         if not user or not user.get("accountId"):
             return None
-        account_id = str(user["accountId"])
+        display_name = _display_name(user)
+        email = str(user.get("emailAddress") or "").strip().lower()
+        attributes = {"display_name": display_name} if display_name else {}
+        if email:
+            attributes["email"] = email
+            return VertexRecord("Person", f"person:{email}", attributes)
         return VertexRecord(
-            "JiraUser",
-            self._id("user", account_id),
-            {
-                "account_id": account_id,
-                "display_name": _display_name(user),
-            },
+            "Person",
+            self._id("user", str(user["accountId"])),
+            attributes,
         )
 
     def map(self, issue: dict[str, Any]) -> MappedIssue:
@@ -232,9 +282,7 @@ class JiraIssueMapper:
         issue_key = str(issue.get("key") or issue_id)
         fields = issue.get("fields") or {}
         project = fields.get("project") or {}
-        project_id = str(project.get("id") or project.get("key") or "unknown")
         issue_vertex_id = self._issue_id(issue_key)
-        project_vertex_id = self._id("project", project_id)
         site_url = self.source.connection.site_url
         issue_url = f"{site_url}/browse/{issue_key}"
 
@@ -248,9 +296,13 @@ class JiraIssueMapper:
         story_points_field = self.source.scope.story_points_field
         story_points = fields.get(story_points_field) if story_points_field else None
 
+        project_key = issue_key.split("-", 1)[0]
         issue_attrs = {
             "issue_key": issue_key,
             "summary": str(fields.get("summary") or ""),
+            "description": description.strip(),
+            "project_key": project_key,
+            "project_name": str(project.get("name") or ""),
             "issue_type": str(issue_type.get("name") or ""),
             "status": str(status.get("name") or ""),
             "status_category": str(status_category.get("key") or ""),
@@ -258,7 +310,8 @@ class JiraIssueMapper:
             "resolution": str(resolution.get("name") or ""),
             "labels": _comma_names(fields.get("labels")),
             "components": _comma_names(fields.get("components")),
-            "fix_versions": _comma_names(fields.get("fixVersions")),
+            "fix_versions": _fix_versions(fields.get("fixVersions")),
+            "custom_fields": _custom_fields(fields, story_points_field),
             "created": _datetime(fields.get("created")),
             "updated": _datetime(fields.get("updated")),
             "due": _datetime(fields.get("duedate")),
@@ -284,52 +337,47 @@ class JiraIssueMapper:
                 return
             vertices[key] = vertex
 
-        add_vertex(
-            VertexRecord(
-                "JiraProject",
-                project_vertex_id,
-                {
-                    "project_key": str(project.get("key") or ""),
-                    "name": str(project.get("name") or ""),
-                    "url": (
-                        f"{site_url}/jira/software/projects/{project.get('key')}"
-                        if project.get("key")
-                        else site_url
-                    ),
-                },
-            )
-        )
         add_vertex(VertexRecord("JiraIssue", issue_vertex_id, issue_attrs))
-
-        edges = [
-            EdgeRecord(
-                "JiraIssue",
-                issue_vertex_id,
-                JIRA_PROJECT_EDGE,
-                "JiraProject",
-                project_vertex_id,
-            )
-        ]
+        edges: list[EdgeRecord] = []
 
         for field_name, edge_type in (
-            ("assignee", JIRA_ASSIGNEE_EDGE),
-            ("reporter", JIRA_REPORTER_EDGE),
+            ("assignee", ASSIGNED_TO_EDGE),
+            ("reporter", REPORTED_EDGE),
         ):
-            user_vertex = self._user_vertex(fields.get(field_name))
-            add_vertex(user_vertex)
-            if user_vertex:
+            person = self._person_vertex(fields.get(field_name))
+            add_vertex(person)
+            if person:
                 edges.append(
                     EdgeRecord(
                         "JiraIssue",
                         issue_vertex_id,
                         edge_type,
-                        "JiraUser",
-                        user_vertex.vertex_id,
+                        "Person",
+                        person.vertex_id,
                     )
                 )
 
+        for attachment in fields.get("attachment") or []:
+            attachment_id = attachment.get("id")
+            if attachment_id is None:
+                continue
+            file_name = str(attachment.get("filename") or "").strip()
+            content_url = str(attachment.get("content") or "").strip()
+            if not file_name and not content_url:
+                continue
+            add_vertex(
+                VertexRecord(
+                    "Attachment",
+                    self._id("attachment", attachment_id),
+                    {
+                        "file_name": file_name,
+                        "content_url": content_url,
+                        "parent_id": issue_key,
+                    },
+                )
+            )
+
         mapped_comments: list[MappedComment] = []
-        previous_comment_vertex_id: str | None = None
         comments = (
             (fields.get("comment") or {}).get("comments") or []
             if self.source.scope.include_comments
@@ -362,19 +410,8 @@ class JiraIssueMapper:
 
             comment_id = str(raw_comment_id)
             comment_vertex_id = self._id("comment", comment_id)
-            author_vertex = self._user_vertex(author)
+            author_vertex = self._person_vertex(author)
             add_vertex(author_vertex)
-            visibility = comment.get("visibility")
-            if not isinstance(visibility, dict):
-                visibility = {}
-            visibility_text = ":".join(
-                str(value)
-                for value in (
-                    visibility.get("type"),
-                    visibility.get("value"),
-                )
-                if value
-            )
             comment_body = _filter_long_log_output(
                 comment_body,
                 self.comment_chunker.chunk_size,
@@ -397,12 +434,10 @@ class JiraIssueMapper:
             ).hexdigest()
             comment_attrs = {
                 "comment_id": comment_id,
+                "issue_key": issue_key,
                 "body": comment_body,
                 "created": _datetime(comment.get("created")),
                 "updated": _datetime(comment.get("updated")),
-                "visibility": visibility_text,
-                "is_public": comment.get("jsdPublic"),
-                "ontology_class": "Event",
                 "content_hash": comment_hash,
             }
             add_vertex(
@@ -416,61 +451,14 @@ class JiraIssueMapper:
                     },
                 )
             )
-            edges.append(
-                EdgeRecord(
-                    "JiraComment",
-                    comment_vertex_id,
-                    JIRA_COMMENT_ISSUE_EDGE,
-                    "JiraIssue",
-                    issue_vertex_id,
-                )
-            )
             if author_vertex:
                 edges.append(
                     EdgeRecord(
                         "JiraComment",
                         comment_vertex_id,
-                        JIRA_COMMENT_AUTHOR_EDGE,
-                        "JiraUser",
+                        AUTHORED_EDGE,
+                        "Person",
                         author_vertex.vertex_id,
-                    )
-                )
-            parent_comment = comment.get("parent")
-            if not isinstance(parent_comment, dict):
-                parent_comment = {}
-            parent_comment_id = comment.get("parentId") or parent_comment.get("id")
-            if parent_comment_id:
-                parent_comment_vertex_id = self._id(
-                    "comment",
-                    parent_comment_id,
-                )
-                add_vertex(
-                    VertexRecord(
-                        "JiraComment",
-                        parent_comment_vertex_id,
-                        {
-                            "comment_id": str(parent_comment_id),
-                            "ontology_class": "Event",
-                        },
-                    )
-                )
-                edges.append(
-                    EdgeRecord(
-                        "JiraComment",
-                        comment_vertex_id,
-                        JIRA_COMMENT_REPLY_EDGE,
-                        "JiraComment",
-                        parent_comment_vertex_id,
-                    )
-                )
-            if previous_comment_vertex_id:
-                edges.append(
-                    EdgeRecord(
-                        "JiraComment",
-                        comment_vertex_id,
-                        JIRA_COMMENT_AFTER_EDGE,
-                        "JiraComment",
-                        previous_comment_vertex_id,
                     )
                 )
             mapped_comments.append(
@@ -492,8 +480,6 @@ class JiraIssueMapper:
                     ],
                 )
             )
-            previous_comment_vertex_id = comment_vertex_id
-
         parent = fields.get("parent") or {}
         if parent.get("id"):
             parent_key = str(parent.get("key") or parent["id"])
@@ -518,7 +504,7 @@ class JiraIssueMapper:
                 EdgeRecord(
                     "JiraIssue",
                     issue_vertex_id,
-                    JIRA_PARENT_EDGE,
+                    PART_OF_EDGE,
                     "JiraIssue",
                     parent_id,
                 )
@@ -551,7 +537,7 @@ class JiraIssueMapper:
                 EdgeRecord(
                     "JiraIssue",
                     issue_vertex_id,
-                    JIRA_LINK_EDGE,
+                    RELATES_TO_EDGE,
                     "JiraIssue",
                     target_id,
                     {"link_type": str(relation or link_type.get("name") or "relates to")},
@@ -669,7 +655,6 @@ class JiraIssueMapper:
         edges: list[EdgeRecord] = []
         parts: list[tuple[str, tuple[tuple[str, str], ...]]] = []
         change_index = 0
-        issue_vertex_id = self._issue_id(issue_key)
         for history in histories:
             author = history.get("author") or {}
             author_name = _display_name(author) or "Unknown"
@@ -691,11 +676,11 @@ class JiraIssueMapper:
                 change_vertex_id = self._id("change", change_key)
                 attributes = {
                     "change_id": change_key,
+                    "issue_key": issue_key,
                     "field": field,
                     "from_value": from_val,
                     "to_value": to_val,
                     "created": created,
-                    "ontology_class": "Event",
                 }
                 vertices.append(
                     VertexRecord(
@@ -708,24 +693,15 @@ class JiraIssueMapper:
                         },
                     )
                 )
-                edges.append(
-                    EdgeRecord(
-                        "JiraIssue",
-                        issue_vertex_id,
-                        JIRA_CHANGE_EDGE,
-                        "JiraChange",
-                        change_vertex_id,
-                    )
-                )
-                author_vertex = self._user_vertex(author)
+                author_vertex = self._person_vertex(author)
                 if author_vertex:
                     vertices.append(author_vertex)
                     edges.append(
                         EdgeRecord(
                             "JiraChange",
                             change_vertex_id,
-                            JIRA_CHANGE_AUTHOR_EDGE,
-                            "JiraUser",
+                            CHANGED_EDGE,
+                            "Person",
                             author_vertex.vertex_id,
                         )
                     )

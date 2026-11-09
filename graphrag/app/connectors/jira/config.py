@@ -101,6 +101,10 @@ class JiraSyncState(BaseModel):
     last_completed_at: datetime | None = None
     last_error: str | None = None
     last_issue_count: int = Field(default=0, ge=0)
+    # Issue keys from a failed run that did not finish. A key is removed once
+    # that issue has a content hash. Resume reads this list and ignores every
+    # key that already has one.
+    failed_issue_keys: list[str] = Field(default_factory=list)
 
 
 class JiraDataSource(BaseModel):

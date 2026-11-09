@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   DatabaseZap,
   Loader2,
@@ -9,6 +9,13 @@ import {
 } from "lucide-react";
 import ConfigScopeToggle from "@/components/ConfigScopeToggle";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { safeJson } from "@/utils/safeJson";
 import { pauseIdleTimer, pingIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
@@ -77,6 +84,35 @@ const jiraStatusCategories = [
   { value: "done", label: "Done" },
 ] as const;
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isNetworkError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message === "Failed to fetch" ||
+    message === "Load failed" ||
+    message === "NetworkError when attempting to fetch resource."
+  );
+};
+
+const waitUntilVisible = () =>
+  new Promise<void>((resolve) => {
+    if (document.visibilityState === "visible") {
+      resolve();
+      return;
+    }
+    const finish = () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", finish);
+      resolve();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") finish();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", finish);
+  });
+
 const errorDetail = (data: any, fallback: string) => {
   if (typeof data?.detail === "string") return data.detail;
   if (typeof data?.detail?.message === "string") {
@@ -115,6 +151,9 @@ const DataSourcesConfig: React.FC = () => {
     useState<ActionFeedback | null>(null);
   const [sourceFeedback, setSourceFeedback] =
     useState<ActionFeedback | null>(null);
+  const [jiraDialogOpen, setJiraDialogOpen] = useState(false);
+  const installWatchRef = useRef(0);
+  const installActiveRef = useRef(false);
   const [schemaFeedback, setSchemaFeedback] =
     useState<ActionFeedback | null>(null);
   const [syncFeedback, setSyncFeedbackRaw] =
@@ -194,6 +233,94 @@ const DataSourcesConfig: React.FC = () => {
     }
   }, [selectedGraph]);
 
+  const watchSchemaInstall = useCallback(async (graph: string) => {
+    const watchId = ++installWatchRef.current;
+    installActiveRef.current = true;
+    setBusy("schema");
+    pauseIdleTimer();
+    setSchemaFeedback({
+      type: "pending",
+      text: "Installing Jira schema. This keeps running if the laptop locks.",
+    });
+    let misses = 0;
+    try {
+      while (installWatchRef.current === watchId) {
+        if (document.visibilityState === "hidden") {
+          await waitUntilVisible();
+          continue;
+        }
+        try {
+          const response = await fetch(
+            `/ui/${graph}/data-sources/jira/schema`,
+            { headers: { Authorization: sessionStorage.getItem("auth")! } }
+          );
+          const data = await safeJson(response);
+          if (installWatchRef.current !== watchId) return;
+          if (!response.ok) {
+            throw new Error(
+              errorDetail(data, `Failed to inspect schema (${response.status})`)
+            );
+          }
+          pingIdleTimer();
+          setSchema(data);
+          const installStatus = data.install?.status;
+          if (installStatus === "failed") {
+            throw new Error(
+              data.install?.error || "Jira schema installation failed."
+            );
+          }
+          if (installStatus === "completed") {
+            setSchemaFeedback({
+              type: "success",
+              text: "Jira schema installed.",
+            });
+            return;
+          }
+          if (installStatus === "queued" || installStatus === "running") {
+            misses = 0;
+            setSchemaFeedback({
+              type: "pending",
+              text: "Installing Jira schema. This keeps running if the laptop locks.",
+            });
+          } else if (data.status === "installed") {
+            setSchemaFeedback({
+              type: "success",
+              text: "Jira schema installed.",
+            });
+            return;
+          } else {
+            misses += 1;
+            if (misses >= 5) {
+              throw new Error(
+                "The connection dropped before installation started. Install Jira schema again."
+              );
+            }
+          }
+        } catch (error: any) {
+          if (installWatchRef.current !== watchId) return;
+          if (!isNetworkError(error)) throw error;
+          setSchemaFeedback({
+            type: "pending",
+            text: "The laptop lock closed the browser connection. Schema installation is still running and will show here when the network returns.",
+          });
+        }
+        await sleep(3000);
+      }
+    } catch (error: any) {
+      if (installWatchRef.current !== watchId) return;
+      setSchemaFeedback({
+        type: "error",
+        text: `Schema installation failed: ${error.message}`,
+      });
+    } finally {
+      if (installWatchRef.current === watchId) {
+        installActiveRef.current = false;
+        resumeIdleTimer();
+        setBusy("");
+      }
+    }
+  }, []);
+
   const loadSchema = useCallback(async () => {
     if (!selectedGraph) {
       setSchema(null);
@@ -211,17 +338,47 @@ const DataSourcesConfig: React.FC = () => {
         );
       }
       setSchema(data);
+      const installStatus = data.install?.status;
+      if (
+        (installStatus === "queued" || installStatus === "running") &&
+        !installActiveRef.current
+      ) {
+        void watchSchemaInstall(selectedGraph);
+      } else if (installStatus === "failed" && !installActiveRef.current) {
+        setSchemaFeedback({
+          type: "error",
+          text: `Schema installation failed: ${
+            data.install?.error || "Jira schema installation failed."
+          }`,
+        });
+      }
       return true;
     } catch (error: any) {
-      setSchemaFeedback({
-        type: "error",
-        text: `Failed to inspect Jira schema: ${error.message}`,
-      });
+      if (!installActiveRef.current) {
+        setSchemaFeedback({
+          type: "error",
+          text: `Failed to inspect Jira schema: ${error.message}`,
+        });
+      }
       return false;
     }
-  }, [selectedGraph]);
+  }, [selectedGraph, watchSchemaInstall]);
 
   useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void loadSchema();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onVisible);
+    };
+  }, [loadSchema]);
+
+  useEffect(() => {
+    installWatchRef.current += 1;
+    installActiveRef.current = false;
     setEditing(null);
     setConnectionVerified(false);
     setProjectSelectionLoaded(false);
@@ -504,9 +661,10 @@ const DataSourcesConfig: React.FC = () => {
   const installSchema = async () => {
     if (!selectedGraph) return;
     setBusy("schema");
+    pauseIdleTimer();
     setSchemaFeedback({
       type: "pending",
-      text: "Installing Jira schema…",
+      text: "Installing Jira schema. This keeps running if the laptop locks.",
     });
     try {
       const response = await fetch(
@@ -522,19 +680,22 @@ const DataSourcesConfig: React.FC = () => {
           errorDetail(data, `Schema installation failed (${response.status})`)
         );
       }
-      setSchema(data.schema);
-      setSchemaFeedback({
-        type: "success",
-        text: "Jira schema installed.",
-      });
     } catch (error: any) {
+      if (!isNetworkError(error)) {
+        setSchemaFeedback({
+          type: "error",
+          text: `Schema installation failed: ${error.message}`,
+        });
+        resumeIdleTimer();
+        setBusy("");
+        return;
+      }
       setSchemaFeedback({
-        type: "error",
-        text: `Schema installation failed: ${error.message}`,
+        type: "pending",
+        text: "The laptop lock closed the browser connection. Checking whether schema installation is still running.",
       });
-    } finally {
-      setBusy("");
     }
+    await watchSchemaInstall(selectedGraph);
   };
 
   const pollSync = async (sourceId: string, runId: string) => {
@@ -558,23 +719,29 @@ const DataSourcesConfig: React.FC = () => {
     }
   };
 
-  const sync = async (source: JiraSource) => {
+  const sync = async (source: JiraSource, resume = false) => {
     setBusy(`sync:${source.id}`);
-    setSources((current) =>
-      current.map((item) =>
-        item.id === source.id
-          ? { ...item, sync: { ...item.sync, last_error: null } }
-          : item
-      )
-    );
+    if (!resume) {
+      setSources((current) =>
+        current.map((item) =>
+          item.id === source.id
+            ? { ...item, sync: { ...item.sync, last_error: null } }
+            : item
+        )
+      );
+    }
     setSyncFeedback({
       type: "pending",
-      text: `Ingesting ${source.display_name} into the graph…`,
+      text: resume
+        ? `Resuming failed tickets for ${source.display_name}. Tickets already ingested are skipped.`
+        : `Ingesting ${source.display_name} into the graph…`,
     });
     pauseIdleTimer();
     try {
       const response = await fetch(
-        `/ui/${selectedGraph}/data-sources/${encodeURIComponent(source.id)}/sync`,
+        `/ui/${selectedGraph}/data-sources/${encodeURIComponent(source.id)}/sync${
+          resume ? "?resume=true" : ""
+        }`,
         {
           method: "POST",
           headers: { Authorization: sessionStorage.getItem("auth")! },
@@ -659,6 +826,11 @@ const DataSourcesConfig: React.FC = () => {
             : " No Jira changes were detected, so no new build was started."),
       });
     } catch (error: any) {
+      try {
+        await loadSources();
+      } catch {
+        // Keep the ingestion error below. Resume appears once last_error reloads.
+      }
       setSyncFeedback({
         type: "error",
         text: `Jira ingestion failed: ${error.message}`,
@@ -714,21 +886,36 @@ const DataSourcesConfig: React.FC = () => {
       )
     : projects;
 
+  const jiraCardStatus = !selectedGraph
+    ? "Select a graph to set up Jira."
+    : loading
+      ? "Loading…"
+      : sources.length === 0
+        ? "No Jira connection on this graph."
+        : `${sources.length} connection${sources.length === 1 ? "" : "s"} · ${
+            schema?.install?.status === "queued" ||
+            schema?.install?.status === "running"
+              ? "Schema installing"
+              : schema?.status === "installed"
+              ? "Schema installed"
+              : schema?.status === "conflict"
+                ? "Schema conflicts with this graph"
+                : schema?.status === "incomplete"
+                  ? "Schema incomplete"
+                  : "Schema not installed"
+          }`;
+
   return (
-    <div className="p-6 max-w-5xl mx-auto">
-      <div className="flex items-center gap-4 mb-6">
-        <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center">
-          <DatabaseZap className="h-6 w-6 text-tigerOrange" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold text-black dark:text-white">
-            Data sources
-          </h1>
-          <p className="text-sm text-gray-600 dark:text-[#D9D9D9]">
-            Connect, configure, ingest, and monitor external sources for the
-            selected knowledge graph.
-          </p>
-        </div>
+    <div className="p-8">
+      <div className="max-w-7xl mx-auto">
+      <div className="mb-8">
+        <h1 className="text-2xl font-bold text-black dark:text-white mb-2">
+          Data sources
+        </h1>
+        <p className="text-sm text-gray-600 dark:text-[#D9D9D9]">
+          Connect, configure, ingest, and monitor external sources for the
+          selected knowledge graph.
+        </p>
       </div>
 
       <ConfigScopeToggle
@@ -758,23 +945,53 @@ const DataSourcesConfig: React.FC = () => {
         </div>
       )}
 
-      {selectedGraph && (
-        <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 space-y-6">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-lg bg-blue-50 dark:bg-blue-900/20 flex items-center justify-center">
-                <DatabaseZap className="h-5 w-5 text-blue-600 dark:text-blue-400" />
-              </div>
-              <div>
-                <h2 className="text-lg font-semibold text-black dark:text-white">
-                  Jira Cloud
-                </h2>
-                <p className="text-sm text-gray-600 dark:text-gray-400">
-                  Connect Jira, select projects, install its graph schema, then
-                  ingest issues and build GraphRAG.
-                </p>
-              </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+          <div className="mb-4">
+            <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
+              <DatabaseZap className="h-6 w-6 text-tigerOrange" />
             </div>
+            <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
+              Jira Cloud
+            </h2>
+            <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
+              Connect Jira, select projects, install its graph schema, then
+              ingest issues and build GraphRAG.
+            </p>
+            <p className="text-sm text-gray-600 dark:text-[#D9D9D9]">
+              {jiraCardStatus}
+            </p>
+          </div>
+          <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
+            <Button
+              onClick={() => setJiraDialogOpen(true)}
+              disabled={!selectedGraph}
+              className="gradient w-full text-white"
+            >
+              <DatabaseZap className="h-4 w-4 mr-2" />
+              Set up Jira
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <Dialog open={jiraDialogOpen} onOpenChange={setJiraDialogOpen}>
+        <DialogContent
+          className="z-[70] sm:max-w-[900px] max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+          onInteractOutside={(event) => event.preventDefault()}
+        >
+          <DialogHeader>
+            <DialogTitle className="text-black dark:text-white">
+              Jira Cloud
+            </DialogTitle>
+            <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
+              Connect Jira, select projects, install its graph schema, then
+              ingest issues.
+            </DialogDescription>
+          </DialogHeader>
+      {selectedGraph && (
+        <div className="space-y-6">
+          <div className="flex justify-end">
             <Button
               variant="outline"
               size="sm"
@@ -1385,21 +1602,42 @@ const DataSourcesConfig: React.FC = () => {
                         </div>
                       )}
                     </div>
-                    <Button
-                      size="sm"
-                      onClick={() => sync(source)}
-                      disabled={
-                        !!busy ||
-                        !source.enabled ||
-                        !source.sync.last_tested_at ||
-                        source.scope.project_keys.length === 0
-                      }
-                    >
-                      {busy === `sync:${source.id}` && (
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    <div className="flex gap-2">
+                      {source.sync.last_error && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => sync(source, true)}
+                          disabled={
+                            !!busy ||
+                            !source.enabled ||
+                            !source.sync.last_tested_at ||
+                            source.scope.project_keys.length === 0
+                          }
+                        >
+                          {busy === `sync:${source.id}` && (
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          )}
+                          Resume
+                        </Button>
                       )}
-                      Ingest now
-                    </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => sync(source)}
+                        disabled={
+                          !!busy ||
+                          !source.enabled ||
+                          !source.sync.last_tested_at ||
+                          source.scope.project_keys.length === 0
+                        }
+                      >
+                        {busy === `sync:${source.id}` &&
+                          !source.sync.last_error && (
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        )}
+                        Ingest now
+                      </Button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1408,6 +1646,9 @@ const DataSourcesConfig: React.FC = () => {
           )}
         </div>
       )}
+        </DialogContent>
+      </Dialog>
+      </div>
     </div>
   );
 };

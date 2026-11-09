@@ -11,17 +11,12 @@ from connectors.jira.client import JiraCloudClient
 from connectors.jira.config import JiraDataSource
 from connectors.jira.mapper import JiraIssueMapper
 from connectors.jira.schema import (
-    JIRA_ASSIGNEE_EDGE,
-    JIRA_CHANGE_AUTHOR_EDGE,
-    JIRA_CHANGE_EDGE,
-    JIRA_COMMENT_AFTER_EDGE,
-    JIRA_COMMENT_AUTHOR_EDGE,
-    JIRA_COMMENT_ISSUE_EDGE,
-    JIRA_COMMENT_REPLY_EDGE,
-    JIRA_LINK_EDGE,
-    JIRA_PARENT_EDGE,
-    JIRA_PROJECT_EDGE,
-    JIRA_REPORTER_EDGE,
+    ASSIGNED_TO_EDGE,
+    AUTHORED_EDGE,
+    CHANGED_EDGE,
+    PART_OF_EDGE,
+    RELATES_TO_EDGE,
+    REPORTED_EDGE,
     jira_schema_proposal,
     jira_schema_status,
 )
@@ -46,6 +41,26 @@ def test_sync_state_records_public_run_id_without_argument_collision():
     finally:
         with data_sources._sync_state_lock:
             data_sources._sync_state.pop(run_id, None)
+
+
+def test_schema_status_keeps_a_running_install_visible_after_the_request_drops(monkeypatch):
+    from routers import data_sources
+
+    graph = "InstallStateTest"
+    data_sources._install_state.pop(graph, None)
+    monkeypatch.setattr(
+        data_sources,
+        "jira_schema_status",
+        lambda conn: {"status": "not_installed", "missing": {}, "conflicts": []},
+    )
+    monkeypatch.setattr(data_sources, "get_current_operation", lambda graphname: None)
+    data_sources._set_install_state(graph, status="running", error=None)
+    try:
+        payload = data_sources._schema_status_payload(object(), graph)
+        assert payload["status"] == "not_installed"
+        assert payload["install"]["status"] == "running"
+    finally:
+        data_sources._install_state.pop(graph, None)
 
 
 def source(**overrides) -> JiraDataSource:
@@ -354,11 +369,10 @@ def test_comment_reconciliation_deletes_only_removed_comments(
     stale_id = "jira:comment:9002"
 
     class Connection:
-        def getEdges(self, vertex_type, vertex_id, edge_type):
-            assert vertex_type == "JiraIssue"
-            assert vertex_id == mapped.issue_vertex_id
-            assert edge_type == f"reverse_{JIRA_COMMENT_ISSUE_EDGE}"
-            return [{"to_id": current_id}, {"to_id": stale_id}]
+        def getVertices(self, vertex_type, where="", select="", limit=0):
+            assert vertex_type == "JiraComment"
+            assert "PAY-123" in where
+            return [{"v_id": current_id}, {"v_id": stale_id}]
 
     service = JiraSyncService(
         "TestGraph",
@@ -443,6 +457,94 @@ def test_sync_keeps_checkpoint_when_a_page_batch_is_interrupted(
     assert stored.sync.checkpoint is None
     assert stored.sync.last_completed_at is None
     assert stored.sync.last_error == "simulated shutdown"
+    assert stored.sync.failed_issue_keys == ["PAY-123"]
+
+
+def test_resume_writes_failed_tickets_and_skips_ingested_ones(
+    tmp_path,
+    monkeypatch,
+):
+    from connectors.jira import sync as sync_module
+
+    store = JiraSourceStore(str(tmp_path))
+    configured = store.upsert("TestGraph", source())
+    configured.sync.last_error = "simulated shutdown"
+    configured.sync.failed_issue_keys = ["PAY-1", "PAY-2"]
+    store.update_runtime_state("TestGraph", configured)
+    seen: dict = {"by_keys": None, "written": []}
+
+    def issue(issue_id: str, key: str, updated: str) -> dict:
+        return {
+            "id": issue_id,
+            "key": key,
+            "fields": {
+                "summary": key,
+                "project": {"id": "1", "key": "PAY", "name": "Payments"},
+                "updated": updated,
+            },
+        }
+
+    class Client:
+        def iter_issues_by_keys(self, keys):
+            seen["by_keys"] = set(keys)
+            yield [issue("1", "PAY-1", "2024-01-02T00:00:00.000+0000")]
+
+        def iter_issue_pages(self):
+            yield [issue("2", "PAY-2", "2024-01-03T00:00:00.000+0000")]
+            yield [issue("3", "PAY-3", "2024-01-04T00:00:00.000+0000")]
+
+    class Connection:
+        def getVertices(self, vertex_type, select="", where="", limit=0):
+            return []
+
+        def runInterpretedQuery(self, query):
+            if "JiraIssue" in query:
+                return [
+                    {
+                        "res": [
+                            {
+                                "v_id": "jira:pay-2:issue",
+                                "attributes": {"res.content_hash": "already"},
+                            }
+                        ]
+                    }
+                ]
+            return [{"res": []}]
+
+    monkeypatch.setattr(
+        sync_module,
+        "jira_schema_status",
+        lambda *args: {"status": "installed"},
+    )
+    monkeypatch.setattr(
+        sync_module,
+        "embedding_coverage",
+        lambda *args: {"total": 1, "missing": 0},
+    )
+    service = JiraSyncService(
+        "TestGraph",
+        store.get("TestGraph", "jira-acme"),
+        Connection(),
+        store=store,
+        client=Client(),
+    )
+
+    def record_upsert(mapped, hashes, _comment_hashes):
+        seen["written"].extend(item.issue_vertex_id for item in mapped)
+        for item in mapped:
+            hashes[item.issue_vertex_id] = item.content_hash
+        return [], [], 0
+
+    monkeypatch.setattr(service, "_upsert_issue_records", record_upsert)
+
+    result = service.run(resume=True)
+
+    assert result["status"] == "completed"
+    assert seen["by_keys"] == {"PAY-1"}
+    assert seen["written"] == ["jira:pay-1:issue", "jira:pay-3:issue"]
+    stored = store.get("TestGraph", "jira-acme")
+    assert stored.sync.last_error is None
+    assert stored.sync.failed_issue_keys == []
 
 
 def test_recovery_ignores_link_stubs_and_does_not_move_checkpoint(
@@ -521,6 +623,7 @@ def test_recovery_ignores_link_stubs_and_does_not_move_checkpoint(
                             "content_hash": "",
                             "body": "A real comment that was not embedded.",
                             "created": "2024-02-01 00:00:00",
+                            "issue_key": "PAY-9",
                         },
                     },
                 ]
@@ -626,7 +729,23 @@ def test_mapper_writes_small_schema_and_searchable_document():
             },
             "priority": {"name": "High"},
             "assignee": {"accountId": "ada", "displayName": "Ada"},
-            "reporter": {"accountId": "grace", "displayName": "Grace"},
+            "reporter": {
+                "accountId": "grace",
+                "displayName": "Grace",
+                "emailAddress": "Grace@Example.com",
+            },
+            "duedate": "2026-10-15",
+            "fixVersions": [
+                {"name": "4.2.0", "releaseDate": "2026-10-01"},
+            ],
+            "customfield_10020": {"value": "Payments"},
+            "attachment": [
+                {
+                    "id": "77",
+                    "filename": "trace.txt",
+                    "content": "https://example.test/trace.txt",
+                }
+            ],
             "created": "2026-09-01T10:00:00.000+0000",
             "updated": "2026-09-20T14:03:00.000+0000",
             "description": {
@@ -666,20 +785,17 @@ def test_mapper_writes_small_schema_and_searchable_document():
     }
     mapped = JiraIssueMapper(source()).map(issue)
     assert {vertex.vertex_type for vertex in mapped.vertices} == {
+        "Attachment",
         "JiraComment",
         "JiraIssue",
-        "JiraProject",
-        "JiraUser",
+        "Person",
     }
     assert {edge.edge_type for edge in mapped.edges} == {
-        JIRA_PROJECT_EDGE,
-        JIRA_ASSIGNEE_EDGE,
-        JIRA_REPORTER_EDGE,
-        JIRA_COMMENT_ISSUE_EDGE,
-        JIRA_COMMENT_AUTHOR_EDGE,
-        JIRA_COMMENT_REPLY_EDGE,
-        JIRA_COMMENT_AFTER_EDGE,
+        ASSIGNED_TO_EDGE,
+        REPORTED_EDGE,
+        AUTHORED_EDGE,
     }
+    assert not any(edge.edge_type == "part_of" for edge in mapped.edges)
     fact_text = "\n".join(fact.chunk.text for fact in mapped.facts)
     description_text = mapped.facts[0].chunk.text
     issue_vertex = next(
@@ -691,6 +807,24 @@ def test_mapper_writes_small_schema_and_searchable_document():
     assert fact_text.startswith("Issue: PAY-123")
     assert "Summary: Login timeout" in description_text
     assert "Timeout at checkout" in description_text
+    assert issue_vertex.attributes["description"] == "Timeout at checkout"
+    assert issue_vertex.attributes["status"] == "In Progress"
+    assert issue_vertex.attributes["project_key"] == "PAY"
+    assert issue_vertex.attributes["project_name"] == "Payments"
+    assert issue_vertex.attributes["due"] == "2026-10-15 00:00:00"
+    assert issue_vertex.attributes["fix_versions"] == "4.2.0 (release 2026-10-01)"
+    assert "customfield_10020: Payments" in issue_vertex.attributes["custom_fields"]
+    reporter = next(
+        edge for edge in mapped.edges if edge.edge_type == REPORTED_EDGE
+    )
+    assert reporter.target_id == "person:grace@example.com"
+    attachment = next(
+        vertex
+        for vertex in mapped.vertices
+        if vertex.vertex_type == "Attachment"
+    )
+    assert attachment.attributes["file_name"] == "trace.txt"
+    assert attachment.attributes["parent_id"] == "PAY-123"
     assert issue_vertex.attributes["created"] == "2026-09-01 10:00:00"
     assert issue_vertex.attributes["updated"] == "2026-09-20 14:03:00"
     assert "Created:" not in fact_text
@@ -779,10 +913,9 @@ def test_issue_changes_are_separate_facts_and_events():
     ]
     assert len(changes) == 2
     assert {vertex.attributes["field"] for vertex in changes} == {"status"}
-    assert {edge.edge_type for edge in mapped.edges} >= {
-        JIRA_CHANGE_EDGE,
-        JIRA_CHANGE_AUTHOR_EDGE,
-    }
+    assert CHANGED_EDGE in {edge.edge_type for edge in mapped.edges}
+    assert all(edge.target_type != "JiraChange" for edge in mapped.edges)
+    assert {vertex.attributes["issue_key"] for vertex in changes} == {"GML-2192"}
     fact_text = "\n".join(fact.chunk.text for fact in mapped.facts)
     assert "Issue: GML-2192" in fact_text
     assert 'changed status from "To Do" to "In Progress"' in fact_text
@@ -1137,24 +1270,19 @@ def test_legacy_comment_migration_resets_checkpoint_only_once(tmp_path):
 def test_schema_is_bounded():
     proposal = jira_schema_proposal()
     assert {vertex.name for vertex in proposal.vertices} == {
+        "Attachment",
         "JiraChange",
         "JiraComment",
         "JiraIssue",
-        "JiraProject",
-        "JiraUser",
+        "Person",
     }
     assert {edge.name for edge in proposal.edges} == {
-        JIRA_PROJECT_EDGE,
-        JIRA_ASSIGNEE_EDGE,
-        JIRA_REPORTER_EDGE,
-        JIRA_PARENT_EDGE,
-        JIRA_LINK_EDGE,
-        JIRA_COMMENT_ISSUE_EDGE,
-        JIRA_COMMENT_AUTHOR_EDGE,
-        JIRA_COMMENT_REPLY_EDGE,
-        JIRA_COMMENT_AFTER_EDGE,
-        JIRA_CHANGE_EDGE,
-        JIRA_CHANGE_AUTHOR_EDGE,
+        ASSIGNED_TO_EDGE,
+        REPORTED_EDGE,
+        AUTHORED_EDGE,
+        CHANGED_EDGE,
+        PART_OF_EDGE,
+        RELATES_TO_EDGE,
     }
 
 
@@ -1200,13 +1328,18 @@ def test_store_resets_checkpoint_when_ingestion_filters_change(tmp_path):
     store.upsert("TestGraph", source())
     configured = store.get("TestGraph", "jira-acme")
     configured.sync.checkpoint = datetime(2026, 9, 24, tzinfo=timezone.utc)
+    configured.sync.last_error = "simulated shutdown"
+    configured.sync.failed_issue_keys = ["PAY-123"]
     store.update_runtime_state("TestGraph", configured)
 
     changed = store.get("TestGraph", "jira-acme")
     changed.scope.created_after = date(2026, 1, 1)
     store.upsert("TestGraph", changed)
 
-    assert store.get("TestGraph", "jira-acme").sync.checkpoint is None
+    stored = store.get("TestGraph", "jira-acme")
+    assert stored.sync.checkpoint is None
+    assert stored.sync.failed_issue_keys == []
+    assert stored.sync.last_error is None
 
 
 class SchemaConnection:
@@ -1250,12 +1383,9 @@ class SchemaConnection:
             "ToVertexTypeName": "*",
             "IsDirected": True,
             "EdgePairs": [
-                {"From": "Document", "To": "JiraIssue"},
-                {"From": "DocumentChunk", "To": "JiraIssue"},
-                {"From": "Document", "To": "JiraComment"},
-                {"From": "DocumentChunk", "To": "JiraComment"},
-                {"From": "Document", "To": "JiraChange"},
-                {"From": "DocumentChunk", "To": "JiraChange"},
+                {"From": source_type, "To": vertex.name}
+                for vertex in proposal.vertices
+                for source_type in ("Document", "DocumentChunk")
             ],
         }
         self.edges["HAS_CHILD"] = {
@@ -1304,13 +1434,7 @@ def test_schema_status_detects_installed_and_conflicting_schema():
 def test_schema_status_marks_partial_graph_incomplete():
     conn = SchemaConnection()
     conn.vertices.pop("JiraComment")
-    for edge_type in (
-        JIRA_COMMENT_ISSUE_EDGE,
-        JIRA_COMMENT_AUTHOR_EDGE,
-        JIRA_COMMENT_REPLY_EDGE,
-        JIRA_COMMENT_AFTER_EDGE,
-    ):
-        conn.edges.pop(edge_type)
+    conn.edges.pop(AUTHORED_EDGE)
     conn.edges["CONTAINS_ENTITY"]["EdgePairs"] = [
         pair
         for pair in conn.edges["CONTAINS_ENTITY"]["EdgePairs"]

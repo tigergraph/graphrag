@@ -8,7 +8,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+)
 from fastapi.security import HTTPBasicCredentials
 
 from common.config import validate_graphname
@@ -34,6 +41,8 @@ store = JiraSourceStore()
 
 _sync_state: dict[str, dict[str, Any]] = {}
 _sync_state_lock = threading.Lock()
+_install_state: dict[str, dict[str, Any]] = {}
+_install_state_lock = threading.Lock()
 _jira_tokens: dict[tuple[str, str], str] = {}
 _jira_tokens_lock = threading.Lock()
 
@@ -124,6 +133,31 @@ def _set_sync_state(sync_run_id: str, **updates: Any) -> None:
         current = dict(_sync_state.get(sync_run_id) or {})
         current.update(updates)
         _sync_state[sync_run_id] = current
+
+
+def _set_install_state(graphname: str, **updates: Any) -> dict[str, Any]:
+    with _install_state_lock:
+        current = dict(_install_state.get(graphname) or {})
+        current.update(updates)
+        _install_state[graphname] = current
+        return dict(current)
+
+
+def _install_snapshot(graphname: str) -> dict[str, Any] | None:
+    with _install_state_lock:
+        state = _install_state.get(graphname)
+        return dict(state) if state else None
+
+
+def _schema_status_payload(conn, graphname: str) -> dict[str, Any]:
+    status = jira_schema_status(conn)
+    install = _install_snapshot(graphname)
+    if get_current_operation(graphname) == "install_jira_schema" and (
+        not install or install.get("status") not in {"queued", "running"}
+    ):
+        install = {"status": "running", **(install or {})}
+    status["install"] = install
+    return status
 
 
 @router.get(f"{route_prefix}/{{graphname}}/data-sources")
@@ -332,7 +366,7 @@ def get_jira_schema_status(
 ):
     _require_access(graphname, auth)
     conn = _connection(request, graphname)
-    return jira_schema_status(conn)
+    return _schema_status_payload(conn, graphname)
 
 
 @router.post(f"{route_prefix}/{{graphname}}/data-sources/jira/schema/install")
@@ -364,83 +398,112 @@ def install_jira_schema(
             status_code=409,
             detail="Select and save at least one Jira project before installing its schema.",
         )
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
     operation = "install_jira_schema"
     if not acquire_graph_lock(graphname, operation):
         current = get_current_operation(graphname) or "another operation"
+        if current == operation:
+            return {
+                "status": "submitted",
+                "install": _install_snapshot(graphname) or {"status": "running"},
+            }
         raise HTTPException(
             status_code=409,
             detail=f"Graph '{graphname}' is busy with '{current}'.",
         )
-    try:
-        conn = _connection(request, graphname)
-        before = jira_schema_status(conn)
-        if before["status"] == "not_initialized":
-            raise HTTPException(
-                status_code=409,
-                detail=(
+
+    install = _set_install_state(
+        graphname,
+        status="queued",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        completed_at=None,
+        error=None,
+    )
+
+    def run() -> None:
+        error: Exception | None = None
+        try:
+            _set_install_state(graphname, status="running")
+            from routers.ui import ws_basic_auth
+
+            _, conn = ws_basic_auth(authorization, graphname)
+            before = jira_schema_status(conn)
+            if before["status"] == "not_initialized":
+                raise RuntimeError(
                     "Initialize the knowledge graph before installing "
                     "the Jira connector schema."
-                ),
-            )
-        if before["status"] == "conflict":
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "message": "Existing graph schema conflicts with Jira schema.",
-                    "conflicts": before["conflicts"],
-                },
-            )
+                )
+            if before["status"] == "conflict":
+                conflicts = "; ".join(before.get("conflicts") or [])
+                raise RuntimeError(
+                    "Existing graph schema conflicts with Jira schema."
+                    + (f" {conflicts}" if conflicts else "")
+                )
+            if before["status"] != "installed":
+                result = apply_proposal(conn, graphname, jira_schema_proposal())
+                if result.get("status") == "error":
+                    raise RuntimeError(
+                        result.get("error") or "Jira schema installation failed."
+                    )
+                retrievers = result.get("retrievers") or {}
+                if retrievers.get("status") == "error":
+                    raise RuntimeError(
+                        "Jira schema was applied, but retriever installation failed: "
+                        f"{retrievers.get('error', 'unknown error')}"
+                    )
 
-        result = apply_proposal(conn, graphname, jira_schema_proposal())
-        if result.get("status") == "error":
-            raise HTTPException(
-                status_code=500,
-                detail=result.get("error") or "Jira schema installation failed.",
-            )
-        retrievers = result.get("retrievers") or {}
-        if retrievers.get("status") == "error":
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Jira schema was applied, but retriever installation failed: "
-                    f"{retrievers.get('error', 'unknown error')}"
-                ),
-            )
+            # The connection used to apply the SCHEMA_CHANGE JOB can retain the
+            # pre-migration schema snapshot. Verify through a fresh connection so
+            # a successful migration is not reported as a false failure.
+            _, verification_conn = ws_basic_auth(authorization, graphname)
+            after = jira_schema_status(verification_conn)
+            if after["status"] != "installed":
+                logger.error(
+                    "Jira schema verification failed for graph %s: %s",
+                    graphname,
+                    after,
+                )
+                missing = after.get("missing") or {}
+                conflicts = "; ".join(after.get("conflicts") or [])
+                raise RuntimeError(
+                    "Jira schema installation completed, but verification "
+                    "did not find a compatible schema."
+                    + (f" Missing: {missing}." if missing else "")
+                    + (f" Conflicts: {conflicts}." if conflicts else "")
+                )
+        except Exception as exc:
+            error = exc
+            logger.exception("Jira schema installation failed graph=%s", graphname)
+        finally:
+            release_graph_lock(graphname, operation)
 
-        # The connection used to apply the SCHEMA_CHANGE JOB can retain the
-        # pre-migration schema snapshot. Verify through a fresh connection so
-        # a successful migration is not reported as a false 500.
-        verification_conn = _connection(request, graphname)
-        after = jira_schema_status(verification_conn)
-        if after["status"] != "installed":
-            logger.error(
-                "Jira schema verification failed for graph %s: %s",
+        if error is not None:
+            _set_install_state(
                 graphname,
-                after,
+                status="failed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=str(error)[:1000],
             )
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "message": (
-                        "Jira schema installation completed, but verification "
-                        "did not find a compatible schema."
-                    ),
-                    "missing": after.get("missing"),
-                    "conflicts": after.get("conflicts"),
-                },
+        else:
+            _set_install_state(
+                graphname,
+                status="completed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=None,
             )
-        return {
-            "status": "installed",
-            "schema": after,
-            "migration": {
-                "status": result.get("status"),
-                "statements": result.get("statements") or [],
-                "summary": result.get("summary") or {},
-                "retrievers": retrievers,
-            },
-        }
-    finally:
+
+    try:
+        threading.Thread(
+            target=run,
+            name=f"jira-schema-install-{graphname}",
+            daemon=True,
+        ).start()
+    except Exception:
         release_graph_lock(graphname, operation)
+        raise
+    return {"status": "submitted", "install": install}
 
 
 @router.post(f"{route_prefix}/{{graphname}}/data-sources/{{source_id}}/sync")
@@ -453,6 +516,7 @@ def start_sync(
         tuple[list[str], HTTPBasicCredentials],
         Depends(_ui_basic_auth()),
     ],
+    resume: bool = Query(False),
 ):
     _require_access(graphname, auth)
     source = _source_with_credentials(graphname, source_id)
@@ -467,6 +531,11 @@ def start_sync(
         raise HTTPException(
             status_code=409,
             detail="Select at least one Jira project before synchronization.",
+        )
+    if resume and not source.sync.last_error:
+        raise HTTPException(
+            status_code=409,
+            detail="Ingestion has not failed, so there is nothing to resume.",
         )
     authorization = request.headers.get("Authorization")
     if not authorization:
@@ -518,7 +587,7 @@ def start_sync(
                 source,
                 conn,
                 store=store,
-            ).run()
+            ).run(resume=resume)
         except Exception as exc:
             error = exc
             logger.exception(
