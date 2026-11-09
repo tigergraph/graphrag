@@ -26,17 +26,12 @@ from .mapper import (
     VertexRecord,
 )
 from .schema import (
-    JIRA_ASSIGNEE_EDGE,
-    JIRA_CHANGE_AUTHOR_EDGE,
-    JIRA_CHANGE_EDGE,
-    JIRA_COMMENT_AFTER_EDGE,
-    JIRA_COMMENT_AUTHOR_EDGE,
-    JIRA_COMMENT_ISSUE_EDGE,
-    JIRA_COMMENT_REPLY_EDGE,
-    JIRA_LINK_EDGE,
-    JIRA_PARENT_EDGE,
-    JIRA_PROJECT_EDGE,
-    JIRA_REPORTER_EDGE,
+    ASSIGNED_TO_EDGE,
+    AUTHORED_EDGE,
+    CHANGED_EDGE,
+    PART_OF_EDGE,
+    RELATES_TO_EDGE,
+    REPORTED_EDGE,
     jira_schema_status,
 )
 from .state import JiraSourceStore
@@ -44,19 +39,12 @@ from .state import JiraSourceStore
 logger = logging.getLogger(__name__)
 
 CURRENT_STATE_EDGES = (
-    JIRA_PROJECT_EDGE,
-    JIRA_ASSIGNEE_EDGE,
-    JIRA_REPORTER_EDGE,
-    JIRA_PARENT_EDGE,
-    JIRA_LINK_EDGE,
-    JIRA_CHANGE_EDGE,
+    ASSIGNED_TO_EDGE,
+    REPORTED_EDGE,
+    PART_OF_EDGE,
+    RELATES_TO_EDGE,
 )
-COMMENT_STATE_EDGES = (
-    JIRA_COMMENT_ISSUE_EDGE,
-    JIRA_COMMENT_AUTHOR_EDGE,
-    JIRA_COMMENT_REPLY_EDGE,
-    JIRA_COMMENT_AFTER_EDGE,
-)
+COMMENT_STATE_EDGES = (AUTHORED_EDGE,)
 UPSERT_BATCH_SIZE = 500
 EMBEDDING_BATCH_SIZE = 32
 # Flush accumulated documents and comment-chunks to TigerGraph every this
@@ -114,14 +102,25 @@ class JiraSyncService:
         self.client = client or JiraCloudClient(source)
         self._owns_client = client is None
 
-    def run(self) -> dict[str, Any]:
+    def run(self, *, resume: bool = False) -> dict[str, Any]:
         if not self.source.enabled:
             raise ValueError("Cannot sync a disabled data source")
+        if resume and not self.source.sync.last_error:
+            raise ValueError(
+                "Ingestion has not failed, so there is nothing to resume."
+            )
 
         started = datetime.now(timezone.utc)
         self.source.sync.last_started_at = started
-        self.source.sync.last_error = None
+        if not resume:
+            self.source.sync.last_error = None
         self.store.update_runtime_state(self.graphname, self.source)
+        pending_keys = {
+            key.strip().upper()
+            for key in self.source.sync.failed_issue_keys
+            if key and key.strip()
+        }
+        existing_hashes: dict[str, str] = {}
 
         try:
             schema_result = jira_schema_status(self.conn)
@@ -204,20 +203,72 @@ class JiraSyncService:
                 )
             # ── End recovery phase ────────────────────────────────────────────
 
-            for issues in self._iter_pages_pipelined():
-                mapped = [mapper.map(issue) for issue in issues]
-                changed_docs, changed_comms, deleted_count = (
-                    self._upsert_issue_records(
-                        mapped,
+            if resume:
+                failed_keys = set(pending_keys)
+                failed_keys.update(self._find_recovery_issue_keys())
+                failed_keys -= self._ingested_keys(existing_hashes)
+                for issues in self.client.iter_issues_by_keys(failed_keys):
+                    mapped = self._not_ingested(
+                        [mapper.map(issue) for issue in issues],
+                        existing_hashes,
+                    )
+                    if not mapped:
+                        continue
+                    self._remember_attempt(mapped, pending_keys)
+                    changed_docs, changed_comms, deleted = (
+                        self._upsert_issue_records(
+                            mapped,
+                            existing_hashes,
+                            existing_comment_hashes,
+                        )
+                    )
+                    pending_docs.extend(changed_docs)
+                    pending_comments.extend(changed_comms)
+                    documents_loaded += len(changed_docs)
+                    comments_deleted += deleted
+                    issues_upserted += len(mapped)
+                    pages_since_flush += 1
+                if pending_docs or pending_comments:
+                    self._finalize_batch(
+                        pending_docs,
+                        pending_comments,
                         existing_hashes,
                         existing_comment_hashes,
                     )
+                    pending_docs = []
+                    pending_comments = []
+                    pages_since_flush = 0
+                    self._forget_ingested(pending_keys, existing_hashes)
+                    self.source.sync.failed_issue_keys = sorted(pending_keys)
+                    self.store.update_runtime_state(self.graphname, self.source)
+
+            for issues in self._iter_pages_pipelined():
+                mapped = [mapper.map(issue) for issue in issues]
+                self._remember_attempt(mapped, pending_keys)
+                self._forget_ingested(pending_keys, existing_hashes)
+                # Resume writes a ticket only when it has no content hash.
+                # The scan still moves the checkpoint past tickets that already
+                # finished, so the same page is not fetched again.
+                to_write = (
+                    self._not_ingested(mapped, existing_hashes)
+                    if resume
+                    else mapped
                 )
+                if to_write:
+                    changed_docs, changed_comms, deleted_count = (
+                        self._upsert_issue_records(
+                            to_write,
+                            existing_hashes,
+                            existing_comment_hashes,
+                        )
+                    )
+                else:
+                    changed_docs, changed_comms, deleted_count = [], [], 0
                 pending_docs.extend(changed_docs)
                 pending_comments.extend(changed_comms)
                 documents_loaded += len(changed_docs)
                 comments_deleted += deleted_count
-                issues_upserted += len(mapped)
+                issues_upserted += len(to_write)
                 pages_since_flush += 1
 
                 page_max = max(
@@ -239,11 +290,13 @@ class JiraSyncService:
                     pending_docs = []
                     pending_comments = []
                     pages_since_flush = 0
+                    self._forget_ingested(pending_keys, existing_hashes)
+                    self.source.sync.failed_issue_keys = sorted(pending_keys)
                     if pending_checkpoint != self.source.sync.checkpoint:
                         self.source.sync.checkpoint = pending_checkpoint
-                        self.store.update_runtime_state(
-                            self.graphname, self.source
-                        )
+                    self.store.update_runtime_state(
+                        self.graphname, self.source
+                    )
 
             # Final flush for any pages that did not fill a complete batch.
             if pending_docs or pending_comments:
@@ -253,9 +306,11 @@ class JiraSyncService:
                     existing_hashes,
                     existing_comment_hashes,
                 )
+            self._forget_ingested(pending_keys, existing_hashes)
+            self.source.sync.failed_issue_keys = []
             if pending_checkpoint != self.source.sync.checkpoint:
                 self.source.sync.checkpoint = pending_checkpoint
-                self.store.update_runtime_state(self.graphname, self.source)
+            self.store.update_runtime_state(self.graphname, self.source)
 
             chunk_coverage = embedding_coverage(
                 self.conn,
@@ -316,11 +371,55 @@ class JiraSyncService:
                 self.source.id,
             )
             self.source.sync.last_error = str(exc)[:1000]
+            self._forget_ingested(pending_keys, existing_hashes)
+            self.source.sync.failed_issue_keys = sorted(pending_keys)
             self.store.update_runtime_state(self.graphname, self.source)
             raise
         finally:
             if self._owns_client:
                 self.client.close()
+
+    @staticmethod
+    def _ingested_keys(existing_hashes: dict[str, str]) -> set[str]:
+        """Issue keys whose content hash is already stored."""
+        keys: set[str] = set()
+        for vertex_id, content_hash in existing_hashes.items():
+            if not content_hash:
+                continue
+            key = JiraSyncService._issue_key_from_vertex_id(vertex_id)
+            if key:
+                keys.add(key)
+        return keys
+
+    def _remember_attempt(
+        self,
+        mapped: list[MappedIssue],
+        pending_keys: set[str],
+    ) -> None:
+        for item in mapped:
+            key = self._issue_key(item).strip().upper()
+            if key:
+                pending_keys.add(key)
+
+    @staticmethod
+    def _forget_ingested(
+        pending_keys: set[str],
+        existing_hashes: dict[str, str],
+    ) -> None:
+        pending_keys.difference_update(
+            JiraSyncService._ingested_keys(existing_hashes)
+        )
+
+    @staticmethod
+    def _not_ingested(
+        mapped: list[MappedIssue],
+        existing_hashes: dict[str, str],
+    ) -> list[MappedIssue]:
+        return [
+            item
+            for item in mapped
+            if not existing_hashes.get(item.issue_vertex_id)
+        ]
 
     def _find_recovery_issue_keys(self) -> set[str]:
         """Return issue keys whose own ingest was written but not embedded.
@@ -355,25 +454,15 @@ class JiraSyncService:
             comment_verts = self.conn.getVertices(
                 "JiraComment",
                 where='content_hash=""',
-                select="content_hash,body,created",
+                select="content_hash,body,created,issue_key",
                 limit=5000,
             ) or []
             for vertex in comment_verts:
                 if not self._comment_embed_incomplete(vertex):
                     continue
-                comment_v_id = str(vertex.get("v_id", ""))
-                try:
-                    edges = self.conn.getEdges(
-                        "JiraComment",
-                        comment_v_id,
-                        JIRA_COMMENT_ISSUE_EDGE,
-                    ) or []
-                except Exception:
-                    continue
-                for edge in edges:
-                    key = self._issue_key_from_vertex_id(str(edge.get("to_id", "")))
-                    if key:
-                        keys.add(key)
+                key = self._vertex_attr(vertex, "issue_key")
+                if key:
+                    keys.add(key.upper())
         except Exception as exc:
             logger.warning(
                 "Recovery: could not query empty-hash JiraComment vertices "
@@ -584,6 +673,7 @@ class JiraSyncService:
                 existing_comment_hashes,
             )
             self._reconcile_issue_changes(item)
+            self._reconcile_issue_attachments(item)
 
         all_vertices: dict[tuple[str, str], VertexRecord] = {}
         all_edges: list[EdgeRecord] = []
@@ -689,6 +779,7 @@ class JiraSyncService:
                 existing_comment_hashes,
             )
             self._reconcile_issue_changes(item)
+            self._reconcile_issue_attachments(item)
 
         all_vertices: dict[tuple[str, str], VertexRecord] = {}
         all_edges: list[EdgeRecord] = []
@@ -817,22 +908,49 @@ class JiraSyncService:
             changed.append(comment)
         return changed
 
-    def _issue_comment_ids(self, issue_vertex_id: str) -> set[str]:
+    def _issue_key(self, issue: MappedIssue) -> str:
+        for vertex in issue.vertices:
+            if (
+                vertex.vertex_type == "JiraIssue"
+                and vertex.vertex_id == issue.issue_vertex_id
+            ):
+                key = str(vertex.attributes.get("issue_key") or "").strip()
+                if key:
+                    return key
+        return self._issue_key_from_vertex_id(issue.issue_vertex_id)
+
+    def _ids_for_issue_attribute(
+        self,
+        vertex_type: str,
+        attribute: str,
+        value: str,
+    ) -> set[str]:
+        if not value:
+            return set()
+        safe = value.replace("\\", "").replace('"', "")
         try:
-            edges = self.conn.getEdges(
-                "JiraIssue",
-                issue_vertex_id,
-                f"reverse_{JIRA_COMMENT_ISSUE_EDGE}",
+            vertices = self.conn.getVertices(
+                vertex_type,
+                where=f'{attribute}="{safe}"',
+                select=attribute,
+                limit=10000,
             ) or []
         except Exception as exc:
             if "is not a valid vertex id" in str(exc):
                 return set()
             raise
         return {
-            str(edge.get("to_id"))
-            for edge in edges
-            if edge.get("to_id") is not None
+            str(vertex.get("v_id"))
+            for vertex in vertices
+            if vertex.get("v_id") is not None
         }
+
+    def _issue_comment_ids(self, issue_key: str) -> set[str]:
+        return self._ids_for_issue_attribute(
+            "JiraComment",
+            "issue_key",
+            issue_key,
+        )
 
     def _reconcile_issue_comments(
         self,
@@ -842,7 +960,7 @@ class JiraSyncService:
         current_ids = {
             comment.comment_vertex_id for comment in issue.comments
         }
-        stale_ids = self._issue_comment_ids(issue.issue_vertex_id) - current_ids
+        stale_ids = self._issue_comment_ids(self._issue_key(issue)) - current_ids
         for comment_vertex_id in stale_ids:
             self._delete_comment(
                 issue.issue_vertex_id,
@@ -854,33 +972,39 @@ class JiraSyncService:
     def _reconcile_issue_changes(self, issue: MappedIssue) -> None:
         current_ids = set(issue.change_vertex_ids)
         for change_vertex_id in (
-            self._issue_change_ids(issue.issue_vertex_id) - current_ids
+            self._issue_change_ids(self._issue_key(issue)) - current_ids
         ):
             self.conn.delVerticesById("JiraChange", [change_vertex_id])
 
-    def _issue_change_ids(self, issue_vertex_id: str) -> set[str]:
-        try:
-            edges = self.conn.getEdges(
-                "JiraIssue",
-                issue_vertex_id,
-                JIRA_CHANGE_EDGE,
-            ) or []
-        except Exception as exc:
-            if "is not a valid vertex id" in str(exc):
-                return set()
-            raise
-        return {
-            str(edge.get("to_id"))
-            for edge in edges
-            if edge.get("to_id") is not None
+    def _issue_change_ids(self, issue_key: str) -> set[str]:
+        return self._ids_for_issue_attribute(
+            "JiraChange",
+            "issue_key",
+            issue_key,
+        )
+
+    def _reconcile_issue_attachments(self, issue: MappedIssue) -> None:
+        current_ids = {
+            vertex.vertex_id
+            for vertex in issue.vertices
+            if vertex.vertex_type == "Attachment"
         }
+        for attachment_id in (
+            self._ids_for_issue_attribute(
+                "Attachment",
+                "parent_id",
+                self._issue_key(issue),
+            )
+            - current_ids
+        ):
+            self.conn.delVerticesById("Attachment", [attachment_id])
 
     def _delete_change_author_edges(self, change_vertex_id: str) -> None:
         try:
             self.conn.delEdges(
                 "JiraChange",
                 change_vertex_id,
-                JIRA_CHANGE_AUTHOR_EDGE,
+                CHANGED_EDGE,
             )
         except Exception as exc:
             if "is not a valid vertex id" in str(exc):

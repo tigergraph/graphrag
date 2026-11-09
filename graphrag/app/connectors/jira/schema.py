@@ -7,17 +7,12 @@ from typing import Any
 from common.db.schema_utils import SchemaProposal, read_existing_schema
 
 
-JIRA_PROJECT_EDGE = "JIRA_BELONGS_TO"
-JIRA_ASSIGNEE_EDGE = "JIRA_ASSIGNED_TO"
-JIRA_REPORTER_EDGE = "JIRA_REPORTED_BY"
-JIRA_PARENT_EDGE = "JIRA_HAS_PARENT"
-JIRA_LINK_EDGE = "JIRA_LINKS_TO"
-JIRA_COMMENT_ISSUE_EDGE = "JIRA_COMMENT_ON"
-JIRA_COMMENT_AUTHOR_EDGE = "JIRA_COMMENTED_BY"
-JIRA_COMMENT_REPLY_EDGE = "JIRA_COMMENT_REPLIES_TO"
-JIRA_COMMENT_AFTER_EDGE = "JIRA_COMMENT_AFTER"
-JIRA_CHANGE_EDGE = "JIRA_HAS_CHANGE"
-JIRA_CHANGE_AUTHOR_EDGE = "JIRA_CHANGE_BY"
+ASSIGNED_TO_EDGE = "assigned_to"
+REPORTED_EDGE = "reported"
+AUTHORED_EDGE = "authored"
+CHANGED_EDGE = "changed"
+PART_OF_EDGE = "part_of"
+RELATES_TO_EDGE = "relates_to"
 
 
 def _attribute_types(metadata: dict[str, Any]) -> dict[str, str]:
@@ -49,32 +44,23 @@ def _edge_pairs(metadata: dict[str, Any]) -> set[tuple[str, str]]:
 
 
 def jira_schema_proposal() -> SchemaProposal:
-    """Return the bounded Jira schema consumed by GraphRAG."""
+    """Return the Jira schema from the connector design."""
     proposal = SchemaProposal(domain_label="Jira Cloud")
-    proposal.add_vertex(
-        "JiraProject",
-        (
-            "A Jira project, modeled as a POLE+O Object subtype and work "
-            "container. project_key is the short key, such as PAY."
-        ),
-        [
-            ("project_key", "STRING"),
-            ("name", "STRING"),
-            ("url", "STRING"),
-        ],
-    )
     proposal.add_vertex(
         "JiraIssue",
         (
-            "A Jira work item modeled as a POLE+O Object subtype. Filter using "
-            "issue_key, status, status_category (new, indeterminate, or done), "
-            "priority, issue_type, resolution, labels, components, "
-            "fix_versions, created, updated, or due. Status, assignee, "
-            "priority, and resolution changes are JiraChange events."
+            "One Jira issue. status is the current status. summary and "
+            "description answer a summary. due is the due date. fix_versions "
+            "is the fix version, and a parenthetical release date on that "
+            "value is when that version is scheduled. project_key is the "
+            "prefix of issue_key. project_name is the Jira project name."
         ),
         [
             ("issue_key", "STRING"),
             ("summary", "STRING"),
+            ("description", "STRING"),
+            ("project_key", "STRING"),
+            ("project_name", "STRING"),
             ("issue_type", "STRING"),
             ("status", "STRING"),
             ("status_category", "STRING"),
@@ -83,6 +69,7 @@ def jira_schema_proposal() -> SchemaProposal:
             ("labels", "STRING"),
             ("components", "STRING"),
             ("fix_versions", "STRING"),
+            ("custom_fields", "STRING"),
             ("created", "DATETIME"),
             ("updated", "DATETIME"),
             ("due", "DATETIME"),
@@ -92,122 +79,100 @@ def jira_schema_proposal() -> SchemaProposal:
         ],
     )
     proposal.add_vertex(
-        "JiraUser",
+        "Person",
         (
-            "An Atlassian account modeled as a POLE+O Person subtype. "
-            "account_id is the stable identity and display_name is the "
-            "human-readable name."
+            "A person shared by connectors. email is stored when the source "
+            "returns an email address. display_name is the name to show."
         ),
         [
-            ("account_id", "STRING"),
+            ("email", "STRING"),
             ("display_name", "STRING"),
         ],
     )
     proposal.add_vertex(
         "JiraComment",
         (
-            "A Jira comment modeled as a POLE+O Event subtype. body is the "
-            "comment text. Searchable text is also stored as document chunks. "
-            "Use graph edges for issue, author, ordering, and explicit replies."
+            "One comment. issue_key is the issue it belongs to. body is the "
+            "comment text. Order comments by created."
         ),
         [
             ("comment_id", "STRING"),
+            ("issue_key", "STRING"),
             ("body", "STRING"),
             ("created", "DATETIME"),
             ("updated", "DATETIME"),
-            ("visibility", "STRING"),
-            ("is_public", "BOOL"),
-            ("ontology_class", "STRING"),
             ("content_hash", "STRING"),
         ],
     )
     proposal.add_vertex(
         "JiraChange",
         (
-            "One status, assignee, priority, or resolution change, modeled as "
-            "a POLE+O Event subtype. field is the changed field, from_value "
-            "and to_value are the previous and new values, and created is "
-            "when the change happened. The author is JIRA_CHANGE_BY."
+            "One status, assignee, priority, or resolution change. issue_key "
+            "is the issue. field, from_value, to_value, and created are the "
+            "change. The person is the changed edge."
         ),
         [
             ("change_id", "STRING"),
+            ("issue_key", "STRING"),
             ("field", "STRING"),
             ("from_value", "STRING"),
             ("to_value", "STRING"),
             ("created", "DATETIME"),
-            ("ontology_class", "STRING"),
+        ],
+    )
+    proposal.add_vertex(
+        "Attachment",
+        (
+            "A file attached to a record. parent_id is the issue key. "
+            "file_name and content_url identify the file. The bytes are not "
+            "stored."
+        ),
+        [
+            ("file_name", "STRING"),
+            ("content_url", "STRING"),
+            ("parent_id", "STRING"),
         ],
     )
 
     proposal.add_edge_pair(
-        JIRA_PROJECT_EDGE,
+        ASSIGNED_TO_EDGE,
         "JiraIssue",
-        "JiraProject",
-        "The Jira issue's current project.",
+        "Person",
+        "The current assignee. This is Jira's assignee field.",
     )
     proposal.add_edge_pair(
-        JIRA_ASSIGNEE_EDGE,
+        REPORTED_EDGE,
         "JiraIssue",
-        "JiraUser",
-        "The Jira issue's current assignee.",
+        "Person",
+        "The reporter. This is Jira's reporter field.",
     )
     proposal.add_edge_pair(
-        JIRA_REPORTER_EDGE,
-        "JiraIssue",
-        "JiraUser",
-        "The Atlassian account that reported the Jira issue.",
+        AUTHORED_EDGE,
+        "JiraComment",
+        "Person",
+        "The person who wrote the comment.",
     )
     proposal.add_edge_pair(
-        JIRA_PARENT_EDGE,
-        "JiraIssue",
-        "JiraIssue",
-        "The parent Jira issue, including epic and subtask parents.",
+        CHANGED_EDGE,
+        "JiraChange",
+        "Person",
+        "The person who made the change.",
     )
     proposal.add_edge_pair(
-        JIRA_LINK_EDGE,
+        PART_OF_EDGE,
+        "JiraIssue",
+        "JiraIssue",
+        "The parent epic or parent issue.",
+    )
+    proposal.add_edge_pair(
+        RELATES_TO_EDGE,
         "JiraIssue",
         "JiraIssue",
         (
-            "A directed Jira issue link. link_type is the phrase from the "
-            "source issue toward the target, such as blocks or is blocked by."
+            "Another issue. link_type is the Jira phrase, such as blocks or "
+            "relates to."
         ),
         [("link_type", "STRING")],
-    )
-    proposal.add_edge_pair(
-        JIRA_COMMENT_ISSUE_EDGE,
-        "JiraComment",
-        "JiraIssue",
-        "The Jira issue on which the comment was posted.",
-    )
-    proposal.add_edge_pair(
-        JIRA_COMMENT_AUTHOR_EDGE,
-        "JiraComment",
-        "JiraUser",
-        "The Atlassian account that authored the comment.",
-    )
-    proposal.add_edge_pair(
-        JIRA_COMMENT_REPLY_EDGE,
-        "JiraComment",
-        "JiraComment",
-        "An explicit source-provided parent comment; never inferred.",
-    )
-    proposal.add_edge_pair(
-        JIRA_COMMENT_AFTER_EDGE,
-        "JiraComment",
-        "JiraComment",
-        "Chronological order between adjacent comments on one issue.",
-    )
-    proposal.add_edge_pair(
-        JIRA_CHANGE_EDGE,
-        "JiraIssue",
-        "JiraChange",
-        "A status, assignee, priority, or resolution change on this issue.",
-    )
-    proposal.add_edge_pair(
-        JIRA_CHANGE_AUTHOR_EDGE,
-        "JiraChange",
-        "JiraUser",
-        "The Atlassian account that made the change.",
     )
     return proposal
 
@@ -278,13 +243,13 @@ def jira_schema_status(conn) -> dict[str, Any]:
             if (source.casefold(), target.casefold()) not in actual_pairs:
                 missing_pairs.append(f"{edge.name}: {source} -> {target}")
 
-    required_links = (
-        ("CONTAINS_ENTITY", "Document", "JiraIssue"),
-        ("CONTAINS_ENTITY", "DocumentChunk", "JiraIssue"),
-        ("CONTAINS_ENTITY", "Document", "JiraComment"),
-        ("CONTAINS_ENTITY", "DocumentChunk", "JiraComment"),
-        ("CONTAINS_ENTITY", "Document", "JiraChange"),
-        ("CONTAINS_ENTITY", "DocumentChunk", "JiraChange"),
+    required_links = tuple(
+        (edge, source, vertex.name)
+        for vertex in proposal.vertices
+        for edge, source in (
+            ("CONTAINS_ENTITY", "Document"),
+            ("CONTAINS_ENTITY", "DocumentChunk"),
+        )
     )
     for edge, source, target in required_links:
         if not existing.has_edge_pair(edge, source, target):

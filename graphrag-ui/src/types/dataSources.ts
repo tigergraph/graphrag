@@ -38,4 +38,8 @@ export interface JiraSchemaStatus {
     | "installed";
   missing: Record<string, string[]>;
   conflicts: string[];
+  install?: {
+    status: "queued" | "running" | "completed" | "failed";
+    error?: string | null;
+  } | null;
 }
