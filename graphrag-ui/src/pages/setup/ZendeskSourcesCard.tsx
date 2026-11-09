@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { pauseIdleTimer, pingIdleTimer, resumeIdleTimer } from "@/hooks/useIdleTimeout";
 import { Loader2, Plus, Save, ShieldCheck, Ticket, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { safeJson } from "@/utils/safeJson";
 import type { JiraSchemaStatus, ZendeskSource } from "@/types/dataSources";
 import ConnectorPromptGuide from "@/pages/setup/ConnectorPromptGuide";
+import RestoreApiTokenCard from "@/pages/setup/RestoreApiTokenCard";
 
 const editingSourceKey = (graph: string) =>
   `graphrag:zendesk-editing-source:${graph}`;
@@ -70,6 +72,17 @@ const emptySource = (): ZendeskSource => ({
 const labelClass = "block text-sm font-medium mb-2 text-black dark:text-white";
 const inputClass = "dark:border-[#3D3D3D] dark:bg-background";
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isNetworkError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message === "Failed to fetch" ||
+    message === "Load failed" ||
+    message === "NetworkError when attempting to fetch resource."
+  );
+};
+
 const errorDetail = (data: any, fallback: string) => {
   if (typeof data?.detail === "string") return data.detail;
   if (typeof data?.detail?.message === "string") {
@@ -97,6 +110,9 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
   const [schemaFeedback, setSchemaFeedback] = useState<ActionFeedback | null>(null);
   const [syncFeedback, setSyncFeedbackRaw] = useState<ActionFeedback | null>(null);
   const [open, setOpen] = useState(false);
+  const installWatchRef = useRef(0);
+  const installActiveRef = useRef(false);
+  const [tokenPromptFor, setTokenPromptFor] = useState<string | null>(null);
 
   const authHeaders = () => ({
     Authorization: sessionStorage.getItem("auth") || "",
@@ -109,6 +125,75 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
     else sessionStorage.removeItem(key);
     setSyncFeedbackRaw(feedback);
   };
+
+  const watchSchemaInstall = useCallback(async () => {
+    const watchId = ++installWatchRef.current;
+    installActiveRef.current = true;
+    setBusy("schema");
+    pauseIdleTimer();
+    setSchemaFeedback({
+      type: "pending",
+      text: "Installing Zendesk schema. This keeps running if the laptop locks.",
+    });
+    let misses = 0;
+    try {
+      while (installWatchRef.current === watchId) {
+        try {
+          const response = await fetch(`/ui/${graph}/data-sources/zendesk/schema`, {
+            headers: { Authorization: sessionStorage.getItem("auth") || "" },
+          });
+          const data = await safeJson(response);
+          if (installWatchRef.current !== watchId) return;
+          if (!response.ok) {
+            throw new Error(errorDetail(data, `Failed to inspect schema (${response.status})`));
+          }
+          pingIdleTimer();
+          setSchema(data);
+          const installStatus = data.install?.status;
+          if (installStatus === "failed") {
+            throw new Error(data.install?.error || "Zendesk schema installation failed.");
+          }
+          if (installStatus === "completed") {
+            setSchemaFeedback({ type: "success", text: "Zendesk schema installed." });
+            return;
+          }
+          if (installStatus === "queued" || installStatus === "running") {
+            misses = 0;
+          } else if (data.status === "installed") {
+            setSchemaFeedback({ type: "success", text: "Zendesk schema installed." });
+            return;
+          } else {
+            misses += 1;
+            if (misses >= 5) {
+              throw new Error(
+                "The connection dropped before installation started. Install the Zendesk schema again."
+              );
+            }
+          }
+        } catch (error: any) {
+          if (installWatchRef.current !== watchId) return;
+          if (!isNetworkError(error)) throw error;
+          setSchemaFeedback({
+            type: "pending",
+            text: "The laptop lock closed the browser connection. Schema installation is still running and will show here when the network returns.",
+          });
+        }
+        await sleep(3000);
+      }
+    } catch (error: any) {
+      if (installWatchRef.current !== watchId) return;
+      setSchemaFeedback({
+        type: "error",
+        text: `Schema installation failed: ${error.message}`,
+      });
+    } finally {
+      if (installWatchRef.current === watchId) {
+        installActiveRef.current = false;
+        resumeIdleTimer();
+        setBusy("");
+      }
+    }
+  }, [graph]);
 
   const loadSchema = useCallback(async () => {
     if (!graph) {
@@ -123,7 +208,21 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
       throw new Error(errorDetail(data, `HTTP ${response.status}`));
     }
     setSchema(data);
-  }, [graph]);
+    const installStatus = data.install?.status;
+    if (
+      (installStatus === "queued" || installStatus === "running") &&
+      !installActiveRef.current
+    ) {
+      void watchSchemaInstall();
+    } else if (installStatus === "failed" && !installActiveRef.current) {
+      setSchemaFeedback({
+        type: "error",
+        text: `Schema installation failed: ${
+          data.install?.error || "Zendesk schema installation failed."
+        }`,
+      });
+    }
+  }, [graph, watchSchemaInstall]);
 
   const loadSources = useCallback(async () => {
     if (!graph) {
@@ -158,6 +257,23 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
       setLoading(false);
     }
   }, [graph, loadSchema]);
+
+  const restoreToken = async (source: ZendeskSource, token: string) => {
+    const response = await fetch(
+      `/ui/${graph}/data-sources/zendesk/${encodeURIComponent(source.id)}/test`,
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          ...source,
+          connection: { ...source.connection, api_token: token },
+        }),
+      }
+    );
+    const data = await safeJson(response);
+    if (!response.ok) throw new Error(errorDetail(data, `HTTP ${response.status}`));
+    await loadSources();
+  };
 
   useEffect(() => {
     setEditing(null);
@@ -262,7 +378,11 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
 
   const installSchema = async () => {
     setBusy("schema");
-    setSchemaFeedback(null);
+    pauseIdleTimer();
+    setSchemaFeedback({
+      type: "pending",
+      text: "Installing Zendesk schema. This keeps running if the laptop locks.",
+    });
     try {
       const response = await fetch(
         `/ui/${graph}/data-sources/zendesk/schema/install`,
@@ -270,13 +390,22 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
       );
       const data = await safeJson(response);
       if (!response.ok) throw new Error(errorDetail(data, `HTTP ${response.status}`));
-      setSchema(data.schema);
-      setSchemaFeedback({ type: "success", text: "Zendesk schema installed." });
     } catch (error: any) {
-      setSchemaFeedback({ type: "error", text: error.message });
-    } finally {
-      setBusy("");
+      if (!isNetworkError(error)) {
+        setSchemaFeedback({
+          type: "error",
+          text: `Schema installation failed: ${error.message}`,
+        });
+        resumeIdleTimer();
+        setBusy("");
+        return;
+      }
+      setSchemaFeedback({
+        type: "pending",
+        text: "The laptop lock closed the browser connection. Checking whether schema installation is still running.",
+      });
     }
+    await watchSchemaInstall();
   };
 
   const pollSync = async (sourceId: string, runId: string) => {
@@ -307,7 +436,15 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
     throw new Error("Zendesk ingest is still running. Refresh this page to check it.");
   };
 
+  const tokenMissing = (message: string) =>
+    message.toLowerCase().includes("api token is not available");
+
   const sync = async (source: ZendeskSource, resume = false) => {
+    if (source.token_available === false) {
+      setTokenPromptFor(source.id);
+      setSyncFeedback(null);
+      return;
+    }
     setBusy(`sync:${source.id}`);
     setSyncFeedback({
       type: "pending",
@@ -324,6 +461,11 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
       if (!response.ok) throw new Error(errorDetail(data, `HTTP ${response.status}`));
       await pollSync(source.id, data.run_id);
     } catch (error: any) {
+      if (tokenMissing(error.message || "")) {
+        setTokenPromptFor(source.id);
+        setSyncFeedback(null);
+        return;
+      }
       setSyncFeedback({ type: "error", text: error.message });
     } finally {
       setBusy("");
@@ -455,7 +597,8 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
                   {source.connection.subdomain}.zendesk.com ·{" "}
                   {source.sync.last_tested_at ? "Connection tested" : "Connection not tested"}
                 </div>
-                {source.sync.last_error && (
+                {source.sync.last_error &&
+                  !tokenMissing(source.sync.last_error) && (
                   <div className="text-xs text-red-600 mt-1">{source.sync.last_error}</div>
                 )}
               </div>
@@ -696,7 +839,9 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
                 2. Zendesk graph schema
               </div>
               <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
-                {schema?.status === "installed"
+                {schema?.install?.status === "queued" || schema?.install?.status === "running"
+                  ? "Installing the Zendesk schema. This keeps running if the laptop locks."
+                  : schema?.status === "installed"
                   ? "Installed"
                   : schema?.status === "not_initialized"
                     ? "Initialize this graph before installing the Zendesk schema."
@@ -750,13 +895,15 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
           <div className="space-y-3">
             {sources.map((source) => {
               const needsResume = Boolean(
-                source.sync.last_error || source.sync.last_link_error
+                (source.sync.last_error && !tokenMissing(source.sync.last_error)) ||
+                source.sync.last_link_error
               );
               return (
               <div
                 key={source.id}
-                className="border border-gray-200 dark:border-[#3D3D3D] rounded-md p-4 flex flex-wrap items-center justify-between gap-4"
+                className="border border-gray-200 dark:border-[#3D3D3D] rounded-md p-4"
               >
+                <div className="flex flex-wrap items-center justify-between gap-4">
                 <div>
                   <div className="font-medium text-black dark:text-white">
                     {source.display_name}
@@ -765,7 +912,8 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
                     Last ingestion: {source.sync.last_completed_at || "Never"} · Tickets:{" "}
                     {source.sync.last_ticket_count || 0}
                   </div>
-                  {source.sync.last_error && (
+                  {source.sync.last_error &&
+                    !tokenMissing(source.sync.last_error) && (
                     <div className="text-xs text-red-600 mt-1">{source.sync.last_error}</div>
                   )}
                   {source.sync.last_link_error && (
@@ -782,6 +930,25 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
                   )}
                   {needsResume ? "Resume" : "Ingest now"}
                 </Button>
+                </div>
+                {tokenPromptFor === source.id && (
+                  <div className="mt-3">
+                    <RestoreApiTokenCard
+                      name={source.display_name}
+                      detail={`${source.connection.subdomain}.zendesk.com`}
+                      busy={busy === `token:${source.id}`}
+                      onSave={async (token) => {
+                        setBusy(`token:${source.id}`);
+                        try {
+                          await restoreToken(source, token);
+                          setTokenPromptFor(null);
+                        } finally {
+                          setBusy("");
+                        }
+                      }}
+                    />
+                  </div>
+                )}
               </div>
               );
             })}

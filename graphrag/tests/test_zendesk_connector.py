@@ -12,6 +12,7 @@ from connectors.jira.state import JiraSourceStore
 from connectors.prompt_selection import allows_type, guidance_for
 from connectors.schema_reuse import can_reuse_vertex, must_remain_separate
 from connectors.zendesk.client import (
+    ZendeskAPIError,
     ZendeskClient,
     export_start_time,
     ticket_search_query,
@@ -19,11 +20,8 @@ from connectors.zendesk.client import (
 from connectors.zendesk.config import ZendeskDataSource
 from connectors.zendesk.linking import normalized_link, reconcile_links
 from connectors.zendesk.mapper import ZendeskMapper
-from connectors.records import VertexRecord
-from connectors.zendesk.same_person import edges_for_jira_users
 from connectors.zendesk.schema import (
-    ZENDESK_LINKS_TO_JIRA,
-    ZENDESK_SAME_PERSON,
+    LINKS_ISSUE,
     zendesk_schema_proposal,
     zendesk_schema_status,
 )
@@ -94,7 +92,7 @@ class Graph:
     def __init__(self, vertices=None, vertex_types=None, edge_types=None):
         self.present = set(vertices or [])
         self.vertex_types = list(vertex_types or ["JiraIssue", "ZendeskTicket"])
-        self.edge_types = list(edge_types or [ZENDESK_LINKS_TO_JIRA])
+        self.edge_types = list(edge_types or [LINKS_ISSUE])
         self.edges = {}
         self.payloads = []
         self.attrs = {}
@@ -172,7 +170,7 @@ class Graph:
         return {
             target_id
             for target_type, target_id in self.edges.get(
-                ("ZendeskTicket", ticket_vertex_id, ZENDESK_LINKS_TO_JIRA),
+                ("ZendeskTicket", ticket_vertex_id, LINKS_ISSUE),
                 set(),
             )
         }
@@ -230,7 +228,7 @@ class SchemaConnection:
             "IsDirected": True,
             "EdgePairs": [
                 {"From": container, "To": name}
-                for name in ("ZendeskTicket", "ZendeskUser", "ZendeskComment")
+                for name in ("ZendeskTicket", "ZendeskComment")
                 for container in ("Document", "DocumentChunk")
             ],
         }
@@ -312,6 +310,9 @@ class FakeClient:
         wanted = {str(item_id) for item_id in group_ids}
         return [row for row in self.group_rows if str(row["id"]) in wanted]
 
+    def audits(self, ticket_id):
+        return []
+
     def iter_jira_link_pages(self):
         if isinstance(self.link_pages, Exception):
             raise self.link_pages
@@ -325,17 +326,16 @@ def test_schema_keeps_ticket_separate_and_adds_jira_edge_only_when_installed():
     proposal = zendesk_schema_proposal()
     assert {vertex.name for vertex in proposal.vertices} == {
         "ZendeskTicket",
-        "ZendeskUser",
+        "Person",
+        "Organization",
         "ZendeskComment",
+        "ZendeskChange",
+        "Attachment",
     }
-    assert ZENDESK_LINKS_TO_JIRA not in {edge.name for edge in proposal.edges}
-    assert ZENDESK_SAME_PERSON not in {edge.name for edge in proposal.edges}
+    assert LINKS_ISSUE not in {edge.name for edge in proposal.edges}
     linked = zendesk_schema_proposal({"JiraIssue"})
-    edge = next(edge for edge in linked.edges if edge.name == ZENDESK_LINKS_TO_JIRA)
+    edge = next(edge for edge in linked.edges if edge.name == LINKS_ISSUE)
     assert edge.pairs == [("ZendeskTicket", "JiraIssue")]
-    same_person = zendesk_schema_proposal({"JiraUser"})
-    same_edge = next(edge for edge in same_person.edges if edge.name == ZENDESK_SAME_PERSON)
-    assert same_edge.pairs == [("ZendeskUser", "JiraUser")]
     assert must_remain_separate("ZendeskTicket", "JiraIssue")
     assert not can_reuse_vertex(
         "ZendeskTicket",
@@ -344,10 +344,10 @@ def test_schema_keeps_ticket_separate_and_adds_jira_edge_only_when_installed():
         {"ticket_id": "STRING", "issue_key": "STRING"},
     )
     assert can_reuse_vertex(
-        "ZendeskUser",
-        {"user_id": "STRING", "display_name": "STRING"},
-        "zendeskuser",
-        {"user_id": "STRING", "display_name": "STRING"},
+        "Person",
+        {"email": "STRING", "display_name": "STRING"},
+        "person",
+        {"email": "STRING", "display_name": "STRING"},
     )
 
 
@@ -366,7 +366,7 @@ def test_schema_status_reports_installed_conflict_and_uninitialized():
     }
     partial = zendesk_schema_status(missing_jira_edge)
     assert partial["status"] == "incomplete"
-    assert any(ZENDESK_LINKS_TO_JIRA in pair for pair in partial["missing"]["edges"])
+    assert any(LINKS_ISSUE in pair for pair in partial["missing"]["edges"])
     assert zendesk_schema_status(SchemaConnection(drop_document=True))["status"] == "not_initialized"
     missing_priority = SchemaConnection()
     missing_priority.vertices["ZendeskTicket"]["Attributes"] = [
@@ -587,7 +587,7 @@ def test_reconcile_links_existing_issue_and_creates_a_placeholder_for_a_missing_
     issue = "jira:tse-1073:issue"
     other = "jira:pay-1:issue"
     graph = Graph(vertices={("ZendeskTicket", ticket), ("JiraIssue", issue), ("JiraIssue", other)})
-    graph.edges[("ZendeskTicket", ticket, ZENDESK_LINKS_TO_JIRA)] = {("JiraIssue", other)}
+    graph.edges[("ZendeskTicket", ticket, LINKS_ISSUE)] = {("JiraIssue", other)}
     result = reconcile_links(
         graph,
         "acme",
@@ -600,6 +600,10 @@ def test_reconcile_links_existing_issue_and_creates_a_placeholder_for_a_missing_
     missing_ticket = "zendesk:acme:ticket:1"
     missing_issue = "jira:gle-9999:issue"
     absent = Graph(vertices={("ZendeskTicket", missing_ticket)})
+    absent.attrs[("ZendeskTicket", missing_ticket)] = {
+        "subject": "Missing issue",
+        "description": "Steps",
+    }
     created = reconcile_links(
         absent,
         "acme",
@@ -608,7 +612,9 @@ def test_reconcile_links_existing_issue_and_creates_a_placeholder_for_a_missing_
     )
     assert created.links_written == 1
     assert absent.link_targets(missing_ticket) == {missing_issue}
-    assert absent.attrs[("JiraIssue", missing_issue)] == {"issue_key": "GLE-9999"}
+    assert absent.attrs[("JiraIssue", missing_issue)]["issue_key"] == "GLE-9999"
+    assert absent.attrs[("JiraIssue", missing_issue)]["summary"] == "Missing issue"
+    assert absent.attrs[("JiraIssue", missing_issue)]["description"] == "Steps"
 
     filled = Graph(vertices={("ZendeskTicket", ticket), ("JiraIssue", issue)})
     filled.attrs[("JiraIssue", issue)] = {"issue_key": "TSE-1073", "summary": "RCA"}
@@ -622,7 +628,7 @@ def test_reconcile_links_existing_issue_and_creates_a_placeholder_for_a_missing_
     assert filled.link_targets(ticket) == {issue}
 
     removed = Graph(vertices={("ZendeskTicket", ticket), ("JiraIssue", issue)})
-    removed.edges[("ZendeskTicket", ticket, ZENDESK_LINKS_TO_JIRA)] = {("JiraIssue", issue)}
+    removed.edges[("ZendeskTicket", ticket, LINKS_ISSUE)] = {("JiraIssue", issue)}
     reconcile_links(removed, "acme", [[]], ["59326"])
     assert removed.link_targets(ticket) == set()
 
@@ -692,23 +698,19 @@ def test_sync_writes_records_chunks_and_checkpoint_without_inferring_links(
     ]
     assert any("Login fails" in text and "PAY-1" in text for text in texts)
     assert any("Tried again" in text and "Ada" in text for text in texts)
-    assert store.get("TestGraph", "zendesk-acme").sync.checkpoint == datetime.fromtimestamp(
-        1700000000, tz=timezone.utc
+    assert store.get("TestGraph", "zendesk-acme").sync.checkpoint == datetime(
+        2026, 10, 1, tzinfo=timezone.utc
     )
+    assert store.get("TestGraph", "zendesk-acme").sync.last_ticket_id == 10
 
 
-def test_sync_writes_priority_org_group_and_same_person(tmp_path, monkeypatch):
+def test_sync_writes_priority_group_person_and_organization(tmp_path, monkeypatch):
     _install_sync_patches(monkeypatch)
     store = ZendeskSourceStore(str(tmp_path))
     saved = store.upsert("TestGraph", source())
     graph = Graph(
-        vertex_types=["ZendeskTicket", "ZendeskUser", "JiraUser", "JiraIssue"],
-        edge_types=[ZENDESK_LINKS_TO_JIRA, ZENDESK_SAME_PERSON],
-    )
-    graph.upsertVertex(
-        "JiraUser",
-        "jira:user:ada",
-        {"email": "ada@acme.com", "account_id": "ada"},
+        vertex_types=["ZendeskTicket", "Person", "Organization", "JiraIssue"],
+        edge_types=[LINKS_ISSUE, "requested", "member"],
     )
     client = FakeClient(
         pages=[
@@ -719,8 +721,8 @@ def test_sync_writes_priority_org_group_and_same_person(tmp_path, monkeypatch):
                 None,
             )
         ],
-        users=[{"id": 7, "name": "Ada", "email": "Ada@acme.com"}],
-        organizations=[{"id": 42, "name": "Acme"}],
+        users=[{"id": 7, "name": "Ada", "email": "Ada@acme.com", "organization_id": 42}],
+        organizations=[{"id": 42, "name": "Acme", "domain_names": ["acme.com"]}],
         groups=[{"id": 9, "name": "Support"}],
         links=[[]],
     )
@@ -729,44 +731,12 @@ def test_sync_writes_priority_org_group_and_same_person(tmp_path, monkeypatch):
     ).run()
     ticket = graph.attrs[("ZendeskTicket", "zendesk:acme:ticket:10")]
     assert ticket["priority"] == "high"
-    assert ticket["organization_name"] == "Acme"
+    assert ticket["description"]
     assert ticket["group_name"] == "Support"
-    assert graph.attrs[("ZendeskUser", "zendesk:acme:user:7")]["email"] == "ada@acme.com"
-    assert ("JiraUser", "jira:user:ada") in graph.edges[
-        ("ZendeskUser", "zendesk:acme:user:7", ZENDESK_SAME_PERSON)
+    assert graph.attrs[("Person", "person:ada@acme.com")]["email"] == "ada@acme.com"
+    assert ("Person", "person:ada@acme.com") in graph.edges[
+        ("Organization", "organization:acme.com", "member")
     ]
-
-
-def test_jira_user_links_back_to_an_existing_zendesk_user():
-    graph = Graph(
-        vertex_types=["ZendeskUser", "JiraUser"],
-        edge_types=[ZENDESK_SAME_PERSON],
-    )
-    graph.upsertVertex(
-        "ZendeskUser",
-        "zendesk:acme:user:7",
-        {"email": "ada@acme.com"},
-    )
-    edges = edges_for_jira_users(
-        graph,
-        [
-            VertexRecord(
-                "JiraUser",
-                "jira:user:ada",
-                {"account_id": "ada", "email": "ada@acme.com"},
-            )
-        ],
-    )
-    assert [(edge.source_id, edge.target_id) for edge in edges] == [
-        ("zendesk:acme:user:7", "jira:user:ada")
-    ]
-    assert (
-        edges_for_jira_users(
-            graph,
-            [VertexRecord("JiraUser", "jira:user:other", {"email": "other@acme.com"})],
-        )
-        == []
-    )
 
 
 def test_comment_failure_is_retried_without_blocking_the_ticket(tmp_path, monkeypatch):
@@ -818,7 +788,8 @@ def test_link_inventory_failure_does_not_roll_back_tickets(tmp_path, monkeypatch
     stored = store.get("TestGraph", "zendesk-acme")
     assert stored.sync.last_error is None
     assert stored.sync.last_link_error == "inventory down"
-    assert stored.sync.checkpoint == datetime.fromtimestamp(1700000000, tz=timezone.utc)
+    assert stored.sync.checkpoint == datetime(2026, 10, 1, tzinfo=timezone.utc)
+    assert stored.sync.last_ticket_id == 10
 
 
 def test_sync_refuses_disabled_source_and_missing_schema(tmp_path, monkeypatch):
@@ -872,9 +843,27 @@ def test_source_ids_cannot_collide_and_jira_save_keeps_zendesk(tmp_path):
     assert "api_token" not in document["zendesk_sources"][0]["connection"]
 
 
+def test_missing_ticket_history_is_not_an_auth_failure():
+    class AuditClient:
+        def audits(self, ticket_id):
+            if str(ticket_id) == "25":
+                raise ZendeskAPIError(404, "/api/v2/tickets/25/audits.json: Not found")
+            if str(ticket_id) == "26":
+                raise ZendeskAPIError(401, "/api/v2/tickets/26/audits.json: Couldn't authenticate you")
+            return [{"id": 1, "author_id": 7, "events": []}]
+
+    service = ZendeskSyncService.__new__(ZendeskSyncService)
+    service.client = AuditClient()
+    found = service._audits_for([{"id": 10}, {"id": 25}])
+    assert found["10"] == [{"id": 1, "author_id": 7, "events": []}]
+    assert found["25"] == []
+    with pytest.raises(ZendeskAPIError, match="rejected the API token"):
+        service._audits_for([{"id": 26}])
+
+
 def test_open_zendesk_question_is_search_and_an_unknown_field_is_refused():
     planner = guidance_for("What went wrong on Zendesk for this customer?", "planner")
-    assert "Do not invent a schema filter" in planner
+    assert "word search" in planner
     answer = guidance_for("Who is the assignee of Zendesk ticket 10?", "answer")
     assert "not on the ticket" in answer
     assert guidance_for("What is the ticket status?", "planner") == (
@@ -887,7 +876,7 @@ def test_open_zendesk_question_is_search_and_an_unknown_field_is_refused():
         "How is Zendesk ticket 59326 linked to TSE-1073?",
         "query",
     )
-    assert "ZENDESK_LINKS_TO_JIRA" in guidance
+    assert "links_issue" in guidance
     assert "CROSS_SOURCE_LINK" not in guidance
     assert "ZendeskTicketRef" not in guidance
     assert allows_type("ZendeskTicket", {"jira"})
@@ -951,10 +940,10 @@ def test_failed_embedding_retries_only_the_unfinished_ticket(tmp_path, monkeypat
         comments={"10": [{"id": 3, "author_id": 7, "body": "Tried again"}]},
         users=[{"id": 7, "name": "Ada"}],
     )
-    with pytest.raises(RuntimeError, match="embed failed"):
-        ZendeskSyncService("TestGraph", saved, graph, store=store, client=client).run()
+    ZendeskSyncService("TestGraph", saved, graph, store=store, client=client).run()
     stored = store.get("TestGraph", "zendesk-acme")
     assert stored.sync.checkpoint is None
+    assert stored.sync.failed_ticket_ids == ["10"]
     assert graph.attrs[("ZendeskTicket", "zendesk:acme:ticket:10")].get("content_hash") in (None, "")
 
     monkeypatch.setattr(
@@ -963,8 +952,9 @@ def test_failed_embedding_retries_only_the_unfinished_ticket(tmp_path, monkeypat
     )
     saved = store.get("TestGraph", "zendesk-acme")
     ZendeskSyncService("TestGraph", saved, graph, store=store, client=client).run()
-    assert store.get("TestGraph", "zendesk-acme").sync.checkpoint == datetime.fromtimestamp(
-        1700000000, tz=timezone.utc
+    assert store.get("TestGraph", "zendesk-acme").sync.failed_ticket_ids == []
+    assert store.get("TestGraph", "zendesk-acme").sync.checkpoint == datetime(
+        2026, 10, 1, tzinfo=timezone.utc
     )
     assert graph.attrs[("ZendeskTicket", "zendesk:acme:ticket:10")]["content_hash"]
     assert embeddings.added

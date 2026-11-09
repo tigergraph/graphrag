@@ -18,6 +18,7 @@ export interface JiraSource {
     include_comments: boolean;
     story_points_field?: string | null;
   };
+  token_available?: boolean;
   sync: {
     overlap_seconds: number;
     checkpoint?: string | null;
@@ -42,6 +43,7 @@ export interface ZendeskSource {
   type: "zendesk";
   enabled: boolean;
   display_name: string;
+  token_available?: boolean;
   connection: {
     subdomain: string;
     email: string;

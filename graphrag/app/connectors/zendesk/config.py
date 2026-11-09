@@ -67,7 +67,9 @@ class ZendeskScope(BaseModel):
 class ZendeskSyncState(BaseModel):
     overlap_seconds: int = Field(default=120, ge=0, le=3600)
     checkpoint: datetime | None = None
+    last_ticket_id: int | None = None
     export_cursor: str | None = None
+    failed_ticket_ids: list[str] = Field(default_factory=list)
     pending_comment_ticket_ids: list[str] = Field(default_factory=list)
     linked_ticket_ids: list[str] = Field(default_factory=list)
     last_tested_at: datetime | None = None

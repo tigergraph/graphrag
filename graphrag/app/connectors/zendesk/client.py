@@ -290,12 +290,9 @@ class ZendeskClient:
         the older time-based export.
         """
         path = "/api/v2/incremental/tickets/cursor.json"
-        saved_cursor = (self.source.sync.export_cursor or "").strip()
-        params: dict[str, Any] | None = (
-            {"cursor": saved_cursor}
-            if saved_cursor
-            else {"start_time": export_start_time(self.source)}
-        )
+        params: dict[str, Any] | None = {
+            "start_time": export_start_time(self.source)
+        }
         while True:
             payload = self._request("GET", path, params=params) or {}
             tickets = list(payload.get("tickets") or [])
@@ -334,6 +331,17 @@ class ZendeskClient:
         if isinstance(payload, dict) and isinstance(payload.get("ticket"), dict):
             return payload["ticket"]
         return payload if isinstance(payload, dict) else {}
+
+    def audits(self, ticket_id: str) -> list[dict[str, Any]]:
+        path: str | None = (
+            f"/api/v2/tickets/{quote(str(ticket_id), safe='')}/audits.json"
+        )
+        audits: list[dict[str, Any]] = []
+        while path:
+            payload = self._request("GET", path) or {}
+            audits.extend(payload.get("audits") or [])
+            path = payload.get("next_page") or None
+        return audits
 
     def comments(self, ticket_id: str) -> list[dict[str, Any]]:
         path: str | None = (

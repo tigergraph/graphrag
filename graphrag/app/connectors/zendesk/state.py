@@ -96,7 +96,9 @@ class ZendeskSourceStore:
                 or submitted.scope.updated_after != existing.scope.updated_after
             ):
                 submitted.sync.checkpoint = None
+                submitted.sync.last_ticket_id = None
                 submitted.sync.export_cursor = None
+                submitted.sync.failed_ticket_ids = []
                 submitted.sync.pending_comment_ticket_ids = []
         else:
             submitted.sync = ZendeskSyncState(overlap_seconds=overlap_seconds)
