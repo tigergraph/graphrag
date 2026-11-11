@@ -11,7 +11,7 @@ from common.config import get_graphrag_config
 from connectors.records import EdgeRecord, VertexRecord
 
 from .config import ZendeskDataSource
-from .schema import AUTHORED, CHANGED, MEMBER, REQUESTED
+from .schema import ASSIGNED, AUTHORED, CHANGED, MEMBER, REQUESTED
 
 _CHANGE_FIELDS = {
     "status": "status",
@@ -28,6 +28,31 @@ def _user_name_email(value) -> tuple[str, str, str]:
             str(value.get("organization_id") or ""),
         )
     return str(value or ""), "", ""
+
+
+def _user_role(value) -> str:
+    if isinstance(value, dict):
+        return str(value.get("role") or "")
+    return ""
+
+
+def _source_ticket_id(ticket: dict) -> str:
+    via = ticket.get("via")
+    if not isinstance(via, dict):
+        return ""
+    source = via.get("source")
+    if not isinstance(source, dict):
+        return ""
+    origin = source.get("from")
+    if not isinstance(origin, dict) or not origin.get("ticket_id"):
+        return ""
+    return str(origin.get("ticket_id"))
+
+
+def _followup_ids(ticket: dict) -> str:
+    return ", ".join(
+        str(item) for item in (ticket.get("followup_ids") or []) if item
+    )
 
 
 @dataclass
@@ -128,6 +153,8 @@ class ZendeskMapper:
         ticket_type = str(ticket.get("type") or "")
         tags = ", ".join(str(tag) for tag in (ticket.get("tags") or []) if tag)
         problem_id = str(ticket.get("problem_id") or "")
+        followup_ids = _followup_ids(ticket)
+        source_ticket_id = _source_ticket_id(ticket)
         group_id = ticket.get("group_id")
         group_name = (
             groups_by_id.get(str(group_id), "") if group_id is not None else ""
@@ -135,6 +162,8 @@ class ZendeskMapper:
         url = str(ticket.get("url") or "") or (
             f"https://{self.subdomain}.zendesk.com/agent/tickets/{ticket_id}"
         )
+        created = str(ticket.get("created_at") or "")
+        updated = str(ticket.get("updated_at") or "")
         vertices = [
             VertexRecord(
                 "ZendeskTicket",
@@ -149,8 +178,12 @@ class ZendeskMapper:
                     "tags": tags,
                     "custom_fields": _custom_fields(ticket),
                     "problem_id": problem_id,
+                    "followup_ids": followup_ids,
+                    "source_ticket_id": source_ticket_id,
                     "group_name": group_name,
                     "url": url,
+                    "created": created,
+                    "updated": updated,
                 },
             )
         ]
@@ -163,6 +196,7 @@ class ZendeskMapper:
             organizations_by_id,
             vertex_id,
         )
+        self._add_assignee(vertices, edges, ticket, users_by_id, vertex_id)
 
         mapped_comments: list[MappedComment] = []
         comment_bodies: list[str] = []
@@ -177,9 +211,12 @@ class ZendeskMapper:
             visibility = "public" if comment.get("public", True) else "internal"
             author_id = comment.get("author_id")
             author_name = ""
+            author_role = ""
+            created = str(comment.get("created_at") or "")
             if author_id is not None and str(author_id).strip():
                 author = str(author_id)
                 author_name, _email, _org = _user_name_email(users_by_id.get(author))
+                author_role = _user_role(users_by_id.get(author))
                 person_id = self._add_person(vertices, author, users_by_id)
                 edges.append(
                     EdgeRecord(
@@ -205,6 +242,8 @@ class ZendeskMapper:
                         "ticket_id": ticket_id,
                         "body": body,
                         "visibility": visibility,
+                        "author_role": author_role,
+                        "created": created,
                         "content_hash": comment_hash,
                     },
                 )
@@ -310,6 +349,29 @@ class ZendeskMapper:
         )
         edges.append(
             EdgeRecord("Organization", org_vertex, MEMBER, "Person", person_id)
+        )
+
+    def _add_assignee(
+        self,
+        vertices,
+        edges,
+        ticket,
+        users_by_id,
+        ticket_vertex_id_value,
+    ) -> None:
+        assignee_id = ticket.get("assignee_id")
+        if assignee_id is None or not str(assignee_id).strip():
+            return
+        assignee = str(assignee_id)
+        person_id = self._add_person(vertices, assignee, users_by_id)
+        edges.append(
+            EdgeRecord(
+                "Person",
+                person_id,
+                ASSIGNED,
+                "ZendeskTicket",
+                ticket_vertex_id_value,
+            )
         )
 
     def _add_attachments(self, vertices, comment: dict, ticket_id: str) -> None:

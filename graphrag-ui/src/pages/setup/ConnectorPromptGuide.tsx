@@ -73,7 +73,7 @@ Prefer a structured value when the same field also appears in a passage. Do not 
 const ZENDESK_PLANNER_EXAMPLE = `## Zendesk tickets
 A Zendesk ticket is a ZendeskTicket vertex. Its id is zendesk:<subdomain>:ticket:<id>, which is never a Jira issue key.
 
-- Structural (graphrag__structural_retrieve): ticket_id, subject, description, status, and url. The requester is requested from Person. Comment text is ZendeskComment.body filtered by ticket_id. The author is authored.
+- Structural (graphrag__structural_retrieve): ticket_id, subject, description, status, priority, created, updated, and url. The requester is requested from Person. The assignee is assigned from Person. Comment text is ZendeskComment.body filtered by ticket_id, with created and author_role. The author is authored. A public comment whose author_role is agent or admin is a support-team response. Linked Zendesk tickets are problem_id, followup_ids, and source_ticket_id.
 - Unstructured (graphrag__hybrid_search): chunks for the subject, description, and comments. A chunk starts with the ticket id.
 
 When the question names a Jira issue and a Zendesk ticket, retrieve both and follow links_issue from ZendeskTicket to JiraIssue. Do not treat a ticket number as a Jira issue key, and do not infer a link from a URL or number in the description.

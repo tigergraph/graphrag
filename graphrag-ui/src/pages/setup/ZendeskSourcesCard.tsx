@@ -83,6 +83,10 @@ const isNetworkError = (error: unknown) => {
   );
 };
 
+const catalogBusy = (message: string, status?: number) =>
+  (status != null && status >= 500) ||
+  /lock catalog|another command is running|try lock timeout/i.test(message);
+
 const errorDetail = (data: any, fallback: string) => {
   if (typeof data?.detail === "string") return data.detail;
   if (typeof data?.detail?.message === "string") {
@@ -92,6 +96,16 @@ const errorDetail = (data: any, fallback: string) => {
     return `${data.detail.message}${conflicts}`;
   }
   return fallback;
+};
+
+const ingestProgressText = (source: ZendeskSource) => {
+  const checked = source.sync.progress_checked || 0;
+  const written = source.sync.progress_written || 0;
+  const ticket =
+    source.sync.last_ticket_id != null
+      ? ` · saved through ticket ${source.sync.last_ticket_id}`
+      : "";
+  return `Ingesting ${source.display_name} · ${checked} checked · ${written} written${ticket}`;
 };
 
 const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
@@ -145,8 +159,17 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
           const data = await safeJson(response);
           if (installWatchRef.current !== watchId) return;
           if (!response.ok) {
-            throw new Error(errorDetail(data, `Failed to inspect schema (${response.status})`));
-          }
+            const message = errorDetail(data, `Failed to inspect schema (${response.status})`);
+            if (catalogBusy(message, response.status)) {
+              misses = 0;
+              setSchemaFeedback({
+                type: "pending",
+                text: "Installing Zendesk schema. The catalog is busy while the change runs.",
+              });
+            } else {
+              throw new Error(message);
+            }
+          } else {
           pingIdleTimer();
           setSchema(data);
           const installStatus = data.install?.status;
@@ -170,9 +193,10 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
               );
             }
           }
+          }
         } catch (error: any) {
           if (installWatchRef.current !== watchId) return;
-          if (!isNetworkError(error)) throw error;
+          if (!isNetworkError(error) && !catalogBusy(error.message || "")) throw error;
           setSchemaFeedback({
             type: "pending",
             text: "The laptop lock closed the browser connection. Schema installation is still running and will show here when the network returns.",
@@ -224,13 +248,15 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
     }
   }, [graph, watchSchemaInstall]);
 
-  const loadSources = useCallback(async () => {
+  const loadSources = useCallback(async (quiet = false) => {
     if (!graph) {
       setSources([]);
       return;
     }
-    setLoading(true);
-    setMessage("");
+    if (!quiet) {
+      setLoading(true);
+      setMessage("");
+    }
     try {
       const response = await fetch(`/ui/${graph}/data-sources/zendesk`, {
         headers: { Authorization: sessionStorage.getItem("auth") || "" },
@@ -241,20 +267,30 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
         Array.isArray(data.sources) ? data.sources : []
       ).filter((source) => source?.type === "zendesk");
       setSources(loaded);
-      const stored = sessionStorage.getItem(syncFeedbackKey(graph));
-      if (stored) {
-        try {
-          setSyncFeedbackRaw(JSON.parse(stored));
-        } catch {
-          setSyncFeedbackRaw(null);
+      const running = loaded.find((source) => source.sync_running);
+      if (running) {
+        setSyncFeedback({
+          type: "pending",
+          text: ingestProgressText(running),
+        });
+      } else if (!quiet) {
+        const stored = sessionStorage.getItem(syncFeedbackKey(graph));
+        if (stored) {
+          try {
+            setSyncFeedbackRaw(JSON.parse(stored));
+          } catch {
+            setSyncFeedbackRaw(null);
+          }
         }
       }
-      await loadSchema();
+      if (!quiet) await loadSchema();
     } catch (error: any) {
-      setMessage(`Failed to load Zendesk sources: ${error.message}`);
-      setMessageType("error");
+      if (!quiet) {
+        setMessage(`Failed to load Zendesk sources: ${error.message}`);
+        setMessageType("error");
+      }
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, [graph, loadSchema]);
 
@@ -284,6 +320,15 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
     setSchemaFeedback(null);
     loadSources();
   }, [loadSources]);
+
+  const syncRunning = sources.some((source) => source.sync_running);
+  useEffect(() => {
+    if (!open || !syncRunning) return;
+    const timer = window.setInterval(() => {
+      void loadSources(true);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [open, syncRunning, loadSources]);
 
   const patch = (updates: Partial<ZendeskSource>) => {
     setEditing((current) => (current ? { ...current, ...updates } : current));
@@ -409,8 +454,9 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
   };
 
   const pollSync = async (sourceId: string, runId: string) => {
-    for (let attempt = 0; attempt < 120; attempt += 1) {
+    for (;;) {
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      await loadSources(true);
       const response = await fetch(
         `/ui/${graph}/data-sources/zendesk/${encodeURIComponent(sourceId)}/sync/${runId}`,
         { headers: { Authorization: sessionStorage.getItem("auth") || "" } }
@@ -433,11 +479,20 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
         throw new Error(data.error || "Zendesk ingest failed.");
       }
     }
-    throw new Error("Zendesk ingest is still running. Refresh this page to check it.");
   };
 
   const tokenMissing = (message: string) =>
     message.toLowerCase().includes("api token is not available");
+
+  const ingestStoppedEarly = (sync: ZendeskSource["sync"]) => {
+    if (!sync.last_started_at || (!sync.checkpoint && sync.last_ticket_id == null)) {
+      return false;
+    }
+    if (!sync.last_completed_at) return true;
+    const started = Date.parse(sync.last_started_at);
+    const completed = Date.parse(sync.last_completed_at);
+    return Number.isFinite(started) && Number.isFinite(completed) && started > completed;
+  };
 
   const sync = async (source: ZendeskSource, resume = false) => {
     if (source.token_available === false) {
@@ -458,7 +513,22 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
         { method: "POST", headers: authHeaders() }
       );
       const data = await safeJson(response);
-      if (!response.ok) throw new Error(errorDetail(data, `HTTP ${response.status}`));
+      if (!response.ok) {
+        const message = errorDetail(data, `HTTP ${response.status}`);
+        if (message.includes(`zendesk_sync:${source.id}`)) {
+          setSources((current) =>
+            current.map((item) =>
+              item.id === source.id ? { ...item, sync_running: true } : item
+            )
+          );
+          setSyncFeedback({
+            type: "pending",
+            text: `${source.display_name} is already ingesting.`,
+          });
+          return;
+        }
+        throw new Error(message);
+      }
       await pollSync(source.id, data.run_id);
     } catch (error: any) {
       if (tokenMissing(error.message || "")) {
@@ -894,9 +964,13 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
           )}
           <div className="space-y-3">
             {sources.map((source) => {
+              const stoppedEarly = ingestStoppedEarly(source.sync);
               const needsResume = Boolean(
                 (source.sync.last_error && !tokenMissing(source.sync.last_error)) ||
-                source.sync.last_link_error
+                source.sync.last_link_error ||
+                (source.sync.failed_ticket_ids?.length ?? 0) > 0 ||
+                (source.sync.pending_comment_ticket_ids?.length ?? 0) > 0 ||
+                stoppedEarly
               );
               return (
               <div
@@ -909,8 +983,27 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
                     {source.display_name}
                   </div>
                   <div className="text-xs text-gray-500 mt-1">
-                    Last ingestion: {source.sync.last_completed_at || "Never"} · Tickets:{" "}
-                    {source.sync.last_ticket_count || 0}
+                    {source.sync_running ? (
+                      <>
+                        Ingesting · {source.sync.progress_checked || 0} checked ·{" "}
+                        {source.sync.progress_written || 0} written
+                        {source.sync.last_ticket_id != null
+                          ? ` · saved through ticket ${source.sync.last_ticket_id}`
+                          : ""}
+                      </>
+                    ) : stoppedEarly ? (
+                      <>
+                        Ingest stopped before it finished
+                        {source.sync.last_ticket_id != null
+                          ? ` · saved through ticket ${source.sync.last_ticket_id}`
+                          : ""}
+                      </>
+                    ) : (
+                      <>
+                        Last ingestion: {source.sync.last_completed_at || "Never"} · Tickets:{" "}
+                        {source.sync.last_ticket_count || 0}
+                      </>
+                    )}
                   </div>
                   {source.sync.last_error &&
                     !tokenMissing(source.sync.last_error) && (
@@ -923,12 +1016,21 @@ const ZendeskSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
                 <Button
                   size="sm"
                   onClick={() => sync(source, needsResume)}
-                  disabled={!!busy || !source.enabled || !source.sync.last_tested_at}
+                  disabled={
+                    !!busy ||
+                    source.sync_running ||
+                    !source.enabled ||
+                    !source.sync.last_tested_at
+                  }
                 >
-                  {busy === `sync:${source.id}` && (
+                  {(busy === `sync:${source.id}` || source.sync_running) && (
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                   )}
-                  {needsResume ? "Resume" : "Ingest now"}
+                  {source.sync_running
+                    ? "Ingesting"
+                    : needsResume
+                      ? "Resume"
+                      : "Ingest now"}
                 </Button>
                 </div>
                 {tokenPromptFor === source.id && (

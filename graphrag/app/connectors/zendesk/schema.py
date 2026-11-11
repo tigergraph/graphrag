@@ -12,6 +12,7 @@ REQUESTED = "requested"
 MEMBER = "member"
 AUTHORED = "authored"
 CHANGED = "changed"
+ASSIGNED = "assigned"
 LINKS_ISSUE = "links_issue"
 
 _CONTAINS_TARGETS = ("ZendeskTicket", "ZendeskComment")
@@ -34,8 +35,12 @@ def zendesk_schema_proposal(
             ("tags", "STRING"),
             ("custom_fields", "STRING"),
             ("problem_id", "STRING"),
+            ("followup_ids", "STRING"),
+            ("source_ticket_id", "STRING"),
             ("group_name", "STRING"),
             ("url", "STRING"),
+            ("created", "STRING"),
+            ("updated", "STRING"),
             ("content_hash", "STRING"),
         ],
     )
@@ -63,6 +68,8 @@ def zendesk_schema_proposal(
             ("ticket_id", "STRING"),
             ("body", "STRING"),
             ("visibility", "STRING"),
+            ("author_role", "STRING"),
+            ("created", "STRING"),
             ("content_hash", "STRING"),
         ],
     )
@@ -92,6 +99,12 @@ def zendesk_schema_proposal(
         "Person",
         "ZendeskTicket",
         "The person who requested the ticket.",
+    )
+    proposal.add_edge_pair(
+        ASSIGNED,
+        "Person",
+        "ZendeskTicket",
+        "The person assigned to the ticket.",
     )
     proposal.add_edge_pair(
         MEMBER,

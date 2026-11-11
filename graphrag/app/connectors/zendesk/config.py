@@ -71,13 +71,15 @@ class ZendeskSyncState(BaseModel):
     export_cursor: str | None = None
     failed_ticket_ids: list[str] = Field(default_factory=list)
     pending_comment_ticket_ids: list[str] = Field(default_factory=list)
-    linked_ticket_ids: list[str] = Field(default_factory=list)
     last_tested_at: datetime | None = None
     last_started_at: datetime | None = None
     last_completed_at: datetime | None = None
     last_error: str | None = None
     last_link_error: str | None = None
     last_ticket_count: int = Field(default=0, ge=0)
+    progress_checked: int = Field(default=0, ge=0)
+    progress_written: int = Field(default=0, ge=0)
+    progress_phase: str | None = None
 
 
 class ZendeskDataSource(BaseModel):
