@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from connectors.records import EdgeRecord, VertexRecord
@@ -22,7 +22,6 @@ class LinkReconciliationResult:
     links_seen: int = 0
     links_written: int = 0
     links_skipped: int = 0
-    linked_ticket_ids: list[str] = field(default_factory=list)
 
 
 def normalized_link(link: dict[str, Any]) -> tuple[str, str] | None:
@@ -168,19 +167,50 @@ def _ensure_issue_vertex(conn, issue_key: str, ticket_vertex: str, ticket_id: st
     return issue_vertex
 
 
-def reconcile_links(
-    conn,
-    subdomain: str,
-    pages,
-    previously_linked: list[str],
-) -> LinkReconciliationResult:
+def _ticket_ids_with_links(conn, subdomain: str) -> set[str]:
+    """Ticket ids that already have a links_issue edge in the graph."""
+    graphname = str(getattr(conn, "graphname", "") or "")
+    if not graphname:
+        raise RuntimeError("The graph connection has no graph name")
+    prefix = f"zendesk:{subdomain}:ticket:"
+    found: set[str] = set()
+    page_size = 10_000
+    offset = 0
+    while True:
+        query = (
+            f"INTERPRET QUERY() FOR GRAPH {graphname} {{\n"
+            f"  start = {{ZendeskTicket.*}};\n"
+            f"  res = SELECT s FROM start:s -(links_issue)-> :t\n"
+            f"        ORDER BY s.ticket_id ASC\n"
+            f"        LIMIT {page_size} OFFSET {offset};\n"
+            f"  PRINT res;\n"
+            f"}}"
+        )
+        response = conn.runInterpretedQuery(query) or []
+        page = response[0].get("res", []) if response else []
+        for vertex in page:
+            if not isinstance(vertex, dict):
+                continue
+            vertex_id = str(vertex.get("v_id") or "")
+            if not vertex_id.startswith(prefix):
+                continue
+            ticket_id = vertex_id[len(prefix) :]
+            if _TICKET_ID.fullmatch(ticket_id):
+                found.add(ticket_id)
+        if len(page) < page_size:
+            return found
+        offset += page_size
+
+
+def reconcile_links(conn, subdomain: str, pages) -> LinkReconciliationResult:
     """Write a link for every inventory row whose Zendesk ticket is in the graph.
 
-    A missing Jira issue is created with issue_key only, and the edge is
-    written in the same pass. Inventory rows for one ticket replace that
-    ticket's link edges. A ticket that was linked on the previous run and is
-    absent from this inventory has its link edges removed. The Jira vertex
-    is not deleted.
+    A missing Jira issue is created in the same pass with issue_key, summary
+    from the ticket subject, and description from the ticket description plus
+    the public comments. An existing Jira issue is not written again. Inventory
+    rows for one ticket replace that ticket's link edges. A ticket that has
+    links_issue in the graph and is absent from this inventory has those edges
+    removed. The Jira vertex is not deleted.
     """
     if not _has_type(conn, "getVertexTypes", "JiraIssue"):
         return LinkReconciliationResult()
@@ -204,12 +234,7 @@ def reconcile_links(
             issue_key, ticket_id = normalized
             by_ticket.setdefault(ticket_id, set()).add(issue_key)
 
-    touched = set(by_ticket) | {
-        ticket_id
-        for ticket_id in previously_linked
-        if _TICKET_ID.fullmatch(str(ticket_id) or "")
-    }
-    linked: list[str] = []
+    touched = set(by_ticket) | _ticket_ids_with_links(conn, subdomain)
     for ticket_id in sorted(touched):
         ticket_vertex = ticket_vertex_id(subdomain, ticket_id)
         if not _vertex_exists(conn, "ZendeskTicket", ticket_vertex):
@@ -222,7 +247,4 @@ def reconcile_links(
             )
             result.links_written += 1
         _replace_edges(conn, ticket_vertex, issue_vertices)
-        if issue_vertices:
-            linked.append(ticket_id)
-    result.linked_ticket_ids = linked
     return result

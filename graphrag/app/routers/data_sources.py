@@ -191,8 +191,31 @@ def _with_token_availability(
     return sources
 
 
+def _catalog_busy(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "lock catalog" in text or "another command is running" in text
+
+
+def _status_during_catalog_lock(graphname: str, operation: str) -> dict[str, Any] | None:
+    install = _visible_install(graphname, operation)
+    if not install or install.get("status") not in {"queued", "running"}:
+        return None
+    return {
+        "status": "incomplete",
+        "missing": {},
+        "conflicts": [],
+        "install": install,
+    }
+
+
 def _schema_status_payload(conn, graphname: str) -> dict[str, Any]:
-    status = jira_schema_status(conn)
+    try:
+        status = jira_schema_status(conn)
+    except Exception as exc:
+        deferred = _status_during_catalog_lock(graphname, "install_jira_schema")
+        if deferred is not None and _catalog_busy(exc):
+            return deferred
+        raise
     status["install"] = _visible_install(graphname, "install_jira_schema")
     return status
 
@@ -734,11 +757,13 @@ def list_zendesk_sources(
     _require_access(graphname, auth)
     with _zendesk_tokens_lock:
         tokens = dict(_zendesk_tokens)
-    return {
-        "sources": _with_token_availability(
-            graphname, zendesk_store.list(graphname), tokens
-        )
-    }
+    operation = get_current_operation(graphname)
+    sources = _with_token_availability(
+        graphname, zendesk_store.list(graphname), tokens
+    )
+    for source in sources:
+        source["sync_running"] = operation == f"zendesk_sync:{source.get('id')}"
+    return {"sources": sources}
 
 
 @router.put(f"{route_prefix}/{{graphname}}/data-sources/zendesk/{{source_id}}")
@@ -866,7 +891,13 @@ def get_zendesk_schema_status(
     ],
 ):
     _require_access(graphname, auth)
-    status = zendesk_schema_status(_connection(request, graphname))
+    try:
+        status = zendesk_schema_status(_connection(request, graphname))
+    except Exception as exc:
+        deferred = _status_during_catalog_lock(graphname, "install_zendesk_schema")
+        if deferred is not None and _catalog_busy(exc):
+            return deferred
+        raise
     status["install"] = _visible_install(graphname, "install_zendesk_schema")
     return status
 

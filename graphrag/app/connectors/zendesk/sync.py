@@ -56,8 +56,13 @@ class ZendeskSyncService:
                 )
 
             started = datetime.now(timezone.utc)
+            self._progress_checked = 0
+            self._progress_written = 0
             self.source.sync.last_started_at = started
             self.source.sync.last_error = None
+            self.source.sync.progress_checked = 0
+            self.source.sync.progress_written = 0
+            self.source.sync.progress_phase = "tickets"
             self.store.update_runtime_state(self.graphname, self.source)
             mapper = ZendeskMapper(self.source, graphname=self.graphname)
             try:
@@ -75,6 +80,7 @@ class ZendeskSyncService:
                 link_result = self._reconcile_links()
                 self.source.sync.last_ticket_count = tickets_upserted
                 self.source.sync.last_completed_at = datetime.now(timezone.utc)
+                self.source.sync.progress_phase = None
                 if self.source.sync.failed_ticket_ids:
                     self.source.sync.last_error = (
                         self.source.sync.last_error or "some tickets failed"
@@ -94,6 +100,7 @@ class ZendeskSyncService:
                 }
             except Exception as exc:
                 self.source.sync.last_error = str(exc)[:1000]
+                self.source.sync.progress_phase = None
                 self.store.update_runtime_state(self.graphname, self.source)
                 raise
         finally:
@@ -115,6 +122,7 @@ class ZendeskSyncService:
                 mapped = self._map_tickets(mapper, [ticket], comments)
                 comments_upserted += self._write_mapped(mapped)
                 tickets_upserted += len(mapped)
+                self._note_progress(checked=len(mapped), written=len(mapped))
             except Exception:
                 logger.warning(
                     "Zendesk retry failed for ticket %s", ticket_id, exc_info=True
@@ -146,6 +154,7 @@ class ZendeskSyncService:
             written_comments = self._write_mapped(mapped)
             tickets_upserted += len(mapped)
             comments_upserted += written_comments
+            self._note_progress(checked=len(mapped), written=len(mapped))
         self.source.sync.pending_comment_ticket_ids = still_pending
         self.store.update_runtime_state(self.graphname, self.source)
         return tickets_upserted, comments_upserted
@@ -156,6 +165,15 @@ class ZendeskSyncService:
         for tickets, _end_time, _end_of_stream, _after_cursor in self.client.iter_ticket_pages():
             kept = [ticket for ticket in tickets if self._keep(ticket)]
             kept.sort(key=lambda ticket: (_ticket_sort_key(ticket), int(ticket.get("id") or 0)))
+            already_stored = self._fully_ingested_ids(kept)
+            if already_stored:
+                self._note_progress(checked=len(already_stored), written=0)
+                self.store.update_runtime_state(self.graphname, self.source)
+            kept = [
+                ticket
+                for ticket in kept
+                if str(ticket.get("id")) not in already_stored
+            ]
             comments, failed = self._comments_for(kept)
             pending = list(self.source.sync.pending_comment_ticket_ids)
             for ticket_id in failed:
@@ -185,6 +203,7 @@ class ZendeskSyncService:
                     self.store.update_runtime_state(self.graphname, self.source)
                     continue
                 tickets_upserted += 1
+                self._note_progress(checked=1, written=1)
                 updated_at = ticket.get("updated_at")
                 if updated_at:
                     self.source.sync.checkpoint = _parse_time(str(updated_at))
@@ -203,7 +222,6 @@ class ZendeskSyncService:
                 self.conn,
                 self.source.connection.subdomain,
                 self.client.iter_jira_link_pages(),
-                list(self.source.sync.linked_ticket_ids),
             )
         except Exception as exc:
             logger.warning(
@@ -216,9 +234,52 @@ class ZendeskSyncService:
             self.store.update_runtime_state(self.graphname, self.source)
             return LinkReconciliationResult()
         self.source.sync.last_link_error = None
-        self.source.sync.linked_ticket_ids = list(result.linked_ticket_ids)
         self.store.update_runtime_state(self.graphname, self.source)
         return result
+
+    def _note_progress(self, *, checked: int, written: int) -> None:
+        self._progress_checked += checked
+        self._progress_written += written
+        self.source.sync.progress_checked = self._progress_checked
+        self.source.sync.progress_written = self._progress_written
+        self.source.sync.progress_phase = "tickets"
+
+    def _fully_ingested_ids(self, tickets: list[dict[str, Any]]) -> set[str]:
+        """Tickets at or before the saved cursor that already have stored text.
+
+        Failed tickets and tickets still waiting on comments stay in the run.
+        A later ``updated_at`` is ingested again.
+        """
+        checkpoint = self.source.sync.checkpoint
+        last_id = self.source.sync.last_ticket_id
+        if checkpoint is None or last_id is None:
+            return set()
+        failed = {str(ticket_id) for ticket_id in self.source.sync.failed_ticket_ids}
+        pending = {
+            str(ticket_id)
+            for ticket_id in self.source.sync.pending_comment_ticket_ids
+        }
+        candidates: list[str] = []
+        for ticket in tickets:
+            ticket_id = str(ticket.get("id"))
+            if ticket_id in failed or ticket_id in pending or not ticket_id.isdigit():
+                continue
+            if (_ticket_sort_key(ticket), int(ticket_id)) > (checkpoint, last_id):
+                continue
+            candidates.append(ticket_id)
+        if not candidates:
+            return set()
+        vertex_ids = [
+            f"zendesk:{self.source.connection.subdomain}:ticket:{ticket_id}"
+            for ticket_id in candidates
+        ]
+        hashes = self._stored_hashes("ZendeskTicket", vertex_ids)
+        created = self._stored_hashes("ZendeskTicket", vertex_ids, "created")
+        return {
+            ticket_id
+            for ticket_id, vertex_id in zip(candidates, vertex_ids)
+            if hashes.get(vertex_id) and created.get(vertex_id)
+        }
 
     def _keep(self, ticket: dict[str, Any]) -> bool:
         statuses = {status.casefold() for status in self.source.scope.statuses}
@@ -280,6 +341,9 @@ class ZendeskSyncService:
             requester = ticket.get("requester_id")
             if requester is not None:
                 user_ids.append(str(requester))
+            assignee = ticket.get("assignee_id")
+            if assignee is not None:
+                user_ids.append(str(assignee))
             for comment in comments.get(str(ticket.get("id")), []):
                 author = comment.get("author_id")
                 if author is not None:
@@ -293,6 +357,7 @@ class ZendeskSyncService:
                 "name": str(user.get("name") or ""),
                 "email": str(user.get("email") or ""),
                 "organization_id": str(user.get("organization_id") or ""),
+                "role": str(user.get("role") or ""),
             }
             for user in self.client.users(user_ids)
             if user.get("id") is not None
@@ -424,7 +489,12 @@ class ZendeskSyncService:
             )
         return sum(len(item.comments) for item in mapped)
 
-    def _stored_hashes(self, vertex_type: str, vertex_ids: list[str]) -> dict[str, str]:
+    def _stored_hashes(
+        self,
+        vertex_type: str,
+        vertex_ids: list[str],
+        attribute: str = "content_hash",
+    ) -> dict[str, str]:
         if not vertex_ids:
             return {}
         try:
@@ -441,7 +511,7 @@ class ZendeskSyncService:
                 continue
             vertex_id = str(row.get("v_id") or row.get("id") or "")
             attributes = row.get("attributes") or {}
-            value = attributes.get("content_hash")
+            value = attributes.get(attribute)
             if isinstance(value, dict):
                 value = value.get("value")
             hashes[vertex_id] = str(value or "")

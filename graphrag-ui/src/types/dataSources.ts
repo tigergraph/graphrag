@@ -44,6 +44,7 @@ export interface ZendeskSource {
   enabled: boolean;
   display_name: string;
   token_available?: boolean;
+  sync_running?: boolean;
   connection: {
     subdomain: string;
     email: string;
@@ -58,14 +59,18 @@ export interface ZendeskSource {
   sync: {
     overlap_seconds: number;
     checkpoint?: string | null;
+    last_ticket_id?: number | null;
+    failed_ticket_ids?: string[];
     pending_comment_ticket_ids?: string[];
-    linked_ticket_ids?: string[];
     last_tested_at?: string | null;
     last_started_at?: string | null;
     last_completed_at?: string | null;
     last_error?: string | null;
     last_link_error?: string | null;
     last_ticket_count: number;
+    progress_checked?: number;
+    progress_written?: number;
+    progress_phase?: string | null;
   };
 }
 

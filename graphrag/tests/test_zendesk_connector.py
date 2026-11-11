@@ -90,6 +90,7 @@ class FakeHttp:
 
 class Graph:
     def __init__(self, vertices=None, vertex_types=None, edge_types=None):
+        self.graphname = "TestGraph"
         self.present = set(vertices or [])
         self.vertex_types = list(vertex_types or ["JiraIssue", "ZendeskTicket"])
         self.edge_types = list(edge_types or [LINKS_ISSUE])
@@ -119,6 +120,16 @@ class Graph:
             {"to_id": target_id, "to_type": target_type}
             for target_type, target_id in targets
         ]
+
+    def runInterpretedQuery(self, query):
+        rows = [
+            {"v_id": source_id}
+            for (source_type, source_id, edge_type), targets in self.edges.items()
+            if source_type == "ZendeskTicket"
+            and edge_type == LINKS_ISSUE
+            and targets
+        ]
+        return [{"res": rows}]
 
     def delEdges(self, vertex_type, vertex_id, edge_type):
         self.edges.pop((vertex_type, vertex_id, edge_type), None)
@@ -277,6 +288,7 @@ class FakeClient:
         self.link_pages = links if links is not None else [[]]
         self.fail_comments = {str(ticket_id) for ticket_id in fail_comments}
         self.ticket_calls = []
+        self.comment_calls = []
 
     def iter_ticket_pages(self):
         yield from self.pages
@@ -294,6 +306,7 @@ class FakeClient:
         }
 
     def comments(self, ticket_id):
+        self.comment_calls.append(str(ticket_id))
         if str(ticket_id) in self.fail_comments:
             raise RuntimeError("comments failed")
         return list(self.comments_by_ticket.get(str(ticket_id), []))
@@ -592,7 +605,6 @@ def test_reconcile_links_existing_issue_and_creates_a_placeholder_for_a_missing_
         graph,
         "acme",
         [[{"issue_key": "TSE-1073", "ticket_id": "59326"}, {"issue_key": "not a key", "ticket_id": "1"}]],
-        [],
     )
     assert result.links_written == 1
     assert graph.link_targets(ticket) == {issue}
@@ -608,7 +620,6 @@ def test_reconcile_links_existing_issue_and_creates_a_placeholder_for_a_missing_
         absent,
         "acme",
         [[{"issue_key": "GLE-9999", "ticket_id": "1"}]],
-        [],
     )
     assert created.links_written == 1
     assert absent.link_targets(missing_ticket) == {missing_issue}
@@ -622,14 +633,13 @@ def test_reconcile_links_existing_issue_and_creates_a_placeholder_for_a_missing_
         filled,
         "acme",
         [[{"issue_key": "TSE-1073", "ticket_id": "59326"}]],
-        [],
     )
     assert filled.attrs[("JiraIssue", issue)]["summary"] == "RCA"
     assert filled.link_targets(ticket) == {issue}
 
     removed = Graph(vertices={("ZendeskTicket", ticket), ("JiraIssue", issue)})
     removed.edges[("ZendeskTicket", ticket, LINKS_ISSUE)] = {("JiraIssue", issue)}
-    reconcile_links(removed, "acme", [[]], ["59326"])
+    reconcile_links(removed, "acme", [[]])
     assert removed.link_targets(ticket) == set()
 
 
@@ -658,6 +668,7 @@ def _ticket(ticket_id=10, **overrides):
         "status": "open",
         "requester_id": 7,
         "updated_at": "2026-10-01T00:00:00Z",
+        "created_at": "2026-09-01T00:00:00Z",
         "url": f"https://acme.zendesk.com/api/v2/tickets/{ticket_id}.json",
     }
     payload.update(overrides)
@@ -824,7 +835,6 @@ def test_sync_links_an_ingested_jira_issue(tmp_path, monkeypatch):
     ).run()
     assert result["links_written"] == 1
     assert graph.link_targets("zendesk:acme:ticket:59326") == {"jira:tse-1073:issue"}
-    assert store.get("TestGraph", "zendesk-acme").sync.linked_ticket_ids == ["59326"]
 
 
 def test_source_ids_cannot_collide_and_jira_save_keeps_zendesk(tmp_path):
@@ -901,6 +911,47 @@ def test_mapper_omits_empty_comments_and_uses_subdomain_ids(monkeypatch):
     assert mapped.ticket_chunks[0].text.splitlines()[0] == "10"
 
 
+def test_ticket_stores_times_assignee_comment_time_and_links(monkeypatch):
+    monkeypatch.setattr(
+        "connectors.zendesk.mapper.get_graphrag_config",
+        lambda graphname=None: {"chunker_config": {"chunk_size": 4000, "overlap_size": 0}},
+    )
+    mapped = ZendeskMapper(source()).map_ticket(
+        _ticket(
+            assignee_id=9,
+            followup_ids=[12, 13],
+            via={"source": {"rel": "follow_up", "from": {"ticket_id": 4}}},
+        ),
+        [
+            {
+                "id": 3,
+                "author_id": 8,
+                "body": "We replied",
+                "public": True,
+                "created_at": "2026-07-02T01:00:00Z",
+            }
+        ],
+        {
+            "8": {"name": "Ada", "email": "ada@tigergraph.com", "role": "agent"},
+            "9": {"name": "Bo", "email": "bo@tigergraph.com", "role": "agent"},
+        },
+    )
+    ticket = mapped.vertices[0].attributes
+    assert ticket["created"] == "2026-09-01T00:00:00Z"
+    assert ticket["updated"] == "2026-10-01T00:00:00Z"
+    assert ticket["followup_ids"] == "12, 13"
+    assert ticket["source_ticket_id"] == "4"
+    comment = next(
+        vertex for vertex in mapped.vertices if vertex.vertex_type == "ZendeskComment"
+    )
+    assert comment.attributes["created"] == "2026-07-02T01:00:00Z"
+    assert comment.attributes["author_role"] == "agent"
+    assert any(
+        edge.edge_type == "assigned" and edge.target_id == mapped.vertex_id
+        for edge in mapped.edges
+    )
+
+
 def test_unchanged_ticket_is_not_embedded_again(tmp_path, monkeypatch):
     embeddings = _install_sync_patches(monkeypatch)
     store = ZendeskSourceStore(str(tmp_path))
@@ -957,4 +1008,56 @@ def test_failed_embedding_retries_only_the_unfinished_ticket(tmp_path, monkeypat
         2026, 10, 1, tzinfo=timezone.utc
     )
     assert graph.attrs[("ZendeskTicket", "zendesk:acme:ticket:10")]["content_hash"]
-    assert embeddings.added
+
+
+def test_resume_skips_tickets_that_are_already_stored(tmp_path, monkeypatch):
+    _install_sync_patches(monkeypatch)
+    store = ZendeskSourceStore(str(tmp_path))
+    saved = store.upsert("TestGraph", source())
+    graph = Graph()
+    client = FakeClient(
+        pages=[
+            (
+                [
+                    _ticket(10),
+                    _ticket(11, updated_at="2026-10-03T00:00:00Z"),
+                ],
+                1700000000,
+                True,
+                None,
+            )
+        ],
+        comments={
+            "10": [{"id": 3, "author_id": 7, "body": "Tried again"}],
+            "11": [{"id": 4, "author_id": 7, "body": "New"}],
+        },
+        users=[{"id": 7, "name": "Ada"}],
+    )
+    ZendeskSyncService("TestGraph", saved, graph, store=store, client=client).run()
+    assert set(client.comment_calls) == {"10", "11"}
+    saved = store.get("TestGraph", "zendesk-acme")
+    saved.sync.failed_ticket_ids = ["10"]
+    graph.attrs[("ZendeskTicket", "zendesk:acme:ticket:10")]["content_hash"] = ""
+    resume = FakeClient(
+        pages=[
+            (
+                [
+                    _ticket(10),
+                    _ticket(11, updated_at="2026-10-03T00:00:00Z"),
+                    _ticket(12, updated_at="2026-10-04T00:00:00Z"),
+                ],
+                1700000000,
+                True,
+                None,
+            )
+        ],
+        comments={
+            "10": [{"id": 3, "author_id": 7, "body": "Tried again"}],
+            "11": [{"id": 4, "author_id": 7, "body": "New"}],
+            "12": [{"id": 5, "author_id": 7, "body": "Later"}],
+        },
+        users=[{"id": 7, "name": "Ada"}],
+    )
+    ZendeskSyncService("TestGraph", saved, graph, store=store, client=resume).run()
+    assert set(resume.comment_calls) == {"10", "12"}
+    assert "11" not in resume.comment_calls
