@@ -20,9 +20,7 @@ through ``get_graphrag_config``)::
     "graphrag_config": {
       "agent_engine": "default",         # "default" | "deepagent" (both Deep Agent) | "legacy"
       "deep_agent": {
-        "memory_backend": "sqlite",      # "sqlite" (default) | "postgres" | "memory"
-        "memory_path": "/code/deep_agent_data/memory.sqlite",
-        "postgres_uri": "postgresql://user:pass@host:5432/db",
+        "memory_backend": "sqlite",      # "sqlite" (default) | "memory" (until restart)
         "recursion_limit": 80,
         "long_term_memory": true,
         "subagents": true,
@@ -31,9 +29,11 @@ through ``get_graphrag_config``)::
       }
     }
 
-Environment variables ``DEEP_AGENT_MEMORY_BACKEND``, ``DEEP_AGENT_MEMORY_PATH``
-and ``DEEP_AGENT_POSTGRES_URI`` override the persistence settings, which are
-process-wide (one checkpointer and one store per service).
+Memory is kept per graph. Each graph has its own SQLite file,
+``configs/graph_data/<graph>/agent_memory.sqlite``. ``graph_data`` holds the
+data GraphRAG keeps for a graph, apart from its settings in
+``graph_configs``. ``configs/`` is the volume every deployment already
+mounts, so memory survives container recreation without another volume.
 """
 
 from __future__ import annotations
@@ -41,7 +41,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-DEFAULT_MEMORY_PATH = os.path.join("deep_agent_data", "memory.sqlite")
+MEMORY_FILE = "agent_memory.sqlite"
+
+
+def memory_path(graphname: str) -> str:
+    """The SQLite memory file of a graph."""
+    return os.path.join("configs", "graph_data", graphname, MEMORY_FILE)
 
 
 @dataclass(frozen=True)
@@ -56,8 +61,7 @@ class DeepAgentSettings:
 @dataclass(frozen=True)
 class MemorySettings:
     backend: str = "sqlite"
-    path: str = DEFAULT_MEMORY_PATH
-    postgres_uri: str = ""
+    path: str = ""
 
 
 def _section(graphrag_cfg) -> dict:
@@ -93,13 +97,13 @@ def agent_settings(graphrag_cfg) -> DeepAgentSettings:
     )
 
 
-def memory_settings(graphrag_cfg) -> MemorySettings:
+def memory_settings(graphrag_cfg, graphname: str) -> MemorySettings:
+    """Memory settings of one graph (``graphrag_cfg`` is that graph's
+    configuration)."""
     sec = _section(graphrag_cfg)
-    backend = (os.getenv("DEEP_AGENT_MEMORY_BACKEND") or sec.get("memory_backend") or "sqlite")
     return MemorySettings(
-        backend=str(backend).strip().lower(),
-        path=os.getenv("DEEP_AGENT_MEMORY_PATH") or sec.get("memory_path") or DEFAULT_MEMORY_PATH,
-        postgres_uri=os.getenv("DEEP_AGENT_POSTGRES_URI") or sec.get("postgres_uri") or "",
+        backend=str(sec.get("memory_backend") or "sqlite").strip().lower(),
+        path=memory_path(graphname),
     )
 
 

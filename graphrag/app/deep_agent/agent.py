@@ -14,11 +14,11 @@
 
 """The Deep Agent chat engine.
 
-``DeepGraphRAGAgent`` has the chat-engine interface the routers already drive
+``DeepGraphRAGAgent`` has the chat-engine interface the routers drive
 (``question_for_agent(question, conversation) -> GraphRAGResponse``, a ``q``
 progress queue, ``engine_note``), so the WebSocket chat, the UI query endpoint
-and the REST query endpoints run it unchanged. Internally the whole answer is
-produced by one LangChain Deep Agent:
+and the REST query endpoints can run it in place of the other engines. One
+LangChain Deep Agent produces the whole answer:
 
 * the model decides which tools to call, plans with ``write_todos``, and may
   delegate to two subagents (``graph-analyst``, ``document-researcher``);
@@ -383,7 +383,7 @@ class DeepGraphRAGAgent:
         if metrics:
             metrics.llm_inprogress_requests.labels(self.model_name).inc()
         try:
-            backends = mem.get_backends()
+            backends = mem.get_backends(self.graphname)
             convo = [{"query": c.get("query", ""), "response": c.get("response", "")}
                      for c in (conversation or [])]
             graph_ctx = self._graph_tool_context(convo)
@@ -404,7 +404,7 @@ class DeepGraphRAGAgent:
             if self.conversation_id:
                 tid = mem.thread_id(self.graphname, self.user, self.conversation_id)
                 checkpointer = backends.checkpointer
-                prior = mem.thread_messages(tid)
+                prior = mem.thread_messages(self.graphname, tid)
             else:
                 from langgraph.checkpoint.memory import InMemorySaver
                 tid = f"ephemeral:{uuid.uuid4()}"

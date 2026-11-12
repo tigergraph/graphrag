@@ -392,13 +392,13 @@ GraphRAG offers two chat engines, chosen from the chat menu (or set as a per-gra
 
 ### Agentic
 
-Agent mode runs on one of two engines, chosen with `agent_engine` in the [GraphRAG configuration](#graphrag-configuration):
+The Agentic engine runs one of two agents, chosen with `agent_engine` in the [GraphRAG configuration](#graphrag-configuration):
 
-| `agent_engine` | Engine |
+| `agent_engine` | Agent |
 |---|---|
-| `"default"` (or not set) | The default engine, currently the Deep Agent |
+| `"default"` (or not set) | The default agent: the Deep Agent |
 | `"deepagent"` | The Deep Agent |
-| `"legacy"` | The Planned / Reactive agent from GraphRAG 2.0 |
+| `"legacy"` | The Planned / Reactive agent |
 
 #### Deep Agent (default)
 
@@ -410,11 +410,11 @@ The agent works with these tools, always as the signed-in TigerGraph user:
 - **TigerGraph lookups (read-only)** — vertex and edge counts, vertex and edge lookups, the installed queries of the graph, and read-only openCypher when Cypher is enabled.
 - **MCP tools** — the [MCP servers](#mcp-servers-agentic-tools) configured for the graph.
 
-The agent cannot change data, ingest documents or install queries. TigerGraph permissions of the signed-in user still apply to every tool. In this engine, the Planned / Reactive style picker has no effect.
+The agent cannot change data, ingest documents or install queries. TigerGraph permissions of the signed-in user still apply to every tool. With the Deep Agent, the Planned / Reactive style picker has no effect.
 
 #### Legacy engine (Planned / Reactive)
 
-With `agent_engine: "legacy"`, Agent mode runs the engine from GraphRAG 2.0. The agent decides its **own** retrieval instead of following a fixed pipeline: it picks which methods to use (structural graph queries, vector search, community search), can call external [MCP tools](#mcp-servers-agentic-tools), answers greetings and questions about itself directly, reuses what the conversation already answers and retrieves only what is missing, and cites the chunks and queries it used. It comes in two styles:
+With `agent_engine: "legacy"`, the Agentic engine runs the Planned / Reactive agent. The agent decides its **own** retrieval instead of following a fixed pipeline: it picks which methods to use (structural graph queries, vector search, community search), can call external [MCP tools](#mcp-servers-agentic-tools), answers greetings and questions about itself directly, reuses what the conversation already answers and retrieves only what is missing, and cites the chunks and queries it used. It comes in two styles:
 
 - **Planned** *(default)* — analyzes the question against the graph's schema up front, answers directly when the conversation or the schema already holds the answer (for example "what data do we have?"), and otherwise lays out the whole retrieval plan (which methods, how many, in what order) as a small DAG, executes it, then synthesizes one grounded answer. Predictable and efficient; a strong fit for most questions, including multi-part ones.
 - **Reactive** — reasons and acts one step at a time, deciding each next retrieval from what the previous step returned, and keeps going until it can answer completely and accurately. More adaptive to what it finds, at the cost of more steps (and tokens) on complex questions.
@@ -434,7 +434,7 @@ The Deep Agent keeps two kinds of memory, both stored on your own server:
 
 Memory is private to each TigerGraph user and needs a username and password login. API calls with a token keep no memory. `POST /{graph}/query` and `/{graph}/query_with_history` stay stateless: they use only the history sent with the request.
 
-Memory is stored in SQLite by default. The provided Docker Compose file keeps it in `./data/deep_agent/`, so it survives container recreation. Use one GraphRAG replica per SQLite file; for several replicas, use Postgres (install `langgraph-checkpoint-postgres`, `psycopg[binary]` and `psycopg-pool`). The environment variables `DEEP_AGENT_MEMORY_BACKEND`, `DEEP_AGENT_MEMORY_PATH` and `DEEP_AGENT_POSTGRES_URI` override the memory settings in the configuration.
+Memory is kept per graph. Each graph has its own SQLite file, `configs/graph_data/<graph>/agent_memory.sqlite`. The `configs` folder is already mounted, so memory survives container recreation, and a backup of `configs` includes users' conversations. Use one GraphRAG replica per `configs` folder.
 
 ### Agent API
 
@@ -449,7 +449,7 @@ The Deep Agent has its own REST API. All routes authenticate like the other grap
 | GET | `/{graph}/agent/memories` | The caller's long-term memory files |
 | GET / PUT / DELETE | `/{graph}/agent/memories/{path}` | Read, write (`{"content": ...}`) or delete one memory file, for example `AGENTS.md` |
 
-The existing chat and query endpoints also use the Deep Agent whenever Agent mode is selected.
+The chat and query endpoints also use the Deep Agent when the Agentic engine is selected.
 
 ```bash
 curl -s -u USER:PASS -X POST http://<host>/MyGraph/agent/chat \
@@ -665,23 +665,21 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `num_seen_min` | int | `2` | Minimum occurrence count for a node to be included during hybrid search traversal. Higher values filter out loosely connected nodes, reducing context size. |
 | `max_results` | int | `2 × top_k` | Caps the number of result chunks hybrid and community search return, ranked by relevance to the question, instead of every chunk the expansion (or community membership) reaches. When unset it is twice `top_k`, which is also the minimum; set higher to return more context. Lowering it reduces the context sent to the LLM. |
 | `community_level` | int | `2` | Community hierarchy level for community search. Higher levels retrieve broader, higher-order community summaries. |
-| `agent_engine` | string | `"default"` | Engine for Agent mode: `"default"` (the default engine, currently the Deep Agent), `"deepagent"` (the Deep Agent) or `"legacy"` (the Planned / Reactive agent). See [Agentic](#agentic). |
+| `agent_engine` | string | `"default"` | Agent that the Agentic engine runs: `"default"` (the default agent, the Deep Agent), `"deepagent"` (the Deep Agent) or `"legacy"` (the Planned / Reactive agent). See [Agentic](#agentic). |
 | `deep_agent` | object | `{}` | Deep Agent settings (see sub-parameters below). |
-| ↳ `memory_backend` | string | `"sqlite"` | Where agent memory is stored: `sqlite`, `postgres` or `memory` (kept until restart). See [Agent memory](#agent-memory). |
-| ↳ `memory_path` | string | `"/code/deep_agent_data/memory.sqlite"` | SQLite file for agent memory. |
-| ↳ `postgres_uri` | string | `""` | Postgres connection string, when `memory_backend` is `postgres`. |
+| ↳ `memory_backend` | string | `"sqlite"` | Where agent memory is stored: `sqlite` (the graph's config folder) or `memory` (kept until restart). See [Agent memory](#agent-memory). |
 | ↳ `long_term_memory` | bool | `true` | Keep each user's lasting preferences across conversations. |
 | ↳ `subagents` | bool | `true` | Let the agent hand focused research to its helper agents. |
 | ↳ `recursion_limit` | int | `80` | Most steps the agent may take for one question. |
 | ↳ `allow_installed_queries` | bool | `true` | Let the agent list and run the graph's installed queries. |
 | ↳ `installed_query_allowlist` | list | `["*"]` | Name patterns of the installed queries the agent may run. |
 | ↳ `max_tool_output_chars` | int | `60000` | Most characters of one tool result the agent reads. |
-| `agent_style` | string | `"planned"` | Legacy engine only. Default agentic engine style: `"planned"` (plan the whole retrieval up front) or `"reactive"` (decide each step from the last result). The chat menu can override per request. See [Chat Engines and Agents](#chat-engines-and-agents). |
-| `agent_max_iterations` | int | `30` | Legacy engine, reactive agent only: maximum reason-act-observe steps before it must answer. |
-| `agent_max_replans` | int | `3` | Legacy engine, planned agent only: how many times the planner may extend its plan when the gathered context is insufficient. |
+| `agent_style` | string | `"planned"` | Planned / Reactive agent only. Default agentic engine style: `"planned"` (plan the whole retrieval up front) or `"reactive"` (decide each step from the last result). The chat menu can override per request. See [Chat Engines and Agents](#chat-engines-and-agents). |
+| `agent_max_iterations` | int | `30` | Reactive agent only: maximum reason-act-observe steps before it must answer. |
+| `agent_max_replans` | int | `3` | Planned agent only: how many times the planner may extend its plan when the gathered context is insufficient. |
 | `cypher_max_attempts` | int | `10` | How many times a structured graph query may be generated for one question before GraphRAG gives up on it. |
-| `planner_max_output_tokens` | int | `4000` | Legacy engine, planned agent only: the most output tokens the planner may use for one plan. Reasoning models use at least `16000`. |
-| `agent_max_total_steps` | int | `20` | Legacy engine, planned agent only: hard cap on executed retrieval steps across all replans. |
+| `planner_max_output_tokens` | int | `4000` | Planned agent only: the most output tokens the planner may use for one plan. Reasoning models use at least `16000`. |
+| `agent_max_total_steps` | int | `20` | Planned agent only: hard cap on executed retrieval steps across all replans. |
 | `chunk_only` | bool | `true` | If true, hybrid search only retrieves document chunks, excluding entity data. |
 | `doc_only` | bool | `false` | If true, hybrid search retrieves whole documents instead of chunks. Significantly increases context size. |
 | `with_chunk` | bool | `true` | If true, community search also includes document chunks alongside community summaries. Increases context size. |

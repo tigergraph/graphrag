@@ -22,9 +22,9 @@
   "memories")``, so what the agent remembers for a user on a graph persists
   across conversations and restarts and is private to that user.
 
-Both are process-wide singletons. On-prem persistence uses SQLite by default
-(``langgraph-checkpoint-sqlite``); Postgres (``langgraph-checkpoint-postgres``)
-is used when configured; ``memory`` keeps everything in-process, for tests.
+Both are kept per graph, in one SQLite file per graph
+(``langgraph-checkpoint-sqlite``) in the graph's config folder. ``memory``
+keeps everything in-process, for tests.
 """
 
 from __future__ import annotations
@@ -54,7 +54,9 @@ class _Backends:
 
 
 _lock = threading.Lock()
-_backends: Optional[_Backends] = None
+# Open backends by graph name.
+_backends: dict = {}
+_test_backends: Optional[_Backends] = None
 
 
 # --------------------------------------------------------------------------
@@ -124,80 +126,70 @@ def _sqlite_backends(path: str) -> _Backends:
     return _Backends(checkpointer, store, "sqlite", (cp_conn.close, st_conn.close))
 
 
-def _postgres_backends(uri: str) -> _Backends:
-    from langgraph.checkpoint.postgres import PostgresSaver
-    from langgraph.store.postgres import PostgresStore
-    from psycopg.rows import dict_row
-    from psycopg_pool import ConnectionPool
-
-    kwargs = {"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row}
-    pool = ConnectionPool(conninfo=uri, max_size=10, kwargs=kwargs, open=True)
-    checkpointer = PostgresSaver(pool, serde=serializer())
-    checkpointer.setup()
-    store = PostgresStore(pool)
-    store.setup()
-    return _Backends(checkpointer, store, "postgres", (pool.close,))
+def _open(settings: MemorySettings) -> _Backends:
+    if settings.backend == "memory":
+        return _memory_backends()
+    return _sqlite_backends(settings.path)
 
 
-def init_backends(settings: MemorySettings) -> _Backends:
-    """Create (once) and return the checkpointer and store.
+def init_backends(settings: MemorySettings, graphname: str) -> _Backends:
+    """Open (once) and return the checkpointer and store of a graph.
 
-    A persistence backend that fails to start (missing package, unreachable
-    database, read-only volume) falls back to in-process memory with a
+    A persistence backend that fails to start (missing package, read-only
+    volume) falls back to in-process memory with a
     warning, so chat keeps working; memories then last until restart.
     """
-    global _backends
-    if _backends is not None:
-        return _backends
+    if _test_backends is not None:
+        return _test_backends
+    backends = _backends.get(graphname)
+    if backends is not None:
+        return backends
     with _lock:
-        if _backends is not None:
-            return _backends
-        kind = settings.backend
+        backends = _backends.get(graphname)
+        if backends is not None:
+            return backends
         try:
-            if kind == "postgres":
-                if not settings.postgres_uri:
-                    raise ValueError("deep_agent.postgres_uri is not set")
-                _backends = _postgres_backends(settings.postgres_uri)
-            elif kind == "memory":
-                _backends = _memory_backends()
-            else:
-                _backends = _sqlite_backends(settings.path)
-            logger.info(f"deep_agent: memory backend={_backends.kind}")
+            backends = _open(settings)
+            logger.info(f"deep_agent: memory backend={backends.kind} for {graphname}")
         except Exception as exc:
             logger.warning(
-                f"deep_agent: memory backend {kind!r} unavailable ({exc}); "
-                "using in-process memory — conversations and memories will not "
-                "survive a restart"
+                f"deep_agent: memory backend {settings.backend!r} unavailable for "
+                f"{graphname} ({exc}); using in-process memory — conversations and "
+                "memories will not survive a restart"
             )
-            _backends = _memory_backends()
-        return _backends
+            backends = _memory_backends()
+        _backends[graphname] = backends
+        return backends
 
 
-def get_backends() -> _Backends:
-    if _backends is None:
-        from common.config import get_graphrag_config
-        from deep_agent.settings import memory_settings
-        return init_backends(memory_settings(get_graphrag_config()))
-    return _backends
+def get_backends(graphname: str) -> _Backends:
+    """The checkpointer and store of a graph, opened on first use."""
+    if _test_backends is not None:
+        return _test_backends
+    backends = _backends.get(graphname)
+    if backends is not None:
+        return backends
+    from common.config import get_graphrag_config
+    from deep_agent.settings import memory_settings
+    return init_backends(memory_settings(get_graphrag_config(graphname), graphname), graphname)
 
 
 def close_backends() -> None:
     """Release database connections (application shutdown)."""
-    global _backends
     with _lock:
-        if _backends is None:
-            return
-        for close in _backends.closers:
-            try:
-                close()
-            except Exception as exc:
-                logger.warning(f"deep_agent: closing memory backend failed: {exc}")
-        _backends = None
+        for backends in _backends.values():
+            for close in backends.closers:
+                try:
+                    close()
+                except Exception as exc:
+                    logger.warning(f"deep_agent: closing memory backend failed: {exc}")
+        _backends.clear()
 
 
 def reset_backends_for_tests(backends: Optional[_Backends] = None) -> None:
-    global _backends
-    _backends = backends
+    """Use ``backends`` for every graph (``None`` restores normal lookup)."""
+    global _test_backends
+    _test_backends = backends
 
 
 # --------------------------------------------------------------------------
@@ -231,9 +223,9 @@ def _thread_reader(checkpointer):
     return reader
 
 
-def thread_messages(tid: str) -> list:
+def thread_messages(graphname: str, tid: str) -> list:
     """The messages of a thread (empty when the thread does not exist)."""
-    checkpointer = get_backends().checkpointer
+    checkpointer = get_backends(graphname).checkpointer
     if checkpointer.get_tuple(_config(tid)) is None:
         return []
     state = _thread_reader(checkpointer).get_state(_config(tid))
@@ -244,7 +236,7 @@ def list_threads(graphname: str, user: str, limit: int = 100) -> list:
     """Thread ids (latest checkpoint per thread) of a user on a graph."""
     prefix = thread_prefix(graphname, user)
     seen, out = set(), []
-    for tup in get_backends().checkpointer.list(None):
+    for tup in get_backends(graphname).checkpointer.list(None):
         tid = (tup.config or {}).get("configurable", {}).get("thread_id", "")
         if not tid.startswith(prefix) or tid in seen:
             continue
@@ -259,8 +251,8 @@ def list_threads(graphname: str, user: str, limit: int = 100) -> list:
     return out
 
 
-def delete_thread(tid: str) -> None:
-    get_backends().checkpointer.delete_thread(tid)
+def delete_thread(graphname: str, tid: str) -> None:
+    get_backends(graphname).checkpointer.delete_thread(tid)
 
 
 # --------------------------------------------------------------------------
@@ -281,7 +273,7 @@ def _key(path: str) -> str:
 
 
 def list_memories(graphname: str, user: str) -> list:
-    items = get_backends().store.search(memory_namespace(graphname, user), limit=1000)
+    items = get_backends(graphname).store.search(memory_namespace(graphname, user), limit=1000)
     return [{
         "path": MEMORIES_ROUTE.rstrip("/") + it.key,
         "size": len(str((it.value or {}).get("content", ""))),
@@ -290,7 +282,7 @@ def list_memories(graphname: str, user: str) -> list:
 
 
 def read_memory(graphname: str, user: str, path: str) -> Optional[str]:
-    item = get_backends().store.get(memory_namespace(graphname, user), _key(path))
+    item = get_backends(graphname).store.get(memory_namespace(graphname, user), _key(path))
     if item is None:
         return None
     content = (item.value or {}).get("content", "")
@@ -300,7 +292,7 @@ def read_memory(graphname: str, user: str, path: str) -> Optional[str]:
 def write_memory(graphname: str, user: str, path: str, content: str) -> str:
     key = _key(path)
     ns = memory_namespace(graphname, user)
-    store = get_backends().store
+    store = get_backends(graphname).store
     existing = store.get(ns, key)
     now = _now()
     created = ((existing.value or {}).get("created_at") if existing else None) or now
@@ -312,7 +304,7 @@ def write_memory(graphname: str, user: str, path: str, content: str) -> str:
 def delete_memory(graphname: str, user: str, path: str) -> bool:
     key = _key(path)
     ns = memory_namespace(graphname, user)
-    store = get_backends().store
+    store = get_backends(graphname).store
     if store.get(ns, key) is None:
         return False
     store.delete(ns, key)

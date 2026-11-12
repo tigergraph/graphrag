@@ -16,10 +16,8 @@ services:
       SERVER_CONFIG: "/code/configs/server_config.json"
       LOGLEVEL: "INFO"
       USE_CYPHER: "true"
-      DEEP_AGENT_MEMORY_PATH: "/code/deep_agent_data/memory.sqlite"
     volumes:
       - ./configs/:/code/configs
-      - ./data/deep_agent/:/code/deep_agent_data
 
   graphrag-ecc:
     image: tigergraph/graphrag-ecc:latest

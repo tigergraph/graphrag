@@ -18,7 +18,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from deep_agent import memory as mem
 from deep_agent.agent import DeepGraphRAGAgent, history_messages
 from deep_agent import settings
-from deep_agent.settings import use_deep_agent
+from deep_agent.settings import memory_settings, use_deep_agent
 from deep_agent.tools import ToolEnv, build_tools, query_is_runnable
 
 
@@ -382,13 +382,33 @@ class TestMemoryStore(_Base):
         with tempfile.TemporaryDirectory() as d:
             mem.reset_backends_for_tests(None)
             path = os.path.join(d, "m.sqlite")
-            b = mem.init_backends(MemorySettings(backend="sqlite", path=path))
+            b = mem.init_backends(MemorySettings(backend="sqlite", path=path), "G")
             self.assertEqual(b.kind, "sqlite")
             mem.write_memory("G", "u", "AGENTS.md", "hello")
             mem.close_backends()
-            mem.init_backends(MemorySettings(backend="sqlite", path=path))
+            mem.init_backends(MemorySettings(backend="sqlite", path=path), "G")
             self.assertEqual(mem.read_memory("G", "u", "AGENTS.md"), "hello")
             mem.close_backends()
+
+    def test_each_graph_has_its_own_sqlite_file(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            mem.reset_backends_for_tests(None)
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                for g in ("G1", "G2"):
+                    mem.init_backends(memory_settings({}, g), g)
+                mem.write_memory("G1", "u", "AGENTS.md", "one")
+                mem.write_memory("G2", "u", "AGENTS.md", "two")
+                self.assertEqual(mem.read_memory("G1", "u", "AGENTS.md"), "one")
+                self.assertEqual(mem.read_memory("G2", "u", "AGENTS.md"), "two")
+                for g in ("G1", "G2"):
+                    self.assertTrue(os.path.exists(f"configs/graph_data/{g}/agent_memory.sqlite"))
+            finally:
+                mem.close_backends()
+                os.chdir(cwd)
 
 
 class TestAgentEngineSetting(unittest.TestCase):
@@ -410,6 +430,16 @@ class TestAgentEngineSetting(unittest.TestCase):
             self.assertFalse(use_deep_agent({}))
             self.assertFalse(use_deep_agent({"agent_engine": "default"}))
             self.assertTrue(use_deep_agent({"agent_engine": "deepagent"}))
+
+
+class TestMemorySettings(unittest.TestCase):
+    def test_memory_is_kept_in_the_graph_config_folder(self):
+        m = memory_settings({}, "G")
+        self.assertEqual((m.backend, m.path), ("sqlite", "configs/graph_data/G/agent_memory.sqlite"))
+
+    def test_config_sets_the_memory_store(self):
+        m = memory_settings({"deep_agent": {"memory_backend": " Memory "}}, "G")
+        self.assertEqual(m.backend, "memory")
 
 
 if __name__ == "__main__":

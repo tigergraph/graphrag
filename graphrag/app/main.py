@@ -64,16 +64,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger(__name__).warning(f"agentic capability check skipped: {e}")
 
-    # Deep Agent memory (checkpointer + store): open the on-prem database now
-    # so a misconfiguration is logged at startup rather than on first chat.
-    try:
-        from common.config import get_graphrag_config
-        from deep_agent.memory import init_backends
-        from deep_agent.settings import memory_settings
-        init_backends(memory_settings(get_graphrag_config()))
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"deep_agent memory init failed: {e}")
-
     yield
 
     # --- shutdown ---

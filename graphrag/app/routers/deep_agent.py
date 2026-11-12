@@ -197,7 +197,7 @@ def get_thread(graphname: str, conversation_id: str, request: Request,
     from deep_agent import memory as mem
     _conn, user = _access(request, graphname)
     tid = mem.thread_id(graphname, _require_user(user), conversation_id)
-    messages = mem.thread_messages(tid)
+    messages = mem.thread_messages(graphname, tid)
     if not messages:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"conversation_id": conversation_id, "messages": [_message_view(m) for m in messages]}
@@ -208,7 +208,7 @@ def delete_thread(graphname: str, conversation_id: str, request: Request,
                   credentials: Annotated[HTTPBase, Depends(security)]):
     from deep_agent import memory as mem
     _conn, user = _access(request, graphname)
-    mem.delete_thread(mem.thread_id(graphname, _require_user(user), conversation_id))
+    mem.delete_thread(graphname, mem.thread_id(graphname, _require_user(user), conversation_id))
     return {"deleted": conversation_id}
 
 

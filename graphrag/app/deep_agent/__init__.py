@@ -25,8 +25,7 @@ focused research to subagents, and keeps:
   store, scoped per user and graph, and an ``AGENTS.md`` loaded into every
   conversation.
 
-Knowledge-graph creation, ingestion and retrieval are unchanged: the tools
-call the existing retrievers and query generators.
+The tools call the existing retrievers and query generators.
 """
 
 from deep_agent.agent import DeepGraphRAGAgent
