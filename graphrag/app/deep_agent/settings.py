@@ -18,7 +18,7 @@ Read from ``graphrag_config.deep_agent`` (global, with per-graph overrides
 through ``get_graphrag_config``)::
 
     "graphrag_config": {
-      "agent_engine": "deep",            # "deep" (default) | "legacy"
+      "agent_engine": "default",         # "default" | "deepagent" (both Deep Agent) | "legacy"
       "deep_agent": {
         "memory_backend": "sqlite",      # "sqlite" (default) | "postgres" | "memory"
         "memory_path": "/code/deep_agent_data/memory.sqlite",
@@ -103,8 +103,20 @@ def memory_settings(graphrag_cfg) -> MemorySettings:
     )
 
 
+AGENT_ENGINE_DEFAULT = "default"
+AGENT_ENGINE_DEEPAGENT = "deepagent"
+AGENT_ENGINE_LEGACY = "legacy"
+# The engine that "default" (and an unset or unknown value) selects.
+DEFAULT_AGENT_ENGINE = AGENT_ENGINE_DEEPAGENT
+
+
 def use_deep_agent(graphrag_cfg) -> bool:
-    """Whether Agent mode runs on the Deep Agent engine (default) or the
-    legacy planner/react engine."""
-    engine = str((graphrag_cfg or {}).get("agent_engine", "deep")).strip().lower()
-    return engine != "legacy"
+    """Whether Agent mode runs on the Deep Agent engine. ``agent_engine`` is
+    ``"default"``, ``"deepagent"`` or ``"legacy"``. ``"default"`` selects the
+    default engine, which is the Deep Agent; ``"deepagent"`` selects the Deep
+    Agent by name; ``"legacy"`` selects the previous planner/react engine. An
+    unset or unknown value means ``"default"``."""
+    engine = str((graphrag_cfg or {}).get("agent_engine") or "").strip().lower()
+    if engine not in (AGENT_ENGINE_DEEPAGENT, AGENT_ENGINE_LEGACY):
+        engine = DEFAULT_AGENT_ENGINE
+    return engine == AGENT_ENGINE_DEEPAGENT

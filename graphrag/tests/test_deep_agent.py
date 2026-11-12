@@ -9,6 +9,7 @@ import json
 import sys
 import types
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -16,6 +17,8 @@ from langchain_core.messages import AIMessage, SystemMessage
 
 from deep_agent import memory as mem
 from deep_agent.agent import DeepGraphRAGAgent, history_messages
+from deep_agent import settings
+from deep_agent.settings import use_deep_agent
 from deep_agent.tools import ToolEnv, build_tools, query_is_runnable
 
 
@@ -386,6 +389,27 @@ class TestMemoryStore(_Base):
             mem.init_backends(MemorySettings(backend="sqlite", path=path))
             self.assertEqual(mem.read_memory("G", "u", "AGENTS.md"), "hello")
             mem.close_backends()
+
+
+class TestAgentEngineSetting(unittest.TestCase):
+    def test_default_engine_is_the_deep_agent(self):
+        for cfg in (None, {}, {"agent_engine": None}, {"agent_engine": ""},
+                    {"agent_engine": "default"}, {"agent_engine": " Default "},
+                    {"agent_engine": "deepagent"}, {"agent_engine": "DeepAgent"}):
+            self.assertTrue(use_deep_agent(cfg), cfg)
+
+    def test_legacy_selects_the_previous_engine(self):
+        self.assertFalse(use_deep_agent({"agent_engine": "legacy"}))
+        self.assertFalse(use_deep_agent({"agent_engine": "LEGACY"}))
+
+    def test_unknown_value_uses_the_default(self):
+        self.assertTrue(use_deep_agent({"agent_engine": "deep"}))
+
+    def test_named_engines_do_not_follow_the_default(self):
+        with mock.patch.object(settings, "DEFAULT_AGENT_ENGINE", settings.AGENT_ENGINE_LEGACY):
+            self.assertFalse(use_deep_agent({}))
+            self.assertFalse(use_deep_agent({"agent_engine": "default"}))
+            self.assertTrue(use_deep_agent({"agent_engine": "deepagent"}))
 
 
 if __name__ == "__main__":
