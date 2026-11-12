@@ -4,64 +4,48 @@ This folder contains license files for the libraries used in the GraphRAG projec
 The GraphRAG project uses various open-source libraries, each with their own license. This folder contains the actual license files for these libraries to ensure compliance and transparency.
 
 
-We have successfully collected **34 license files** for the key libraries used in the GraphRAG project:
+We have collected **26 license files** for the key libraries used in the GraphRAG project:
 
+- `argon2-cffi-MIT` - MIT License
+- `asyncer-MIT` - MIT License
+- `azure-core-MIT` - MIT License
+- `deepagents-MIT` - MIT License
+- `docling-MIT` - MIT License
 - `fastapi-MIT` - MIT License
-- `starlette-BSD-3-Clause` - BSD 3-Clause License
-- `websockets-BSD` - BSD License
-- `requests-Apache-2.0` - Apache 2.0 License
-
-- `pytigergraph-Apache-2.0` - Apache 2.0 License
-- `pytigerdriver-Apache-2.0` - Apache 2.0 License
-
 - `langchain-MIT` - MIT License
 - `langgraph-MIT` - MIT License
 - `openai-python-MIT` - MIT License
 - `pydantic-MIT` - MIT License
-
-- `sqlalchemy-MIT` - MIT License
-
-- `azure-core-MIT` - MIT License
-- `google-cloud-aiplatform-Apache-2.0` - Apache 2.0 License
-- `boto3-Apache-2.0` - Apache 2.0 License
-
-- `numpy-BSD` - BSD License
-- `pandas-BSD` - BSD License
-- `scikit-learn-BSD` - BSD License
-- `scipy-BSD` - BSD License
-- `pyarrow-Apache-2.0` - Apache 2.0 License
-
-- `asyncer-MIT` - MIT License
-- `tenacity-Apache-2.0` - Apache 2.0 License
-- `python-dotenv-BSD` - BSD License
+- `pypdf-MIT` - MIT License
+- `pytest-MIT` - MIT License
 - `pyyaml-MIT` - MIT License
+- `sqlalchemy-MIT` - MIT License
 - `watchfiles-MIT` - MIT License
 
-- `cryptography-Apache-2.0` - Apache 2.0 License
-- `pycryptodome-Public-Domain-BSD` - Public Domain/BSD
-- `argon2-cffi-MIT` - MIT License
-
-- `pytest-MIT` - MIT License
-
 - `lxml-BSD` - BSD License
-- `pypdf-MIT` - MIT License
-
-- `huggingface-hub-Apache-2.0` - Apache 2.0 License
-
+- `numpy-BSD` - BSD License
+- `pandas-BSD` - BSD License
+- `python-dotenv-BSD` - BSD License
+- `scikit-learn-BSD` - BSD License
+- `scipy-BSD` - BSD License
 - `sentry-sdk-BSD` - BSD License
+- `websockets-BSD` - BSD License
 
+- `starlette-BSD-3-Clause` - BSD 3-Clause License
+
+- `pycryptodome-Public-Domain-BSD` - Public Domain/BSD
+
+- `pymupdf4llm-AGPL-3.0.txt` - GNU AGPL 3.0
 
 - **MIT License** (15 libraries): Very permissive, compatible with all other licenses
-- **Apache 2.0 License** (8 libraries): Permissive with patent protection
-- **BSD License** (8 libraries): Very permissive, compatible with all other licenses
+- **BSD License** (9 libraries, including BSD 3-Clause): Very permissive, compatible with all other licenses
 - **Public Domain/BSD** (1 library): Very permissive
+- **GNU AGPL 3.0** (1 library): Copyleft, the same license as GraphRAG
 
 
-✅ **All licenses are compatible** - The project uses primarily permissive licenses that are all compatible with each other and with commercial use.
+✅ **All licenses are compatible** - The permissive licenses are compatible with each other and with the GNU AGPL 3.0 license of GraphRAG.
 
-✅ **No GPL dependencies** - There are no GPL-licensed libraries that would require the entire project to be GPL.
-
-✅ **Commercial-friendly** - All the licenses allow commercial use, modification, and distribution.
+✅ **One AGPL dependency** - `pymupdf4llm` is licensed under the GNU AGPL 3.0, the same license as GraphRAG itself.
 
 
 License files follow the pattern: `library_name-license_name`
@@ -89,6 +73,6 @@ All license files were fetched directly from the official repositories of each l
 
 ---
 
-**Total License Files**: 34  
-**Last Updated**: July 31, 2024  
+**Total License Files**: 26  
+**Last Updated**: November 11, 2026  
 **Naming Pattern**: library_name-license_name
