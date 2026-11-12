@@ -112,8 +112,11 @@ def _sqlite_backends(path: str) -> _Backends:
     from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.store.sqlite import SqliteStore
 
-    directory = os.path.dirname(os.path.abspath(path))
-    os.makedirs(directory, exist_ok=True)
+    # SQLite cannot open a path through a symlink whose target climbs above the
+    # root directory, such as the image's /code/configs -> ../../configs link to
+    # the mounted volume; open the real path.
+    path = os.path.realpath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     # One connection per backend, shared across worker threads. Both classes
     # serialize access with their own lock.
     cp_conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)

@@ -390,6 +390,28 @@ class TestMemoryStore(_Base):
             self.assertEqual(mem.read_memory("G", "u", "AGENTS.md"), "hello")
             mem.close_backends()
 
+    def test_sqlite_file_behind_a_relative_symlink(self):
+        # The image links configs -> ../../configs, the mounted volume.
+        import os
+        import tempfile
+        from deep_agent.settings import MemorySettings
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "volume"))
+            os.makedirs(os.path.join(d, "code"))
+            # Like ../../configs from /code, the link climbs above the root
+            # directory before it reaches the volume.
+            up = "../" * (len(os.path.realpath(d).strip("/").split("/")) + 3)
+            os.symlink(up + os.path.realpath(d).strip("/") + "/volume", os.path.join(d, "code", "configs"))
+            path = os.path.join(d, "code", "configs", "graph_data", "G", "m.sqlite")
+            mem.reset_backends_for_tests(None)
+            try:
+                b = mem.init_backends(MemorySettings(backend="sqlite", path=path), "G")
+                self.assertEqual(b.kind, "sqlite")
+                mem.write_memory("G", "u", "AGENTS.md", "hello")
+                self.assertTrue(os.path.exists(os.path.join(d, "volume", "graph_data", "G", "m.sqlite")))
+            finally:
+                mem.close_backends()
+
     def test_each_graph_has_its_own_sqlite_file(self):
         import os
         import tempfile
