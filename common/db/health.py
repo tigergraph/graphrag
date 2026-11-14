@@ -86,3 +86,27 @@ def community_summary_health(conn, markers=None) -> dict | None:
     except Exception as e:
         logger.warning(f"community_summary_health failed: {e}")
         return None
+
+
+def chunk_context_health(conn) -> dict | None:
+    """``{"schema_ready": bool, "total": M, "with_summary": N}`` for document
+    chunks, or ``None`` when the graph has no chunk type. ``schema_ready`` is
+    true when DocumentChunk has the heading_path and summary attributes;
+    ``with_summary`` counts chunks with a stored summary."""
+    from common.utils.chunk_context import SUMMARY_ATTR, has_chunk_context_attrs
+
+    try:
+        chunk = next(
+            (v for v in conn.getSchema(force=True).get("VertexTypes", []) if v.get("Name") == "DocumentChunk"),
+            None,
+        )
+        if chunk is None:
+            return None
+        total = int(conn.getVertexCount("DocumentChunk"))
+        if not has_chunk_context_attrs(chunk):
+            return {"schema_ready": False, "total": total, "with_summary": 0}
+        with_summary = int(conn.getVertexCount("DocumentChunk", where=f'{SUMMARY_ATTR}!=""'))
+        return {"schema_ready": True, "total": total, "with_summary": with_summary}
+    except Exception as e:
+        logger.warning(f"chunk_context_health failed: {e}")
+        return None

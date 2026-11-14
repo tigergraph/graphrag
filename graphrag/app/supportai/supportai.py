@@ -9,6 +9,9 @@ import pyTigerGraph as tg
 from pyTigerGraph import TigerGraphConnection
 
 from common.config import embedding_dimension
+from common.db.retriever_render import TEMPLATED_RETRIEVERS, render_retriever_body
+from common.db.schema_utils import gsql_output_error
+from common.utils.chunk_context import schema_change_gsql as chunk_context_schema_gsql
 from common.py_schemas.schemas import (
     # GraphRAGResponse,
     CreateIngestConfig,
@@ -74,6 +77,16 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
     else:
         schema_res += " " + conn.gsql(document_versions_schema_gsql(graphname))
 
+    # The chunk heading path and summary live in their own job so graphs
+    # created before them stay compatible; the Migration Assistant adds them.
+    chunk_context = True
+    if re.search(r"- VERTEX DocumentChunk\([^)]*\bheading_path STRING", current_schema):
+        schema_res += " Chunk context schema already exists, skipped."
+    else:
+        out = conn.gsql(chunk_context_schema_gsql(graphname))
+        schema_res += " " + out
+        chunk_context = gsql_output_error(out) is None
+
     logger.info(f"Checking if embedding schema needs to be created")
     if "- embedding(Dimension=" in current_schema:
         schema_res+=" Embeddding schema already exists, skipped."
@@ -132,6 +145,11 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
         with open(f"{filename}", "r") as f:
             q_body = f.read()
         q_name, extension = os.path.splitext(os.path.basename(filename))
+        if q_name in TEMPLATED_RETRIEVERS:
+            q_body = render_retriever_body(
+                q_body, domain_vts=[], domain_edges=[], include_entity=True,
+                chunk_context=chunk_context,
+            )
         q_res = conn.gsql(
             """USE GRAPH {}\nBEGIN\n{}\nEND\n""".format(
                 conn.graphname, q_body

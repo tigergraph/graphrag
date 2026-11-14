@@ -228,18 +228,9 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
         the chunk's dense embedding. Returns an empty string when the
         summary is absent or malformed.
         """
+        from common.utils.chunk_context import format_chunk_summary
         s = json_out.get("summary") if isinstance(json_out, dict) else None
-        if not isinstance(s, dict):
-            return ""
-        topic = str(s.get("topic", "")).strip()
-        section = str(s.get("section", "")).strip()
-        ents = s.get("entities") or []
-        ents_s = ", ".join(str(x).strip() for x in ents if str(x).strip()) if isinstance(ents, list) else ""
-        parts = []
-        if topic:   parts.append(f"TOPIC: {topic}")
-        if section: parts.append(f"SECTION: {section}")
-        if ents_s:  parts.append(f"ENTITIES: {ents_s}")
-        return "\n".join(parts)
+        return format_chunk_summary(s)
 
     async def _aextract_kg_from_doc(self, doc, chain, parser) -> list[GraphDocument]:
         try:

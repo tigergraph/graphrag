@@ -19,10 +19,12 @@ finally:
 
 
 class _Conn:
+    graphname = "G"
+
     def __init__(self, missing):
         self.missing = missing
 
-    async def getSchema(self):
+    async def getSchema(self, force=False):
         return {"VertexTypes": [{"Name": "Community", "EmbeddingAttributes": [{"Name": "embedding"}]}]}
 
     async def runInstalledQuery(self, name, params=None):
@@ -58,3 +60,30 @@ class TestRegenerateEmbeddingsCounts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _SchemaConn:
+    graphname = "G"
+
+    def __init__(self, schema=None, error=None):
+        self.schema, self.error = schema, error
+
+    async def getSchema(self, force=False):
+        if self.error:
+            raise self.error
+        return self.schema
+
+
+class TestChunkSummaryPrecheck(unittest.TestCase):
+    """Generate summaries reports why it did not start."""
+
+    def test_a_failed_schema_read_is_not_reported_as_a_missing_attribute(self):
+        conn = _SchemaConn(error=RuntimeError("Try lock timeout, failed to lock catalog."))
+        out = asyncio.run(regenerate.regenerate_chunk_summaries("G", conn))
+        self.assertIn("Could not read the graph schema", out["error"])
+        self.assertIn("failed to lock catalog", out["error"])
+
+    def test_a_schema_without_the_attribute_is_reported(self):
+        conn = _SchemaConn(schema={"VertexTypes": [{"Name": "DocumentChunk", "Attributes": []}]})
+        out = asyncio.run(regenerate.regenerate_chunk_summaries("G", conn))
+        self.assertEqual(out["error"], "The graph schema has no chunk summary attribute.")
