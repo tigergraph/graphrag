@@ -55,7 +55,7 @@ class TestRealFolderProcessing(unittest.TestCase):
             failures = failed_extractions(result)
 
             self.assertEqual(sorted(failures), ["corrupt.docx", "legacy.doc"])
-            self.assertTrue(os.path.exists(os.path.join(out, "good.jsonl")))
+            self.assertTrue(os.path.exists(os.path.join(out, "good.txt.jsonl")))
             self.assertIn(".docx", failures["legacy.doc"])
             for reason in failures.values():
                 self.assertNotIn(src, reason, "no filesystem path in the reason")
@@ -195,6 +195,10 @@ class TestPublicCreateIngestRoute(unittest.TestCase):
         ]}
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             TextExtractor, "process_folder", return_value=failed
+        ), patch(
+            # Ingest needs an admin of the graph.
+            "routers.ui._get_user_role_details",
+            return_value=(["superuser"], {}, "user"),
         ):
             resp = self.client.post(
                 "/g/supportai/create_ingest",

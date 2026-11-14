@@ -15,6 +15,8 @@ import shutil
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+from common.utils.graph_docs import add_checksums, converted_name
+
 logger = logging.getLogger(__name__)
 
 
@@ -496,6 +498,27 @@ def replace_path_with_tg_protocol(md_text, image_id, tg_reference):
 
     return _md_pattern.sub(repl, md_text)
 
+def _copy_jsonl_with_checksums(src: str, dest: str) -> int:
+    """Copy a JSONL source file, adding ``content_checksum`` to records that
+    lack it. Returns the number of records."""
+    count = 0
+    with open(src, 'r', encoding='utf-8') as fin, open(dest, 'w', encoding='utf-8') as fout:
+        for line in fin:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                fout.write(line if line.endswith('\n') else line + '\n')
+                count += 1
+                continue
+            if isinstance(rec, dict) and 'content_checksum' not in rec:
+                rec = add_checksums([rec])[0]
+            fout.write(json.dumps(rec, ensure_ascii=False) + '\n')
+            count += 1
+    return count
+
+
 class TextExtractor:
     """Class for handling text extraction from various file formats and cleanup."""
 
@@ -544,11 +567,11 @@ class TextExtractor:
                 graphname
             )
 
-            # Create one JSONL file per input file
+            # Create one JSONL file per input file, named after the full
+            # file name so that notes.md and notes.pdf do not overwrite
+            # each other.
             if doc_entries:
-                # Use the original filename (stem) for the JSONL file
-                file_stem = Path(file_path).stem
-                jsonl_file = os.path.join(temp_folder, f"{file_stem}.jsonl")
+                jsonl_file = os.path.join(temp_folder, converted_name(Path(file_path).name))
                 
                 await loop.run_in_executor(
                     None,
@@ -562,7 +585,7 @@ class TextExtractor:
                 'success': True,
                 'file_path': str(file_path),
                 'num_documents': len(doc_entries),
-                'jsonl_file': f"{Path(file_path).stem}.jsonl"
+                'jsonl_file': converted_name(Path(file_path).name)
             }
 
         except FileNotFoundError:
@@ -591,7 +614,7 @@ class TextExtractor:
         Each document is written as a separate line.
         """
         with open(jsonl_file, 'w', encoding='utf-8') as f:
-            for doc_data in doc_entries:
+            for doc_data in add_checksums(doc_entries):
                 json_line = json.dumps(doc_data, ensure_ascii=False)
                 f.write(json_line + '\n')
 
@@ -648,8 +671,7 @@ class TextExtractor:
                 file_ext = file_path.suffix.lower()
                 if file_ext == '.jsonl':
                     dest = os.path.join(temp_folder, file_path.name)
-                    shutil.copy2(str(file_path), dest)
-                    num_lines = sum(1 for _ in open(dest, 'r', encoding='utf-8'))
+                    num_lines = _copy_jsonl_with_checksums(str(file_path), dest)
                     jsonl_files_copied.append({
                         'file_path': str(file_path),
                         'num_documents': num_lines,
@@ -665,7 +687,7 @@ class TextExtractor:
                     # when the user uploaded sample files via the
                     # Initialize Graph dialog and is now ingesting them.
                     cached_jsonl = os.path.join(
-                        temp_folder, f"{file_path.stem}.jsonl"
+                        temp_folder, converted_name(file_path.name)
                     )
                     if os.path.exists(cached_jsonl):
                         try:
@@ -741,7 +763,7 @@ class TextExtractor:
             'temp_folder': temp_folder
         }
 
-    def process_folder(self, folder_path, graphname, temp_folder):
+    def process_folder(self, folder_path, graphname, temp_folder, filenames=None):
         """
         Process local folder with multiple file formats and extract text content.
         Uses async processing internally for parallel file handling.
@@ -751,9 +773,10 @@ class TextExtractor:
             folder_path: Path to the folder containing files to process
             graphname: Name of the graph (for context)
             temp_folder: Path to save processed documents as JSONL files (one per input file)
+            filenames: Optional base names; only these files are processed.
         """
         logger.info(f"Processing local folder: {folder_path} for graph: {graphname}")
-        return asyncio.run(self._process_folder_async(folder_path, graphname, temp_folder))
+        return asyncio.run(self._process_folder_async(folder_path, graphname, temp_folder, filenames=filenames))
 
 
 def extract_text_from_file_with_images_as_docs(file_path, graphname=None):
@@ -762,7 +785,9 @@ def extract_text_from_file_with_images_as_docs(file_path, graphname=None):
     """
     file_path = Path(file_path)
     extension = file_path.suffix.lower()
-    base_doc_id = str(file_path.stem)
+    # The document id keeps the extension, so that it shows the type of the
+    # source file and notes.md and notes.pdf get different ids.
+    base_doc_id = str(file_path.name)
 
     logger.debug(f"Extracting with images as docs: {file_path} (type: {extension})")
 

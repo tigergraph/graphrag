@@ -377,6 +377,7 @@ Upgrading GraphRAG does not change graphs that already exist: their installed qu
 - **Queries** — installed queries that are outdated or missing. **Repair** reinstalls them in place, without rebuilding the knowledge graph.
 - **Prompt overrides** — saved custom prompts in a format the current release no longer uses.
 - **Data health** — vertices missing embeddings and communities missing summaries, each with its own regenerate action.
+- **Document versions** — whether the graph records the content of each document and which documents a newer one replaces. **Set up** adds this to the graph; [Stored Files](#stored-files) needs it to compare files with the graph and to replace older versions.
 
 A graph created with a version earlier than 1.4 can't be repaired in place; the Migration Assistant reports this and does not offer **Repair**. Create a new graph and ingest its documents again.
 
@@ -540,51 +541,51 @@ Documents can be ingested into the knowledge graph either through the UI Admin p
 
 ### Ingest Documents from the UI
 
-You can upload local files, download files from cloud storage, or use **Amazon Bedrock Data Automation (BDA)** as an external pre-processor for document ingestion.
+Open **Knowledge Graph Admin → Ingest Document**. Only an admin can manage the documents of a graph: a superuser or globaldesigner for all graphs, and a user with the admin role on a graph for that graph. The graph list shows only the graphs you can manage.
 
-#### Local File Upload
+Files are added to a graph in three ways, and are then ingested from **Stored Files**:
 
-Local file ingestion follows a two-step process:
+- **Upload** — upload local files.
+- **Download from Cloud** — download files from S3, GCS or Azure with the provider's credentials.
+- **Amazon BDA** — use **Amazon Bedrock Data Automation** as the document pre-processor. BDA reads documents from one S3 bucket and writes the converted output to another, and that output is ingested in one step.
 
-1. **Upload local files to the server**  
-   Files are first uploaded to the GraphRAG server for pre-processing.  
-   - Multimodal files (e.g., PDFs) are converted into text along with extracted images.  
-   - Each image receives a generated description and a reference inside the converted text file.  
-   - Uploaded files may be manually deleted before ingestion if they are no longer needed.
-
-2. **Ingest files into your knowledge graph**  
-   The pre-processed documents are loaded into the graph database as vertices using a dedicated ingestion job.
+Uploaded and downloaded files are pre-processed when they are added: multimodal files such as PDFs are converted to text with extracted images, and each image gets a generated description and a reference in the text. The Upload and Download from Cloud tabs list their files, which can be deleted there. Each file becomes a document named after its file name, including the extension, so `notes.md` and `notes.pdf` are two documents. An upload is refused when another stored file has the same name apart from letter case, such as `Report.pdf` next to `report.pdf`, or a downloaded file with the same name; rename it or delete the other file first.
 
 ![Upload Files](./docs/img/LocalFileUpload.png)
 
-#### Download from Cloud
-
-Cloud ingestion works similarly to local uploads and also follows a two-step process:
-
-1. **Download files from cloud storage**  
-   Instead of selecting local files, you can connect to a cloud provider (S3, GCS, Azure) using the appropriate credentials.  
-   - Files are downloaded to the GraphRAG server for pre-processing.  
-   - Multimodal files (e.g., PDFs) are converted to text with extracted images, each with descriptive references.  
-   - Downloaded files can be manually deleted before ingestion if no longer needed.
-
-2. **Ingest files into your knowledge graph**  
-   After pre-processing, the documents are loaded into the graph database as vertices via a dedicated ingestion job.
-
 ![Download from Cloud](./docs/img/DownloadFromCloud.png)
 
-#### Use Amazon BDA
-
-You may choose **Amazon Bedrock Data Automation (BDA)** as the external document pre-processor instead of the built-in GraphRAG processor.  
-- Amazon BDA processes multimodal documents stored in an S3 bucket.  
-- It writes the converted outputs to a separate S3 bucket.  
-- These processed documents can then be ingested directly into your knowledge graph.  
-- This method is a **single-step ingestion workflow** since pre-processing is completed by BDA.
-
 ![Use Amazon BDA](./docs/img/UseAmazonBDA.png)
+
+#### Stored Files
+
+**Stored Files** lists the uploaded and downloaded files of the graph, with their size, the time they were added, and their state:
+
+| State | Meaning |
+|---|---|
+| Not ingested | The graph has no document for the file. |
+| Ingested | The graph has the same content. |
+| Changed | The graph has different content for the file. |
+| Not verified | The graph has the document, but its content can't be compared, for example because it was ingested with an earlier release. |
+| Older version | The graph has the document under the name an earlier release gave it, without the extension. |
+| Conflict | Another stored file has the same name, apart from letter case. |
+
+Select files one by one or by state, then:
+
+- **Ingest selected** loads the files that are not ingested. With **Override documents already in the graph**, it also loads the new content of Changed and Not verified files, and replaces Older version files: the earlier document stays in the graph and is marked as outdated. Ingested and Conflict files are not loaded.
+- **Delete selected** deletes the stored files. The documents in the graph do not change.
+
+To resolve a conflict, click **Rename** under a file in conflict and enter a new name; the extension stays the same. The file then gets its own state. Deleting one of the files also resolves the conflict.
+
+Ingest loads the document content only. Rebuild the knowledge graph to process the new and changed documents.
+
+Stored files are kept on the server in `configs/graph_docs/uploads/<graph>/` and `configs/graph_docs/downloads/<graph>/`, so they stay when the containers are recreated.
 
 ### Ingest Documents via API
 
 For examples of how to ingest documents through the backend API, refer to the **[GraphRAG Demo Notebook](./docs/notebooks/GraphRAGDemo.ipynb)**.
+
+`POST /{graph}/graphrag/create_ingest` and `POST /{graph}/graphrag/ingest` need an admin of the graph, as in the UI. With `"data_source": "server"`, `data_source_config.data_path` is a folder on the GraphRAG server that is visible to the graphrag container; its files are converted and then loaded by `ingest`. Ingest does not process the documents; call `GET /{graph}/graphrag/forceupdate` or rebuild the knowledge graph to process them.
 
 
 [Go back to top](#top)

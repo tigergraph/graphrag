@@ -55,6 +55,7 @@ from tools.validation_utils import MapQuestionToSchemaException
 from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
 from common.db.connections import get_db_connection_pwd_manual
 from common.db import schema_utils as schema_utils_mod
+from common.utils import graph_docs
 from common.db import schema_extraction as schema_extraction_mod
 from common.utils.text_extractors import (
     ExtractionError,
@@ -397,6 +398,36 @@ def _resolve_llm_config_access(
         if any(role in {"admin"} for role in roles_for_graph):
             return "chatbot_only"
     raise HTTPException(status_code=403, detail="Insufficient permissions.")
+
+# Roles that manage the documents of every graph.
+_DOCUMENT_ADMIN_GLOBAL_ROLES = {"superuser", "globaldesigner"}
+
+
+def _is_document_admin(global_roles, graph_roles: dict, graphname: str) -> bool:
+    """A superuser or globaldesigner manages the documents of all graphs; a
+    user with the admin role on a graph manages that graph's documents."""
+    if any(r in _DOCUMENT_ADMIN_GLOBAL_ROLES for r in (global_roles or [])):
+        return True
+    return "admin" in [r.lower() for r in (graph_roles or {}).get(graphname, [])]
+
+
+def _require_document_admin(credentials: HTTPBasicCredentials, graphname: str) -> None:
+    """Raise 403 unless the user can upload, list, delete and ingest the
+    documents of ``graphname``."""
+    validate_graphname(graphname)
+    try:
+        global_roles, graph_roles, _ = _get_user_role_details(
+            credentials.username, credentials.password
+        )
+    except Exception as e:
+        logger.error(f"Failed to resolve user roles: {e}")
+        raise HTTPException(status_code=403, detail="Unable to verify user roles.")
+    if not _is_document_admin(global_roles, graph_roles, graphname):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Only an admin of graph '{graphname}' can manage its documents.",
+        )
+
 
 def _ecc_jobs_running(graphs: list[str], auth_header: str) -> bool:
     if not graphs:
@@ -1441,6 +1472,7 @@ def migration_status(
         "community_summaries_incomplete": bool(
             community_summaries.get("needs_resummarize", 0)
         ),
+        "document_versions_missing": _document_versions_missing(conn),
         "needs_repair": bool(outdated) or bool(not_installed) or bool(prompt_issues),
         "repairable": schema_compatible,
     }
@@ -1596,6 +1628,111 @@ _INCOMPATIBLE_SCHEMA_MESSAGE = (
     "This graph was created with an older version of GraphRAG and can't be "
     "repaired in place. Create a new graph and ingest its documents again."
 )
+
+
+def _document_versions_missing(conn) -> bool:
+    """True when the graph's Document type lacks the checksum and outdated
+    attributes or the SUPERSEDED_BY edge type. False when it cannot be read."""
+    try:
+        return not supportai.graph_has_document_versions(conn)
+    except Exception as e:
+        logger.warning(f"document version schema check failed: {e}")
+        return False
+
+
+_DOCUMENT_SCHEMA_WAIT_SECONDS = 1800
+
+
+def _add_document_versions_schema(graphname: str, creds) -> dict:
+    """Add the Document checksum and outdated attributes and the
+    SUPERSEDED_BY edge type, install again the queries the schema change
+    uninstalled, and create the loading jobs again in the form that loads
+    the checksum. Returns the query reinstall result; empty when the graph
+    already had the schema."""
+    from common.db.migrate import get_installed_query_names
+    from common.db.schema_utils import gsql_output_error
+
+    if get_rebuilding_graph() == graphname:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is being rebuilt; retry after it completes.",
+        )
+    conn = get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password)
+    if supportai.graph_has_document_versions(conn):
+        return {}
+    compatible, check_failed = _schema_compatibility(conn, graphname)
+    if check_failed:
+        raise HTTPException(status_code=503, detail="The graph's schema could not be checked. Try again shortly.")
+    if not compatible:
+        raise HTTPException(status_code=409, detail=_INCOMPATIBLE_SCHEMA_MESSAGE)
+    if not acquire_graph_lock(graphname, "migration"):
+        current = get_current_operation(graphname) or "another operation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is currently busy with '{current}'. "
+                   f"Wait for it to finish, then try again.",
+        )
+    try:
+        job = supportai.DOCUMENT_VERSIONS_SCHEMA_JOB
+        installed = get_installed_query_names(conn, graphname)
+        if job in conn.gsql(f"USE GRAPH {graphname}\nls"):
+            # A job left by an earlier attempt that did not finish.
+            conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {job}")
+        try:
+            err = gsql_output_error(conn.gsql(supportai.document_versions_schema_gsql(graphname)))
+        except Exception as e:
+            # A long schema change can outlive the request; the wait below
+            # tells whether it finished.
+            logger.warning(f"document version schema change on {graphname}: {e}")
+            err = None
+        if err:
+            logger.error(f"document version schema change failed on {graphname}: {err}")
+            raise HTTPException(
+                status_code=500,
+                detail="Could not add the document version attributes to the graph schema.",
+            )
+        deadline = time.time() + _DOCUMENT_SCHEMA_WAIT_SECONDS
+        while not supportai.graph_has_document_versions(conn):
+            if time.time() > deadline:
+                raise HTTPException(
+                    status_code=504,
+                    detail="Adding the document version attributes did not finish. Check again later.",
+                )
+            time.sleep(15)
+        if job in conn.gsql(f"USE GRAPH {graphname}\nls"):
+            conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {job}")
+
+        for load_job_id in supportai._LOADING_JOB_GSQL_FILES:
+            supportai._ensure_loading_jobs(conn, graphname, load_job_id)
+
+        managed = {os.path.splitext(os.path.basename(p))[0] for p in _MIGRATION_QUERY_PATHS}
+        missing = installed - get_installed_query_names(conn, graphname)
+        result = _migration_apply_inner(
+            graphname, conn,
+            apply_schema=False,
+            queries_outdated=[],
+            queries_not_installed=sorted(missing & managed),
+        )
+        others = sorted(missing - managed)
+        if others:
+            logger.info(f"Reinstalling {len(others)} other queries on {graphname} after the schema change")
+            conn.installQueries(others)
+        return result
+    finally:
+        release_graph_lock(graphname, "migration")
+
+
+@router.post(route_prefix + "/{graphname}/migration/document_versions")
+async def migration_document_versions(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Add the Document checksum and outdated attributes and the
+    SUPERSEDED_BY edge type to an existing graph, then install
+    again the queries and loading jobs. Returns the query reinstall result."""
+    await asyncio.to_thread(_require_document_admin, creds[1], graphname)
+    result = await asyncio.to_thread(_add_document_versions_schema, graphname, creds)
+    return {"graphname": graphname, "updated": True, "query_errors": result.get("errors", [])}
 
 
 def _migration_apply_inner(
@@ -2006,8 +2143,8 @@ def _sweep_legacy_schema_subdirs(graphname: str) -> None:
     sample-upload request.
     """
     for parent in (
-        os.path.join("uploads", graphname),
-        os.path.join("uploads", "ingestion_temp", graphname),
+        graph_docs.source_dir(graphname, graph_docs.UPLOADS),
+        graph_docs.converted_dir(graphname, graph_docs.UPLOADS),
     ):
         if not os.path.isdir(parent):
             continue
@@ -2034,8 +2171,8 @@ async def convert_sample_files(
     """
     Step 1/2 of the sample-doc schema extraction flow:
 
-    Save uploaded sample files to ``uploads/<graphname>/`` and convert
-    each to JSONL under ``uploads/ingestion_temp/<graphname>/``. Files
+    Save uploaded sample files to the graph's kept uploads folder and
+    convert each to JSONL in its converted folder. Files
     are persisted so the Ingest Document dialog can reuse them, and
     the JSONL cache means a subsequent Ingest run won't re-convert.
 
@@ -2095,9 +2232,9 @@ async def convert_sample_files(
     try:
         _sweep_legacy_schema_subdirs(graphname)
 
-        upload_dir = os.path.join("uploads", graphname)
+        upload_dir = graph_docs.source_dir(graphname, graph_docs.UPLOADS)
         os.makedirs(upload_dir, exist_ok=True)
-        temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+        temp_folder = graph_docs.converted_dir(graphname, graph_docs.UPLOADS)
         os.makedirs(temp_folder, exist_ok=True)
 
         if not overwrite:
@@ -2143,8 +2280,7 @@ async def convert_sample_files(
             # are re-converted instead of silently reusing the stale
             # extract.
             if overwrite:
-                stem = os.path.splitext(safe_name)[0]
-                cached_jsonl = os.path.join(temp_folder, f"{stem}.jsonl")
+                cached_jsonl = os.path.join(temp_folder, graph_docs.converted_name(safe_name))
                 if os.path.exists(cached_jsonl):
                     try:
                         os.remove(cached_jsonl)
@@ -2217,8 +2353,7 @@ def extract_schema_from_jsonl(
 
     Body:
         ``{"filenames": ["report1.pdf", "report2.docx"]}``
-    The endpoint reads ``uploads/ingestion_temp/<graphname>/<stem>.jsonl``
-    for each listed name. ``filenames`` is required and must be a
+    The endpoint reads the converted JSONL of each listed name. ``filenames`` is required and must be a
     non-empty list — every sample file the caller wants fed to the
     schema-extraction LLM must be named explicitly.
 
@@ -2249,7 +2384,7 @@ def extract_schema_from_jsonl(
         )
 
     try:
-        temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+        temp_folder = graph_docs.converted_dir(graphname, graph_docs.UPLOADS)
         if not os.path.isdir(temp_folder):
             raise HTTPException(
                 status_code=400,
@@ -2262,8 +2397,7 @@ def extract_schema_from_jsonl(
         jsonl_paths = []
         missing_jsonls = []
         for name in requested:
-            stem = os.path.splitext(os.path.basename(name))[0]
-            p = os.path.join(temp_folder, f"{stem}.jsonl")
+            p = os.path.join(temp_folder, graph_docs.converted_name(os.path.basename(name)))
             if os.path.exists(p):
                 jsonl_paths.append(p)
             else:
@@ -2521,6 +2655,48 @@ def get_rebuild_status(
         }
 
 
+def _check_ui_server_source(graphname: str, cfg: CreateIngestConfig) -> None:
+    """Allow a ``server`` source only for the graph's own kept files.
+
+    A ``data_path`` that is one of the graph's kept-file folders is turned
+    into its ``source``; any other path is refused.
+    """
+    if (cfg.data_source or "").lower() != "server":
+        return
+    conf = dict(cfg.data_source_config or {})
+    source = conf.get("source")
+    path = conf.pop("data_path", None)
+    if source is None and path:
+        source = next(
+            (s for s in graph_docs.SOURCES
+             if os.path.realpath(path) == os.path.realpath(graph_docs.source_dir(graphname, s))),
+            None,
+        )
+    if source not in graph_docs.SOURCES:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose the uploaded or downloaded files of this graph.",
+        )
+    conf["source"] = source
+    cfg.data_source_config = conf
+
+
+def _check_ui_server_load(graphname: str, loader_info: LoadingInfo) -> None:
+    """Allow a ``server`` load only from the graph's own converted files."""
+    ds = loader_info.data_source_id
+    if not isinstance(ds, dict) or ds.get("data_source") != "server":
+        return
+    path = ds.get("data_path") or ""
+    if not any(
+        os.path.realpath(path) == os.path.realpath(graph_docs.converted_dir(graphname, s))
+        for s in graph_docs.SOURCES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Only the converted files of this graph can be ingested.",
+        )
+
+
 @router.post(route_prefix + "/{graphname}/create_ingest")
 def create_ingest(
     graphname: ValidGraphName,
@@ -2531,7 +2707,13 @@ def create_ingest(
     Create an ingest configuration for a GraphRAG knowledge graph.
     This sets up the data source and load job configuration for document ingestion.
     Uses HTTP Basic Authentication to get credentials and create a connection.
+
+    A ``server`` source names the graph's own kept files: ``source`` is
+    ``uploads`` or ``downloads``, with optional ``filenames``. No other
+    server folder is accepted.
     """
+    _require_document_admin(creds[1], graphname)
+    _check_ui_server_source(graphname, cfg)
     # Check if this graph is currently being rebuilt
     currently_rebuilding = get_rebuilding_graph()
     if currently_rebuilding == graphname:
@@ -2587,6 +2769,8 @@ def ingest(
     This processes documents from the configured data source and loads them into the graph.
     Uses HTTP Basic Authentication to get credentials and create a connection.
     """
+    _require_document_admin(creds[1], graphname)
+    _check_ui_server_load(graphname, loader_info)
     # Check if this graph is currently being rebuilt
     currently_rebuilding = get_rebuilding_graph()
     if currently_rebuilding == graphname:
@@ -3365,6 +3549,7 @@ async def get_upload_status(
                        "schema_extraction" | "rebuild" | null
         }
     """
+    await asyncio.to_thread(_require_document_admin, creds[1], graphname)
     op = get_current_operation(graphname)
     # The rebuild lock is a separate (global) lock — surface it under the
     # same flag so the UI doesn't need a second endpoint.
@@ -3386,8 +3571,9 @@ async def list_uploaded_files(
     List all files currently uploaded for a specific graphname.
     Returns file names, sizes, and upload dates.
     """
+    await asyncio.to_thread(_require_document_admin, creds[1], graphname)
     try:
-        upload_dir = os.path.join("uploads", graphname)
+        upload_dir = graph_docs.source_dir(graphname, graph_docs.UPLOADS)
         
         if not os.path.exists(upload_dir):
             return {"graphname": graphname, "files": [], "total_files": 0, "total_size": 0}
@@ -3418,6 +3604,15 @@ async def list_uploaded_files(
         raise HTTPException(status_code=500, detail=f"Error listing files: {str(e)}")
 
 
+def _id_conflict_message(id_conflicts: dict) -> str:
+    parts = [f"{name} (same as {', '.join(others)})" for name, others in id_conflicts.items()]
+    return (
+        "These files have the same name as stored files when letter case is ignored: "
+        + "; ".join(parts)
+        + ". Rename them, or delete the stored files first."
+    )
+
+
 @router.post(route_prefix + "/{graphname}/uploads/check")
 async def check_upload_conflicts(
     graphname: ValidGraphName,
@@ -3434,17 +3629,24 @@ async def check_upload_conflicts(
     Body:
         ``{"filenames": ["report.pdf", "transactions.csv", ...]}``
     Response:
-        ``{"conflicts": ["report.pdf"]}``
+        ``{"conflicts": ["report.pdf"], "id_conflicts": {"notes.md": ["downloads/Notes.md"]}}``
+
+    ``id_conflicts`` lists planned files whose document id is the id of a
+    different kept file; the upload refuses them.
     """
+    await asyncio.to_thread(_require_document_admin, creds[1], graphname)
     requested = payload.get("filenames") or []
     if not isinstance(requested, list):
         raise HTTPException(
             status_code=400, detail="'filenames' must be a list of strings.",
         )
 
-    upload_dir = os.path.join("uploads", graphname)
+    upload_dir = graph_docs.source_dir(graphname, graph_docs.UPLOADS)
+    id_conflicts = graph_docs.upload_id_conflicts(
+        graphname, [n for n in requested if isinstance(n, str) and n]
+    )
     if not os.path.isdir(upload_dir):
-        return {"graphname": graphname, "conflicts": []}
+        return {"graphname": graphname, "conflicts": [], "id_conflicts": id_conflicts}
 
     conflicts = []
     for name in requested:
@@ -3453,7 +3655,7 @@ async def check_upload_conflicts(
         safe_name = os.path.basename(name)
         if os.path.exists(os.path.join(upload_dir, safe_name)):
             conflicts.append(safe_name)
-    return {"graphname": graphname, "conflicts": conflicts}
+    return {"graphname": graphname, "conflicts": conflicts, "id_conflicts": id_conflicts}
 
 
 @router.post(route_prefix + "/{graphname}/uploads")
@@ -3466,7 +3668,7 @@ async def upload_files(
 ):
     """
     Upload one or multiple files for a specific graphname.
-    Files are stored in uploads/{graphname}/ directory.
+    Files are kept in the graph's uploads folder under configs/graph_docs.
 
     Parameters:
     - graphname: The graph name to associate files with
@@ -3483,6 +3685,7 @@ async def upload_files(
     Pre-flight via ``POST /uploads/check`` to avoid re-uploading bytes
     when a collision is hit.
     """
+    await asyncio.to_thread(_require_document_admin, creds[1], graphname)
     # Acquire graph lock
     acquired = await asyncio.to_thread(acquire_graph_lock, graphname, "upload_files")
     if not acquired:
@@ -3492,9 +3695,9 @@ async def upload_files(
         )
 
     try:
-        upload_dir = os.path.join("uploads", graphname)
+        upload_dir = graph_docs.source_dir(graphname, graph_docs.UPLOADS)
         os.makedirs(upload_dir, exist_ok=True)
-        temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+        temp_folder = graph_docs.converted_dir(graphname, graph_docs.UPLOADS)
 
         skip_set: set[str] = set()
         if skip:
@@ -3505,6 +3708,15 @@ async def upload_files(
             f for f in files
             if os.path.basename(f.filename or "") not in skip_set
         ]
+
+        id_conflicts = graph_docs.upload_id_conflicts(
+            graphname, [f.filename or "" for f in accepted]
+        )
+        if id_conflicts:
+            raise HTTPException(
+                status_code=409,
+                detail=_id_conflict_message(id_conflicts),
+            )
 
         # Check for existing files if overwrite is False
         if not overwrite:
@@ -3539,8 +3751,7 @@ async def upload_files(
             # re-converts the new bytes instead of silently reusing the
             # stale extract.
             if overwrite and os.path.isdir(temp_folder):
-                stem = os.path.splitext(safe_name)[0]
-                cached_jsonl = os.path.join(temp_folder, f"{stem}.jsonl")
+                cached_jsonl = os.path.join(temp_folder, graph_docs.converted_name(safe_name))
                 if os.path.exists(cached_jsonl):
                     try:
                         os.remove(cached_jsonl)
@@ -3597,8 +3808,9 @@ async def clear_uploaded_files(
     - graphname: The graph name whose files to clear
     - filename: If provided, only delete this specific file. Otherwise, delete all files.
     """
+    await asyncio.to_thread(_require_document_admin, creds[1], graphname)
     try:
-        upload_dir = os.path.join("uploads", graphname)
+        upload_dir = graph_docs.source_dir(graphname, graph_docs.UPLOADS)
         
         if not os.path.exists(upload_dir):
             return {
@@ -3611,15 +3823,13 @@ async def clear_uploaded_files(
         
         if filename:
             # Delete corresponding JSONL file from temp folder FIRST
-            temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+            temp_folder = graph_docs.converted_dir(graphname, graph_docs.UPLOADS)
             if os.path.exists(temp_folder):
-                from pathlib import Path
-                file_stem = Path(filename).stem
-                jsonl_file = os.path.join(temp_folder, f"{file_stem}.jsonl")
-                
+                jsonl_file = os.path.join(temp_folder, graph_docs.converted_name(filename))
+
                 if os.path.exists(jsonl_file):
                     os.remove(jsonl_file)
-                    logger.info(f"Deleted corresponding JSONL file: {file_stem}.jsonl")
+                    logger.info(f"Deleted corresponding JSONL file: {os.path.basename(jsonl_file)}")
                     
                     # If temp folder is now empty, remove it
                     if not os.listdir(temp_folder):
@@ -3647,7 +3857,7 @@ async def clear_uploaded_files(
                 os.rmdir(upload_dir)
             
             # Also delete the entire temp folder for this graph
-            temp_folder = os.path.join("uploads", "ingestion_temp", graphname)
+            temp_folder = graph_docs.converted_dir(graphname, graph_docs.UPLOADS)
             if os.path.exists(temp_folder):
                 import shutil
                 shutil.rmtree(temp_folder)
@@ -3673,6 +3883,288 @@ async def clear_uploaded_files(
 
 # Cloud Storage Download Endpoints
 
+# Stored Files: the kept files of a graph and their state in the graph
+
+_INGEST_JOB = "load_documents_content_json_with_images"
+_SKIP_REASONS = {
+    graph_docs.INGESTED: "The graph has the same content.",
+    graph_docs.CHANGED: "The graph has other content for this file. Select Override to load it.",
+    graph_docs.NOT_VERIFIED: "The graph has this file, but its content cannot be compared. Select Override to load it again.",
+    graph_docs.OLDER_VERSION: "The graph has this file under its earlier name. Select Override to replace it.",
+}
+
+
+def _skip_reason(f) -> str:
+    if f.state == graph_docs.CONFLICT:
+        return (f"Same name as {', '.join(f.conflict_with)} when letter case is ignored. "
+                "Rename or delete one of them.")
+    return _SKIP_REASONS.get(f.state, "Not loaded.")
+
+
+def _graph_document_rows(conn, has_versions: bool) -> dict:
+    """``{doc_id: {"content_checksum": str, "outdated": bool}}`` for all
+    Documents of the graph, outdated ones included."""
+    select = (
+        f"{graph_docs.CHECKSUM_ATTR},{graph_docs.OUTDATED_ATTR}" if has_versions else "epoch_added"
+    )
+    rows = conn.getVertices("Document", select=select) or []
+    out = {}
+    for row in rows:
+        attrs = row.get("attributes") or {}
+        out[str(row.get("v_id", "")).lower()] = {
+            graph_docs.CHECKSUM_ATTR: attrs.get(graph_docs.CHECKSUM_ATTR) or "",
+            graph_docs.OUTDATED_ATTR: bool(attrs.get(graph_docs.OUTDATED_ATTR)),
+        }
+    return out
+
+
+def _kept_files_with_states(graphname: str, conn):
+    has_versions = supportai.graph_has_document_versions(conn)
+    files = graph_docs.list_kept_files(graphname)
+    graph_docs.assign_states(files, _graph_document_rows(conn, has_versions), has_versions)
+    return files, has_versions
+
+
+def _selected_files(graphname: str, payload: dict) -> list[tuple[str, str]]:
+    """``[(source, name)]`` from ``{"files": [{"source", "name"}]}``; each
+    must be a kept file of the graph."""
+    items = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(items, list) or not items:
+        raise HTTPException(status_code=400, detail="Select at least one file.")
+    out = []
+    for item in items:
+        source = (item or {}).get("source")
+        name = (item or {}).get("name")
+        try:
+            path = graph_docs.kept_file_path(graphname, source, name)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Unknown file: {name}")
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail=f"File not found: {name}")
+        key = (source, os.path.basename(path))
+        if key not in out:
+            out.append(key)
+    return out
+
+
+@router.get(route_prefix + "/{graphname}/documents")
+def list_documents(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """The kept files of the graph (uploads and downloads), each with its
+    document ids and its state against the graph: not_ingested, ingested,
+    changed, not_verified, older_version or conflict. ``counts`` has the
+    number of files in each state; ``versions_ready`` says whether the graph
+    has the document checksum schema."""
+    _require_document_admin(creds[1], graphname)
+    conn = get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password)
+    files, has_versions = _kept_files_with_states(graphname, conn)
+    return {
+        "graphname": graphname,
+        "files": [f.to_dict() for f in files],
+        "counts": graph_docs.state_counts(files),
+        "total": len(files),
+        "versions_ready": has_versions,
+    }
+
+
+@router.post(route_prefix + "/{graphname}/documents/ingest")
+def ingest_documents(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict, Body(...)],
+):
+    """Load selected kept files into the graph.
+
+    Body: ``{"files": [{"source": "uploads", "name": "a.pdf"}], "override": false}``
+
+    Files that are not converted yet are converted first. A not_ingested file
+    always loads. With ``override``, a changed or not_verified file loads its
+    content again and its Document is marked for processing again, and an
+    older_version file loads as a new Document that supersedes the old one
+    (the old Document is kept and marked outdated). Ingested and conflict
+    files never load. The document content is loaded only; a rebuild
+    processes it.
+    """
+    _require_document_admin(creds[1], graphname)
+    selected = _selected_files(graphname, payload)
+    override = bool(payload.get("override", False))
+    if get_rebuilding_graph() == graphname:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is being rebuilt. Wait for the rebuild to finish.",
+        )
+    if not acquire_graph_lock(graphname, "ingest"):
+        current = get_current_operation(graphname) or "another operation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is busy with '{current}'. Wait for it to finish, then try again.",
+        )
+    try:
+        conn = get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password)
+        failed: list[dict] = []
+
+        # 1. Convert the selected files that have no converted file yet.
+        for source in graph_docs.SOURCES:
+            names = [
+                n for s, n in selected
+                if s == source and not os.path.exists(graph_docs.converted_path(graphname, source, n))
+            ]
+            if not names:
+                continue
+            temp_folder = graph_docs.converted_dir(graphname, source)
+            os.makedirs(temp_folder, exist_ok=True)
+            result = TextExtractor().process_folder(
+                graph_docs.source_dir(graphname, source), graphname, temp_folder, filenames=names,
+            )
+            for name, reason in (failed_extractions(result) or {}).items():
+                failed.append({"source": source, "name": os.path.basename(name), "error": reason})
+
+        # 2. Decide per file from its state.
+        files, has_versions = _kept_files_with_states(graphname, conn)
+        by_key = {(f.source, f.name): f for f in files}
+        failed_keys = {(f["source"], f["name"]) for f in failed}
+        to_load: list = []
+        skipped: list[dict] = []
+        for key in selected:
+            f = by_key.get(key)
+            if f is None or key in failed_keys:
+                continue
+            if f.documents is None:
+                failed.append({"source": f.source, "name": f.name, "error": "The file could not be converted."})
+            elif f.state == graph_docs.NOT_INGESTED:
+                to_load.append(f)
+            elif f.state in graph_docs.OVERRIDE_STATES and override:
+                if f.state == graph_docs.OLDER_VERSION and not has_versions:
+                    skipped.append({
+                        "source": f.source, "name": f.name, "state": f.state,
+                        "reason": "Update the graph in the Migration Assistant to replace older versions.",
+                    })
+                else:
+                    to_load.append(f)
+            else:
+                skipped.append({"source": f.source, "name": f.name, "state": f.state,
+                                "reason": _skip_reason(f)})
+
+        # 3. Load, one converted file per kept file.
+        loaded: list[dict] = []
+        for source in graph_docs.SOURCES:
+            group = [f for f in to_load if f.source == source]
+            if not group:
+                continue
+            info = LoadingInfo(
+                load_job_id=_INGEST_JOB,
+                file_path="in_temp_storage",
+                data_source_id={
+                    "data_source": "server",
+                    "data_source_id": "DocumentContent",
+                    "data_path": graph_docs.converted_dir(graphname, source),
+                    "files": [graph_docs.converted_name(f.name) for f in group],
+                },
+            )
+            res = supportai.ingest(graphname, info, conn)
+            by_jsonl = {r.get("jsonl_file"): r for r in res.get("ingested_files", [])}
+            for f in group:
+                r = by_jsonl.get(graph_docs.converted_name(f.name)) or {}
+                if r.get("status") == "success":
+                    loaded.append(f)
+                else:
+                    failed.append({"source": f.source, "name": f.name,
+                                   "error": r.get("error") or "The file could not be loaded."})
+
+        # 4. Mark overridden documents for processing again, and record
+        #    superseded older versions.
+        now = int(time.time())
+        for f in loaded:
+            if f.state in (graph_docs.CHANGED, graph_docs.NOT_VERIFIED):
+                for did in f.doc_ids:
+                    conn.upsertVertex("Document", did, {"epoch_processing": 0, "epoch_processed": 0})
+            elif f.state == graph_docs.OLDER_VERSION and f.legacy_id:
+                new_id = graph_docs.doc_id(f.name)
+                conn.upsertVertex("Document", f.legacy_id, {graph_docs.OUTDATED_ATTR: True})
+                conn.upsertEdge(
+                    "Document", f.legacy_id, graph_docs.SUPERSEDED_BY, "Document", new_id,
+                    {"epoch_added": now},
+                )
+
+        return {
+            "graphname": graphname,
+            "loaded": [{"source": f.source, "name": f.name, "state": f.state} for f in loaded],
+            "skipped": skipped,
+            "failed": failed,
+        }
+    finally:
+        release_graph_lock(graphname, "ingest")
+
+
+@router.post(route_prefix + "/{graphname}/documents/delete")
+def delete_documents(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict, Body(...)],
+):
+    """Delete selected kept files and their converted files. The documents
+    in the graph do not change.
+
+    Body: ``{"files": [{"source": "uploads", "name": "a.pdf"}]}``
+    """
+    _require_document_admin(creds[1], graphname)
+    selected = _selected_files(graphname, payload)
+    if not acquire_graph_lock(graphname, "delete_files"):
+        current = get_current_operation(graphname) or "another operation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is busy with '{current}'. Wait for it to finish, then try again.",
+        )
+    try:
+        deleted = []
+        for source, name in selected:
+            converted = graph_docs.converted_path(graphname, source, name)
+            if os.path.exists(converted):
+                os.remove(converted)
+            os.remove(graph_docs.kept_file_path(graphname, source, name))
+            deleted.append({"source": source, "name": name})
+        return {"graphname": graphname, "deleted": deleted}
+    finally:
+        release_graph_lock(graphname, "delete_files")
+
+
+@router.post(route_prefix + "/{graphname}/documents/rename")
+def rename_document_file(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict, Body(...)],
+):
+    """Rename a kept file in conflict, so that it gets its own document id.
+
+    Body: ``{"source": "downloads", "name": "Report.pdf", "new_name": "report-2.pdf"}``
+
+    The extension stays the same. The converted file is renamed with it, and
+    its document ids follow the new name.
+    """
+    _require_document_admin(creds[1], graphname)
+    payload = payload if isinstance(payload, dict) else {}
+    source, name = payload.get("source"), payload.get("name")
+    (source, name), = _selected_files(graphname, {"files": [{"source": source, "name": name}]})
+    conflicts = graph_docs.id_conflicts(graph_docs.list_kept_files(graphname))
+    if (source, name) not in conflicts:
+        raise HTTPException(status_code=400, detail="Only a file in conflict can be renamed.")
+    if not acquire_graph_lock(graphname, "rename_file"):
+        current = get_current_operation(graphname) or "another operation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is busy with '{current}'. Wait for it to finish, then try again.",
+        )
+    try:
+        new = graph_docs.rename_kept_file(graphname, source, name, payload.get("new_name"))
+    except graph_docs.RenameError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        release_graph_lock(graphname, "rename_file")
+    return {"graphname": graphname, "source": source, "name": new}
+
+
 @router.post(route_prefix + "/{graphname}/cloud/download")
 async def download_from_cloud(
     graphname: ValidGraphName,
@@ -3690,6 +4182,7 @@ async def download_from_cloud(
       - For GCS: project_id, gcs_credentials_json, bucket, prefix
       - For Azure: account_name, account_key, container, prefix
     """
+    await asyncio.to_thread(_require_document_admin, credentials, graphname)
     # Acquire graph lock
     acquired = await asyncio.to_thread(acquire_graph_lock, graphname, "download_from_cloud")
     if not acquired:
@@ -3712,7 +4205,7 @@ async def download_from_cloud(
         account_key = request_body.get("account_key")
         container = request_body.get("container")
         
-        download_dir = os.path.join("downloaded_files_cloud", graphname)
+        download_dir = graph_docs.source_dir(graphname, graph_docs.DOWNLOADS)
         os.makedirs(download_dir, exist_ok=True)
         
         downloaded_files = []
@@ -3881,6 +4374,12 @@ async def download_from_cloud(
             }
         
         logger.info(f"Downloaded {len(downloaded_files)} file(s) from {provider} for graph {graphname}")
+        kept_conflicts = graph_docs.id_conflicts(graph_docs.list_kept_files(graphname))
+        conflicts = {
+            name: kept_conflicts[(graph_docs.DOWNLOADS, name)]
+            for name in sorted({os.path.basename(n) for n in downloaded_files})
+            if (graph_docs.DOWNLOADS, name) in kept_conflicts
+        }
         
         return {
             "status": "success",
@@ -3888,6 +4387,7 @@ async def download_from_cloud(
             "graphname": graphname,
             "provider": provider,
             "downloaded_files": downloaded_files,
+            "conflicts": conflicts,
             "local_path": download_dir,
         }
     
@@ -3913,8 +4413,9 @@ async def list_cloud_downloads(
     Parameters:
     - graphname: The graph name to list downloaded files for
     """
+    await asyncio.to_thread(_require_document_admin, credentials, graphname)
     try:
-        download_dir = os.path.join("downloaded_files_cloud", graphname)
+        download_dir = graph_docs.source_dir(graphname, graph_docs.DOWNLOADS)
         
         if not os.path.exists(download_dir):
             return {
@@ -3962,8 +4463,9 @@ async def delete_cloud_downloads(
     - graphname: The graph name whose downloaded files to clear
     - filename: If provided, only delete this specific file. Otherwise, delete all files.
     """
+    await asyncio.to_thread(_require_document_admin, credentials, graphname)
     try:
-        download_dir = os.path.join("downloaded_files_cloud", graphname)
+        download_dir = graph_docs.source_dir(graphname, graph_docs.DOWNLOADS)
         
         if not os.path.exists(download_dir):
             return {
@@ -3976,15 +4478,13 @@ async def delete_cloud_downloads(
         
         if filename:
             # Delete corresponding JSONL file from temp folder FIRST
-            temp_folder = os.path.join("downloaded_files_cloud", "ingestion_temp", graphname)
+            temp_folder = graph_docs.converted_dir(graphname, graph_docs.DOWNLOADS)
             if os.path.exists(temp_folder):
-                from pathlib import Path
-                file_stem = Path(filename).stem
-                jsonl_file = os.path.join(temp_folder, f"{file_stem}.jsonl")
-                
+                jsonl_file = os.path.join(temp_folder, graph_docs.converted_name(filename))
+
                 if os.path.exists(jsonl_file):
                     os.remove(jsonl_file)
-                    logger.info(f"Deleted corresponding JSONL file: {file_stem}.jsonl")
+                    logger.info(f"Deleted corresponding JSONL file: {os.path.basename(jsonl_file)}")
                     
                     # If temp folder is now empty, remove it
                     if not os.listdir(temp_folder):
@@ -4012,7 +4512,7 @@ async def delete_cloud_downloads(
                 os.rmdir(download_dir)
             
             # Also delete the entire temp folder for this graph
-            temp_folder = os.path.join("downloaded_files_cloud", "ingestion_temp", graphname)
+            temp_folder = graph_docs.converted_dir(graphname, graph_docs.DOWNLOADS)
             if os.path.exists(temp_folder):
                 import shutil
                 shutil.rmtree(temp_folder)

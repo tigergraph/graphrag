@@ -39,6 +39,20 @@ from common.utils.graph_locks import (
 
 GRAPH = "TestGraph"
 
+# Document routes need an admin of the graph; the tests sign in as a superuser.
+_roles_patch = patch(
+    "app.routers.ui._get_user_role_details",
+    return_value=(["superuser"], {}, "testuser"),
+)
+
+
+def setUpModule():
+    _roles_patch.start()
+
+
+def tearDownModule():
+    _roles_patch.stop()
+
 
 def _ok_auth():
     """Mock ``auth()`` to return a single accessible graph + dummy creds."""
@@ -77,7 +91,7 @@ class TestUploadsCheck(unittest.TestCase):
     @patch("app.routers.ui.auth", return_value=_ok_auth())
     def test_returns_conflicts_for_existing_files(self, _mock_auth):
         with _ChdirTempDir() as tmp:
-            upload_dir = tmp / "uploads" / GRAPH
+            upload_dir = tmp / "configs" / "graph_docs" / "uploads" / GRAPH
             upload_dir.mkdir(parents=True)
             (upload_dir / "report.pdf").write_bytes(b"old")
             (upload_dir / "summary.docx").write_bytes(b"old")
@@ -95,7 +109,7 @@ class TestUploadsCheck(unittest.TestCase):
     @patch("app.routers.ui.auth", return_value=_ok_auth())
     def test_returns_empty_when_no_conflicts(self, _mock_auth):
         with _ChdirTempDir() as tmp:
-            (tmp / "uploads" / GRAPH).mkdir(parents=True)
+            (tmp / "configs" / "graph_docs" / "uploads" / GRAPH).mkdir(parents=True)
 
             resp = self.client.post(
                 f"/ui/{GRAPH}/uploads/check",
@@ -139,8 +153,8 @@ class TestUploadsOverwriteSkip(unittest.TestCase):
     @patch("app.routers.ui.auth", return_value=_ok_auth())
     def test_overwrite_false_returns_conflict_envelope_on_collision(self, _mock_auth):
         with _ChdirTempDir() as tmp:
-            (tmp / "uploads" / GRAPH).mkdir(parents=True)
-            (tmp / "uploads" / GRAPH / "report.pdf").write_bytes(b"old")
+            (tmp / "configs" / "graph_docs" / "uploads" / GRAPH).mkdir(parents=True)
+            (tmp / "configs" / "graph_docs" / "uploads" / GRAPH / "report.pdf").write_bytes(b"old")
 
             resp = self.client.post(
                 f"/ui/{GRAPH}/uploads",
@@ -156,12 +170,12 @@ class TestUploadsOverwriteSkip(unittest.TestCase):
     @patch("app.routers.ui.auth", return_value=_ok_auth())
     def test_overwrite_true_drops_cached_jsonl(self, _mock_auth):
         with _ChdirTempDir() as tmp:
-            upload_dir = tmp / "uploads" / GRAPH
+            upload_dir = tmp / "configs" / "graph_docs" / "uploads" / GRAPH
             upload_dir.mkdir(parents=True)
             (upload_dir / "report.pdf").write_bytes(b"old")
-            temp_folder = tmp / "uploads" / "ingestion_temp" / GRAPH
+            temp_folder = tmp / "configs" / "graph_docs" / "uploads" / "ingestion_temp" / GRAPH
             temp_folder.mkdir(parents=True)
-            (temp_folder / "report.jsonl").write_text("stale-extract")
+            (temp_folder / "report.pdf.jsonl").write_text("stale-extract")
 
             resp = self.client.post(
                 f"/ui/{GRAPH}/uploads?overwrite=true",
@@ -174,13 +188,13 @@ class TestUploadsOverwriteSkip(unittest.TestCase):
             # File replaced with new bytes
             self.assertEqual((upload_dir / "report.pdf").read_bytes(), b"new")
             # Cached extract removed so the next ingest re-converts
-            self.assertFalse((temp_folder / "report.jsonl").exists())
+            self.assertFalse((temp_folder / "report.pdf.jsonl").exists())
 
     @patch("app.routers.ui.auth", return_value=_ok_auth())
     def test_skip_drops_listed_files_from_upload_set(self, _mock_auth):
         with _ChdirTempDir() as tmp:
-            (tmp / "uploads" / GRAPH).mkdir(parents=True)
-            (tmp / "uploads" / GRAPH / "keep_me.pdf").write_bytes(b"old")
+            (tmp / "configs" / "graph_docs" / "uploads" / GRAPH).mkdir(parents=True)
+            (tmp / "configs" / "graph_docs" / "uploads" / GRAPH / "keep_me.pdf").write_bytes(b"old")
 
             resp = self.client.post(
                 f"/ui/{GRAPH}/uploads?skip=keep_me.pdf",
@@ -200,7 +214,7 @@ class TestUploadsOverwriteSkip(unittest.TestCase):
             )
             # Skipped file untouched on disk
             self.assertEqual(
-                (tmp / "uploads" / GRAPH / "keep_me.pdf").read_bytes(),
+                (tmp / "configs" / "graph_docs" / "uploads" / GRAPH / "keep_me.pdf").read_bytes(),
                 b"old",
             )
 
@@ -262,9 +276,8 @@ class TestConvertSampleFiles(unittest.TestCase):
     @patch("app.routers.ui.auth", return_value=_ok_auth())
     def test_writes_to_flat_layout_and_returns_saved_files(self, _mock_auth):
         async def _fake_process(self, folder, graphname, temp, filenames=None):
-            stem = "report"
             Path(temp).mkdir(parents=True, exist_ok=True)
-            Path(temp, f"{stem}.jsonl").write_text('{"text":"hello"}\n')
+            Path(temp, "report.pdf.jsonl").write_text('{"text":"hello"}\n')
             return {"num_documents": 1}
 
         with _ChdirTempDir() as tmp, patch(
@@ -282,7 +295,7 @@ class TestConvertSampleFiles(unittest.TestCase):
             self.assertEqual(body["status"], "success")
             self.assertEqual(body["saved_files"], ["report.pdf"])
             # File landed in the flat upload directory, NOT a _schema_* subdir
-            self.assertTrue((tmp / "uploads" / GRAPH / "report.pdf").exists())
+            self.assertTrue((tmp / "configs" / "graph_docs" / "uploads" / GRAPH / "report.pdf").exists())
             # No request-id field surfaces to the caller in the new contract
             self.assertNotIn("request_id", body)
 
@@ -352,8 +365,8 @@ class TestConvertSampleFiles(unittest.TestCase):
             "app.routers.ui.TextExtractor._process_folder_async",
             new=_fake_process,
         ):
-            stale_a = tmp / "uploads" / GRAPH / "_schema_old1"
-            stale_b = tmp / "uploads" / "ingestion_temp" / GRAPH / "_schema_old2"
+            stale_a = tmp / "configs" / "graph_docs" / "uploads" / GRAPH / "_schema_old1"
+            stale_b = tmp / "configs" / "graph_docs" / "uploads" / "ingestion_temp" / GRAPH / "_schema_old2"
             stale_a.mkdir(parents=True)
             stale_b.mkdir(parents=True)
             (stale_a / "ghost.pdf").write_bytes(b"x")
@@ -372,8 +385,8 @@ class TestConvertSampleFiles(unittest.TestCase):
     @patch("app.routers.ui.auth", return_value=_ok_auth())
     def test_returns_conflict_envelope_on_collision(self, _mock_auth):
         with _ChdirTempDir() as tmp:
-            (tmp / "uploads" / GRAPH).mkdir(parents=True)
-            (tmp / "uploads" / GRAPH / "report.pdf").write_bytes(b"old")
+            (tmp / "configs" / "graph_docs" / "uploads" / GRAPH).mkdir(parents=True)
+            (tmp / "configs" / "graph_docs" / "uploads" / GRAPH / "report.pdf").write_bytes(b"old")
 
             resp = self.client.post(
                 f"/ui/{GRAPH}/convert_sample_files",
@@ -406,9 +419,9 @@ class TestLegacySubdirSweep(unittest.TestCase):
 
     def test_removes_schema_subdirs_under_both_trees(self):
         with _ChdirTempDir() as tmp:
-            a = tmp / "uploads" / GRAPH / "_schema_x"
-            b = tmp / "uploads" / "ingestion_temp" / GRAPH / "_schema_y"
-            other = tmp / "uploads" / GRAPH / "regular_subdir"
+            a = tmp / "configs" / "graph_docs" / "uploads" / GRAPH / "_schema_x"
+            b = tmp / "configs" / "graph_docs" / "uploads" / "ingestion_temp" / GRAPH / "_schema_y"
+            other = tmp / "configs" / "graph_docs" / "uploads" / GRAPH / "regular_subdir"
             for d in (a, b, other):
                 d.mkdir(parents=True)
                 (d / "file.bin").write_bytes(b"x")

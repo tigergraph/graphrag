@@ -88,11 +88,13 @@ const KGAdmin = () => {
     embeddings_incomplete?: boolean;
     community_summaries?: { total: number; needs_resummarize: number };
     community_summaries_incomplete?: boolean;
+    document_versions_missing?: boolean;
   } | null>(null);
   const [migrationChecking, setMigrationChecking] = useState(false);
   const [migrationApplying, setMigrationApplying] = useState(false);
   // "" | "regenerate_embeddings" | "regenerate_summaries" — which regen is running
   const [migrationRegenerating, setMigrationRegenerating] = useState("");
+  const [migrationSettingUpVersions, setMigrationSettingUpVersions] = useState(false);
   const [migrationMessage, setMigrationMessage] = useState("");
   // Reset states when dialogs close
   const handleInitializeDialogChange = (open: boolean) => {
@@ -167,7 +169,8 @@ const KGAdmin = () => {
       } else if (
         !data.needs_repair &&
         !data.embeddings_incomplete &&
-        !data.community_summaries_incomplete
+        !data.community_summaries_incomplete &&
+        !data.document_versions_missing
       ) {
         setMigrationMessage("✅ Graph is up to date — no repairs needed.");
       } else {
@@ -184,6 +187,8 @@ const KGAdmin = () => {
           parts.push(
             `${data.community_summaries?.needs_resummarize ?? 0} communities need re-summarization`
           );
+        if (data.document_versions_missing)
+          parts.push("document versions not set up");
         setMigrationMessage(`Found: ${parts.join("; ")}.`);
       }
     } catch (err: any) {
@@ -298,6 +303,66 @@ const KGAdmin = () => {
       setMigrationMessage(`Regenerate failed: ${err.message || err}`);
     } finally {
       setMigrationRegenerating("");
+    }
+  };
+
+  // Set up document versions on the graph: a schema change plus a
+  // reinstall of its queries, so it is confirmed first.
+  const runDocumentVersionsSetup = async () => {
+    if (!migrationGraph) return;
+    const auth = sessionStorage.getItem("auth");
+    if (!auth) {
+      setMigrationMessage("Not authenticated.");
+      return;
+    }
+    const ok = await confirm(
+      `Set up document versions on "${migrationGraph}"? ` +
+        "The graph schema changes and its queries are installed again; " +
+        "search on this graph is unavailable until that finishes, which can take several minutes."
+    );
+    if (!ok) return;
+    setMigrationSettingUpVersions(true);
+    setMigrationMessage("Setting up document versions…");
+    try {
+      const resp = await fetch(
+        `/ui/${migrationGraph}/migration/document_versions`,
+        {
+          method: "POST",
+          headers: { Authorization: auth },
+        }
+      );
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setMigrationMessage(
+          `❌ Set up failed: ${data.detail || resp.statusText}`
+        );
+        return;
+      }
+      const errs: Array<{ query?: string; error?: string }> = Array.isArray(
+        data.query_errors
+      )
+        ? data.query_errors
+        : [];
+      // Re-run the check so the row reflects the new state, then report.
+      await runMigrationCheck(migrationGraph);
+      if (errs.length > 0) {
+        const shown = errs
+          .slice(0, 3)
+          .map((e) => `• ${e.query ? e.query + ": " : ""}${e.error || ""}`)
+          .join("\n");
+        const more = errs.length > 3 ? `\n…and ${errs.length - 3} more.` : "";
+        setMigrationMessage(
+          `⚠️ Document versions are set up, but ${errs.length} query(s) could not be installed again:\n${shown}${more}`
+        );
+      } else {
+        setMigrationMessage("✅ Document versions are set up.");
+      }
+    } catch (err: unknown) {
+      setMigrationMessage(
+        `❌ Set up failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      setMigrationSettingUpVersions(false);
     }
   };
 
@@ -2863,7 +2928,14 @@ const KGAdmin = () => {
         </Dialog>
 
         {/* Migration Assistant Dialog */}
-        <Dialog open={migrationDialogOpen} onOpenChange={setMigrationDialogOpen}>
+        <Dialog
+          open={migrationDialogOpen}
+          onOpenChange={(open) => {
+            // Keep the dialog open while the confirm prompt is showing.
+            if (!open && isConfirmDialogOpen) return;
+            setMigrationDialogOpen(open);
+          }}
+        >
           <DialogContent
             className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
             onInteractOutside={(e) => e.preventDefault()}
@@ -2890,11 +2962,11 @@ const KGAdmin = () => {
                     setMigrationStatus(null);
                     setMigrationMessage("");
                   }}
-                  disabled={migrationChecking || migrationApplying || isRebuildRunning}
+                  disabled={migrationChecking || migrationApplying || migrationSettingUpVersions || isRebuildRunning}
                 >
                   <SelectTrigger
                     className="dark:border-[#3D3D3D] dark:bg-shadeA"
-                    disabled={migrationChecking || migrationApplying || isRebuildRunning}
+                    disabled={migrationChecking || migrationApplying || migrationSettingUpVersions || isRebuildRunning}
                   >
                     <SelectValue placeholder="Pick a graph" />
                   </SelectTrigger>
@@ -2915,7 +2987,7 @@ const KGAdmin = () => {
                 <div className="mt-3">
                   <Button
                     onClick={() => runMigrationCheck(migrationGraph)}
-                    disabled={!migrationGraph || migrationChecking || migrationApplying || isRebuildRunning}
+                    disabled={!migrationGraph || migrationChecking || migrationApplying || migrationSettingUpVersions || isRebuildRunning}
                     className="gradient text-white"
                   >
                     {migrationChecking ? (
@@ -3060,6 +3132,37 @@ const KGAdmin = () => {
                         </div>
                       </div>
                     )}
+
+                  {/* Schema health: document versions */}
+                  {migrationStatus.document_versions_missing && (
+                    <div className="p-3 rounded border bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="font-medium text-black dark:text-white">
+                          Document versions — not set up
+                        </div>
+                        <Button
+                          onClick={runDocumentVersionsSetup}
+                          disabled={
+                            migrationSettingUpVersions ||
+                            !!migrationRegenerating ||
+                            migrationApplying ||
+                            migrationChecking ||
+                            isRebuildRunning
+                          }
+                          className="gradient text-white h-7 text-xs whitespace-nowrap"
+                        >
+                          {migrationSettingUpVersions ? (
+                            <>
+                              <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                              Setting up…
+                            </>
+                          ) : (
+                            "Set up"
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -3084,7 +3187,7 @@ const KGAdmin = () => {
               <Button
                 onClick={() => setMigrationDialogOpen(false)}
                 variant="outline"
-                disabled={migrationApplying}
+                disabled={migrationApplying || migrationSettingUpVersions}
                 className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
               >
                 Close
@@ -3092,7 +3195,7 @@ const KGAdmin = () => {
               {migrationStatus?.needs_repair && migrationStatus?.repairable && (
                 <Button
                   onClick={runMigrationApply}
-                  disabled={migrationApplying || migrationChecking || isRebuildRunning}
+                  disabled={migrationApplying || migrationSettingUpVersions || migrationChecking || isRebuildRunning}
                   className="gradient text-white"
                 >
                   {migrationApplying ? (
