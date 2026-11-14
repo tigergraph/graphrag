@@ -67,6 +67,11 @@ async def lifespan(app: FastAPI):
     yield
 
     # --- shutdown ---
+    try:
+        from deep_agent.memory import close_backends
+        close_backends()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"deep_agent memory shutdown failed: {e}")
     # Close every cached external-MCP client and stop the dedicated event loop
     # so stdio subprocesses don't outlive the worker.
     try:
@@ -99,6 +104,7 @@ app.include_router(routers.supportai_router, prefix=PATH_PREFIX)
 app.include_router(routers.queryai_router, prefix=PATH_PREFIX)
 app.include_router(routers.ui_router, prefix=PATH_PREFIX)
 app.include_router(routers.mcp_servers_router, prefix=PATH_PREFIX)
+app.include_router(routers.deep_agent_router, prefix=PATH_PREFIX)
 
 
 excluded_metrics_paths = ("/docs", "/openapi.json", "/metrics")

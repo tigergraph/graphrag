@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.0]
+
+### Changed
+- **The Agentic engine answers with a Deep Agent by default.** The Deep Agent chooses its tools as it goes, keeps a to-do list for questions with several parts, and can hand research on graph data or on documents to helper agents. It uses the GraphRAG searches, read-only TigerGraph lookups and the graph's MCP tools, as the signed-in user. The new `agent_engine` setting selects the agent: `"default"` (the Deep Agent; used when the setting is absent), `"deepagent"` or `"legacy"`. To keep the Planned / Reactive agent, set `agent_engine` to `"legacy"`; `agent_style` and the planner settings apply only to that agent.
+
+### Added
+- **The Deep Agent remembers conversations and user preferences.** The Planned and Reactive agents keep nothing of a user between conversations. With the Deep Agent, a conversation continues where it left off, also after a restart. Lasting preferences a user states apply to that user's later conversations on the graph. Memory is private to each TigerGraph user, needs a username and password login, and is stored per graph in `configs/graph_data/<graph>/`. New `deep_agent` settings: `memory_backend` (`"sqlite"`), `long_term_memory` (`true`), `subagents` (`true`), `recursion_limit` (`80`), `allow_installed_queries` (`true`), `installed_query_allowlist` (`["*"]`) and `max_tool_output_chars` (`60000`).
+- **Deep Agent REST API.** `POST /{graph}/agent/chat` asks a question and continues a conversation by id. `/{graph}/agent/threads` lists, reads and deletes the caller's conversations, `/{graph}/agent/memories` lists, reads, writes and deletes their long-term memories, and `/{graph}/agent/tools` lists the tools available on a graph. The bundled nginx also serves these routes on port 80.
+
 ## [2.0.4]
 
 ### Changed

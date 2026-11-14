@@ -92,6 +92,10 @@ langchainhub>=0.1.21
 langdetect>=1.0.9
 langgraph>=1.0.0
 langgraph-checkpoint>=3.0.0
+# Deep Agent chat engine (LangChain Deep Agents on LangGraph) and its on-prem
+# short/long-term memory (SQLite checkpointer + store).
+deepagents==0.7.32
+langgraph-checkpoint-sqlite>=3.1.2
 langsmith>=0.4.2
 Levenshtein>=0.27.1
 lomond>=0.3.3

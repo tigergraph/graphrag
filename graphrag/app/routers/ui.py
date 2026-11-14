@@ -3009,7 +3009,7 @@ async def write_message_to_history(
 _AGENT_STYLES = {"auto", "planned", "reactive", "react"}
 
 
-def _chat_agent(graphname, conn, use_cypher, mode, value, ws=None):
+def _chat_agent(graphname, conn, use_cypher, mode, value, ws=None, conversation_id=None, user=None):
     """Build the chat agent from one menu selection.
 
     ``mode`` (``"agentic"`` | ``"classic"`` | ``None`` → graph config) picks the
@@ -3044,9 +3044,16 @@ def _chat_agent(graphname, conn, use_cypher, mode, value, ws=None):
         # Only a real agent style reaches the orchestrator; else fall back.
         retriever, style = "auto", (value if vlow in _AGENT_STYLES else "auto")
 
+    # Login sentinels (API token, GSQL secret) are shared by every token
+    # user; they never identify whose agent memory to use.
+    # "" tells the agent there is no known user (None would make it derive
+    # one from the connection, which for a token is not the caller).
+    if not user or user == _UI_TOKEN_SENTINEL or user.startswith("__GSQL__"):
+        user = ""
     return make_agent(
         graphname, conn, use_cypher, ws=ws, mode=resolved_mode,
         supportai_retriever=retriever, agent_style=style,
+        conversation_id=conversation_id, user=user,
     )
 
 
@@ -3096,7 +3103,15 @@ async def graph_query(
             LogWriter.info(f"Continuing conversation with ID: {convo_id}")
 
         # create agent from the menu selection (engine + style/retriever)
-        agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern)
+        # Agent memory is per user: resolve token/secret logins to the real
+        # TigerGraph identity (as the chat WebSocket does). If that fails,
+        # the agent gets no user and keeps no memory.
+        try:
+            _, _, agent_user = _get_user_role_details(creds.username, creds.password)
+        except Exception:
+            agent_user = None
+        agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern,
+                            conversation_id=convo_id, user=agent_user)
 
         prev_id = None
         data = q
@@ -3256,7 +3271,8 @@ async def chat(
     await websocket.send_text(json.dumps({"conversation_id": convo_id}))
 
     # create agent from the menu selection (engine + style/retriever)
-    agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern, ws=websocket)
+    agent = _chat_agent(graphname, conn, use_cypher, mode, rag_pattern, ws=websocket,
+                        conversation_id=convo_id, user=ws_username)
     # If Agent mode was requested but the model can't tool-call, make_agent
     # downgraded to the Classic engine — tell the user once.
     if getattr(agent, "engine_note", None):
