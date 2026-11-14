@@ -15,6 +15,8 @@
 - **The Migration Assistant sets up document versions.** Each document records the content it holds, and which documents a newer one replaces. New graphs get this when they are created. For an existing graph, **Set up** under Document versions adds it; Stored Files needs it to compare files with the graph and to replace older versions.
 - **Migration Assistant stores chunk section paths and summaries separately.** For a graph created before this release, the check reports that they are not stored separately, and **Store separately** adds the new fields, installs the graph's queries again and moves each chunk's section path out of its text. **Generate summaries** creates summaries for chunks that have none, with one model request per chunk.
 
+- **Ingest and rebuild report their time, model calls, tokens and cost.** Only chat answers showed model use, and the largest cost of a rebuild, entity extraction, was not recorded at all. Adding files, an ingest from Stored Files, a rebuild and **Generate summaries** now show the time, the number of model calls, the tokens and the cost when they finish, write one summary line to the log, and keep the last run of each kind for the graph. Token counts now also come from providers other than OpenAI.
+
 ### Security
 - **Only an admin of a graph can manage its documents.** Any user who could sign in to a graph could upload, download, list, delete and ingest its documents, and could ingest folders on the GraphRAG server outside the graph's own files. A superuser or globaldesigner can now manage the documents of all graphs, and a user with the admin role on a graph can manage that graph's documents. The UI ingests only the graph's own stored files. The ingest API accepts a server folder only from an admin.
 

@@ -20,6 +20,8 @@ import traceback
 from collections import Counter, defaultdict
 
 import httpx
+
+from common.utils import run_usage
 from aiochannel import Channel, ChannelClosed
 from graphrag import workers
 from graphrag import util  # after workers: util and workers import each other
@@ -963,6 +965,9 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
         f"DONE. graphrag community initializer dT: {community_end-community_start}"
     )
     logger.info(f"DONE. graphrag.run() total time elaplsed: {end-init_start}")
+    run_usage.add_phase("documents", init_end - init_start)
+    if community_detection_switch:
+        run_usage.add_phase("communities", community_end - community_start)
 
     # Verify all required queries and loading jobs are still intact after the
     # pipeline.  Per TG docs, only DROP invalidates queries, and ALTER/DROP

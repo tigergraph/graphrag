@@ -501,6 +501,11 @@ class TestDocumentRoutes(unittest.TestCase):
             conn = self._conn(self._graph())
             body, _ = self._ingest(conn, override=False)
             self.assertEqual([f["name"] for f in body["loaded"]], ["new.md"])
+            # The ingest is one tracked run; its totals come back and are saved.
+            self.assertEqual(body["usage"]["kind"], "ingest")
+            self.assertEqual(body["usage"]["status"], "completed")
+            runs = self._call("get", f"/ui/{G}/run_usage", (["superuser"], {}, "u")).json()["runs"]
+            self.assertIn("ingest", runs)
             self.assertEqual(
                 sorted((f["name"], f["state"]) for f in body["skipped"]),
                 [("edited.md", "changed"), ("plain.html", "older_version"), ("same.md", "ingested")],
