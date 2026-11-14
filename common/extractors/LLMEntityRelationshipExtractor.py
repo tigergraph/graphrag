@@ -22,6 +22,7 @@ from common.llm_services import LLM_Model
 from common.py_schemas import KnowledgeGraph
 from langchain_community.graphs.graph_document import Node, Relationship, GraphDocument
 from langchain_core.documents import Document
+from langchain_community.callbacks.manager import get_openai_callback
 
 logger = logging.getLogger(__name__)
 
@@ -232,12 +233,21 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
         s = json_out.get("summary") if isinstance(json_out, dict) else None
         return format_chunk_summary(s)
 
+    def _record_usage(self, cb, out) -> None:
+        """Record the usage of one extraction call, as the other model calls
+        that go through the LLM service do."""
+        from common.llm_services.base_llm import _record_usage, usage_from
+        _record_usage("entity_extraction", usage_from(cb, out),
+                      getattr(self.llm_service, "config", None))
+
     async def _aextract_kg_from_doc(self, doc, chain, parser) -> list[GraphDocument]:
         try:
             logger.debug(str(doc))
-            out = await chain.ainvoke(
-                {"input": doc, "format_instructions": parser.get_format_instructions()}
-            )
+            with get_openai_callback() as cb:
+                out = await chain.ainvoke(
+                    {"input": doc, "format_instructions": parser.get_format_instructions()}
+                )
+                self._record_usage(cb, out)
             logger.debug(str(out))
         except Exception as e:
             return [GraphDocument(nodes=[], relationships=[], source=Document(page_content=doc))]
@@ -279,9 +289,11 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
 
     def _extract_kg_from_doc(self, doc, chain, parser) -> list[GraphDocument]:
         try:
-            out = chain.invoke(
-                {"input": doc, "format_instructions": parser.get_format_instructions()}
-            )
+            with get_openai_callback() as cb:
+                out = chain.invoke(
+                    {"input": doc, "format_instructions": parser.get_format_instructions()}
+                )
+                self._record_usage(cb, out)
         except Exception as e:
             return [GraphDocument(nodes=[], relationships=[], source=Document(page_content=doc))]
         try:

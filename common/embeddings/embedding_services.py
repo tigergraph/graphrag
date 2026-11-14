@@ -33,10 +33,26 @@ class EmbeddingModel(Embeddings):
         self.embeddings = None
         self.model_name = model_name
         self.dimensions = config.get("dimensions", 1536)
+        self.config = config
         self.token_calculator = get_token_calculator(token_limit=config.get("token_limit", 8192), model_name=model_name)
         LogWriter.info(
             f"request_id={req_id_cv.get()} instantiated AI model_name={model_name} with dimensions={self.dimensions}"
         )
+
+    def _record_run_usage(self, texts: List[str]) -> None:
+        """Add an embedding call to the ingest or rebuild run being tracked.
+        Tokens are counted with the service's tokenizer; the embedding API
+        does not return them."""
+        from common.utils import run_usage
+        if run_usage.current_run() is None:
+            return
+        from common.llm_services.base_llm import estimate_cost_from_config
+        try:
+            tokens = sum(self.token_calculator.count_tokens(t) for t in texts)
+        except Exception:
+            tokens = 0
+        cost = estimate_cost_from_config(self.config, tokens, 0) or 0.0
+        run_usage.record("embedding", input_tokens=tokens, cost=cost, items=len(texts))
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Embed Documents.
@@ -64,6 +80,7 @@ class EmbeddingModel(Embeddings):
                 docs = self.embeddings.embed_documents(texts, output_dimensionality=self.dimensions)
             else:
                 docs = self.embeddings.embed_documents(texts)
+            self._record_run_usage(texts)
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT embed_documents()")
             metrics.llm_success_response_total.labels(self.model_name).inc()
             return docs
@@ -105,6 +122,7 @@ class EmbeddingModel(Embeddings):
                 query_embedding = self.embeddings.embed_query(question, output_dimensionality=self.dimensions)
             else:
                 query_embedding = self.embeddings.embed_query(question)
+            self._record_run_usage([question])
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT embed_query()")
             metrics.llm_success_response_total.labels(self.model_name).inc()
             return query_embedding
@@ -143,6 +161,7 @@ class EmbeddingModel(Embeddings):
             query_embedding = await self.embeddings.aembed_query(question, output_dimensionality=self.dimensions)
         else:
             query_embedding = await self.embeddings.aembed_query(question)
+        self._record_run_usage([question])
         LogWriter.info(f"request_id={req_id_cv.get()} EXIT aembed_query()")
         # metrics.llm_success_response_total.labels(self.model_name).inc()
         return query_embedding
