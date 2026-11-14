@@ -1,13 +1,19 @@
 """Document files kept for a graph, and their state against the graph.
 
-Files that an admin uploads, or downloads from cloud storage, are kept under
-``configs/graph_docs/<source>/<graph>/``. Their converted JSONL files are kept
-under ``configs/graph_docs/<source>/ingestion_temp/<graph>/``. The configs
-folder is mounted in every deployment, so the files stay when the container
-is recreated.
+Files are kept under ``configs/graph_docs/<source>/<graph>/``. The sources
+``uploads`` and ``downloads`` hold the files an admin uploads or downloads
+from cloud storage; any other folder under ``configs/graph_docs/`` (for
+example ``server``) is a source an admin fills on the server. A source folder
+can have subfolders. Converted JSONL files are kept under
+``configs/graph_docs/<source>/ingestion_temp/<graph>/``, in the same
+subfolders. The configs folder is mounted in every deployment, so the files
+stay when the container is recreated.
 
-A file's document id is its file name with the extension, in lowercase, the
-same value the loading job stores. Each converted record carries a SHA-256 of
+A file's name is its path under the graph's folder, such as ``q1.pdf`` or
+``reports/2023/q1.pdf``. Its document id is the file name with the
+extension, in lowercase (``q1.pdf``), the same value the loading job stores.
+Files with the same file name in different subfolders get the same id, so
+they show as a conflict until one is renamed or deleted. Each converted record carries a SHA-256 of
 its content (``content_checksum``), which the loading job stores on the
 Document. Comparing the two tells whether the graph holds the file's current
 content.
@@ -19,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
@@ -29,6 +36,10 @@ UPLOADS = "uploads"
 DOWNLOADS = "downloads"
 SOURCES = (UPLOADS, DOWNLOADS)
 CONVERTED_DIR = "ingestion_temp"
+_SOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+# Name prefixes of files and folders that are never listed: hidden files,
+# editor and Office lock files, and schema-extraction samples.
+_SKIP_PREFIXES = (".", "~", "$", "_schema_")
 
 CHECKSUM_ATTR = "content_checksum"
 OUTDATED_ATTR = "outdated"
@@ -51,9 +62,21 @@ OVERRIDE_STATES = (CHANGED, NOT_VERIFIED, OLDER_VERSION)
 # --------------------------------------------------------------------------
 
 def _check_source(source: str) -> str:
-    if source not in SOURCES:
+    if not isinstance(source, str) or not _SOURCE_NAME.match(source) or source == CONVERTED_DIR:
         raise ValueError(f"unknown document source: {source!r}")
     return source
+
+
+def all_sources() -> list[str]:
+    """``uploads``, ``downloads`` and every other source folder under
+    ``configs/graph_docs/``."""
+    extra = []
+    if os.path.isdir(DOCS_ROOT):
+        for name in sorted(os.listdir(DOCS_ROOT)):
+            if (name not in SOURCES and _SOURCE_NAME.match(name) and name != CONVERTED_DIR
+                    and os.path.isdir(os.path.join(DOCS_ROOT, name))):
+                extra.append(name)
+    return list(SOURCES) + extra
 
 
 def source_dir(graphname: str, source: str) -> str:
@@ -74,8 +97,22 @@ def safe_file_name(name: str) -> str:
     return base
 
 
+def safe_rel_path(name: str) -> str:
+    """``name`` as a relative path with ``/`` separators, such as
+    ``reports/2023/q1.pdf``; refuses absolute paths, ``..`` and hidden parts."""
+    text = str(name or "").replace("\\", "/")
+    parts = [p for p in text.split("/") if p not in ("", ".")]
+    if text.startswith("/") or not parts or any(p == ".." or p.startswith(".") for p in parts):
+        raise ValueError(f"invalid file name: {name!r}")
+    return "/".join(parts)
+
+
 def kept_file_path(graphname: str, source: str, name: str) -> str:
-    return os.path.join(source_dir(graphname, source), safe_file_name(name))
+    folder = source_dir(graphname, source)
+    path = os.path.join(folder, *safe_rel_path(name).split("/"))
+    if not is_within(path, folder):
+        raise ValueError(f"invalid file name: {name!r}")
+    return path
 
 
 def is_within(path: str, folder: str) -> bool:
@@ -88,7 +125,7 @@ def is_graph_docs_folder(graphname: str, path: str) -> bool:
     """True if ``path`` is one of the graph's own kept-file folders."""
     return any(
         os.path.realpath(path) == os.path.realpath(source_dir(graphname, s))
-        for s in SOURCES
+        for s in all_sources()
     )
 
 
@@ -96,27 +133,34 @@ def is_graph_docs_folder(graphname: str, path: str) -> bool:
 # Ids and checksums
 # --------------------------------------------------------------------------
 
+def _base(file_name: str) -> str:
+    return os.path.basename(str(file_name).replace("\\", "/"))
+
+
 def doc_id(file_name: str) -> str:
-    """Document id of a kept file: its name with the extension, in lowercase
-    (the loading job lowercases the id it stores)."""
-    return os.path.basename(file_name).lower()
+    """Document id of a kept file: its file name with the extension, in
+    lowercase (the loading job lowercases the id it stores). The subfolder
+    is not part of the id."""
+    return _base(file_name).lower()
 
 
 def legacy_doc_id(file_name: str) -> str:
     """Document id that releases before 2.1.0 gave the file: its name without
     the extension, in lowercase."""
-    return os.path.splitext(os.path.basename(file_name))[0].lower()
+    return os.path.splitext(_base(file_name))[0].lower()
 
 
 def converted_name(file_name: str) -> str:
-    """Name of the converted JSONL file of a kept file. A ``.jsonl`` source is
-    already in the loading format and keeps its name."""
-    base = os.path.basename(file_name)
-    return base if base.lower().endswith(".jsonl") else f"{base}.jsonl"
+    """Path of the converted JSONL file of a kept file, relative to the
+    converted folder. A ``.jsonl`` source is already in the loading format
+    and keeps its name."""
+    name = str(file_name).replace("\\", "/")
+    return name if name.lower().endswith(".jsonl") else f"{name}.jsonl"
 
 
 def converted_path(graphname: str, source: str, name: str) -> str:
-    return os.path.join(converted_dir(graphname, source), converted_name(safe_file_name(name)))
+    rel = converted_name(safe_rel_path(name))
+    return os.path.join(converted_dir(graphname, source), *rel.split("/"))
 
 
 def content_checksum(content) -> str:
@@ -196,18 +240,29 @@ class KeptFile:
         }
 
 
-def list_kept_files(graphname: str, sources: Iterable[str] = SOURCES) -> list[KeptFile]:
+def _walk_files(folder: str) -> list[str]:
+    """Relative paths of the files under ``folder``, subfolders included,
+    without hidden, temporary and schema-sample entries."""
+    out = []
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(_SKIP_PREFIXES))
+        for name in sorted(names):
+            if name.startswith(_SKIP_PREFIXES):
+                continue
+            rel = os.path.relpath(os.path.join(root, name), folder).replace(os.sep, "/")
+            out.append(rel)
+    return out
+
+
+def list_kept_files(graphname: str, sources: Optional[Iterable[str]] = None) -> list[KeptFile]:
     """The kept files of a graph, with the documents of their converted files."""
     files = []
-    for source in sources:
+    for source in (all_sources() if sources is None else sources):
         folder = source_dir(graphname, source)
         if not os.path.isdir(folder):
             continue
-        for name in sorted(os.listdir(folder)):
-            path = os.path.join(folder, name)
-            if name.startswith((".", "~", "$", "_schema_")) or not os.path.isfile(path):
-                continue
-            st = os.stat(path)
+        for name in _walk_files(folder):
+            st = os.stat(os.path.join(folder, *name.split("/")))
             files.append(KeptFile(
                 name=name, source=source, size=st.st_size, modified=st.st_mtime,
                 documents=converted_documents(converted_path(graphname, source, name)),
@@ -344,17 +399,24 @@ def _renamed_records(records: list[dict], old_name: str, new_name: str) -> list[
 def rename_kept_file(graphname: str, source: str, name: str, new_name: str) -> str:
     """Rename a kept file inside its folder, and its converted file with it.
 
-    The extension stays the same. The new document id must not be the id of
-    another kept file. Returns the new file name.
+    ``name`` is the file's path under the graph's folder; ``new_name`` is a
+    file name, and the file stays in its subfolder. The extension stays the
+    same. The new document id must not be the id of another kept file.
+    Returns the new path.
     """
-    old = safe_file_name(name)
+    old = safe_rel_path(name)
+    folder, old_base = os.path.split(old)
+    raw_new = str(new_name or "").strip()
     try:
-        new = safe_file_name(str(new_name or "").strip())
+        if "/" in raw_new.replace("\\", "/"):
+            raise ValueError(raw_new)
+        new_base = safe_file_name(raw_new)
     except ValueError:
         raise RenameError("Enter a valid file name.")
-    if os.path.splitext(new)[1].lower() != os.path.splitext(old)[1].lower():
+    new = f"{folder}/{new_base}" if folder else new_base
+    if os.path.splitext(new_base)[1].lower() != os.path.splitext(old_base)[1].lower():
         raise RenameError("The new name must keep the file extension.")
-    if old.lower().endswith(".jsonl"):
+    if old_base.lower().endswith(".jsonl"):
         raise RenameError("A JSONL file keeps the document ids inside it. Renaming it does not change them.")
     if doc_id(new) == doc_id(old):
         raise RenameError("The new name must differ by more than letter case.")
@@ -363,13 +425,13 @@ def rename_kept_file(graphname: str, source: str, name: str, new_name: str) -> s
         raise FileNotFoundError(old)
     dst = kept_file_path(graphname, source, new)
     if os.path.exists(dst):
-        raise RenameError(f"A file named {new} is already stored.")
+        raise RenameError(f"A file named {new_base} is already stored in this folder.")
     others = [
         f.name for f in list_kept_files(graphname)
         if doc_id(new) in f.doc_ids and not (f.source == source and f.name == old)
     ]
     if others:
-        raise RenameError(f"{new} has the same name as {', '.join(sorted(set(others)))} when letter case is ignored.")
+        raise RenameError(f"{new_base} has the same name as {', '.join(sorted(set(others)))} when letter case is ignored.")
 
     old_conv, new_conv = converted_path(graphname, source, old), converted_path(graphname, source, new)
     records = None
@@ -379,7 +441,7 @@ def rename_kept_file(graphname: str, source: str, name: str, new_name: str) -> s
     os.rename(src, dst)
     if records is not None:
         with open(new_conv, "w", encoding="utf-8") as f:
-            for rec in _renamed_records(records, old, new):
+            for rec in _renamed_records(records, old_base, new_base):
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         os.remove(old_conv)
     return new

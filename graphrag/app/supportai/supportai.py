@@ -503,7 +503,7 @@ def create_ingest(
         source = ingest_config.data_source_config.get("source")
         filenames = ingest_config.data_source_config.get("filenames")
         if source:
-            # A graph's own kept files (uploads or downloads).
+            # A graph's own kept files (uploads, downloads or another source folder).
             data_path = graph_docs.source_dir(graphname, source)
             temp_folder = graph_docs.converted_dir(graphname, source)
         else:
@@ -512,7 +512,8 @@ def create_ingest(
                 raise Exception("Data path not provided for server processing")
             temp_folder = os.path.join(os.path.dirname(data_path), "ingestion_temp", graphname)
         if filenames is not None:
-            filenames = [graph_docs.safe_file_name(n) for n in filenames]
+            # Paths under the source folder, such as reports/2023/q1.pdf.
+            filenames = [graph_docs.safe_rel_path(n) for n in filenames]
         try:
             os.makedirs(temp_folder, exist_ok=True)
             # Process files and save immediately to temp folder (memory efficient)
@@ -817,8 +818,13 @@ def ingest(
                 data_path = ingest_config.get("data_path")
                 if not data_path or not os.path.exists(data_path):
                     raise Exception(f"Data path not found: {data_path}")
-                # Get all JSONL files from temp folder, or only the selected ones
-                jsonl_files = [f for f in os.listdir(data_path) if f.endswith('.jsonl')]
+                # Get all JSONL files from temp folder, subfolders included, or
+                # only the selected ones; each is named by its relative path.
+                jsonl_files = sorted(
+                    os.path.relpath(os.path.join(root, f), data_path).replace(os.sep, "/")
+                    for root, _dirs, names in os.walk(data_path)
+                    for f in names if f.endswith('.jsonl')
+                )
                 selected = ingest_config.get("files")
                 if selected is not None:
                     wanted = set(selected)
@@ -848,7 +854,7 @@ def ingest(
                 def _load_one(jsonl_filename: str) -> dict:
                     """Run the loading job for one file; return its result dict.
                     Raises on failure so the caller can classify and retry."""
-                    jsonl_file = os.path.join(data_path, jsonl_filename)
+                    jsonl_file = os.path.join(data_path, *jsonl_filename.split("/"))
                     load_result = conn.runLoadingJobWithFile(jsonl_file, data_source_id, loader_info.load_job_id)
                     logger.info(f"Loading job raw result for {jsonl_filename}: {load_result}")
                     valid_lines = rejected_lines = doc_count = 0
