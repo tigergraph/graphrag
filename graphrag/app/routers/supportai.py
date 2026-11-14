@@ -83,6 +83,15 @@ def initialize(
     }
 
 
+def _require_document_admin(request: Request, graphname: str) -> None:
+    """Only an admin of the graph (or a superuser or globaldesigner) can
+    ingest its documents."""
+    from routers.ui import _parse_auth_header
+    from routers.ui import _require_document_admin as require_admin
+
+    require_admin(_parse_auth_header(request.headers.get("authorization")), graphname)
+
+
 @router.post("/{graphname}/graphrag/create_ingest")
 @router.post("/{graphname}/supportai/create_ingest")
 def create_ingest(
@@ -91,6 +100,7 @@ def create_ingest(
     conn: Request,
     credentials: Annotated[HTTPBase, Depends(security)],
 ):
+    _require_document_admin(conn, graphname)
     conn = conn.state.conn
     try:
         return supportai.create_ingest(graphname, cfg, conn)
@@ -112,6 +122,7 @@ def ingest(
     conn: Request,
     credentials: Annotated[HTTPBase, Depends(security)],
 ):
+    _require_document_admin(conn, graphname)
     conn = conn.state.conn
     try:
         return supportai.ingest(graphname, loader_info, conn)

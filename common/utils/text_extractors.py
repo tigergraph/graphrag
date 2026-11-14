@@ -15,6 +15,8 @@ import shutil
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+from common.utils.graph_docs import add_checksums, converted_name
+
 logger = logging.getLogger(__name__)
 
 
@@ -496,6 +498,27 @@ def replace_path_with_tg_protocol(md_text, image_id, tg_reference):
 
     return _md_pattern.sub(repl, md_text)
 
+def _copy_jsonl_with_checksums(src: str, dest: str) -> int:
+    """Copy a JSONL source file, adding ``content_checksum`` to records that
+    lack it. Returns the number of records."""
+    count = 0
+    with open(src, 'r', encoding='utf-8') as fin, open(dest, 'w', encoding='utf-8') as fout:
+        for line in fin:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                fout.write(line if line.endswith('\n') else line + '\n')
+                count += 1
+                continue
+            if isinstance(rec, dict) and 'content_checksum' not in rec:
+                rec = add_checksums([rec])[0]
+            fout.write(json.dumps(rec, ensure_ascii=False) + '\n')
+            count += 1
+    return count
+
+
 class TextExtractor:
     """Class for handling text extraction from various file formats and cleanup."""
 
@@ -523,7 +546,7 @@ class TextExtractor:
             '.jsonl': 'application/x-jsonlines'
         }
 
-    async def _process_file_async(self, file_path, graphname, temp_folder):
+    async def _process_file_async(self, file_path, graphname, temp_folder, rel_name=None):
         """
         Async helper to process a single file.
         Runs in thread pool to avoid blocking on I/O operations.
@@ -533,6 +556,8 @@ class TextExtractor:
             file_path: Absolute path to the input file to be processed (e.g., "C:/data/docs/report.pdf").
             graphname: Name of the knowledge graph this file belongs to, used for metadata tagging.
             temp_folder: Absolute path to the temporary directory where output JSONL files are written.
+            rel_name: The file's path relative to the processed folder; the
+                converted file is written at the same relative path.
         """
         try:
             loop = asyncio.get_event_loop()
@@ -544,11 +569,13 @@ class TextExtractor:
                 graphname
             )
 
-            # Create one JSONL file per input file
+            # Create one JSONL file per input file, named after the full
+            # file name so that notes.md and notes.pdf do not overwrite
+            # each other.
+            out_name = converted_name(rel_name or Path(file_path).name)
             if doc_entries:
-                # Use the original filename (stem) for the JSONL file
-                file_stem = Path(file_path).stem
-                jsonl_file = os.path.join(temp_folder, f"{file_stem}.jsonl")
+                jsonl_file = os.path.join(temp_folder, *out_name.split('/'))
+                os.makedirs(os.path.dirname(jsonl_file), exist_ok=True)
                 
                 await loop.run_in_executor(
                     None,
@@ -562,7 +589,7 @@ class TextExtractor:
                 'success': True,
                 'file_path': str(file_path),
                 'num_documents': len(doc_entries),
-                'jsonl_file': f"{Path(file_path).stem}.jsonl"
+                'jsonl_file': out_name
             }
 
         except FileNotFoundError:
@@ -591,7 +618,7 @@ class TextExtractor:
         Each document is written as a separate line.
         """
         with open(jsonl_file, 'w', encoding='utf-8') as f:
-            for doc_data in doc_entries:
+            for doc_data in add_checksums(doc_entries):
                 json_line = json.dumps(doc_data, ensure_ascii=False)
                 f.write(json_line + '\n')
 
@@ -600,9 +627,9 @@ class TextExtractor:
         Async version of process_folder for parallel file processing.
         Creates one JSONL file per input file.
 
-        When *filenames* is supplied, only files whose basename appears
-        in that list are processed; everything else in the folder is
-        ignored. This lets a caller (e.g. the sample-doc schema-extraction
+        When *filenames* is supplied, only files whose path relative to
+        the folder (the file name for a file at the top) appears in that
+        list are processed; everything else in the folder is ignored. This lets a caller (e.g. the sample-doc schema-extraction
         flow) reuse a shared upload directory without re-converting
         files that belong to a previous request.
         """
@@ -620,7 +647,13 @@ class TextExtractor:
         os.makedirs(temp_folder, exist_ok=True)
         logger.info(f"Saving processed documents to: {temp_folder}")
 
-        allowed_basenames = set(filenames) if filenames is not None else None
+        allowed_names = set(filenames) if filenames is not None else None
+
+        def rel_name(path) -> str:
+            # The converted file keeps the source file's subfolder, so files
+            # with the same name in different subfolders do not overwrite
+            # each other's converted file.
+            return path.relative_to(folder_path_obj).as_posix()
 
         def safe_walk(path):
             try:
@@ -643,17 +676,18 @@ class TextExtractor:
             if file_path.is_file():
                 if file_path.name.startswith(('.', '~', '$')) or 'BROMIUM' in file_path.name.upper():
                     continue
-                if allowed_basenames is not None and file_path.name not in allowed_basenames:
+                rel = rel_name(file_path)
+                if allowed_names is not None and rel not in allowed_names:
                     continue
                 file_ext = file_path.suffix.lower()
                 if file_ext == '.jsonl':
-                    dest = os.path.join(temp_folder, file_path.name)
-                    shutil.copy2(str(file_path), dest)
-                    num_lines = sum(1 for _ in open(dest, 'r', encoding='utf-8'))
+                    dest = os.path.join(temp_folder, *rel.split('/'))
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    num_lines = _copy_jsonl_with_checksums(str(file_path), dest)
                     jsonl_files_copied.append({
                         'file_path': str(file_path),
                         'num_documents': num_lines,
-                        'jsonl_file': file_path.name,
+                        'jsonl_file': rel,
                         'status': 'success'
                     })
                     logger.info(f"Copied JSONL file directly: {file_path.name} ({num_lines} documents)")
@@ -665,7 +699,7 @@ class TextExtractor:
                     # when the user uploaded sample files via the
                     # Initialize Graph dialog and is now ingesting them.
                     cached_jsonl = os.path.join(
-                        temp_folder, f"{file_path.stem}.jsonl"
+                        temp_folder, *converted_name(rel).split('/')
                     )
                     if os.path.exists(cached_jsonl):
                         try:
@@ -677,7 +711,7 @@ class TextExtractor:
                         cached_jsonl_skipped.append({
                             'file_path': str(file_path),
                             'num_documents': num_lines,
-                            'jsonl_file': os.path.basename(cached_jsonl),
+                            'jsonl_file': converted_name(rel),
                             'status': 'success',
                             'cached': True,
                         })
@@ -686,7 +720,7 @@ class TextExtractor:
                             f"({num_lines} documents) — skipping re-conversion"
                         )
                     else:
-                        files_to_process.append(file_path)
+                        files_to_process.append((file_path, rel))
 
         logger.info(
             f"Found {len(files_to_process)} files to process, "
@@ -696,11 +730,11 @@ class TextExtractor:
 
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def process_with_semaphore(file_path):
+        async def process_with_semaphore(file_path, rel):
             async with semaphore:
-                return await self._process_file_async(file_path, graphname, temp_folder)
+                return await self._process_file_async(file_path, graphname, temp_folder, rel)
 
-        tasks = [process_with_semaphore(fp) for fp in files_to_process]
+        tasks = [process_with_semaphore(fp, rel) for fp, rel in files_to_process]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         processed_files_info = list(jsonl_files_copied) + list(cached_jsonl_skipped)
@@ -741,7 +775,7 @@ class TextExtractor:
             'temp_folder': temp_folder
         }
 
-    def process_folder(self, folder_path, graphname, temp_folder):
+    def process_folder(self, folder_path, graphname, temp_folder, filenames=None):
         """
         Process local folder with multiple file formats and extract text content.
         Uses async processing internally for parallel file handling.
@@ -751,9 +785,10 @@ class TextExtractor:
             folder_path: Path to the folder containing files to process
             graphname: Name of the graph (for context)
             temp_folder: Path to save processed documents as JSONL files (one per input file)
+            filenames: Optional base names; only these files are processed.
         """
         logger.info(f"Processing local folder: {folder_path} for graph: {graphname}")
-        return asyncio.run(self._process_folder_async(folder_path, graphname, temp_folder))
+        return asyncio.run(self._process_folder_async(folder_path, graphname, temp_folder, filenames=filenames))
 
 
 def extract_text_from_file_with_images_as_docs(file_path, graphname=None):
@@ -762,7 +797,9 @@ def extract_text_from_file_with_images_as_docs(file_path, graphname=None):
     """
     file_path = Path(file_path)
     extension = file_path.suffix.lower()
-    base_doc_id = str(file_path.stem)
+    # The document id keeps the extension, so that it shows the type of the
+    # source file and notes.md and notes.pdf get different ids.
+    base_doc_id = str(file_path.name)
 
     logger.debug(f"Extracting with images as docs: {file_path} (type: {extension})")
 

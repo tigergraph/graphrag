@@ -1,4 +1,4 @@
-import { ReactElement } from "react";
+import { useId } from "react";
 import { createPortal } from "react-dom";
 
 interface ConfirmDialogProps {
@@ -8,6 +8,7 @@ interface ConfirmDialogProps {
 }
 
 export function ConfirmDialog({ message, onConfirm, onCancel }: ConfirmDialogProps) {
+  const messageId = useId();
   const handleCancel = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
@@ -33,11 +34,14 @@ export function ConfirmDialog({ message, onConfirm, onCancel }: ConfirmDialogPro
       style={{ pointerEvents: 'auto' }}
     >
       <div 
+        role="alertdialog"
+        aria-modal="true"
+        aria-describedby={messageId}
         className="bg-white dark:bg-background p-6 rounded-xl shadow-lg w-96 text-left relative border border-gray-300 dark:border-[#3D3D3D] z-[10000]"
         onClick={(e) => e.stopPropagation()}
         style={{ pointerEvents: 'auto' }}
       >
-        <p className="mb-4 text-black dark:text-white text-left whitespace-pre-line">{message}</p>
+        <p id={messageId} className="mb-4 text-black dark:text-white text-left whitespace-pre-line">{message}</p>
         <div className="flex justify-center gap-2">
           <button
             className="px-4 py-2 bg-gray-200 dark:bg-gray-700 text-black dark:text-white rounded hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors cursor-pointer"

@@ -17,6 +17,7 @@ from common.py_schemas.schemas import (
     # SupportAIMethod,
     # SupportAIQuestion,
 )
+from common.utils import graph_docs
 from common.utils.text_extractors import (
     ExtractionError,
     TextExtractor,
@@ -64,6 +65,14 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
                 graphname, image_schema
             )
         )
+
+    # The document checksum, outdated flag and SUPERSEDED_BY edge live in
+    # their own job so graphs created before them stay compatible; the
+    # Migration Assistant adds them.
+    if re.search(r"- VERTEX Document\([^)]*\bcontent_checksum STRING", current_schema):
+        schema_res += " Document version schema already exists, skipped."
+    else:
+        schema_res += " " + conn.gsql(document_versions_schema_gsql(graphname))
 
     logger.info(f"Checking if embedding schema needs to be created")
     if "- embedding(Dimension=" in current_schema:
@@ -113,16 +122,9 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
             )
         )
 
-    logger.info(f"Checking if loading job needs to be created")
-    if "- CREATE LOADING JOB load_documents_content_json {" not in current_schema:
-        supportai_queries.extend([
-            "common/gsql/supportai/SupportAI_InitialLoadJSON.gsql",
-        ])
-
-    if "- CREATE LOADING JOB load_documents_content_json_with_images {" not in current_schema:
-        supportai_queries.extend([
-            "common/gsql/supportai/SupportAI_InitialLoadJSON_WithImages.gsql",
-        ])
+    logger.info(f"Checking if loading jobs need to be created")
+    for load_job_id in _LOADING_JOB_GSQL_FILES:
+        _ensure_loading_jobs(conn, graphname, load_job_id)
 
     logger.info(f"Creating supportai queries")
     for filename in supportai_queries:
@@ -372,6 +374,7 @@ def create_ingest(
         with open(file_path) as f:
             ingest_template = f.read()
         ingest_template = ingest_template.replace("@uuid@", str(uuid.uuid4().hex))
+        ingest_template = document_loading_job(ingest_template, graph_has_document_versions(conn))
         separator = ingest_config.get("separator", "|")
         header = ingest_config.get("header", "true")
         eol = ingest_config.get("eol", "\n")
@@ -497,19 +500,29 @@ def create_ingest(
         except Exception as e:
             raise Exception(f"Error during Amazon BDA preprocessing: {e}")
     elif ingest_config.data_source.lower() == "server":
-        data_path = ingest_config.data_source_config.get("data_path", None)
-        if data_path is None:
-            raise Exception("Data path not provided for server processing")
+        source = ingest_config.data_source_config.get("source")
+        filenames = ingest_config.data_source_config.get("filenames")
+        if source:
+            # A graph's own kept files (uploads, downloads or another source folder).
+            data_path = graph_docs.source_dir(graphname, source)
+            temp_folder = graph_docs.converted_dir(graphname, source)
+        else:
+            data_path = ingest_config.data_source_config.get("data_path", None)
+            if data_path is None:
+                raise Exception("Data path not provided for server processing")
+            temp_folder = os.path.join(os.path.dirname(data_path), "ingestion_temp", graphname)
+        if filenames is not None:
+            # Paths under the source folder, such as reports/2023/q1.pdf.
+            filenames = [graph_docs.safe_rel_path(n) for n in filenames]
         try:
-            #create temp folder
-            base_dir = os.path.dirname(data_path) 
-            temp_folder = os.path.join(base_dir, "ingestion_temp", graphname)
+            os.makedirs(temp_folder, exist_ok=True)
             # Process files and save immediately to temp folder (memory efficient)
             extractor = TextExtractor()
             server_processing_result = extractor.process_folder(
-                data_path, 
+                data_path,
                 graphname=graphname,
-                temp_folder=temp_folder  # Extractor saves files as it processes
+                temp_folder=temp_folder,  # Extractor saves files as it processes
+                filenames=filenames,
             )
             if server_processing_result.get("statusCode") != 200:
                 raise Exception(f"Server folder processing failed: {server_processing_result}")
@@ -522,6 +535,9 @@ def create_ingest(
             logger.info(f"Server folder processing completed: {server_processing_result.get('message')}")
 
             res_ingest_config["data_path"] = temp_folder
+            if filenames is not None:
+                # Ingest loads only the converted files of these files.
+                res_ingest_config["files"] = [graph_docs.converted_name(n) for n in filenames]
             res_ingest_config["file_count"] = doc_count
             res_ingest_config["data_source_id"] = "DocumentContent"
             # Use a placeholder path to indicate temp storage
@@ -562,20 +578,97 @@ _LOADING_JOB_GSQL_FILES = {
 }
 
 
-def _ensure_loading_jobs(conn: TigerGraphConnection, graphname: str, load_job_id: str) -> None:
-    """Check that the required loading job exists; recreate it if missing."""
-    current_schema = conn.gsql(f"USE GRAPH {graphname}\n ls")
-    marker = f"- CREATE LOADING JOB {load_job_id} {{"
-    if marker in current_schema:
-        return
+DOCUMENT_VERSIONS_SCHEMA_FILE = "common/gsql/supportai/SupportAI_Schema_Document_Versions.gsql"
+DOCUMENT_VERSIONS_SCHEMA_JOB = "add_document_versions"
 
+_DOC_VALUES_4 = "gsql_current_time_epoch(0), _, _)"
+_DOC_VALUES_CHECKSUM = 'gsql_current_time_epoch(0), _, _, $"content_checksum", _)'
+_DOC_VALUES_6 = "gsql_current_time_epoch(0), _, _, _, _)"
+
+
+def graph_has_document_versions(conn) -> bool:
+    """True if the graph has the Document checksum and outdated attributes
+    and the SUPERSEDED_BY edge type."""
+    schema = conn.getSchema(force=True) or {}
+    doc = next((v for v in schema.get("VertexTypes", []) if v.get("Name") == "Document"), None)
+    names = {a.get("AttributeName") for a in (doc or {}).get("Attributes", []) or []}
+    edges = {e.get("Name") for e in schema.get("EdgeTypes", []) or []}
+    return (
+        graph_docs.CHECKSUM_ATTR in names
+        and graph_docs.OUTDATED_ATTR in names
+        and graph_docs.SUPERSEDED_BY in edges
+    )
+
+
+def document_versions_schema_gsql(graphname: str) -> str:
+    """GSQL that adds the Document checksum and outdated attributes and the
+    SUPERSEDED_BY edge type. The job is dropped after it runs."""
+    with open(DOCUMENT_VERSIONS_SCHEMA_FILE, "r") as f:
+        job = f.read()
+    return (
+        f"USE GRAPH {graphname}\n{job}\n"
+        f"RUN SCHEMA_CHANGE JOB {DOCUMENT_VERSIONS_SCHEMA_JOB}\n"
+        f"DROP JOB {DOCUMENT_VERSIONS_SCHEMA_JOB}"
+    )
+
+
+def document_loading_job(text: str, has_versions: bool) -> str:
+    """Fit the Document values of a loading job to the graph's schema.
+
+    A graph without the document version attributes takes four Document
+    values. A graph with them takes six; only a job that loads converted
+    files (which carry ``content_checksum``) fills the checksum.
+    """
+    if has_versions:
+        if _DOC_VALUES_CHECKSUM in text:
+            return text
+        return text.replace(_DOC_VALUES_4, _DOC_VALUES_6, 1)
+    return text.replace(_DOC_VALUES_CHECKSUM, _DOC_VALUES_4, 1)
+
+
+def _loading_job_text(current_schema: str, load_job_id: str) -> str | None:
+    """The body of a loading job in ``ls`` output, or None if absent."""
+    marker = f"- CREATE LOADING JOB {load_job_id} {{"
+    start = current_schema.find(marker)
+    if start < 0:
+        return None
+    end = current_schema.find("}", start)
+    return current_schema[start: end if end > 0 else None]
+
+
+def _loading_job_fits(job_text: str, has_versions: bool, wants_checksum: bool) -> bool:
+    flat = re.sub(r"\s+", "", job_text)
+    if not has_versions:
+        return "content_checksum" not in flat and "_,_,_,_)" not in flat
+    if wants_checksum:
+        return '$"content_checksum"' in flat
+    return "_,_,_,_)" in flat
+
+
+def _ensure_loading_jobs(conn: TigerGraphConnection, graphname: str, load_job_id: str) -> None:
+    """Check that the required loading job exists and fits the graph's
+    Document schema; create it again if it is missing or does not fit."""
+    current_schema = conn.gsql(f"USE GRAPH {graphname}\n ls")
     gsql_file = _LOADING_JOB_GSQL_FILES.get(load_job_id)
     if not gsql_file:
+        if _loading_job_text(current_schema, load_job_id) is not None:
+            return
         raise Exception(f"Loading job '{load_job_id}' not found and no GSQL template available to recreate it")
 
-    logger.info(f"Loading job '{load_job_id}' missing — recreating from {gsql_file}")
     with open(gsql_file, "r") as f:
-        q_body = f.read()
+        template = f.read()
+    has_versions = graph_has_document_versions(conn)
+    existing = _loading_job_text(current_schema, load_job_id)
+    if existing is not None and _loading_job_fits(
+        existing, has_versions, _DOC_VALUES_CHECKSUM in template
+    ):
+        return
+    if existing is not None:
+        logger.info(f"Loading job '{load_job_id}' does not fit the Document schema — creating it again")
+        conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {load_job_id}")
+    else:
+        logger.info(f"Loading job '{load_job_id}' missing — recreating from {gsql_file}")
+    q_body = document_loading_job(template, has_versions)
     result = conn.gsql(f"USE GRAPH {graphname}\nBEGIN\n{q_body}\nEND\n")
     logger.info(f"Loading job creation result: {result}")
     if isinstance(result, str) and ("error" in result.lower() or "failed" in result.lower()):
@@ -725,8 +818,17 @@ def ingest(
                 data_path = ingest_config.get("data_path")
                 if not data_path or not os.path.exists(data_path):
                     raise Exception(f"Data path not found: {data_path}")
-                # Get all JSONL files from temp folder
-                jsonl_files = [f for f in os.listdir(data_path) if f.endswith('.jsonl')]
+                # Get all JSONL files from temp folder, subfolders included, or
+                # only the selected ones; each is named by its relative path.
+                jsonl_files = sorted(
+                    os.path.relpath(os.path.join(root, f), data_path).replace(os.sep, "/")
+                    for root, _dirs, names in os.walk(data_path)
+                    for f in names if f.endswith('.jsonl')
+                )
+                selected = ingest_config.get("files")
+                if selected is not None:
+                    wanted = set(selected)
+                    jsonl_files = [f for f in jsonl_files if f in wanted]
                 if not jsonl_files:
                     logger.error(f"No JSONL files found in: {data_path}")
                     raise Exception("No readable documents were found to ingest.")
@@ -752,7 +854,7 @@ def ingest(
                 def _load_one(jsonl_filename: str) -> dict:
                     """Run the loading job for one file; return its result dict.
                     Raises on failure so the caller can classify and retry."""
-                    jsonl_file = os.path.join(data_path, jsonl_filename)
+                    jsonl_file = os.path.join(data_path, *jsonl_filename.split("/"))
                     load_result = conn.runLoadingJobWithFile(jsonl_file, data_source_id, loader_info.load_job_id)
                     logger.info(f"Loading job raw result for {jsonl_filename}: {load_result}")
                     valid_lines = rejected_lines = doc_count = 0

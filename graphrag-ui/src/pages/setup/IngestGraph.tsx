@@ -1,14 +1,15 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Upload,
   Loader2,
-  Trash2,
   FolderUp,
   CloudDownload,
   CloudLightning,
   Database,
+  Archive,
+  Trash2,
 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -20,8 +21,11 @@ import {
 } from "@/components/ui/select";
 import { useConfirm } from "@/hooks/useConfirm";
 import { pingIdleTimer } from "@/hooks/useIdleTimeout";
-import { resolveUploadConflicts } from "@/utils/uploadConflicts";
-import { safeJson } from "@/utils/safeJson";
+import { useRoles } from "@/hooks/useRoles";
+import { resolveUploadPlan } from "@/utils/uploadConflicts";
+import StoredFilesPanel from "./StoredFilesPanel";
+import { formatBytes } from "@/utils/formatBytes";
+import { errorMessage, safeJson } from "@/utils/safeJson";
 
 interface IngestGraphProps {
   isModal?: boolean;
@@ -35,16 +39,6 @@ const MAX_UPLOAD_SIZE_MB =
     : DEFAULT_MAX_UPLOAD_SIZE_MB;
 const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
 
-const formatBytes = (bytes: number) => {
-  if (bytes === 0) return "0 Bytes";
-  const units = ["Bytes", "KB", "MB", "GB", "TB"];
-  const exponent = Math.floor(Math.log(bytes) / Math.log(1024));
-  const value = bytes / Math.pow(1024, exponent);
-  const rounded =
-    value >= 10 || exponent === 0 ? value.toFixed(0) : value.toFixed(1);
-  return `${rounded} ${units[exponent]}`;
-};
-
 const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   const [confirm, confirmDialog] = useConfirm();
   const [availableGraphs, setAvailableGraphs] = useState<string[]>([]);
@@ -55,27 +49,32 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   );
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Files the last ingest preparation could not read, per tab. They are
-  // skipped, so each success message names them rather than reading as clean.
-  type Unreadable = Array<{ file: string; error: string }>;
-  const unreadableRef = useRef<Record<"uploaded" | "downloaded", Unreadable>>({
-    uploaded: [],
-    downloaded: [],
-  });
-  const unreadableNote = (source: "uploaded" | "downloaded") => {
-    const failed = unreadableRef.current[source];
-    if (!failed.length) return "";
-    return ` ⚠️ ${failed.length} file(s) could not be read and were skipped: ${failed.map((f) => f.error).join(" ")}`;
-  };
-  const [uploadedFiles, setUploadedFiles] = useState<any[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
+  // Number of files the last upload / download added to Stored Files;
+  // ``null`` hides the "go to Stored Files" link.
+  const [uploadAdded, setUploadAdded] = useState<number | null>(null);
+  const [uploadBlockedNote, setUploadBlockedNote] = useState("");
   const [isProcessingFiles, setIsProcessingFiles] = useState(false);
   const [isIngesting, setIsIngesting] = useState(false);
   const [ingestMessage, setIngestMessage] = useState("");
-  const [ingestJobData, setIngestJobData] = useState<any>(null);
-  const [directIngestion, setDirectIngestion] = useState(false);
   const [activeTab, setActiveTab] = useState("upload");
+  // Bumped whenever stored files may have changed, so the Stored Files
+  // tab reloads its list.
+  const [storedRefreshKey, setStoredRefreshKey] = useState(0);
+
+  // Only graphs whose documents this user manages are listed.
+  const { userRoles, graphRoles, rolesLoaded } = useRoles();
+  const managesAllGraphs =
+    userRoles.includes("superuser") || userRoles.includes("globaldesigner");
+  const managedGraphs = useMemo(
+    () =>
+      managesAllGraphs
+        ? availableGraphs
+        : availableGraphs.filter((g) => (graphRoles[g] || []).includes("admin")),
+    [availableGraphs, graphRoles, managesAllGraphs]
+  );
+  const graphIsManaged = managedGraphs.includes(ingestGraphName);
 
   // S3 state
   const [awsAccessKey, setAwsAccessKey] = useState("");
@@ -99,10 +98,12 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   const [azureAccountName, setAzureAccountName] = useState("");
   const [azureAccountKey, setAzureAccountKey] = useState("");
   const [azureContainer, setAzureContainer] = useState("");
-  // Cloud download files state
-  const [downloadedFiles, setDownloadedFiles] = useState<any[]>([]);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadMessage, setDownloadMessage] = useState("");
+  const [downloadAdded, setDownloadAdded] = useState<number | null>(null);
+  const [downloadConflictNote, setDownloadConflictNote] = useState("");
+  const [uploadedFiles, setUploadedFiles] = useState<any[]>([]);
+  const [downloadedFiles, setDownloadedFiles] = useState<any[]>([]);
 
   // Fetch uploaded files
   const fetchUploadedFiles = async () => {
@@ -120,6 +121,236 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     }
   };
 
+  // Delete a specific file
+  const handleDeleteFile = async (filename: string) => {
+    if (!ingestGraphName) return;
+
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const response = await fetch(
+        `/ui/${ingestGraphName}/uploads?filename=${encodeURIComponent(filename)}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: creds! },
+        }
+      );
+      const data = await safeJson(response);
+      setUploadAdded(null);
+      setUploadMessage(`✅ ${data.message}`);
+      setStoredRefreshKey((k) => k + 1);
+    } catch (error: any) {
+      setUploadMessage(`❌ Error: ${error.message}`);
+    }
+  };
+
+  // Delete all files
+  const handleDeleteAllFiles = async () => {
+    if (!ingestGraphName) return;
+
+    const shouldDelete = await confirm(
+      "Are you sure you want to delete all uploaded files?"
+    );
+    if (!shouldDelete) return;
+
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const response = await fetch(`/ui/${ingestGraphName}/uploads`, {
+        method: "DELETE",
+        headers: { Authorization: creds! },
+      });
+      const data = await safeJson(response);
+      setUploadAdded(null);
+      setUploadMessage(`✅ ${data.message}`);
+      setStoredRefreshKey((k) => k + 1);
+    } catch (error: any) {
+      setUploadMessage(`❌ Error: ${error.message}`);
+    }
+  };
+
+  // Fetch downloaded files from cloud
+  const fetchDownloadedFiles = async () => {
+    if (!ingestGraphName) return;
+
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const response = await fetch(`/ui/${ingestGraphName}/cloud/list`, {
+        headers: { Authorization: creds! },
+      });
+      const data = await safeJson(response);
+      setDownloadedFiles(data.files || []);
+    } catch (error) {
+      console.error("Error fetching downloaded files:", error);
+    }
+  };
+
+  // Delete a specific downloaded file
+  const handleDeleteDownloadedFile = async (filename: string) => {
+    if (!ingestGraphName) return;
+
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const response = await fetch(
+        `/ui/${ingestGraphName}/cloud/delete?filename=${encodeURIComponent(
+          filename
+        )}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: creds! },
+        }
+      );
+      const data = await safeJson(response);
+      setDownloadAdded(null);
+      setDownloadMessage(`✅ ${data.message}`);
+      setStoredRefreshKey((k) => k + 1);
+    } catch (error: any) {
+      setDownloadMessage(`❌ Error: ${error.message}`);
+    }
+  };
+
+  // Delete all downloaded files
+  const handleDeleteAllDownloadedFiles = async () => {
+    if (!ingestGraphName) return;
+
+    const shouldDelete = await confirm(
+      "Are you sure you want to delete all downloaded files?"
+    );
+    if (!shouldDelete) return;
+
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const response = await fetch(`/ui/${ingestGraphName}/cloud/delete`, {
+        method: "DELETE",
+        headers: { Authorization: creds! },
+      });
+      const data = await safeJson(response);
+      setDownloadAdded(null);
+      setDownloadMessage(`✅ ${data.message}`);
+      setStoredRefreshKey((k) => k + 1);
+    } catch (error: any) {
+      setDownloadMessage(`❌ Error: ${error.message}`);
+    }
+  };
+
+  // Pre-process newly added stored files so a later ingest from the
+  // Stored Files tab is quick. The files are stored either way; a
+  // failure here only means they get prepared at ingest time.
+  const prepareStoredFiles = async (
+    source: "uploads" | "downloads",
+    filenames: string[],
+    setMessage: (m: string) => void,
+    setAdded: (n: number | null) => void
+  ) => {
+    if (!ingestGraphName || filenames.length === 0) return;
+    const n = filenames.length;
+    const added = `${n} file${n === 1 ? "" : "s"} added to Stored Files.`;
+    setMessage(`Preparing ${n} file${n === 1 ? "" : "s"}...`);
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const createResponse = await fetch(`/ui/${ingestGraphName}/create_ingest`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: creds!,
+        },
+        body: JSON.stringify({
+          data_source: "server",
+          data_source_config: { source, filenames },
+          loader_config: {},
+          file_format: "multi",
+        }),
+      });
+      const createData = await safeJson(createResponse);
+      if (!createResponse.ok) {
+        setMessage(
+          `⚠️ ${added} They could not be prepared yet: ${
+            createData.detail || createResponse.statusText
+          }`
+        );
+      } else {
+        const unreadable: Array<{ file: string; error: string }> =
+          Array.isArray(createData.failed_files) ? createData.failed_files : [];
+        setMessage(
+          unreadable.length > 0
+            ? `⚠️ ${added} ${unreadable.length} file(s) could not be read: ${unreadable
+                .map((f) => f.error)
+                .join(" ")}`
+            : `✅ ${added}`
+        );
+      }
+    } catch (error: unknown) {
+      setMessage(`⚠️ ${added} They could not be prepared yet: ${errorMessage(error)}`);
+    } finally {
+      setAdded(n);
+      setStoredRefreshKey((k) => k + 1);
+    }
+  };
+
+  // Send the files to the server: one request when they fit the size
+  // limit, otherwise one request per file. Returns the stored names.
+  const sendUploads = async (
+    files: File[],
+    queryString: string,
+    creds: string
+  ): Promise<{ uploaded: string[]; failed: string[] }> => {
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    if (totalSize <= MAX_UPLOAD_SIZE_BYTES || files.length === 1) {
+      setUploadMessage("Uploading files...");
+      const formData = new FormData();
+      files.forEach((file) => formData.append("files", file));
+      const response = await fetch(
+        `/ui/${ingestGraphName}/uploads${queryString}`,
+        {
+          method: "POST",
+          headers: { Authorization: creds },
+          body: formData,
+        }
+      );
+      const data = await safeJson(response);
+      if (!response.ok) {
+        throw new Error(data.detail || `Upload failed: ${response.statusText}`);
+      }
+      if (data.status !== "success") {
+        throw new Error(data.message || "Upload failed.");
+      }
+      return { uploaded: files.map((f) => f.name), failed: [] };
+    }
+
+    // Total size exceeds the limit: upload one file at a time.
+    const uploaded: string[] = [];
+    const failed: string[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      setUploadMessage(
+        `Uploading file ${i + 1}/${files.length}: ${file.name} (${formatBytes(
+          file.size
+        )})...`
+      );
+      const formData = new FormData();
+      formData.append("files", file);
+      try {
+        const response = await fetch(
+          `/ui/${ingestGraphName}/uploads${queryString}`,
+          {
+            method: "POST",
+            headers: { Authorization: creds },
+            body: formData,
+          }
+        );
+        const data = await safeJson(response);
+        if (!response.ok) {
+          failed.push(`${file.name} (${data.detail || `HTTP ${response.status}`})`);
+        } else if (data.status === "success") {
+          uploaded.push(file.name);
+        } else {
+          failed.push(`${file.name} (${data.message || "unexpected response"})`);
+        }
+      } catch (err: unknown) {
+        failed.push(`${file.name} (${errorMessage(err) || "unknown error"})`);
+      }
+    }
+    return { uploaded, failed };
+  };
+
   // Upload files
   const handleUploadFiles = async () => {
     if (!selectedFiles || selectedFiles.length === 0) {
@@ -128,7 +359,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     }
 
     if (!ingestGraphName) {
-      setUploadMessage("Please enter a graph name");
+      setUploadMessage("Please select a graph");
       return;
     }
 
@@ -153,238 +384,81 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       return;
     }
 
-    const totalSize = filesArray.reduce((sum, file) => sum + file.size, 0);
-
-    // If total size exceeds limit and we have multiple files, upload one by one
-    if (totalSize > MAX_UPLOAD_SIZE_BYTES && filesArray.length > 1) {
-      await handleBatchUpload(filesArray);
-      return;
-    }
-
-    // Single file or files within limit - upload normally
     setIsUploading(true);
-    setUploadMessage("Uploading files...");
-    setIngestMessage("");
+    setUploadMessage("Checking files...");
+    setUploadAdded(null);
+    setUploadBlockedNote("");
 
     try {
-      const creds = sessionStorage.getItem("auth");
-      const queryString = await resolveUploadConflicts(
+      const creds = sessionStorage.getItem("auth")!;
+      // Pre-flight the whole set once so the user sees a single prompt.
+      const plan = await resolveUploadPlan(
         ingestGraphName,
         filesArray.map((f) => f.name),
-        creds!,
+        creds,
         confirm
       );
-      if (queryString === null) {
+      if (plan === null) {
         setUploadMessage("Upload cancelled.");
-        setIsUploading(false);
         return;
       }
-      const formData = new FormData();
-      filesArray.forEach((file) => formData.append("files", file));
 
-      const response = await fetch(
-        `/ui/${ingestGraphName}/uploads${queryString}`,
-        {
-          method: "POST",
-          headers: { Authorization: creds! },
-          body: formData,
-        }
-      );
-
-      if (!response.ok) {
-        const errorData = await safeJson(response);
-        throw new Error(errorData.detail || `Upload failed: ${response.statusText}`);
+      const blocked = Object.entries(plan.blocked);
+      if (blocked.length > 0) {
+        const list = blocked
+          .map(
+            ([name, others]) =>
+              `  •  ${name}: same name as ${others.join(", ")}`
+          )
+          .join("\n");
+        setUploadBlockedNote(
+          `${blocked.length} file${blocked.length === 1 ? " was" : "s were"} not uploaded because a stored file has the same name when letter case is ignored:\n${list}\n` +
+            "Rename these files, or delete the stored files first."
+        );
       }
-
-      const data = await safeJson(response);
-      if (data.status === "success") {
-        const uploadedCount = selectedFiles?.length || 0;
-        setUploadMessage("✅ Successfully uploaded the files. Processing...");
-        setSelectedFiles(null);
-        if (fileInputRef.current) fileInputRef.current.value = "";
-        await fetchUploadedFiles();
-        setIsUploading(false);
-
-        console.log("Calling handleCreateIngestAfterUpload from main upload...");
-        recentProcessClickRef.current = Date.now();
-        setIsProcessingFiles(true);
-        handleCreateIngestAfterUpload("uploaded", uploadedCount).catch((err) => {
-          console.error("Error in background processing:", err);
-          setUploadMessage(`❌ Processing error: ${err.message}`);
-        }).finally(() => setIsProcessingFiles(false));
-      } else {
-        setUploadMessage(`⚠️ ${data.message}`);
-        setIsUploading(false);
-      }
-    } catch (error: any) {
-      console.error("Upload error:", error);
-      const isLockConflict = error.message?.includes("currently being processed");
-      setUploadMessage(isLockConflict ? `⚠️ ${error.message}` : `❌ Error: ${error.message}`);
-      setIsUploading(false);
-    }
-  };
-
-  // Handle batch upload when total size exceeds limit - upload one file at a time
-  const handleBatchUpload = async (filesArray: File[]) => {
-    setIsUploading(true);
-    setUploadMessage("Total size exceeds limit. Uploading files one by one...");
-    setIngestMessage("");
-
-    try {
-      const creds = sessionStorage.getItem("auth");
-      // Pre-flight the whole batch once so the user only sees a single
-      // conflict prompt covering every collision in the upload set.
-      const queryString = await resolveUploadConflicts(
-        ingestGraphName,
-        filesArray.map((f) => f.name),
-        creds!,
-        confirm
-      );
-      if (queryString === null) {
-        setUploadMessage("Upload cancelled.");
-        setIsUploading(false);
+      const toUpload = filesArray.filter((f) => !(f.name in plan.blocked));
+      if (toUpload.length === 0) {
+        setUploadMessage("");
         return;
       }
-      let uploadedCount = 0;
-      const failedFiles: string[] = [];
-      const totalFiles = filesArray.length;
 
-      // Upload files one at a time to avoid 413 errors
-      for (let i = 0; i < filesArray.length; i++) {
-        const file = filesArray[i];
-        const fileNumber = i + 1;
-
-        setUploadMessage(
-          `Uploading file ${fileNumber}/${totalFiles}: ${file.name} (${formatBytes(
-            file.size
-          )})...`
-        );
-
-        const formData = new FormData();
-        formData.append("files", file);
-
-        try {
-          const response = await fetch(
-            `/ui/${ingestGraphName}/uploads${queryString}`,
-            {
-              method: "POST",
-              headers: { Authorization: creds! },
-              body: formData,
-            }
-          );
-
-          if (!response.ok) {
-            const errData = await safeJson(response);
-            const reason = errData.detail || `HTTP ${response.status}`;
-            console.error(`File "${file.name}" failed: ${reason}`);
-            failedFiles.push(`${file.name} (${reason})`);
-            continue;
-          }
-
-          const data = await safeJson(response);
-          if (data.status === "success") {
-            uploadedCount++;
-          } else {
-            const reason = data.message || "unexpected response";
-            console.error(`File "${file.name}" failed:`, data);
-            failedFiles.push(`${file.name} (${reason})`);
-          }
-        } catch (err: any) {
-          console.error(`File "${file.name}" error:`, err);
-          failedFiles.push(`${file.name} (${err.message || "unknown error"})`);
-        }
-      }
-
-      // Show final result
-      if (failedFiles.length === 0) {
-        setUploadMessage(`✅ Successfully uploaded all ${uploadedCount} files. Processing...`);
-      } else {
-        const failedList = failedFiles.join(", ");
-        setUploadMessage(
-          `⚠️ Uploaded ${uploadedCount}/${totalFiles} files. Failed: ${failedList}`
-        );
-      }
-
+      const { uploaded, failed } = await sendUploads(
+        toUpload,
+        plan.query,
+        creds
+      );
       setSelectedFiles(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
-      await fetchUploadedFiles();
 
-      console.log("Calling handleCreateIngestAfterUpload...");
+      if (uploaded.length === 0) {
+        setUploadMessage(`❌ No files were uploaded. Failed: ${failed.join(", ")}`);
+        return;
+      }
+      setIsUploading(false);
       recentProcessClickRef.current = Date.now();
       setIsProcessingFiles(true);
       try {
-        await handleCreateIngestAfterUpload("uploaded", uploadedCount);
-        console.log("handleCreateIngestAfterUpload completed");
+        await prepareStoredFiles(
+          "uploads",
+          uploaded,
+          (m) =>
+            setUploadMessage(
+              failed.length > 0
+                ? `${m}\n⚠️ Failed to upload: ${failed.join(", ")}`
+                : m
+            ),
+          setUploadAdded
+        );
       } finally {
         setIsProcessingFiles(false);
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Upload error:", error);
-      setUploadMessage(`❌ Batch upload error: ${error.message}`);
+      const msg = errorMessage(error);
+      const isLockConflict = msg.includes("currently being processed");
+      setUploadMessage(isLockConflict ? `⚠️ ${msg}` : `❌ Error: ${msg}`);
     } finally {
       setIsUploading(false);
-    }
-  };
-
-  // Delete a specific file
-  const handleDeleteFile = async (filename: string) => {
-    if (!ingestGraphName) return;
-
-    try {
-      const creds = sessionStorage.getItem("auth");
-      const response = await fetch(
-        `/ui/${ingestGraphName}/uploads?filename=${encodeURIComponent(filename)}`,
-        {
-          method: "DELETE",
-          headers: { Authorization: creds! },
-        }
-      );
-      const data = await safeJson(response);
-      unreadableRef.current.uploaded = unreadableRef.current.uploaded.filter((f) => f.file !== filename);
-      setUploadMessage(`✅ ${data.message}`);
-      await fetchUploadedFiles();
-    } catch (error: any) {
-      setUploadMessage(`❌ Error: ${error.message}`);
-    }
-  };
-
-  // Delete all files
-  const handleDeleteAllFiles = async () => {
-    if (!ingestGraphName) return;
-
-    const shouldDelete = await confirm(
-      "Are you sure you want to delete all uploaded files?"
-    );
-    if (!shouldDelete) return;
-
-    try {
-      const creds = sessionStorage.getItem("auth");
-      const response = await fetch(`/ui/${ingestGraphName}/uploads`, {
-        method: "DELETE",
-        headers: { Authorization: creds! },
-      });
-      const data = await safeJson(response);
-      unreadableRef.current.uploaded = [];
-      setUploadMessage(`✅ ${data.message}`);
-      await fetchUploadedFiles();
-    } catch (error: any) {
-      setUploadMessage(`❌ Error: ${error.message}`);
-    }
-  };
-
-  // Fetch downloaded files from cloud
-  const fetchDownloadedFiles = async () => {
-    if (!ingestGraphName) return;
-
-    try {
-      const creds = sessionStorage.getItem("auth");
-      const response = await fetch(`/ui/${ingestGraphName}/cloud/list`, {
-        headers: { Authorization: creds! },
-      });
-      const data = await safeJson(response);
-      setDownloadedFiles(data.files || []);
-    } catch (error) {
-      console.error("Error fetching downloaded files:", error);
     }
   };
 
@@ -396,6 +470,8 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     }
 
     setIsDownloading(true);
+    setDownloadAdded(null);
+    setDownloadConflictNote("");
     setDownloadMessage("Downloading files from cloud storage...");
 
     try {
@@ -461,331 +537,44 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       }
       const data = await safeJson(response);
       if (data.status === "success") {
-        const downloadCount = data.downloaded_files?.length || downloadedFiles.length;
-        setDownloadMessage("✅ Successfully downloaded the files. Processing...");
-        await fetchDownloadedFiles();
+        const names: string[] = Array.isArray(data.downloaded_files)
+          ? data.downloaded_files
+          : [];
+        const conflicts = Object.entries(
+          (data.conflicts || {}) as Record<string, string[]>
+        );
+        if (conflicts.length > 0) {
+          const list = conflicts
+            .map(([name, others]) => `  •  ${name}: same name as ${others.join(", ")}`)
+            .join("\n");
+          setDownloadConflictNote(
+            `${conflicts.length} downloaded file${conflicts.length === 1 ? " has" : "s have"} the same name as a stored file when letter case is ignored:\n${list}\n` +
+              "Rename or delete one of each pair in Stored Files before you ingest them."
+          );
+        }
         setIsDownloading(false);
         recentProcessClickRef.current = Date.now();
         setIsProcessingFiles(true);
-        handleCreateIngestAfterUpload("downloaded", downloadCount).catch((err) => {
-          console.error("Error in background processing:", err);
-          setDownloadMessage(`❌ Processing error: ${err.message}`);
-        }).finally(() => setIsProcessingFiles(false));
+        try {
+          await prepareStoredFiles(
+            "downloads",
+            names,
+            setDownloadMessage,
+            setDownloadAdded
+          );
+        } finally {
+          setIsProcessingFiles(false);
+        }
       } else if (data.status === "warning") {
         setDownloadMessage(`⚠️ ${data.message}`);
-        setIsDownloading(false);
       } else {
         setDownloadMessage(`❌ ${data.message || "Download failed"}`);
-        setIsDownloading(false);
       }
     } catch (error: any) {
       const isLockConflict = error.message?.includes("currently being processed");
       setDownloadMessage(isLockConflict ? `⚠️ ${error.message}` : `❌ Error: ${error.message}`);
     } finally {
       setIsDownloading(false);
-    }
-  };
-
-  // Delete a specific downloaded file
-  const handleDeleteDownloadedFile = async (filename: string) => {
-    if (!ingestGraphName) return;
-
-    try {
-      const creds = sessionStorage.getItem("auth");
-      const response = await fetch(
-        `/ui/${ingestGraphName}/cloud/delete?filename=${encodeURIComponent(
-          filename
-        )}`,
-        {
-          method: "DELETE",
-          headers: { Authorization: creds! },
-        }
-      );
-      const data = await safeJson(response);
-      unreadableRef.current.downloaded = unreadableRef.current.downloaded.filter((f) => f.file !== filename);
-      setDownloadMessage(`✅ ${data.message}`);
-      await fetchDownloadedFiles();
-    } catch (error: any) {
-      setDownloadMessage(`❌ Error: ${error.message}`);
-    }
-  };
-
-  // Delete all downloaded files
-  const handleDeleteAllDownloadedFiles = async () => {
-    if (!ingestGraphName) return;
-
-    const shouldDelete = await confirm(
-      "Are you sure you want to delete all downloaded files?"
-    );
-    if (!shouldDelete) return;
-
-    try {
-      const creds = sessionStorage.getItem("auth");
-      const response = await fetch(`/ui/${ingestGraphName}/cloud/delete`, {
-        method: "DELETE",
-        headers: { Authorization: creds! },
-      });
-      const data = await safeJson(response);
-      unreadableRef.current.downloaded = [];
-      setDownloadMessage(`✅ ${data.message}`);
-      await fetchDownloadedFiles();
-    } catch (error: any) {
-      setDownloadMessage(`❌ Error: ${error.message}`);
-    }
-  };
-
-  const handleRunIngest = async (sourceType: "uploaded" | "downloaded" = "uploaded") => {
-    if (!ingestGraphName) {
-      setIngestMessage("❌ Please select a graph");
-      return;
-    }
-    recentIngestClickRef.current = Date.now();
-    setIsIngesting(true);
-    setIngestMessage("Ingesting documents into knowledge graph...");
-    try {
-      const creds = sessionStorage.getItem("auth");
-      const folderPath = sourceType === "uploaded" ? `uploads/${ingestGraphName}` : `downloaded_files_cloud/${ingestGraphName}`;
-
-      // If no cached job from a prior create_ingest, run it now. The
-      // backend's /ingest endpoint expects the data_source_id dict
-      // shape that create_ingest emits (with the resolved JSONL temp
-      // folder at top-level ``data_path``); building a fallback in
-      // the UI loses that contract.
-      let jobData = ingestJobData;
-      if (!jobData) {
-        setIngestMessage("Step 1/2: Preparing ingest job...");
-        const createResp = await fetch(
-          `/ui/${ingestGraphName}/create_ingest`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: creds!,
-            },
-            body: JSON.stringify({
-              data_source: "server",
-              data_source_config: { data_path: folderPath },
-              loader_config: {},
-              file_format: "multi",
-            }),
-          }
-        );
-        if (!createResp.ok) {
-          const err = await safeJson(createResp);
-          throw new Error(
-            err.detail || `Failed to create ingest job: ${createResp.statusText}`
-          );
-        }
-        const createData = await safeJson(createResp);
-        unreadableRef.current[sourceType] = createData.failed_files || [];
-        jobData = {
-          load_job_id: createData.load_job_id,
-          data_source_id: createData.data_source_id,
-          data_path: createData.data_path || folderPath,
-        };
-        setIngestJobData(jobData);
-        setIngestMessage("Step 2/2: Loading documents into knowledge graph...");
-      }
-
-      const ingestResponse = await fetch(`/ui/${ingestGraphName}/ingest`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: creds!,
-        },
-        body: JSON.stringify({
-          load_job_id: jobData.load_job_id,
-          data_source_id: jobData.data_source_id,
-          file_path: jobData.data_path,
-        }),
-      });
-
-      if (!ingestResponse.ok) {
-        const errorData = await safeJson(ingestResponse);
-        throw new Error(errorData.detail || `Failed to ingest: ${ingestResponse.statusText}`);
-      }
-
-      const ingestData = await safeJson(ingestResponse);
-      console.log("Ingest response:", ingestData);
-
-      setIngestMessage(`✅ Ingestion completed successfully!${unreadableNote(sourceType)}`);
-      setUploadMessage("");
-    } catch (error: any) {
-      console.error("Error during ingestion:", error);
-      const isRebuildConflict = error.message?.includes("currently being rebuilt");
-      setIngestMessage(isRebuildConflict ? `⚠️ ${error.message}` : `❌ Error: ${error.message}`);
-    } finally {
-      setIsIngesting(false);
-    }
-  };
-
-  // Ingest files into knowledge graph (uploaded or downloaded)
-  const handleIngestDocuments = async (sourceType: "uploaded" | "downloaded" = "uploaded") => {
-    if (!ingestGraphName) {
-      setIngestMessage("Please select a graph");
-      return;
-    }
-
-    const folderPath = sourceType === "uploaded" ? `uploads/${ingestGraphName}` : `downloaded_files_cloud/${ingestGraphName}`;
-    const fileCount = sourceType === "uploaded" ? uploadedFiles.length : downloadedFiles.length;
-
-    recentIngestClickRef.current = Date.now();
-    setIsIngesting(true);
-    setIngestMessage("Step 1/2: Creating ingest job...");
-
-    try {
-      const creds = sessionStorage.getItem("auth");
-
-      const createIngestConfig = {
-        data_source: "server",
-        data_source_config: { data_path: folderPath },
-        loader_config: {},
-        file_format: "multi",
-      };
-
-      const createResponse = await fetch(`/ui/${ingestGraphName}/create_ingest`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: creds!,
-        },
-        body: JSON.stringify(createIngestConfig),
-      });
-
-      if (!createResponse.ok) {
-        const errorData = await safeJson(createResponse);
-        throw new Error(errorData.detail || `Failed to create ingest job: ${createResponse.statusText}`);
-      }
-
-      const createData = await safeJson(createResponse);
-      console.log("Create ingest response:", createData);
-      unreadableRef.current[sourceType] = createData.failed_files || [];
-      const readyCount = createData.ready_files ?? fileCount;
-
-      // Store ingest job data for later use
-      setIngestJobData({
-        load_job_id: createData.load_job_id,
-        data_source_id: createData.data_source_id,
-        data_path: folderPath,
-      });
-
-      if (!directIngestion) {
-        setIngestMessage(`✅ ${readyCount} file(s) ready for ingestion.${unreadableNote(sourceType)}`);
-        setIsIngesting(false);
-      } else {
-        setIngestMessage("Step 2/2: Running document ingest...");
-        const loadingInfo = {
-          load_job_id: createData.load_job_id,
-          data_source_id: createData.data_source_id,
-          file_path: createData.data_path || createData.file_path,
-        };
-
-        const ingestResponse = await fetch(`/ui/${ingestGraphName}/ingest`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: creds!,
-          },
-          body: JSON.stringify(loadingInfo),
-        });
-
-        if (!ingestResponse.ok) {
-          const errorData = await safeJson(ingestResponse);
-          throw new Error(errorData.detail || `Failed to run ingest: ${ingestResponse.statusText}`);
-        }
-
-        const ingestData = await safeJson(ingestResponse);
-        console.log("Ingest response:", ingestData);
-
-        setIngestMessage(`✅ Data ingested successfully! Processed documents from ${folderPath}/${unreadableNote(sourceType)}`);
-        setIsIngesting(false);
-      }
-    } catch (error: any) {
-      console.error("Error ingesting data:", error);
-      const isRebuildConflict = error.message?.includes("currently being rebuilt");
-      setIngestMessage(isRebuildConflict ? `⚠️ ${error.message}` : `❌ Error: ${error.message}`);
-      setIsIngesting(false);
-    }
-  };
-
-  // Called automatically after upload or cloud download finishes
-  const handleCreateIngestAfterUpload = async (sourceType: "uploaded" | "downloaded" = "uploaded", fileCountParam?: number) => {
-    console.log("handleCreateIngestAfterUpload called with sourceType:", sourceType);
-    console.log("ingestGraphName:", ingestGraphName);
-
-    if (!ingestGraphName) {
-      console.log("No graph name, returning early");
-      return;
-    }
-
-    const folderPath = sourceType === "uploaded" ? `uploads/${ingestGraphName}` : `downloaded_files_cloud/${ingestGraphName}`;
-    const fileCount = fileCountParam || (sourceType === "uploaded" ? uploadedFiles.length : downloadedFiles.length);
-    console.log("folderPath:", folderPath);
-    console.log("fileCount:", fileCount);
-
-    try {
-      const creds = sessionStorage.getItem("auth");
-
-      const createIngestConfig = {
-        data_source: "server",
-        data_source_config: { data_path: folderPath },
-        loader_config: {},
-        file_format: "multi",
-      };
-
-      console.log("Calling create_ingest with config:", createIngestConfig);
-
-      const createResponse = await fetch(`/ui/${ingestGraphName}/create_ingest`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: creds!,
-        },
-        body: JSON.stringify(createIngestConfig),
-      });
-
-      console.log("create_ingest response status:", createResponse.status);
-
-      if (!createResponse.ok) {
-        const errorData = await safeJson(createResponse);
-        console.error("create_ingest error:", errorData);
-        throw new Error(errorData.detail || `Failed to create ingest job: ${createResponse.statusText}`);
-      }
-
-      const createData = await safeJson(createResponse);
-      console.log("create_ingest response data:", createData);
-      unreadableRef.current[sourceType] = createData.failed_files || [];
-      const readyCount = createData.ready_files ?? fileCount;
-
-      setIngestJobData({
-        load_job_id: createData.load_job_id,
-        data_source_id: createData.data_source_id,
-        data_path: folderPath,
-      });
-
-      console.log("Direct ingestion enabled:", directIngestion);
-
-      if (directIngestion) {
-        if (sourceType === "uploaded") {
-          setUploadMessage("Running direct ingestion...");
-        } else {
-          setDownloadMessage("Running direct ingestion...");
-        }
-        await handleRunIngest(sourceType);
-      } else {
-        if (sourceType === "uploaded") {
-          setUploadMessage(`✅ ${readyCount} file(s) ready for ingestion.${unreadableNote(sourceType)}`);
-        } else {
-          setDownloadMessage(`✅ ${readyCount} file(s) ready for ingestion.${unreadableNote(sourceType)}`);
-        }
-      }
-    } catch (error: any) {
-      console.error("Error in create_ingest:", error);
-      if (sourceType === "uploaded") {
-        setUploadMessage(`❌ Processing error: ${error.message}`);
-      } else {
-        setDownloadMessage(`❌ Processing error: ${error.message}`);
-      }
     }
   };
 
@@ -972,9 +761,6 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     const store = JSON.parse(sessionStorage.getItem("site") || "{}");
     if (store.graphs && Array.isArray(store.graphs)) {
       setAvailableGraphs(store.graphs);
-      if (store.graphs.length > 0 && !ingestGraphName) {
-        setIngestGraphName(store.graphs[0]);
-      }
     }
     const creds = sessionStorage.getItem("auth");
     if (!creds) return;
@@ -989,9 +775,6 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         const cached = JSON.parse(sessionStorage.getItem("site") || "{}");
         cached.graphs = graphs;
         sessionStorage.setItem("site", JSON.stringify(cached));
-        if (graphs.length > 0 && !ingestGraphName) {
-          setIngestGraphName(graphs[0]);
-        }
       })
       .catch(() => {
         /* keep cached value; not fatal */
@@ -1010,17 +793,26 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     return () => window.removeEventListener("graphrag:selectedGraph", handler);
   }, [ingestGraphName]);
 
-  // Load files when graph name changes
+  // Load files when the graph changes or stored files may have changed
   useEffect(() => {
     if (ingestGraphName) {
       fetchUploadedFiles();
       fetchDownloadedFiles();
     }
-  }, [ingestGraphName]);
+  }, [ingestGraphName, storedRefreshKey, activeTab]);
+
+  // Keep the picked graph within the graphs this user manages; fall
+  // back to the first one (or none) once roles and graphs are known.
+  useEffect(() => {
+    if (!rolesLoaded || availableGraphs.length === 0) return;
+    if (!managedGraphs.includes(ingestGraphName)) {
+      setIngestGraphName(managedGraphs[0] || "");
+    }
+  }, [rolesLoaded, availableGraphs, managedGraphs, ingestGraphName]);
 
   // Sync upload / ingest in-flight state from the server. The Radix
   // Dialog unmounts this component when closed, so all local state
-  // (isUploading / isProcessingFiles / isIngesting / uploadedFiles)
+  // (isUploading / isProcessingFiles / isIngesting)
   // is lost across open/close cycles. On mount, ask the backend which
   // operation — if any — currently holds the graph lock, and adopt
   // that. While an operation is in flight, poll every 5s and clear
@@ -1074,8 +866,8 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             (processClickFresh && !serverEverSawProcess)
         );
         if (lastServerOpRef.current && !op) {
-          // Server-side work just finished — refresh the file list.
-          fetchUploadedFiles();
+          // Server-side work just finished — refresh the stored files.
+          setStoredRefreshKey((k) => k + 1);
         }
         lastServerOpRef.current = op;
       } catch {
@@ -1091,6 +883,38 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     };
   }, [ingestGraphName]);
 
+  // Status box for the Upload and Download from Cloud tabs, with a link
+  // to the Stored Files tab once files were added.
+  const renderAddStatus = (message: string, added: number | null) => {
+    if (!message) return null;
+    const tone = message.includes("❌")
+      ? "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
+      : message.includes("⚠️")
+      ? "bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300"
+      : message.includes("✅")
+      ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
+      : "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300";
+    return (
+      <div className={`p-3 rounded-lg text-sm whitespace-pre-line ${tone}`}>
+        {message}
+        {added !== null && added > 0 && (
+          <div className="mt-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setActiveTab("stored")}
+              className="h-7 text-xs dark:border-[#3D3D3D]"
+            >
+              <Archive className="h-3 w-3 mr-1" />
+              Go to Stored Files
+            </Button>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className={isModal ? "" : "p-8"}>
       <div className={isModal ? "" : "max-w-5xl mx-auto"}>
@@ -1101,7 +925,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                 Ingest to Knowledge Graph
               </h1>
               <p className="text-sm text-gray-600 dark:text-[#D9D9D9]">
-                Upload and ingest documents into your knowledge graph for future content processing
+                Add documents and ingest them into your knowledge graph for future content processing
               </p>
             </div>
           </>
@@ -1129,8 +953,8 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                 <SelectValue placeholder="Select a graph" />
               </SelectTrigger>
               <SelectContent>
-                {availableGraphs.length > 0 ? (
-                  availableGraphs.map((graph) => (
+                {managedGraphs.length > 0 ? (
+                  managedGraphs.map((graph) => (
                     <SelectItem key={graph} value={graph}>
                       {graph}
                     </SelectItem>
@@ -1154,10 +978,10 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             }}
             className="w-full"
           >
-            <TabsList className="grid w-full grid-cols-3">
+            <TabsList className="grid w-full grid-cols-4">
               <TabsTrigger value="upload" disabled={isIngesting}>
                 <FolderUp className="h-4 w-4 mr-2" />
-                Upload Files
+                Upload
               </TabsTrigger>
               <TabsTrigger value="cloudDownload" disabled={isIngesting}>
                 <CloudDownload className="h-4 w-4 mr-2" />
@@ -1165,7 +989,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
               </TabsTrigger>
               <TabsTrigger value="AmazonBDA" disabled={isIngesting}>
                 <CloudLightning className="h-4 w-4 mr-2" />
-                Use Amazon BDA
+                Amazon BDA
+              </TabsTrigger>
+              <TabsTrigger value="stored" disabled={isIngesting}>
+                <Archive className="h-4 w-4 mr-2" />
+                Stored Files
               </TabsTrigger>
             </TabsList>
 
@@ -1173,8 +1001,8 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             <TabsContent value="upload" className="space-y-4">
               <div className="space-y-4">
                 <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-3">
-                  Upload local files to the server and ingest them into your knowledge
-                  graph.
+                  Upload local files to Stored Files. Ingest them from the Stored
+                  Files tab.
                 </p>
                 <div>
                   <label className="block text-sm font-medium mb-2 text-black dark:text-white">
@@ -1268,11 +1096,13 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                   )}
                 </div>
 
-                {uploadMessage && (
-                  <div className="p-3 rounded-lg text-sm bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300">
-                    {uploadMessage}
+                {uploadBlockedNote && (
+                  <div className="p-3 rounded-lg text-sm whitespace-pre-line bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300">
+                    ⚠️ {uploadBlockedNote}
                   </div>
                 )}
+
+                {renderAddStatus(uploadMessage, uploadAdded)}
 
                 {/* Uploaded Files List */}
                 {uploadedFiles.length > 0 && (
@@ -1306,51 +1136,6 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     </div>
                   </div>
                 )}
-
-                {/* Ingest Data Section */}
-                {uploadedFiles.length > 0 && (
-                  <div className="border-t border-gray-300 dark:border-[#3D3D3D] pt-4 mt-4">
-                    <h3 className="text-sm font-medium mb-2 text-black dark:text-white">
-                      Ingest Documents into Knowledge Graph
-                    </h3>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
-                      Process uploaded files and add them to the knowledge graph
-                    </p>
-                    <Button
-                      onClick={() => handleRunIngest("uploaded")}
-                      disabled={isIngesting || isProcessingFiles}
-                      className="gradient text-white w-full"
-                    >
-                      {isIngesting ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Ingesting...
-                        </>
-                      ) : isProcessingFiles ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Processing files...
-                        </>
-                      ) : (
-                        <>
-                          <Database className="h-4 w-4 mr-2" />
-                          Ingest Documents into {ingestGraphName}
-                        </>
-                      )}
-                    </Button>
-                    {ingestMessage && (
-                      <div className={`p-3 rounded-lg text-sm mt-3 ${
-                        ingestMessage.includes("✅")
-                          ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
-                          : ingestMessage.includes("❌")
-                          ? "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
-                          : "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
-                      }`}>
-                        {ingestMessage}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             </TabsContent>
 
@@ -1358,8 +1143,8 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             <TabsContent value="cloudDownload" className="space-y-4">
               <div className="space-y-4">
                 <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-3">
-                  Download files from cloud storage and ingest them into your knowledge
-                  graph.
+                  Download files from cloud storage to Stored Files. Ingest them from
+                  the Stored Files tab.
                 </p>
                 <div>
                   <label className="block text-sm font-medium mb-2 text-black dark:text-white">
@@ -1555,16 +1340,10 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     </div>
                   </>
                 )}
-                {ingestGraphName && (
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
-                    Download destination: downloaded_files_cloud/{ingestGraphName}/
-                  </p>
-                )}
-
                 <div className="pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
                   <Button
                     onClick={handleCloudDownload}
-                    disabled={isDownloading}
+                    disabled={isDownloading || isProcessingFiles}
                     className="gradient text-white w-full"
                   >
                     {isDownloading ? (
@@ -1586,17 +1365,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                   </Button>
                 </div>
 
-                {downloadMessage && (
-                  <div
-                    className={`p-3 rounded-lg text-sm mt-3 ${
-                      downloadMessage.includes("✅")
-                        ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
-                        : downloadMessage.includes("❌")
-                        ? "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
-                        : "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
-                    }`}
-                  >
-                    {downloadMessage}
+                {renderAddStatus(downloadMessage, downloadAdded)}
+
+                {downloadConflictNote && (
+                  <div className="p-3 rounded-lg text-sm whitespace-pre-line bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-300">
+                    ⚠️ {downloadConflictNote}
                   </div>
                 )}
 
@@ -1640,40 +1413,6 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         </li>
                       ))}
                     </ul>
-                  </div>
-                )}
-
-                {/* Ingest Downloaded Data Section */}
-                {downloadedFiles.length > 0 && (
-                  <div className="border-t border-gray-300 dark:border-[#3D3D3D] pt-4 mt-4">
-                    <h3 className="text-sm font-medium mb-2 text-black dark:text-white">
-                      Ingest Documents into Knowledge Graph
-                    </h3>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
-                      Process downloaded files and add them to the knowledge graph
-                    </p>
-                    <Button
-                      onClick={() => handleRunIngest("downloaded")}
-                      disabled={isIngesting || isProcessingFiles}
-                      className="gradient text-white w-full"
-                    >
-                      {isIngesting ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Ingesting...
-                        </>
-                      ) : isProcessingFiles ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Processing files...
-                        </>
-                      ) : (
-                        <>
-                          <Database className="h-4 w-4 mr-2" />
-                          Ingest Documents into {ingestGraphName}
-                        </>
-                      )}
-                    </Button>
                   </div>
                 )}
               </div>
@@ -1812,6 +1551,25 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                   )}
                 </div>
               </div>
+            </TabsContent>
+
+            {/* Stored Files Tab */}
+            <TabsContent value="stored" className="space-y-4">
+              <StoredFilesPanel
+                graph={graphIsManaged ? ingestGraphName : ""}
+                active={activeTab === "stored"}
+                refreshKey={storedRefreshKey}
+                busy={isUploading || isProcessingFiles || isDownloading || isIngesting}
+                confirm={confirm}
+                onIngestStart={() => {
+                  recentIngestClickRef.current = Date.now();
+                  setIsIngesting(true);
+                }}
+                onIngestEnd={() => {
+                  recentIngestClickRef.current = 0;
+                  setIsIngesting(false);
+                }}
+              />
             </TabsContent>
           </Tabs>
         </div>

@@ -2,7 +2,7 @@ CREATE LOADING JOB load_documents_content_json_with_images {
     DEFINE FILENAME DocumentContent;
     
     // Load Documents (only entries with content field, not image storage entries)
-    LOAD DocumentContent TO VERTEX Document VALUES(gsql_lower($"doc_id"), gsql_current_time_epoch(0), _, _) 
+    LOAD DocumentContent TO VERTEX Document VALUES(gsql_lower($"doc_id"), gsql_current_time_epoch(0), _, _, $"content_checksum", _) 
         WHERE $"content" != ""
         USING JSON_FILE="true";
     
