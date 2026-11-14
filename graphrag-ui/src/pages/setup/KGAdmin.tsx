@@ -89,10 +89,13 @@ const KGAdmin = () => {
     community_summaries?: { total: number; needs_resummarize: number };
     community_summaries_incomplete?: boolean;
     document_versions_missing?: boolean;
+    chunk_context?: { schema_ready: boolean; total: number; with_summary: number };
+    chunk_context_missing?: boolean;
   } | null>(null);
   const [migrationChecking, setMigrationChecking] = useState(false);
   const [migrationApplying, setMigrationApplying] = useState(false);
-  // "" | "regenerate_embeddings" | "regenerate_summaries" — which regen is running
+  // Which data action is running: "" | "regenerate_embeddings" |
+  // "regenerate_summaries" | "chunk_context" | "regenerate_chunk_summaries"
   const [migrationRegenerating, setMigrationRegenerating] = useState("");
   const [migrationSettingUpVersions, setMigrationSettingUpVersions] = useState(false);
   const [migrationMessage, setMigrationMessage] = useState("");
@@ -170,7 +173,8 @@ const KGAdmin = () => {
         !data.needs_repair &&
         !data.embeddings_incomplete &&
         !data.community_summaries_incomplete &&
-        !data.document_versions_missing
+        !data.document_versions_missing &&
+        !data.chunk_context_missing
       ) {
         setMigrationMessage("✅ Graph is up to date — no repairs needed.");
       } else {
@@ -189,6 +193,8 @@ const KGAdmin = () => {
           );
         if (data.document_versions_missing)
           parts.push("document versions not set up");
+        if (data.chunk_context_missing)
+          parts.push("chunk section paths and summaries are not stored separately");
         setMigrationMessage(`Found: ${parts.join("; ")}.`);
       }
     } catch (err: any) {
@@ -363,6 +369,61 @@ const KGAdmin = () => {
       );
     } finally {
       setMigrationSettingUpVersions(false);
+    }
+  };
+
+  // Store chunk section paths and summaries in their own fields, or
+  // generate summaries for chunks without one.
+  const runChunkContext = async (
+    action: "chunk_context" | "regenerate_chunk_summaries"
+  ) => {
+    const auth = sessionStorage.getItem("auth");
+    if (!auth) {
+      setMigrationMessage("Not authenticated.");
+      return;
+    }
+    const total = migrationStatus?.chunk_context?.total ?? 0;
+    const pending = total - (migrationStatus?.chunk_context?.with_summary ?? 0);
+    const ok = await confirm(
+      action === "chunk_context"
+        ? `Store section paths and summaries separately for "${migrationGraph}"? The graph schema changes and its queries are installed again; search on this graph is unavailable until that finishes, which can take several minutes.`
+        : `Generate summaries for ${pending.toLocaleString()} chunks of "${migrationGraph}"? This makes one model request per chunk.`
+    );
+    if (!ok) return;
+    setMigrationRegenerating(action);
+    setMigrationMessage(
+      action === "chunk_context"
+        ? "Storing section paths and summaries separately… This can take several minutes."
+        : "Generating chunk summaries…"
+    );
+    try {
+      const resp = await fetch(`/ui/${migrationGraph}/migration/${action}`, {
+        method: "POST",
+        headers: { Authorization: auth },
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || data.error) {
+        setMigrationMessage(`❌ ${data.detail || data.error || resp.statusText}`);
+        return;
+      }
+      if (action === "chunk_context") {
+        const notMatched = data.not_matched ?? 0;
+        setMigrationMessage(
+          `✅ Section paths and summaries are stored separately. Moved the section path of ${data.moved ?? 0} chunks.` +
+            (notMatched ? ` ${notMatched} chunks kept their section path in the text.` : "") +
+            (data.query_errors?.length ? ` ⚠️ ${data.query_errors.length} queries could not be installed; run Repair.` : "")
+        );
+      } else {
+        const skipped = data.skipped ?? 0;
+        setMigrationMessage(
+          `✅ Summarized ${data.summarized ?? 0} chunks` + (skipped ? `; ${skipped} skipped.` : ".")
+        );
+      }
+      await runMigrationCheck(migrationGraph);
+    } catch (err: any) {
+      setMigrationMessage(`❌ ${err.message || err}`);
+    } finally {
+      setMigrationRegenerating("");
     }
   };
 
@@ -3163,6 +3224,69 @@ const KGAdmin = () => {
                       </div>
                     </div>
                   )}
+                  {/* Data-integrity health: chunk section paths and summaries */}
+                  {migrationStatus.chunk_context &&
+                    (migrationStatus.chunk_context.total ?? 0) > 0 && (
+                      <div
+                        className={`p-3 rounded border ${
+                          migrationStatus.chunk_context_missing
+                            ? "bg-yellow-50 dark:bg-yellow-900/20 border-yellow-200 dark:border-yellow-800"
+                            : "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="font-medium text-black dark:text-white">
+                            {migrationStatus.chunk_context_missing
+                              ? "Chunk section paths and summaries — not stored separately"
+                              : `Chunk summaries — ${migrationStatus.chunk_context.with_summary}/${migrationStatus.chunk_context.total} chunks`}
+                          </div>
+                          {migrationStatus.chunk_context_missing ? (
+                            <Button
+                              onClick={() => runChunkContext("chunk_context")}
+                              disabled={
+                                !!migrationRegenerating ||
+                                migrationApplying ||
+                                migrationChecking ||
+                                isRebuildRunning
+                              }
+                              className="gradient text-white h-7 text-xs whitespace-nowrap"
+                            >
+                              {migrationRegenerating === "chunk_context" ? (
+                                <>
+                                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                  Updating…
+                                </>
+                              ) : (
+                                "Store separately"
+                              )}
+                            </Button>
+                          ) : (
+                            migrationStatus.chunk_context.with_summary <
+                              migrationStatus.chunk_context.total && (
+                              <Button
+                                onClick={() => runChunkContext("regenerate_chunk_summaries")}
+                                disabled={
+                                  !!migrationRegenerating ||
+                                  migrationApplying ||
+                                  migrationChecking ||
+                                  isRebuildRunning
+                                }
+                                className="gradient text-white h-7 text-xs whitespace-nowrap"
+                              >
+                                {migrationRegenerating === "regenerate_chunk_summaries" ? (
+                                  <>
+                                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                                    Generating…
+                                  </>
+                                ) : (
+                                  "Generate summaries"
+                                )}
+                              </Button>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    )}
                 </div>
               )}
 

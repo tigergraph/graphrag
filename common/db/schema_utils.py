@@ -1760,6 +1760,18 @@ def _detect_transitional_state(
     }
 
 
+def _graph_has_chunk_context(conn) -> bool:
+    """Whether the graph's DocumentChunk has the heading_path attribute, so
+    the retrieval queries show it."""
+    from common.utils.chunk_context import schema_has_chunk_context
+    try:
+        return schema_has_chunk_context(conn.getSchema(force=True))
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"chunk context check failed: {e}")
+        return False
+
+
 def _install_retrievers_after_apply(
     conn,
     graphname: str,
@@ -1841,6 +1853,7 @@ def _install_retrievers_after_apply(
             domain_edges=domain_edges,
             include_entity=include_entity,
             progress=progress,
+            chunk_context=_graph_has_chunk_context(conn),
         ),
     }
     if transitional:

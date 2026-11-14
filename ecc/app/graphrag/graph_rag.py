@@ -22,6 +22,7 @@ from collections import Counter, defaultdict
 import httpx
 from aiochannel import Channel, ChannelClosed
 from graphrag import workers
+from graphrag import util  # after workers: util and workers import each other
 from graphrag.util import (
     COMMUNITY_QUERIES,
     community_desc_progress,
@@ -37,6 +38,7 @@ from graphrag.util import (
     upsert_batch,
 )
 from common.db.schema_utils import is_structural_type, read_existing_schema_async
+from common.utils.chunk_context import HEADING_PATH_ATTR, embedding_text
 from pyTigerGraph import AsyncTigerGraphConnection
 
 from common.config import embedding_service, entity_extraction_switch, community_detection_switch, doc_process_switch, get_graphrag_config
@@ -166,6 +168,19 @@ async def stream_docs(
     # mean chunking is done; advancing here used to clear the chunking
     # progress bar before chunk_docs finished (and before the UI polled).
 
+async def _chunk_heading_path(conn: AsyncTigerGraphConnection, chunk_id: str) -> str:
+    """The chunk's stored heading path; empty on graphs without it."""
+    if conn.graphname not in util.chunk_context_graphs:
+        return ""
+    try:
+        async with tg_sem:
+            rows = await conn.getVerticesById("DocumentChunk", chunk_id)
+        return (rows[0].get("attributes", {}).get(HEADING_PATH_ATTR) or "") if rows else ""
+    except Exception as e:
+        logger.warning(f"heading path read failed for chunk {chunk_id}: {e}")
+        return ""
+
+
 async def stream_chunks(
     conn: AsyncTigerGraphConnection,
     extract_chan: Channel,
@@ -210,13 +225,16 @@ async def stream_chunks(
                 content = chunk_rows[0]["attributes"]["text"].encode(
                     'raw_unicode_escape'
                 ).decode('unicode_escape')
+                heading_path = await _chunk_heading_path(conn, c)
                 logger.debug("chunk writes to extract_chan")
-                await extract_chan.put((content, c))
+                await extract_chan.put((content, c, heading_path))
                 # With extraction on, the extract worker pushes the
                 # summary-augmented embed; only embed raw here when it's off.
                 if not entity_extraction_switch:
                     logger.debug("chunk writes to embed_chan")
-                    await embed_chan.put((c, content, "DocumentChunk"))
+                    await embed_chan.put(
+                        (c, embedding_text(heading_path, "", content), "DocumentChunk")
+                    )
                 n_chunks += 1
                 if n_chunks % 100 == 0:
                     logger.info(f"streaming chunks: {n_chunks} streamed")
@@ -345,7 +363,9 @@ async def load(conn: AsyncTigerGraphConnection):
                 match t:
                     case "vertices":
                         vt, v_id, attr = elem
-                        batch["vertices"][vt][v_id] = attr
+                        # Merge, so a later partial write (such as a chunk
+                        # summary) keeps the attributes of an earlier one.
+                        batch["vertices"][vt].setdefault(v_id, {}).update(attr)
                     case "edges":
                         src_v_type, src_v_id, edge_type, tgt_v_type, tgt_v_id, attrs = (
                             elem
@@ -360,7 +380,7 @@ async def load(conn: AsyncTigerGraphConnection):
                         # them; unpack each into the same batch dict so
                         # they reach TG in one upsertData call.
                         for vt, v_id, attr in elem.get("vertices", []):
-                            batch["vertices"][vt][v_id] = attr
+                            batch["vertices"][vt].setdefault(v_id, {}).update(attr)
                         for (src_v_type, src_v_id, edge_type, tgt_v_type, tgt_v_id, attrs) in elem.get("edges", []):
                             batch["edges"][src_v_type][src_v_id][edge_type][tgt_v_type][tgt_v_id] = attrs
                     case _:
@@ -755,6 +775,7 @@ async def run(graphname: str, conn: AsyncTigerGraphConnection, progress=None):
 
     _report("Preparing rebuild")
     extractor, embedding_store = await init(conn)
+    await util.refresh_chunk_context(conn)
     init_start = time.perf_counter()
 
     if doc_process_switch:

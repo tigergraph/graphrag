@@ -378,6 +378,7 @@ Upgrading GraphRAG does not change graphs that already exist: their installed qu
 - **Prompt overrides** — saved custom prompts in a format the current release no longer uses.
 - **Data health** — vertices missing embeddings and communities missing summaries, each with its own regenerate action.
 - **Document versions** — whether the graph records the content of each document and which documents a newer one replaces. **Set up** adds this to the graph; [Stored Files](#stored-files) needs it to compare files with the graph and to replace older versions.
+- **Chunk section paths and summaries** — whether chunks store their section path and summary in their own fields. **Store separately** updates a graph created before 2.1.0: it changes the graph schema, installs the graph's queries again (search on the graph is unavailable until this finishes) and moves each chunk's section path out of its text. **Generate summaries** creates summaries for chunks without one, with one model request per chunk.
 
 A graph created with a version earlier than 1.4 can't be repaired in place; the Migration Assistant reports this and does not offer **Repair**. Create a new graph and ingest its documents again.
 

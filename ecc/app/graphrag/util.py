@@ -42,6 +42,7 @@ from common.embeddings.tigergraph_embedding_store import TigerGraphEmbeddingStor
 from common.extractors import GraphExtractor, LLMEntityRelationshipExtractor
 from common.extractors.BaseExtractor import BaseExtractor
 from common.logs.logwriter import LogWriter
+from common.utils.chunk_context import schema_has_chunk_context
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,28 @@ from common.db.query_sets import GRAPHRAG_REQUIRED_QUERIES, GRAPHRAG_COMMUNITY_Q
 COMMUNITY_QUERIES = GRAPHRAG_COMMUNITY_QUERIES
 REQUIRED_QUERIES = GRAPHRAG_REQUIRED_QUERIES
 load_q = reusable_channel.ReuseableChannel()
+
+# Graphs whose DocumentChunk has the heading_path and summary attributes.
+# Chunks of other graphs keep the breadcrumb in their text until the Migration
+# Assistant adds the attributes.
+chunk_context_graphs: set[str] = set()
+
+
+async def refresh_chunk_context(conn) -> bool:
+    """Record whether ``conn``'s graph stores chunk heading paths and summaries
+    in their own attributes."""
+    graph = getattr(conn, "graphname", None)
+    try:
+        schema = await conn.getSchema(force=True)
+    except Exception as e:
+        logger.warning(f"chunk context: getSchema failed: {e}")
+        return graph in chunk_context_graphs
+    if schema_has_chunk_context(schema):
+        chunk_context_graphs.add(graph)
+        return True
+    chunk_context_graphs.discard(graph)
+    return False
+
 
 # will pause workers until the event is false
 loading_event = asyncio.Event()
