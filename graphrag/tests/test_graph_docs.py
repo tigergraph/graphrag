@@ -42,14 +42,14 @@ class _InTempDir:
 
 def _keep(source, name, content=None, records=None):
     """Write a kept file and, if given, its converted JSONL."""
-    folder = Path(gd.source_dir(G, source))
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / name).write_bytes(b"x")
+    path = Path(gd.source_dir(G, source)) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x")
     if content is not None or records is not None:
-        conv = Path(gd.converted_dir(G, source))
-        conv.mkdir(parents=True, exist_ok=True)
-        recs = records or [{"doc_id": name, "doc_type": "markdown", "content": content}]
-        with open(conv / gd.converted_name(name), "w") as f:
+        conv = Path(gd.converted_dir(G, source)) / gd.converted_name(name)
+        conv.parent.mkdir(parents=True, exist_ok=True)
+        recs = records or [{"doc_id": os.path.basename(name), "doc_type": "markdown", "content": content}]
+        with open(conv, "w") as f:
             for r in gd.add_checksums(recs):
                 f.write(json.dumps(r) + "\n")
 
@@ -116,6 +116,59 @@ class TestConverter(unittest.TestCase):
             TextExtractor().process_folder(src, G, out, filenames=["b.txt"])
             self.assertFalse(Path(out, "a.txt.jsonl").exists())
             self.assertTrue(Path(out, "b.txt.jsonl").exists())
+
+
+class TestFoldersAndSubfolders(unittest.TestCase):
+    """Source folders besides uploads and downloads, and their subfolders."""
+
+    def test_other_folders_are_sources_and_subfolders_are_listed(self):
+        with _InTempDir():
+            _keep("uploads", "a.md")
+            _keep("server", "reports/2023/q1.pdf")
+            os.makedirs(os.path.join(gd.DOCS_ROOT, "server", "ingestion_temp", G), exist_ok=True)
+            self.assertEqual(gd.all_sources(), ["uploads", "downloads", "server"])
+            files = {(f.source, f.name): f for f in gd.list_kept_files(G)}
+            self.assertEqual(set(files), {("uploads", "a.md"), ("server", "reports/2023/q1.pdf")})
+            # The document id is the file name only.
+            self.assertEqual(files[("server", "reports/2023/q1.pdf")].doc_ids, ["q1.pdf"])
+
+    def test_same_file_name_in_two_subfolders_is_a_conflict(self):
+        with _InTempDir():
+            _keep("server", "2023/q1.pdf")
+            _keep("server", "2024/q1.pdf")
+            files = {f.name: f for f in gd.assign_states(gd.list_kept_files(G), {}, True)}
+            self.assertEqual(files["2023/q1.pdf"].state, gd.CONFLICT)
+            self.assertEqual(files["2023/q1.pdf"].conflict_with, ["2024/q1.pdf"])
+
+    def test_rename_keeps_the_file_in_its_subfolder(self):
+        with _InTempDir():
+            _keep("server", "2023/q1.pdf", records=[
+                {"doc_id": "q1.pdf", "doc_type": "markdown", "content": "a"}])
+            _keep("server", "2024/q1.pdf")
+            self.assertEqual(gd.rename_kept_file(G, "server", "2023/q1.pdf", "q1-2023.pdf"), "2023/q1-2023.pdf")
+            self.assertTrue(os.path.isfile(gd.kept_file_path(G, "server", "2023/q1-2023.pdf")))
+            with open(gd.converted_path(G, "server", "2023/q1-2023.pdf")) as f:
+                self.assertEqual(json.loads(f.readline())["doc_id"], "q1-2023.pdf")
+            with self.assertRaises(gd.RenameError):
+                gd.rename_kept_file(G, "server", "2024/q1.pdf", "other/q1.pdf")
+
+    def test_paths_and_source_names_cannot_leave_the_folder(self):
+        for bad in ("../x.md", "/etc/passwd", "a/../../x.md", ".hidden/x.md"):
+            with self.assertRaises(ValueError, msg=bad):
+                gd.kept_file_path(G, "server", bad)
+        for bad in ("..", "../uploads", "ingestion_temp", "a/b", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                gd.source_dir(G, bad)
+
+    def test_converter_keeps_subfolders_and_ids_the_file_name(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+            for year in ("2023", "2024"):
+                Path(src, year).mkdir()
+                Path(src, year, "notes.md").write_text(f"# Notes {year}\n\nBody.")
+            TextExtractor().process_folder(src, G, out, filenames=["2024/notes.md"])
+            self.assertFalse(Path(out, "2023", "notes.md.jsonl").exists())
+            rec = json.loads(Path(out, "2024", "notes.md.jsonl").read_text().splitlines()[0])
+            self.assertEqual(rec["doc_id"], "notes.md")
 
 
 class TestStates(unittest.TestCase):
@@ -393,6 +446,26 @@ class TestDocumentRoutes(unittest.TestCase):
                 "files": [{"source": "downloads", "name": "Notes.md"}]}).json()
             self.assertEqual(body["skipped"][0]["reason"],
                              "Same name as notes.md when letter case is ignored. Rename or delete one of them.")
+
+    def test_a_file_in_a_server_subfolder_lists_and_ingests(self):
+        def fake_ingest(graphname, info, _conn):
+            return {"ingested_files": [
+                {"jsonl_file": f, "status": "success"} for f in info.data_source_id["files"]
+            ]}
+        with _InTempDir():
+            _keep("server", "reports/2023/q1.md", "q1 text")
+            su = (["superuser"], {}, "u")
+            listed = self._call("get", f"/ui/{G}/documents", su).json()["files"]
+            self.assertEqual([(f["source"], f["name"], f["doc_ids"]) for f in listed],
+                             [("server", "reports/2023/q1.md", ["q1.md"])])
+            with patch("app.routers.ui.supportai.ingest", side_effect=fake_ingest) as ing:
+                body = self._call("post", f"/ui/{G}/documents/ingest", su, json={
+                    "files": [{"source": "server", "name": "reports/2023/q1.md"}],
+                    "override": False}).json()
+            self.assertEqual([f["name"] for f in body["loaded"]], ["reports/2023/q1.md"])
+            info = ing.call_args.args[1]
+            self.assertEqual(info.data_source_id["files"], ["reports/2023/q1.md.jsonl"])
+            self.assertTrue(info.data_source_id["data_path"].endswith(os.path.join("server", "ingestion_temp", G)))
 
     def _ingest(self, conn, override):
         def fake_ingest(graphname, info, _conn):

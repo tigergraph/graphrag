@@ -2792,14 +2792,14 @@ def _check_ui_server_source(graphname: str, cfg: CreateIngestConfig) -> None:
     path = conf.pop("data_path", None)
     if source is None and path:
         source = next(
-            (s for s in graph_docs.SOURCES
+            (s for s in graph_docs.all_sources()
              if os.path.realpath(path) == os.path.realpath(graph_docs.source_dir(graphname, s))),
             None,
         )
-    if source not in graph_docs.SOURCES:
+    if source not in graph_docs.all_sources():
         raise HTTPException(
             status_code=400,
-            detail="Choose the uploaded or downloaded files of this graph.",
+            detail="Choose the stored files of this graph.",
         )
     conf["source"] = source
     cfg.data_source_config = conf
@@ -2813,7 +2813,7 @@ def _check_ui_server_load(graphname: str, loader_info: LoadingInfo) -> None:
     path = ds.get("data_path") or ""
     if not any(
         os.path.realpath(path) == os.path.realpath(graph_docs.converted_dir(graphname, s))
-        for s in graph_docs.SOURCES
+        for s in graph_docs.all_sources()
     ):
         raise HTTPException(
             status_code=400,
@@ -4061,11 +4061,12 @@ def _selected_files(graphname: str, payload: dict) -> list[tuple[str, str]]:
         name = (item or {}).get("name")
         try:
             path = graph_docs.kept_file_path(graphname, source, name)
+            rel = graph_docs.safe_rel_path(name)
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Unknown file: {name}")
         if not os.path.isfile(path):
             raise HTTPException(status_code=404, detail=f"File not found: {name}")
-        key = (source, os.path.basename(path))
+        key = (source, rel)
         if key not in out:
             out.append(key)
     return out
@@ -4130,7 +4131,7 @@ def ingest_documents(
         failed: list[dict] = []
 
         # 1. Convert the selected files that have no converted file yet.
-        for source in graph_docs.SOURCES:
+        for source in graph_docs.all_sources():
             names = [
                 n for s, n in selected
                 if s == source and not os.path.exists(graph_docs.converted_path(graphname, source, n))
@@ -4173,7 +4174,7 @@ def ingest_documents(
 
         # 3. Load, one converted file per kept file.
         loaded: list[dict] = []
-        for source in graph_docs.SOURCES:
+        for source in graph_docs.all_sources():
             group = [f for f in to_load if f.source == source]
             if not group:
                 continue

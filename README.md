@@ -580,7 +580,7 @@ To resolve a conflict, click **Rename** under a file in conflict and enter a new
 
 Ingest loads the document content only. Rebuild the knowledge graph to process the new and changed documents.
 
-Stored files are kept on the server in `configs/graph_docs/uploads/<graph>/` and `configs/graph_docs/downloads/<graph>/`, so they stay when the containers are recreated.
+Stored files are kept on the server in `configs/graph_docs/uploads/<graph>/` and `configs/graph_docs/downloads/<graph>/`, so they stay when the containers are recreated. To add files without the UI, put them in another folder under `configs/graph_docs/` with one subfolder per graph, such as `configs/graph_docs/server/<graph>/`. Stored Files lists them with the folder name as their source, together with the files in its subfolders. A file's document id is its file name, so files with the same name in different subfolders show as Conflict until one is renamed or deleted.
 
 ### Ingest Documents via API
 

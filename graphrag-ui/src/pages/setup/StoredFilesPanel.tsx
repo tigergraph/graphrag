@@ -97,6 +97,15 @@ const STATE_INFO: Record<
 };
 
 const keyOf = (f: FileRef) => `${f.source}/${f.name}`;
+
+// Label of a stored-files source: the two built-in sources by what added the
+// files, any other folder by its name ("server" -> "Server").
+const sourceLabel = (source: string) =>
+  source === "downloads"
+    ? "Cloud"
+    : source === "uploads"
+    ? "Upload"
+    : source.charAt(0).toUpperCase() + source.slice(1);
 const plural = (n: number, one: string, many: string) =>
   `${n} ${n === 1 ? one : many}`;
 
@@ -126,7 +135,12 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
   const [override, setOverride] = useState(false);
   const [working, setWorking] = useState<"" | "ingest" | "delete" | "rename">("");
   // The conflict file being renamed, and the new name without its extension.
-  const [renaming, setRenaming] = useState<{ key: string; base: string; ext: string } | null>(null);
+  const [renaming, setRenaming] = useState<{
+    key: string;
+    dir: string;
+    base: string;
+    ext: string;
+  } | null>(null);
   const [message, setMessage] = useState("");
   const [result, setResult] = useState<IngestResult | null>(null);
 
@@ -296,13 +310,18 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
     }
   };
 
+  // Only the file name changes: the subfolder and the extension stay.
   const startRename = (f: StoredFile) => {
-    const dot = f.name.lastIndexOf(".");
+    const slash = f.name.lastIndexOf("/");
+    const dir = slash >= 0 ? f.name.slice(0, slash + 1) : "";
+    const file = f.name.slice(slash + 1);
+    const dot = file.lastIndexOf(".");
     const hasExt = dot > 0;
     setRenaming({
       key: keyOf(f),
-      base: hasExt ? f.name.slice(0, dot) : f.name,
-      ext: hasExt ? f.name.slice(dot) : "",
+      dir,
+      base: hasExt ? file.slice(0, dot) : file,
+      ext: hasExt ? file.slice(dot) : "",
     });
   };
 
@@ -404,7 +423,7 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-2">
         <p className="text-sm font-medium text-gray-500 dark:text-gray-400">
-          Files added by upload or cloud download. Select files to ingest into
+          Files added by upload, by cloud download, or in a folder on the server. Select files to ingest into
           your knowledge graph or to delete.
         </p>
         <Button
@@ -577,6 +596,11 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                                 handleRename(f);
                               }}
                             >
+                              {renaming.dir && (
+                                <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[8rem]" title={renaming.dir}>
+                                  {renaming.dir}
+                                </span>
+                              )}
                               <input
                                 autoFocus
                                 aria-label={`New name for ${f.name}`}
@@ -611,7 +635,7 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                           )}
                         </TableCell>
                         <TableCell className="px-3 py-2 text-gray-600 dark:text-gray-300">
-                          {f.source === "downloads" ? "Cloud" : "Upload"}
+                          {sourceLabel(f.source)}
                         </TableCell>
                         <TableCell className="px-3 py-2 text-right whitespace-nowrap text-gray-600 dark:text-gray-300">
                           {formatBytes(f.size)}
@@ -709,7 +733,7 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                 {problemFiles.map((p) => (
                   <li key={`${p.kind}:${keyOf(p)}`}>
                     <span className="font-medium">{p.name}</span>
-                    {" "}({p.source === "downloads" ? "Cloud" : "Upload"}) —{" "}
+                    {" "}({sourceLabel(p.source)}) —{" "}
                     {p.kind}: {p.text}
                   </li>
                 ))}
