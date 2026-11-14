@@ -194,6 +194,14 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
   }, [active, load, refreshKey]);
 
   const files = useMemo(() => data?.files ?? [], [data]);
+  // States picked with the state buttons; the table shows only files in
+  // these states, or all files when none is picked.
+  const [shownStates, setShownStates] = useState<Set<FileState>>(new Set());
+  const visibleFiles = useMemo(
+    () => (shownStates.size === 0 ? files : files.filter((f) => shownStates.has(f.state))),
+    [files, shownStates]
+  );
+  const isFiltered = shownStates.size > 0;
   const fileByKey = useMemo(
     () => new Map(files.map((f) => [keyOf(f), f])),
     [files]
@@ -232,17 +240,25 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
     });
   };
 
-  const addState = (state: FileState) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      files.filter((f) => f.state === state).forEach((f) => next.add(keyOf(f)));
-      return next;
-    });
+  // Show or hide a state. Selected files that the new filter hides are
+  // deselected, so an action never touches files the user cannot see.
+  const toggleState = (state: FileState) => {
+    const next = new Set(shownStates);
+    if (next.has(state)) next.delete(state);
+    else next.add(state);
+    setShownStates(next);
+    if (next.size > 0) {
+      setSelected((prev) => {
+        const keep = new Set(files.filter((f) => next.has(f.state)).map(keyOf));
+        return new Set([...prev].filter((k) => keep.has(k)));
+      });
+    }
   };
+  const showAllStates = () => setShownStates(new Set());
 
   const allSelected =
-    files.length > 0 && files.every((f) => selected.has(keyOf(f)));
-  const selectAll = () => setSelected(new Set(files.map(keyOf)));
+    visibleFiles.length > 0 && visibleFiles.every((f) => selected.has(keyOf(f)));
+  const selectAll = () => setSelected(new Set(visibleFiles.map(keyOf)));
   const clearSelection = () => setSelected(new Set());
 
   const handleIngest = async () => {
@@ -399,10 +415,13 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
   };
 
   const total = data?.total ?? files.length;
+  const shownSummary = isFiltered
+    ? `${visibleFiles.length} of ${plural(total, "file", "files")} shown`
+    : plural(total, "file", "files");
   const selectionSummary =
     selectedFiles.length === 0
-      ? plural(total, "file", "files")
-      : `${selectedFiles.length} of ${total} selected: ` +
+      ? shownSummary
+      : `${shownSummary} · ${selectedFiles.length} selected: ` +
         STATE_ORDER.filter((s) => (selectedCounts[s] ?? 0) > 0)
           .map((s) => `${selectedCounts[s]} ${STATE_INFO[s].label.toLowerCase()}`)
           .join(", ");
@@ -453,20 +472,24 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
           {/* Select by state */}
           <div>
             <div className="text-sm font-medium mb-2 text-black dark:text-white">
-              Select by state
+              Show by state
             </div>
             <div className="flex flex-wrap gap-2">
               {STATE_ORDER.map((s) => {
                 const count = data.counts[s] ?? 0;
+                const on = shownStates.has(s);
                 return (
                   <button
                     key={s}
                     type="button"
                     title={STATE_INFO[s].tooltip}
-                    onClick={() => addState(s)}
-                    disabled={count === 0 || isBusy}
+                    aria-pressed={on}
+                    onClick={() => toggleState(s)}
+                    disabled={(count === 0 && !on) || isBusy}
                     className={`px-2.5 py-1 rounded-full border text-xs font-medium transition-opacity ${STATE_INFO[s].pill} ${
-                      count === 0
+                      on ? "ring-2 ring-offset-1 ring-current dark:ring-offset-background" : ""
+                    } ${
+                      count === 0 && !on
                         ? "opacity-50 cursor-default"
                         : "hover:opacity-80 cursor-pointer"
                     }`}
@@ -475,12 +498,24 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                   </button>
                 );
               })}
+              {isFiltered && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={showAllStates}
+                  disabled={isBusy}
+                  className="h-7 text-xs dark:border-[#3D3D3D]"
+                >
+                  Show all
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={selectAll}
-                disabled={files.length === 0 || isBusy}
+                disabled={visibleFiles.length === 0 || isBusy}
                 className="h-7 text-xs dark:border-[#3D3D3D]"
               >
                 Select all
@@ -516,7 +551,7 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                       aria-label="Select all files"
                       checked={allSelected}
                       onChange={() => (allSelected ? clearSelection() : selectAll())}
-                      disabled={files.length === 0 || isBusy}
+                      disabled={visibleFiles.length === 0 || isBusy}
                       className="h-4 w-4 rounded border-gray-300 dark:border-gray-600"
                     />
                   </TableHead>
@@ -528,23 +563,24 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {files.length === 0 ? (
+                {visibleFiles.length === 0 ? (
                   <TableRow className="dark:border-[#3D3D3D]">
                     <TableCell
                       colSpan={6}
                       className="px-3 py-6 text-center text-sm text-gray-500 dark:text-gray-400"
                     >
-                      No stored files. Add files on the Upload or Download from
-                      Cloud tab.
+                      {isFiltered
+                        ? "No files in the chosen states."
+                        : "No stored files. Add files on the Upload or Download from Cloud tab."}
                     </TableCell>
                   </TableRow>
                 ) : (
-                  files.map((f) => {
+                  visibleFiles.map((f) => {
                     const k = keyOf(f);
                     const isConflict = f.state === "conflict";
                     return (
+                      <React.Fragment key={k}>
                       <TableRow
-                        key={k}
                         data-state={selected.has(k) ? "selected" : undefined}
                         onClick={() => !isBusy && toggle(f)}
                         className="dark:border-[#3D3D3D] cursor-pointer"
@@ -560,17 +596,17 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                             className="h-4 w-4 rounded border-gray-300 dark:border-gray-600"
                           />
                         </TableCell>
-                        <TableCell className="px-3 py-2 max-w-[16rem]">
+                        <TableCell className="px-3 py-2 min-w-[12rem]">
                           <div
-                            className="truncate text-black dark:text-white"
+                            className="text-black dark:text-white [overflow-wrap:anywhere]"
                             title={f.name}
                           >
                             {f.name}
                           </div>
                           {isConflict && (
-                            <div className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
+                            <div className="flex flex-wrap items-baseline gap-x-1 text-xs text-red-600 dark:text-red-400">
                               {f.conflict_with.length > 0 && (
-                                <span className="truncate">
+                                <span className="[overflow-wrap:anywhere]">
                                   Same name as{" "}
                                   {f.conflict_with.join(", ")}
                                 </span>
@@ -590,52 +626,6 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                               )}
                             </div>
                           )}
-                          {isConflict && renaming?.key === k && (
-                            <form
-                              className="mt-1 flex items-center gap-1"
-                              onClick={(e) => e.stopPropagation()}
-                              onSubmit={(e) => {
-                                e.preventDefault();
-                                handleRename(f);
-                              }}
-                            >
-                              {renaming.dir && (
-                                <span className="text-xs text-gray-500 dark:text-gray-400 truncate max-w-[8rem]" title={renaming.dir}>
-                                  {renaming.dir}
-                                </span>
-                              )}
-                              <input
-                                autoFocus
-                                aria-label={`New name for ${f.name}`}
-                                value={renaming.base}
-                                onChange={(e) => setRenaming({ ...renaming, base: e.target.value })}
-                                onKeyDown={(e) => e.key === "Escape" && setRenaming(null)}
-                                disabled={isBusy}
-                                className="min-w-0 flex-1 rounded border border-gray-300 dark:border-[#3D3D3D] bg-white dark:bg-shadeA px-1.5 py-0.5 text-xs text-black dark:text-white"
-                              />
-                              {renaming.ext && (
-                                <span className="text-xs text-gray-500 dark:text-gray-400">{renaming.ext}</span>
-                              )}
-                              <Button
-                                type="submit"
-                                size="sm"
-                                disabled={isBusy || !renaming.base.trim()}
-                                className="h-6 px-2 text-xs"
-                              >
-                                Save
-                              </Button>
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                onClick={() => setRenaming(null)}
-                                disabled={working === "rename"}
-                                className="h-6 px-2 text-xs dark:border-[#3D3D3D]"
-                              >
-                                Cancel
-                              </Button>
-                            </form>
-                          )}
                         </TableCell>
                         <TableCell className="px-3 py-2 text-gray-600 dark:text-gray-300">
                           {sourceLabel(f.source)}
@@ -645,7 +635,10 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                         </TableCell>
                         <TableCell className="px-3 py-2 whitespace-nowrap text-gray-600 dark:text-gray-300">
                           {f.modified
-                            ? new Date(f.modified * 1000).toLocaleString()
+                            ? new Date(f.modified * 1000).toLocaleString(undefined, {
+                                dateStyle: "short",
+                                timeStyle: "short",
+                              })
                             : "—"}
                         </TableCell>
                         <TableCell className="px-3 py-2">
@@ -659,6 +652,63 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                           </span>
                         </TableCell>
                       </TableRow>
+                      {isConflict && renaming?.key === k && (
+                        // The rename form spans the whole table, so long
+                        // names and folders stay readable while editing.
+                        <TableRow className="dark:border-[#3D3D3D] bg-gray-50 dark:bg-shadeA/40">
+                          <TableCell colSpan={6} className="px-3 py-2">
+                            <form
+                              className="flex flex-col gap-1.5"
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                handleRename(f);
+                              }}
+                            >
+                              <div className="text-xs text-gray-600 dark:text-gray-300 [overflow-wrap:anywhere]">
+                                Rename <span className="font-medium text-black dark:text-white">{f.name}</span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                {renaming.dir && (
+                                  <span className="shrink-0 text-xs text-gray-500 dark:text-gray-400">
+                                    {renaming.dir}
+                                  </span>
+                                )}
+                                <input
+                                  autoFocus
+                                  aria-label={`New name for ${f.name}`}
+                                  value={renaming.base}
+                                  onChange={(e) => setRenaming({ ...renaming, base: e.target.value })}
+                                  onKeyDown={(e) => e.key === "Escape" && setRenaming(null)}
+                                  disabled={isBusy}
+                                  className="min-w-0 flex-1 rounded border border-gray-300 dark:border-[#3D3D3D] bg-white dark:bg-shadeA px-2 py-1 text-sm text-black dark:text-white"
+                                />
+                                {renaming.ext && (
+                                  <span className="shrink-0 text-sm text-gray-500 dark:text-gray-400">{renaming.ext}</span>
+                                )}
+                                <Button
+                                  type="submit"
+                                  size="sm"
+                                  disabled={isBusy || !renaming.base.trim()}
+                                  className="h-8 px-3 text-xs"
+                                >
+                                  Save
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => setRenaming(null)}
+                                  disabled={working === "rename"}
+                                  className="h-8 px-3 text-xs dark:border-[#3D3D3D]"
+                                >
+                                  Cancel
+                                </Button>
+                              </div>
+                            </form>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                      </React.Fragment>
                     );
                   })
                 )}

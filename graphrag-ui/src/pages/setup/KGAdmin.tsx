@@ -2835,7 +2835,7 @@ const KGAdmin = () => {
           }}
         >
           <DialogContent
-            className="sm:max-w-[760px] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] max-h-[80vh] overflow-y-auto"
+            className="w-[95vw] sm:max-w-[min(95vw,72rem)] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] max-h-[85vh] overflow-y-auto"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>
