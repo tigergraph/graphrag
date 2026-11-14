@@ -163,6 +163,25 @@ def estimate_cost_from_config(
     )
 
 
+def usage_from(cb, response=None) -> dict:
+    """Token counts and cost of one call. LangChain's OpenAI callback counts
+    only OpenAI responses; other providers return their counts with the
+    response (``usage_metadata``), which is used when the callback has none."""
+    usage = {
+        "input_tokens": getattr(cb, "prompt_tokens", 0) or 0,
+        "output_tokens": getattr(cb, "completion_tokens", 0) or 0,
+        "total_tokens": getattr(cb, "total_tokens", 0) or 0,
+        "cost": getattr(cb, "total_cost", 0.0) or 0.0,
+    }
+    meta = getattr(response, "usage_metadata", None)
+    if not usage["total_tokens"] and isinstance(meta, dict):
+        usage["input_tokens"] = int(meta.get("input_tokens") or 0)
+        usage["output_tokens"] = int(meta.get("output_tokens") or 0)
+        usage["total_tokens"] = int(meta.get("total_tokens")
+                                    or usage["input_tokens"] + usage["output_tokens"])
+    return usage
+
+
 def _record_usage(caller_name: str, usage_data: dict, config: Optional[dict] = None):
     # User-configured rates replace LangChain cost entirely; otherwise keep
     # whatever LangChain reported (may be 0 for unknown models).
@@ -174,6 +193,9 @@ def _record_usage(caller_name: str, usage_data: dict, config: Optional[dict] = N
     if user_cost is not None:
         usage_data["cost"] = user_cost
     logger.info(f"{caller_name} usage: {usage_data}")
+    from common.utils import run_usage
+    run_usage.record(caller_name, usage_data.get("input_tokens", 0),
+                     usage_data.get("output_tokens", 0), usage_data.get("cost", 0.0))
     bucket = _usage_collector.get()
     if bucket is not None:
         bucket.append({"caller_name": caller_name, **usage_data})
@@ -587,10 +609,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         with get_openai_callback() as cb:
             raw_output = chain.invoke(input_variables)
 
-            usage_data["input_tokens"] = cb.prompt_tokens
-            usage_data["output_tokens"] = cb.completion_tokens
-            usage_data["total_tokens"] = cb.total_tokens
-            usage_data["cost"] = cb.total_cost
+            usage_data.update(usage_from(cb, raw_output))
             _record_usage(caller_name, usage_data, self.config)
 
         raw_text = self._message_text(raw_output)
@@ -631,10 +650,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         usage_data = {}
         with get_openai_callback() as cb:
             resp = bound.invoke(messages)
-            usage_data["input_tokens"] = cb.prompt_tokens
-            usage_data["output_tokens"] = cb.completion_tokens
-            usage_data["total_tokens"] = cb.total_tokens
-            usage_data["cost"] = cb.total_cost
+            usage_data.update(usage_from(cb, resp))
             _record_usage(caller_name, usage_data, self.config)
         return resp
 
@@ -762,10 +778,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         with get_openai_callback() as cb:
             raw_output = await chain.ainvoke(input_variables)
 
-            usage_data["input_tokens"] = cb.prompt_tokens
-            usage_data["output_tokens"] = cb.completion_tokens
-            usage_data["total_tokens"] = cb.total_tokens
-            usage_data["cost"] = cb.total_cost
+            usage_data.update(usage_from(cb, raw_output))
             _record_usage(caller_name, usage_data, self.config)
 
         raw_text = self._message_text(raw_output)

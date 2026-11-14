@@ -22,6 +22,7 @@ import {
 import { useConfirm } from "@/hooks/useConfirm";
 import { useAlert } from "@/hooks/useAlert";
 import { resolveUploadConflicts } from "@/utils/uploadConflicts";
+import { describeRunUsage } from "@/utils/runUsage";
 import { useNavigate } from "react-router-dom";
 import IngestGraph from "./IngestGraph";
 
@@ -415,8 +416,10 @@ const KGAdmin = () => {
         );
       } else {
         const skipped = data.skipped ?? 0;
+        const usageLine = describeRunUsage(data.usage);
         setMigrationMessage(
-          `✅ Summarized ${data.summarized ?? 0} chunks` + (skipped ? `; ${skipped} skipped.` : ".")
+          `✅ Summarized ${data.summarized ?? 0} chunks` + (skipped ? `; ${skipped} skipped.` : ".") +
+            (usageLine ? `\n${usageLine}` : "")
         );
       }
       await runMigrationCheck(migrationGraph);
@@ -1363,12 +1366,14 @@ const KGAdmin = () => {
           const warnings = Array.isArray(statusData.warnings)
             ? statusData.warnings
             : [];
+          const usageLine = describeRunUsage(statusData.usage);
+          const usageText = usageLine ? `\n${usageLine}` : "";
           if (warnings.length > 0) {
             setRefreshMessage(
-              `⚠️ Rebuild for "${graphName}" completed with warnings: ${warnings.join(" ")}`
+              `⚠️ Rebuild for "${graphName}" completed with warnings: ${warnings.join(" ")}${usageText}`
             );
           } else {
-            setRefreshMessage(`✅ Rebuild completed successfully for "${graphName}".`);
+            setRefreshMessage(`✅ Rebuild completed successfully for "${graphName}".${usageText}`);
           }
           setPollingActive(false);
           setRebuildProgress(null);
@@ -2912,7 +2917,7 @@ const KGAdmin = () => {
               </div>
 
               {refreshMessage && (
-                <div className={`p-3 rounded-lg text-sm ${
+                <div className={`p-3 rounded-lg text-sm whitespace-pre-line ${
                   refreshMessage.includes("✅")
                     ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
                     : refreshMessage.includes("with warnings")

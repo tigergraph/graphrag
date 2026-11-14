@@ -582,6 +582,10 @@ Ingest loads the document content only. Rebuild the knowledge graph to process t
 
 Stored files are kept on the server in `configs/graph_docs/uploads/<graph>/` and `configs/graph_docs/downloads/<graph>/`, so they stay when the containers are recreated. To add files without the UI, put them in another folder under `configs/graph_docs/` with one subfolder per graph, such as `configs/graph_docs/server/<graph>/`. Stored Files lists them with the folder name as their source, together with the files in its subfolders. A file's document id is its file name, so files with the same name in different subfolders show as Conflict until one is renamed or deleted.
 
+#### Time and model use of ingest and rebuild
+
+Adding files, an ingest from Stored Files, a rebuild and the Migration Assistant's **Generate summaries** each report how long they took, how many model calls they made, the tokens they used and the cost. The result message shows them, and the log has one summary line per run, which starts with the kind of run (`Ingest Usage:`, `Conversion Usage:`, `Rebuild Usage:`, `Chunk Summaries Usage:`) and gives the totals by kind of call (entity extraction, image descriptions, chunk and community summaries, embeddings). `grep 'Usage:'` finds all of them. The cost uses `input_cost_per_1m` and `output_cost_per_1m` of the service when they are set. The last run of each kind is kept in `configs/graph_data/<graph>/run_usage.json`, and `GET /ui/{graph}/run_usage` returns it to an admin of the graph.
+
 ### Ingest Documents via API
 
 For examples of how to ingest documents through the backend API, refer to the **[GraphRAG Demo Notebook](./docs/notebooks/GraphRAGDemo.ipynb)**.

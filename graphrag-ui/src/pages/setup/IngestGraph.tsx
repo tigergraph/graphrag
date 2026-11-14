@@ -23,6 +23,7 @@ import { useConfirm } from "@/hooks/useConfirm";
 import { pingIdleTimer } from "@/hooks/useIdleTimeout";
 import { useRoles } from "@/hooks/useRoles";
 import { resolveUploadPlan } from "@/utils/uploadConflicts";
+import { describeRunUsage } from "@/utils/runUsage";
 import StoredFilesPanel from "./StoredFilesPanel";
 import { formatBytes } from "@/utils/formatBytes";
 import { errorMessage, safeJson } from "@/utils/safeJson";
@@ -269,12 +270,13 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       } else {
         const unreadable: Array<{ file: string; error: string }> =
           Array.isArray(createData.failed_files) ? createData.failed_files : [];
+        const usageLine = describeRunUsage(createData.usage);
         setMessage(
-          unreadable.length > 0
+          (unreadable.length > 0
             ? `⚠️ ${added} ${unreadable.length} file(s) could not be read: ${unreadable
                 .map((f) => f.error)
                 .join(" ")}`
-            : `✅ ${added}`
+            : `✅ ${added}`) + (usageLine ? `\n${usageLine}` : "")
         );
       }
     } catch (error: unknown) {

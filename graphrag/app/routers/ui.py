@@ -55,7 +55,7 @@ from tools.validation_utils import MapQuestionToSchemaException
 from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
 from common.db.connections import get_db_connection_pwd_manual
 from common.db import schema_utils as schema_utils_mod
-from common.utils import graph_docs
+from common.utils import graph_docs, run_usage
 from common.db import schema_extraction as schema_extraction_mod
 from common.utils.text_extractors import (
     ExtractionError,
@@ -2861,11 +2861,13 @@ def create_ingest(
         ).decode()
         _, conn = ws_basic_auth(auth, graphname)
 
-        # Create the ingest configuration
+        # Create the ingest configuration. Converting the files is where the
+        # model describes images, so the conversion is tracked as a run.
         LogWriter.info(f"Creating ingest configuration for graph: {graphname}")
-        result = supportai.create_ingest(graphname, cfg, conn)
+        with run_usage.track_run(run_usage.CONVERSION, graphname) as usage:
+            result = supportai.create_ingest(graphname, cfg, conn)
 
-        return result
+        return {**result, "usage": usage.summary()} if isinstance(result, dict) else result
 
     except HTTPException:
         raise
@@ -4094,12 +4096,32 @@ def list_documents(
     }
 
 
+@router.get(route_prefix + "/{graphname}/run_usage")
+def get_run_usage(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """The last run of each kind on the graph (ingest, conversion, rebuild,
+    summaries): its time, model calls, tokens and cost."""
+    _require_document_admin(creds[1], graphname)
+    return {"graphname": graphname, "runs": run_usage.load_summaries(graphname)}
+
+
 @router.post(route_prefix + "/{graphname}/documents/ingest")
 def ingest_documents(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     payload: Annotated[dict, Body(...)],
 ):
+    """Load selected kept files into the graph (see ``_ingest_documents``).
+    The response also has ``usage``: the time, model calls, tokens and cost
+    of this ingest."""
+    with run_usage.track_run(run_usage.INGEST, graphname) as usage:
+        result = _ingest_documents(graphname, creds, payload)
+    return {**result, "usage": usage.summary()}
+
+
+def _ingest_documents(graphname: str, creds, payload: dict) -> dict:
     """Load selected kept files into the graph.
 
     Body: ``{"files": [{"source": "uploads", "name": "a.pdf"}], "override": false}``

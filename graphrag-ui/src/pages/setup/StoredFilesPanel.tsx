@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/table";
 import { errorMessage, safeJson } from "@/utils/safeJson";
 import { formatBytes } from "@/utils/formatBytes";
+import { describeRunUsage } from "@/utils/runUsage";
 
 type Source = "uploads" | "downloads";
 type FileState =
@@ -294,11 +295,13 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
       setResult(res);
       const summary = `${res.loaded.length} loaded, ${res.skipped.length} skipped, ${res.failed.length} failed.`;
       const icon = res.failed.length > 0 ? "⚠️" : "✅";
+      const usageLine = describeRunUsage(body.usage);
       setMessage(
         `${icon} ${summary}` +
           (res.loaded.length > 0
             ? " Run a rebuild to process the new content."
-            : "")
+            : "") +
+          (usageLine ? `\n${usageLine}` : "")
       );
       setSelected(new Set());
     } catch (err: unknown) {
