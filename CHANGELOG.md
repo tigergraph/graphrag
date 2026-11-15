@@ -17,6 +17,9 @@
 
 - **Ingest and rebuild report their time, model calls, tokens and cost.** Only chat answers showed model use, and the largest cost of a rebuild, entity extraction, was not recorded at all. Adding files, an ingest from Stored Files, a rebuild and **Generate summaries** now show the time, the number of model calls, the tokens and the cost when they finish, write one summary line to the log, and keep the last run of each kind for the graph. Token counts now also come from providers other than OpenAI.
 
+### Fixed
+- **Entity extraction finds entities with models that reply in parts.** Gemini 3, Claude with extended thinking and OpenAI reasoning models return their reply as a list of parts. Extraction read no entities from such replies, without an error, and image descriptions from these models were stored as raw reply data. Extraction and image descriptions now read the text of the reply. Extraction also combines a reply's JSON when it comes in several blocks, accepts small JSON mistakes such as trailing commas, and logs a warning when a reply cannot be read.
+
 ### Security
 - **Only an admin of a graph can manage its documents.** Any user who could sign in to a graph could upload, download, list, delete and ingest its documents, and could ingest folders on the GraphRAG server outside the graph's own files. A superuser or globaldesigner can now manage the documents of all graphs, and a user with the admin role on a graph can manage that graph's documents. The UI ingests only the graph's own stored files. The ingest API accepts a server folder only from an admin.
 

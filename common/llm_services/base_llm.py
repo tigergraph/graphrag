@@ -483,7 +483,12 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             for b in content:
                 if isinstance(b, str):
                     parts.append(b)
-                elif isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+                elif (isinstance(b, dict) and isinstance(b.get("text"), str)
+                      and b.get("type") in ("text", "output_text", None)):
+                    # "text" (most providers), "output_text" (OpenAI
+                    # Responses API), or a part without a type (some Gemini
+                    # versions). Thinking and reasoning parts carry their
+                    # text under other keys or types and are dropped.
                     parts.append(b["text"])
             return "".join(parts)
         return str(content)

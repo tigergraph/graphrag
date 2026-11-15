@@ -152,3 +152,4 @@ class TestEntityExtraction(unittest.TestCase):
             asyncio.run(ext._aextract_kg_from_doc("text", _Chain(), parser))
         calls = run.summary()["by_kind"]["entity_extraction"]
         self.assertEqual((calls["calls"], calls["input_tokens"], calls["output_tokens"]), (1, 40, 8))
+
