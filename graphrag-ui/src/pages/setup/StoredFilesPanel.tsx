@@ -254,7 +254,7 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
       });
     }
   };
-  const showAllStates = () => setShownStates(new Set());
+  const clearFilter = () => setShownStates(new Set());
 
   const allSelected =
     visibleFiles.length > 0 && visibleFiles.every((f) => selected.has(keyOf(f)));
@@ -469,47 +469,53 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
 
       {data && (
         <>
-          {/* Select by state */}
-          <div>
-            <div className="text-sm font-medium mb-2 text-black dark:text-white">
-              Show by state
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {STATE_ORDER.map((s) => {
-                const count = data.counts[s] ?? 0;
-                const on = shownStates.has(s);
-                return (
-                  <button
-                    key={s}
+          {/* Filter by state */}
+          <div className="space-y-3">
+            <div>
+              <div className="text-sm font-medium mb-2 text-black dark:text-white">
+                Filter by state
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {STATE_ORDER.map((s) => {
+                  const count = data.counts[s] ?? 0;
+                  const on = shownStates.has(s);
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      title={STATE_INFO[s].tooltip}
+                      aria-pressed={on}
+                      onClick={() => toggleState(s)}
+                      disabled={(count === 0 && !on) || isBusy}
+                      className={`px-2.5 py-1 rounded-full border text-xs font-medium transition-opacity ${STATE_INFO[s].pill} ${
+                        on ? "ring-2 ring-offset-1 ring-current dark:ring-offset-background" : ""
+                      } ${
+                        count === 0 && !on
+                          ? "opacity-50 cursor-default"
+                          : "hover:opacity-80 cursor-pointer"
+                      }`}
+                    >
+                      {STATE_INFO[s].label} ({count})
+                    </button>
+                  );
+                })}
+                {isFiltered && (
+                  <Button
                     type="button"
-                    title={STATE_INFO[s].tooltip}
-                    aria-pressed={on}
-                    onClick={() => toggleState(s)}
-                    disabled={(count === 0 && !on) || isBusy}
-                    className={`px-2.5 py-1 rounded-full border text-xs font-medium transition-opacity ${STATE_INFO[s].pill} ${
-                      on ? "ring-2 ring-offset-1 ring-current dark:ring-offset-background" : ""
-                    } ${
-                      count === 0 && !on
-                        ? "opacity-50 cursor-default"
-                        : "hover:opacity-80 cursor-pointer"
-                    }`}
+                    variant="outline"
+                    size="sm"
+                    onClick={clearFilter}
+                    disabled={isBusy}
+                    className="h-7 text-xs dark:border-[#3D3D3D]"
                   >
-                    {STATE_INFO[s].label} ({count})
-                  </button>
-                );
-              })}
-              {isFiltered && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={showAllStates}
-                  disabled={isBusy}
-                  className="h-7 text-xs dark:border-[#3D3D3D]"
-                >
-                  Show all
-                </Button>
-              )}
+                    Clear filter
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {/* Selection */}
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 variant="outline"
@@ -528,7 +534,7 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                 disabled={selected.size === 0 || isBusy}
                 className="h-7 text-xs dark:border-[#3D3D3D]"
               >
-                Clear
+                Unselect all
               </Button>
             </div>
           </div>
