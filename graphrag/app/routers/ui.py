@@ -1679,7 +1679,9 @@ def _add_document_versions_schema(graphname: str, creds) -> dict:
             # A job left by an earlier attempt that did not finish.
             conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {job}")
         try:
-            err = gsql_output_error(conn.gsql(supportai.document_versions_schema_gsql(graphname)))
+            doc_attrs, has_superseded = supportai.document_schema_state(conn)
+            versions_gsql = supportai.document_versions_schema_gsql(graphname, doc_attrs, has_superseded)
+            err = gsql_output_error(conn.gsql(versions_gsql)) if versions_gsql else None
         except Exception as e:
             # A long schema change can outlive the request; the wait below
             # tells whether it finished.
@@ -3907,7 +3909,7 @@ def _skip_reason(f) -> str:
 
 
 def _graph_document_rows(conn, has_versions: bool) -> dict:
-    """``{doc_id: {"content_checksum": str, "outdated": bool}}`` for all
+    """``{doc_id: {"source_checksum": str, "outdated": bool}}`` for all
     Documents of the graph, outdated ones included."""
     select = (
         f"{graph_docs.CHECKSUM_ATTR},{graph_docs.OUTDATED_ATTR}" if has_versions else "epoch_added"
@@ -4011,14 +4013,19 @@ def ingest_documents(
         conn = get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password)
         failed: list[dict] = []
 
-        # 1. Convert the selected files that have no converted file yet.
+        # 1. Convert the selected files that have no converted file made
+        # from their current bytes. An out-of-date converted file (the file
+        # changed on disk since) is removed first, or conversion would reuse it.
         for source in graph_docs.all_sources():
             names = [
                 n for s, n in selected
-                if s == source and not os.path.exists(graph_docs.converted_path(graphname, source, n))
+                if s == source and not graph_docs.conversion_is_current(graphname, source, n)
             ]
             if not names:
                 continue
+            for n in names:
+                graph_docs.remove_file(graph_docs.converted_path(graphname, source, n),
+                                       graph_docs.converted_dir(graphname, source))
             temp_folder = graph_docs.converted_dir(graphname, source)
             os.makedirs(temp_folder, exist_ok=True)
             result = TextExtractor().process_folder(
@@ -4037,7 +4044,7 @@ def ingest_documents(
             f = by_key.get(key)
             if f is None or key in failed_keys:
                 continue
-            if f.documents is None:
+            if not f.converted:
                 failed.append({"source": f.source, "name": f.name, "error": "The file could not be converted."})
             elif f.state == graph_docs.NOT_INGESTED:
                 to_load.append(f)

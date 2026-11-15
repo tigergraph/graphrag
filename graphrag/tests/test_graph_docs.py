@@ -41,16 +41,18 @@ class _InTempDir:
 
 
 def _keep(source, name, content=None, records=None):
-    """Write a kept file and, if given, its converted JSONL."""
+    """Write a kept file and, if ``content`` or ``records`` is given, its
+    converted JSONL. The file's bytes are ``content`` (or "x"), so the file's
+    checksum is ``gd.content_checksum(content)``."""
     path = Path(gd.source_dir(G, source)) / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"x")
+    path.write_bytes((content if content is not None else "x").encode("utf-8"))
     if content is not None or records is not None:
         conv = Path(gd.converted_dir(G, source)) / gd.converted_name(name)
         conv.parent.mkdir(parents=True, exist_ok=True)
         recs = records or [{"doc_id": gd.doc_id_text(name), "doc_type": "markdown", "content": content}]
         with open(conv, "w") as f:
-            for r in gd.add_checksums(recs):
+            for r in gd.add_checksums(recs, gd.file_checksum(str(path))):
                 f.write(json.dumps(r) + "\n")
 
 
@@ -81,13 +83,16 @@ class TestPathsAndIds(unittest.TestCase):
         self.assertEqual(gd.converted_name("notes.md"), "notes.md.jsonl")
         self.assertEqual(gd.converted_name("batch.jsonl"), "batch.jsonl")
 
-    def test_checksum_is_of_the_converted_content(self):
+    def test_converted_records_carry_the_source_file_checksum(self):
         recs = gd.add_checksums([
             {"doc_id": "a.pdf", "content": "hello"},
             {"doc_id": "a.pdf_image_1", "image_data": "..."},
-        ])
-        self.assertEqual(recs[0]["content_checksum"], gd.content_checksum("hello"))
-        self.assertEqual(recs[1]["content_checksum"], "")
+        ], "filehash")
+        self.assertEqual(recs[0]["source_checksum"], "filehash")
+        self.assertEqual(recs[1]["source_checksum"], "")
+        # Without a file (a .jsonl record), the checksum is of the content.
+        self.assertEqual(gd.add_checksums([{"content": "hello"}])[0]["source_checksum"],
+                         gd.content_checksum("hello"))
 
 
 class TestConverter(unittest.TestCase):
@@ -100,14 +105,14 @@ class TestConverter(unittest.TestCase):
             self.assertTrue(Path(out, "notes.txt.jsonl").exists())
             rec = json.loads(Path(out, "notes.md.jsonl").read_text().splitlines()[0])
             self.assertEqual(rec["doc_id"], "notes.md")
-            self.assertEqual(rec["content_checksum"], gd.content_checksum(rec["content"]))
+            self.assertEqual(rec["source_checksum"], gd.file_checksum(str(Path(src, "notes.md"))))
 
     def test_jsonl_source_gets_a_checksum_when_copied(self):
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
             Path(src, "batch.jsonl").write_text(json.dumps({"doc_id": "d1", "doc_type": "", "content": "c"}) + "\n")
             asyncio.run(TextExtractor()._process_folder_async(src, G, out))
             rec = json.loads(Path(out, "batch.jsonl").read_text().splitlines()[0])
-            self.assertEqual(rec["content_checksum"], gd.content_checksum("c"))
+            self.assertEqual(rec["source_checksum"], gd.content_checksum("c"))
 
     def test_only_listed_files_are_converted(self):
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
@@ -209,13 +214,15 @@ class TestStates(unittest.TestCase):
             _keep("uploads", "edited.md", "edited v2")
             _keep("uploads", "old.md", "old")
             _keep("downloads", "plain.html", "plain")
-            _keep("uploads", "raw.pdf")  # not converted yet
+            _keep("uploads", "raw.pdf")  # not converted yet; its bytes are "x"
+            _keep("uploads", "copy.pdf")  # not converted yet
             graph = {
-                "same.md": {"content_checksum": gd.content_checksum("same"), "outdated": False},
-                "edited.md": {"content_checksum": gd.content_checksum("edited v1"), "outdated": False},
-                "old.md": {"content_checksum": "", "outdated": False},
-                "plain": {"content_checksum": "", "outdated": False},
-                "raw.pdf": {"content_checksum": "abc", "outdated": False},
+                "same.md": {"source_checksum": gd.content_checksum("same"), "outdated": False},
+                "edited.md": {"source_checksum": gd.content_checksum("edited v1"), "outdated": False},
+                "old.md": {"source_checksum": "", "outdated": False},
+                "plain": {"source_checksum": "", "outdated": False},
+                "raw.pdf": {"source_checksum": "abc", "outdated": False},
+                "copy.pdf": {"source_checksum": gd.content_checksum("x"), "outdated": False},
             }
             st = self._states(graph)
             self.assertEqual(st[("uploads", "new.md")].state, gd.NOT_INGESTED)
@@ -224,21 +231,24 @@ class TestStates(unittest.TestCase):
             self.assertEqual(st[("uploads", "old.md")].state, gd.NOT_VERIFIED)
             self.assertEqual(st[("downloads", "plain.html")].state, gd.OLDER_VERSION)
             self.assertEqual(st[("downloads", "plain.html")].legacy_id, "plain")
-            self.assertEqual(st[("uploads", "raw.pdf")].state, gd.NOT_VERIFIED)
+            # The state of a file that is not converted is known from its bytes.
+            self.assertEqual(st[("uploads", "raw.pdf")].state, gd.CHANGED)
+            self.assertEqual(st[("uploads", "copy.pdf")].state, gd.INGESTED)
+            self.assertFalse(st[("uploads", "copy.pdf")].converted)
 
     def test_outdated_older_version_is_not_offered_again(self):
         with _InTempDir():
             _keep("uploads", "plain.html", "plain")
             graph = {
-                "plain": {"content_checksum": "", "outdated": True},
-                "plain.html": {"content_checksum": gd.content_checksum("plain"), "outdated": False},
+                "plain": {"source_checksum": "", "outdated": True},
+                "plain.html": {"source_checksum": gd.content_checksum("plain"), "outdated": False},
             }
             self.assertEqual(self._states(graph)[("uploads", "plain.html")].state, gd.INGESTED)
 
     def test_without_the_checksum_schema_an_existing_document_is_not_verified(self):
         with _InTempDir():
             _keep("uploads", "same.md", "same")
-            graph = {"same.md": {"content_checksum": "", "outdated": False}}
+            graph = {"same.md": {"source_checksum": "", "outdated": False}}
             self.assertEqual(self._states(graph, has_checksum=False)[("uploads", "same.md")].state, gd.NOT_VERIFIED)
 
     def test_files_with_the_same_document_id_conflict(self):
@@ -287,7 +297,8 @@ class TestRename(unittest.TestCase):
                 text, image = [json.loads(line) for line in f]
             self.assertEqual(text["doc_id"], "report-2025.pdf")
             self.assertIn("tg://report-2025.pdf_image_1", text["content"])
-            self.assertEqual(text["content_checksum"], gd.content_checksum(text["content"]))
+            # Renaming does not change the file's bytes, so its checksum stays.
+            self.assertEqual(text["source_checksum"], gd.content_checksum("x"))
             self.assertEqual(image["doc_id"], "report-2025.pdf_image_1")
             self.assertEqual(image["parent_doc"], "report-2025.pdf")
             files = gd.assign_states(gd.list_kept_files(G), {}, True)
@@ -326,40 +337,60 @@ class TestLoadingJobs(unittest.TestCase):
     def tearDown(self):
         os.chdir(self.prev)
 
-    def test_converted_files_job_loads_the_checksum_on_a_graph_with_the_schema(self):
-        job = self.sa.document_loading_job(self.with_images, has_versions=True)
-        self.assertIn('_, _, $"content_checksum", _)', job)
+    NEW = ["epoch_added", "epoch_processing", "epoch_processed", "source_checksum", "outdated"]
+    OLD = ["epoch_added", "epoch_processing", "epoch_processed"]
+    # Set up with an earlier 2.1.0 build: the old attribute stays, the new one
+    # is added at the end.
+    DEV = ["epoch_added", "epoch_processing", "epoch_processed", "content_checksum", "outdated",
+           "source_checksum"]
 
-    def test_other_jobs_get_empty_values_on_a_graph_with_the_schema(self):
-        job = self.sa.document_loading_job(self.plain, has_versions=True)
+    def test_converted_files_job_loads_the_checksum_where_the_graph_has_it(self):
+        job = self.sa.document_loading_job(self.with_images, self.NEW)
+        self.assertIn('gsql_current_time_epoch(0), _, _, $"source_checksum", _)', job)
+        job = self.sa.document_loading_job(self.with_images, self.DEV)
+        self.assertIn('gsql_current_time_epoch(0), _, _, _, _, $"source_checksum")', job)
+
+    def test_other_jobs_get_empty_values(self):
+        job = self.sa.document_loading_job(self.plain, self.NEW)
         self.assertIn("gsql_current_time_epoch(0), _, _, _, _)", job)
-        self.assertNotIn("content_checksum", job)
+        self.assertNotIn("source_checksum", job)
 
     def test_graph_without_the_schema_gets_four_document_values(self):
         for text in (self.with_images, self.plain):
-            job = self.sa.document_loading_job(text, has_versions=False)
+            job = self.sa.document_loading_job(text, self.OLD)
             self.assertIn("gsql_current_time_epoch(0), _, _)", job)
-            self.assertNotIn("content_checksum", job)
+            self.assertNotIn("source_checksum", job)
 
     def test_an_installed_job_is_replaced_when_it_does_not_fit(self):
-        old = "- CREATE LOADING JOB j {\n LOAD f TO VERTEX Document VALUES(gsql_lower($\"doc_id\"), gsql_current_time_epoch(0), _, _) }"
-        text = self.sa._loading_job_text(old, "j")
-        self.assertTrue(self.sa._loading_job_fits(text, has_versions=False, wants_checksum=True))
-        self.assertFalse(self.sa._loading_job_fits(text, has_versions=True, wants_checksum=True))
-        self.assertIsNone(self.sa._loading_job_text(old, "other"))
+        def ls(values):
+            return ("- CREATE LOADING JOB j {\n LOAD f TO VERTEX Document VALUES(gsql_lower($\"doc_id\"), "
+                    f"{values}) WHERE $\"content\" != \"\" USING JSON_FILE=\"true\"; }}")
+        four = self.sa._loading_job_text(ls('gsql_current_time_epoch("0"), _, _'), "j")
+        self.assertTrue(self.sa._loading_job_fits(four, self.OLD, wants_checksum=True))
+        self.assertFalse(self.sa._loading_job_fits(four, self.NEW, wants_checksum=True))
+        old = self.sa._loading_job_text(ls('gsql_current_time_epoch("0"), _, _, $"content_checksum", _'), "j")
+        self.assertFalse(self.sa._loading_job_fits(old, self.NEW, wants_checksum=True))
+        new = self.sa._loading_job_text(ls('gsql_current_time_epoch("0"), _, _, $"source_checksum", _'), "j")
+        self.assertTrue(self.sa._loading_job_fits(new, self.NEW, wants_checksum=True))
+        self.assertIsNone(self.sa._loading_job_text(ls("_"), "other"))
 
-    def test_schema_job_adds_the_attributes_and_the_edge(self):
-        gsql = self.sa.document_versions_schema_gsql(G)
-        self.assertIn("ALTER VERTEX Document ADD ATTRIBUTE (content_checksum STRING, outdated BOOL)", gsql)
+    def test_schema_job_adds_what_the_graph_lacks(self):
+        gsql = self.sa.document_versions_schema_gsql(G, self.OLD, False)
+        self.assertIn("ALTER VERTEX Document ADD ATTRIBUTE (source_checksum STRING, outdated BOOL)", gsql)
         self.assertIn("ADD DIRECTED EDGE SUPERSEDED_BY(FROM Document, TO Document, epoch_added UINT)", gsql)
         self.assertTrue(gsql.rstrip().endswith("DROP JOB add_document_versions"))
+        # A graph set up with the old checksum only gets the new attribute.
+        dev = self.sa.document_versions_schema_gsql(G, self.OLD + ["content_checksum", "outdated"], True)
+        self.assertIn("ALTER VERTEX Document ADD ATTRIBUTE (source_checksum STRING);", dev)
+        self.assertNotIn("ADD DIRECTED EDGE", dev)
+        self.assertIsNone(self.sa.document_versions_schema_gsql(G, self.NEW, True))
 
 
 def _schema(with_versions: bool) -> dict:
     attrs = [{"AttributeName": "epoch_added"}]
     edges = [{"Name": "HAS_CONTENT"}]
     if with_versions:
-        attrs += [{"AttributeName": "content_checksum"}, {"AttributeName": "outdated"}]
+        attrs += [{"AttributeName": "source_checksum"}, {"AttributeName": "outdated"}]
         edges.append({"Name": "SUPERSEDED_BY"})
     return {"VertexTypes": [{"Name": "Document", "Attributes": attrs}], "EdgeTypes": edges}
 
@@ -411,7 +442,7 @@ class TestDocumentRoutes(unittest.TestCase):
         with _InTempDir():
             _keep("uploads", "new.md", "new")
             _keep("uploads", "same.md", "same")
-            conn = self._conn({"same.md": {"content_checksum": gd.content_checksum("same"), "outdated": False}})
+            conn = self._conn({"same.md": {"source_checksum": gd.content_checksum("same"), "outdated": False}})
             body = self._call("get", f"/ui/{G}/documents", (["superuser"], {}, "u"), conn).json()
             self.assertEqual(body["total"], 2)
             self.assertTrue(body["versions_ready"])
@@ -527,6 +558,32 @@ class TestDocumentRoutes(unittest.TestCase):
                 ("files", ("../escape.md", io.BytesIO(b"x"), "text/markdown"))])
             self.assertEqual(resp.status_code, 400, resp.text)
 
+    def test_a_file_edited_on_disk_is_changed_and_converted_again(self):
+        def fake_ingest(graphname, info, _conn):
+            return {"ingested_files": [
+                {"jsonl_file": f, "status": "success"} for f in info.data_source_id["files"]
+            ]}
+        with _InTempDir():
+            _keep("uploads", "notes.md", "version 1")
+            conn = self._conn({"notes.md": {"source_checksum": gd.content_checksum("version 1"),
+                                            "outdated": False}})
+            su = (["superuser"], {}, "u")
+            listed = self._call("get", f"/ui/{G}/documents", su, conn).json()["files"]
+            self.assertEqual((listed[0]["state"], listed[0]["converted"]), ("ingested", True))
+            # The file changes on disk; its converted copy is from the old bytes.
+            Path(gd.kept_file_path(G, "uploads", "notes.md")).write_text("version 2")
+            listed = self._call("get", f"/ui/{G}/documents", su, conn).json()["files"]
+            self.assertEqual((listed[0]["state"], listed[0]["converted"]), ("changed", False))
+            with patch("app.routers.ui.supportai.ingest", side_effect=fake_ingest):
+                body = self._call("post", f"/ui/{G}/documents/ingest", su, conn,
+                                  json={"files": [{"source": "uploads", "name": "notes.md"}],
+                                        "override": True}).json()
+            self.assertEqual([f["name"] for f in body["loaded"]], ["notes.md"])
+            with open(gd.converted_path(G, "uploads", "notes.md")) as f:
+                rec = json.loads(f.readline())
+            self.assertEqual(rec["source_checksum"], gd.content_checksum("version 2"))
+            self.assertIn("version 2", rec["content"])
+
     def _ingest(self, conn, override):
         def fake_ingest(graphname, info, _conn):
             return {"ingested_files": [
@@ -544,9 +601,9 @@ class TestDocumentRoutes(unittest.TestCase):
 
     def _graph(self):
         return {
-            "same.md": {"content_checksum": gd.content_checksum("same"), "outdated": False},
-            "edited.md": {"content_checksum": gd.content_checksum("v1"), "outdated": False},
-            "plain": {"content_checksum": "", "outdated": False},
+            "same.md": {"source_checksum": gd.content_checksum("same"), "outdated": False},
+            "edited.md": {"source_checksum": gd.content_checksum("v1"), "outdated": False},
+            "plain": {"source_checksum": "", "outdated": False},
         }
 
     def _keep_all(self):

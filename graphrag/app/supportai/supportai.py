@@ -69,10 +69,12 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
     # The document checksum, outdated flag and SUPERSEDED_BY edge live in
     # their own job so graphs created before them stay compatible; the
     # Migration Assistant adds them.
-    if re.search(r"- VERTEX Document\([^)]*\bcontent_checksum STRING", current_schema):
+    doc_attrs, has_superseded = document_schema_state(conn)
+    versions_gsql = document_versions_schema_gsql(graphname, doc_attrs, has_superseded)
+    if versions_gsql is None:
         schema_res += " Document version schema already exists, skipped."
     else:
-        schema_res += " " + conn.gsql(document_versions_schema_gsql(graphname))
+        schema_res += " " + conn.gsql(versions_gsql)
 
     logger.info(f"Checking if embedding schema needs to be created")
     if "- embedding(Dimension=" in current_schema:
@@ -374,7 +376,7 @@ def create_ingest(
         with open(file_path) as f:
             ingest_template = f.read()
         ingest_template = ingest_template.replace("@uuid@", str(uuid.uuid4().hex))
-        ingest_template = document_loading_job(ingest_template, graph_has_document_versions(conn))
+        ingest_template = document_loading_job(ingest_template, document_schema_state(conn)[0])
         separator = ingest_config.get("separator", "|")
         header = ingest_config.get("header", "true")
         eol = ingest_config.get("eol", "\n")
@@ -578,52 +580,107 @@ _LOADING_JOB_GSQL_FILES = {
 }
 
 
-DOCUMENT_VERSIONS_SCHEMA_FILE = "common/gsql/supportai/SupportAI_Schema_Document_Versions.gsql"
 DOCUMENT_VERSIONS_SCHEMA_JOB = "add_document_versions"
+# Document attributes the version schema adds, in this order on new graphs.
+_VERSION_ATTRS = ((graph_docs.CHECKSUM_ATTR, "STRING"), (graph_docs.OUTDATED_ATTR, "BOOL"))
+_CHECKSUM_VALUE = f'$"{graph_docs.CHECKSUM_ATTR}"'
 
-_DOC_VALUES_4 = "gsql_current_time_epoch(0), _, _)"
-_DOC_VALUES_CHECKSUM = 'gsql_current_time_epoch(0), _, _, $"content_checksum", _)'
-_DOC_VALUES_6 = "gsql_current_time_epoch(0), _, _, _, _)"
+
+def document_schema_state(conn) -> tuple[list, bool]:
+    """The Document attribute names in schema order, and whether the graph
+    has the SUPERSEDED_BY edge type."""
+    schema = conn.getSchema(force=True) or {}
+    doc = next((v for v in schema.get("VertexTypes", []) if v.get("Name") == "Document"), None)
+    attrs = [a.get("AttributeName") for a in (doc or {}).get("Attributes", []) or []]
+    edges = {e.get("Name") for e in schema.get("EdgeTypes", []) or []}
+    return attrs, graph_docs.SUPERSEDED_BY in edges
 
 
 def graph_has_document_versions(conn) -> bool:
     """True if the graph has the Document checksum and outdated attributes
     and the SUPERSEDED_BY edge type."""
-    schema = conn.getSchema(force=True) or {}
-    doc = next((v for v in schema.get("VertexTypes", []) if v.get("Name") == "Document"), None)
-    names = {a.get("AttributeName") for a in (doc or {}).get("Attributes", []) or []}
-    edges = {e.get("Name") for e in schema.get("EdgeTypes", []) or []}
-    return (
-        graph_docs.CHECKSUM_ATTR in names
-        and graph_docs.OUTDATED_ATTR in names
-        and graph_docs.SUPERSEDED_BY in edges
-    )
+    attrs, has_edge = document_schema_state(conn)
+    return all(name in attrs for name, _ in _VERSION_ATTRS) and has_edge
 
 
-def document_versions_schema_gsql(graphname: str) -> str:
-    """GSQL that adds the Document checksum and outdated attributes and the
-    SUPERSEDED_BY edge type. The job is dropped after it runs."""
-    with open(DOCUMENT_VERSIONS_SCHEMA_FILE, "r") as f:
-        job = f.read()
+def document_versions_schema_gsql(graphname: str, doc_attrs=(), has_superseded: bool = False):
+    """GSQL that adds what the graph lacks of the Document checksum and
+    outdated attributes and the SUPERSEDED_BY edge type, or ``None`` when it
+    has them all. The job is dropped after it runs. A graph set up before the
+    checksum became ``source_checksum`` keeps its old attribute unused."""
+    missing = [f"{name} {kind}" for name, kind in _VERSION_ATTRS if name not in doc_attrs]
+    lines = []
+    if missing:
+        lines.append(f"ALTER VERTEX Document ADD ATTRIBUTE ({', '.join(missing)});")
+    if not has_superseded:
+        lines.append(
+            f"ADD DIRECTED EDGE {graph_docs.SUPERSEDED_BY}(FROM Document, TO Document, "
+            'epoch_added UINT) WITH REVERSE_EDGE="reverse_SUPERSEDED_BY";'
+        )
+    if not lines:
+        return None
+    body = "\n    ".join(lines)
     return (
-        f"USE GRAPH {graphname}\n{job}\n"
+        f"USE GRAPH {graphname}\n"
+        f"CREATE SCHEMA_CHANGE JOB {DOCUMENT_VERSIONS_SCHEMA_JOB} {{\n    {body}\n}}\n"
         f"RUN SCHEMA_CHANGE JOB {DOCUMENT_VERSIONS_SCHEMA_JOB}\n"
         f"DROP JOB {DOCUMENT_VERSIONS_SCHEMA_JOB}"
     )
 
 
-def document_loading_job(text: str, has_versions: bool) -> str:
-    """Fit the Document values of a loading job to the graph's schema.
+_DOCUMENT_VALUES = "TO VERTEX Document VALUES("
 
-    A graph without the document version attributes takes four Document
-    values. A graph with them takes six; only a job that loads converted
-    files (which carry ``content_checksum``) fills the checksum.
-    """
-    if has_versions:
-        if _DOC_VALUES_CHECKSUM in text:
-            return text
-        return text.replace(_DOC_VALUES_4, _DOC_VALUES_6, 1)
-    return text.replace(_DOC_VALUES_CHECKSUM, _DOC_VALUES_4, 1)
+
+def _document_values_span(text: str):
+    """``(start, end, args)`` of the Document VALUES list in a loading job:
+    ``text[start:end]`` holds the arguments, split at top-level commas."""
+    start = text.find(_DOCUMENT_VALUES)
+    if start < 0:
+        return None
+    start += len(_DOCUMENT_VALUES)
+    depth, quote, args, cur = 0, None, [], []
+    for i in range(start, len(text)):
+        ch = text[i]
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                args.append("".join(cur).strip())
+                return start, i, args
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    return None
+
+
+def _document_value(attr: str, loads_checksum: bool) -> str:
+    if attr == "epoch_added":
+        return "gsql_current_time_epoch(0)"
+    if attr == graph_docs.CHECKSUM_ATTR and loads_checksum:
+        return _CHECKSUM_VALUE
+    return "_"
+
+
+def document_loading_job(text: str, doc_attrs) -> str:
+    """Fit the Document values of a loading job to the graph's Document
+    attributes, which differ by graph (positional VALUES must match them).
+    The load time goes to ``epoch_added``; a job whose template loads the
+    checksum (converted files) fills ``source_checksum``; every other
+    attribute keeps its value."""
+    span = _document_values_span(text)
+    if span is None:
+        return text
+    start, end, args = span
+    loads_checksum = any(graph_docs.CHECKSUM_ATTR in a for a in args[1:])
+    values = [args[0]] + [_document_value(a, loads_checksum) for a in doc_attrs]
+    return text[:start] + ", ".join(values) + text[end:]
 
 
 def _loading_job_text(current_schema: str, load_job_id: str) -> str | None:
@@ -636,13 +693,26 @@ def _loading_job_text(current_schema: str, load_job_id: str) -> str | None:
     return current_schema[start: end if end > 0 else None]
 
 
-def _loading_job_fits(job_text: str, has_versions: bool, wants_checksum: bool) -> bool:
-    flat = re.sub(r"\s+", "", job_text)
-    if not has_versions:
-        return "content_checksum" not in flat and "_,_,_,_)" not in flat
-    if wants_checksum:
-        return '$"content_checksum"' in flat
-    return "_,_,_,_)" in flat
+def _loading_job_fits(job_text: str, doc_attrs, wants_checksum: bool) -> bool:
+    """True if an installed job's Document values match the graph's
+    Document attributes (``ls`` prints ``gsql_current_time_epoch("0")``)."""
+    span = _document_values_span(job_text)
+    if span is None:
+        return True
+    args = span[2][1:]
+    if len(args) != len(doc_attrs):
+        return False
+    for attr, arg in zip(doc_attrs, args):
+        want = _document_value(attr, wants_checksum)
+        if want == "_":
+            if arg != "_":
+                return False
+        elif want == _CHECKSUM_VALUE:
+            if graph_docs.CHECKSUM_ATTR not in arg:
+                return False
+        elif "gsql_current_time_epoch" not in arg:
+            return False
+    return True
 
 
 def _ensure_loading_jobs(conn: TigerGraphConnection, graphname: str, load_job_id: str) -> None:
@@ -657,18 +727,18 @@ def _ensure_loading_jobs(conn: TigerGraphConnection, graphname: str, load_job_id
 
     with open(gsql_file, "r") as f:
         template = f.read()
-    has_versions = graph_has_document_versions(conn)
+    doc_attrs, _ = document_schema_state(conn)
+    span = _document_values_span(template)
+    wants_checksum = bool(span) and any(graph_docs.CHECKSUM_ATTR in a for a in span[2][1:])
     existing = _loading_job_text(current_schema, load_job_id)
-    if existing is not None and _loading_job_fits(
-        existing, has_versions, _DOC_VALUES_CHECKSUM in template
-    ):
+    if existing is not None and _loading_job_fits(existing, doc_attrs, wants_checksum):
         return
     if existing is not None:
         logger.info(f"Loading job '{load_job_id}' does not fit the Document schema — creating it again")
         conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {load_job_id}")
     else:
         logger.info(f"Loading job '{load_job_id}' missing — recreating from {gsql_file}")
-    q_body = document_loading_job(template, has_versions)
+    q_body = document_loading_job(template, doc_attrs)
     result = conn.gsql(f"USE GRAPH {graphname}\nBEGIN\n{q_body}\nEND\n")
     logger.info(f"Loading job creation result: {result}")
     if isinstance(result, str) and ("error" in result.lower() or "failed" in result.lower()):
