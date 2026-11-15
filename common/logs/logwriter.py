@@ -140,6 +140,12 @@ class LogWriter:
             LogWriter.warning_logger.warning(message)
         elif level.upper() == "INFO":
             LogWriter.general_logger.info(message)
+        elif level.upper() == "DEBUG":
+            LogWriter.general_logger.debug(message)
+
+    @staticmethod
+    def debug(message, mask_pii=True, **kwargs):
+        LogWriter.log("debug", message, mask_pii, **kwargs)
 
     @staticmethod
     def info(message, mask_pii=True, **kwargs):

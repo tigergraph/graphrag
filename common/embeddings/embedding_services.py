@@ -68,7 +68,7 @@ class EmbeddingModel(Embeddings):
         metrics.llm_inprogress_requests.labels(self.model_name).inc()
 
         try:
-            LogWriter.info(f"request_id={req_id_cv.get()} ENTRY embed_documents()")
+            LogWriter.debug(f"request_id={req_id_cv.get()} ENTRY embed_documents()")
 
             if not self.token_calculator.is_unlimited_tokens():
                 max_context_tokens = self.token_calculator.get_max_context_tokens()
@@ -81,7 +81,7 @@ class EmbeddingModel(Embeddings):
             else:
                 docs = self.embeddings.embed_documents(texts)
             self._record_run_usage(texts)
-            LogWriter.info(f"request_id={req_id_cv.get()} EXIT embed_documents()")
+            LogWriter.debug(f"request_id={req_id_cv.get()} EXIT embed_documents()")
             metrics.llm_success_response_total.labels(self.model_name).inc()
             return docs
         except Exception as e:
@@ -107,7 +107,7 @@ class EmbeddingModel(Embeddings):
         metrics.llm_inprogress_requests.labels(self.model_name).inc()
 
         try:
-            LogWriter.info(f"request_id={req_id_cv.get()} ENTRY embed_query()")
+            LogWriter.debug(f"request_id={req_id_cv.get()} ENTRY embed_query()")
             logger.debug_pii(
                 f"request_id={req_id_cv.get()} embed_query() embedding question={question}"
             )
@@ -123,7 +123,7 @@ class EmbeddingModel(Embeddings):
             else:
                 query_embedding = self.embeddings.embed_query(question)
             self._record_run_usage([question])
-            LogWriter.info(f"request_id={req_id_cv.get()} EXIT embed_query()")
+            LogWriter.debug(f"request_id={req_id_cv.get()} EXIT embed_query()")
             metrics.llm_success_response_total.labels(self.model_name).inc()
             return query_embedding
         except Exception as e:
@@ -149,7 +149,7 @@ class EmbeddingModel(Embeddings):
         # metrics.llm_inprogress_requests.labels(self.model_name).inc()
 
         # try:
-        LogWriter.info(f"request_id={req_id_cv.get()} ENTRY aembed_query()")
+        LogWriter.debug(f"request_id={req_id_cv.get()} ENTRY aembed_query()")
         logger.debug_pii(f"aembed_query() embedding question={question}")
         if not self.token_calculator.is_unlimited_tokens():
             max_context_tokens = self.token_calculator.get_max_context_tokens()
@@ -162,7 +162,7 @@ class EmbeddingModel(Embeddings):
         else:
             query_embedding = await self.embeddings.aembed_query(question)
         self._record_run_usage([question])
-        LogWriter.info(f"request_id={req_id_cv.get()} EXIT aembed_query()")
+        LogWriter.debug(f"request_id={req_id_cv.get()} EXIT aembed_query()")
         # metrics.llm_success_response_total.labels(self.model_name).inc()
         return query_embedding
         # except Exception as e:
