@@ -16,7 +16,7 @@ import asyncio
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
 
-from common.utils.graph_docs import add_checksums, converted_name, doc_id_text
+from common.utils.graph_docs import CHECKSUM_ATTR, add_checksums, converted_name, doc_id_text, file_checksum
 
 logger = logging.getLogger(__name__)
 
@@ -500,8 +500,9 @@ def replace_path_with_tg_protocol(md_text, image_id, tg_reference):
     return _md_pattern.sub(repl, md_text)
 
 def _copy_jsonl_with_checksums(src: str, dest: str) -> int:
-    """Copy a JSONL source file, adding ``content_checksum`` to records that
-    lack it. Returns the number of records."""
+    """Copy a JSONL source file, adding ``source_checksum`` (the checksum of
+    the record's content) to records that lack it. Returns the number of
+    records."""
     count = 0
     with open(src, 'r', encoding='utf-8') as fin, open(dest, 'w', encoding='utf-8') as fout:
         for line in fin:
@@ -513,7 +514,7 @@ def _copy_jsonl_with_checksums(src: str, dest: str) -> int:
                 fout.write(line if line.endswith('\n') else line + '\n')
                 count += 1
                 continue
-            if isinstance(rec, dict) and 'content_checksum' not in rec:
+            if isinstance(rec, dict) and not rec.get(CHECKSUM_ATTR):
                 rec = add_checksums([rec])[0]
             fout.write(json.dumps(rec, ensure_ascii=False) + '\n')
             count += 1
@@ -584,11 +585,14 @@ class TextExtractor:
                 jsonl_file = os.path.join(temp_folder, *out_name.split('/'))
                 os.makedirs(os.path.dirname(jsonl_file), exist_ok=True)
                 
+                # The checksum of the file's bytes as converted, so a later
+                # change to the file can be detected without converting it.
                 await loop.run_in_executor(
                     None,
                     self._write_to_jsonl,
                     jsonl_file,
-                    doc_entries
+                    doc_entries,
+                    file_checksum(str(file_path)),
                 )
             
             # Return metadata only, documents already saved to JSONL
@@ -619,13 +623,14 @@ class TextExtractor:
                 'error': f"Could not process {Path(file_path).name}.",
             }
     
-    def _write_to_jsonl(self, jsonl_file, doc_entries):
+    def _write_to_jsonl(self, jsonl_file, doc_entries, source_checksum=None):
         """
         Write document entries to a JSONL file (one file per input file).
-        Each document is written as a separate line.
+        Each document is written as a separate line, with the checksum of
+        the file it was converted from (``source_checksum``).
         """
         with open(jsonl_file, 'w', encoding='utf-8') as f:
-            for doc_data in add_checksums(doc_entries):
+            for doc_data in add_checksums(doc_entries, source_checksum):
                 json_line = json.dumps(doc_data, ensure_ascii=False)
                 f.write(json_line + '\n')
 

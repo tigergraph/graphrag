@@ -14,10 +14,14 @@ A file's name is its path under the graph's folder, such as ``q1.pdf`` or
 by ``__`` (``reports__2023__q1.pdf``), in lowercase, the same value the
 loading job stores. A file at the top of the folder has its file name as id.
 TigerGraph's REST API cannot look up an id that contains ``/``, so the path
-separator is not used in ids. Each converted record carries a SHA-256 of
-its content (``content_checksum``), which the loading job stores on the
-Document. Comparing the two tells whether the graph holds the file's current
-content.
+separator is not used in ids.
+
+Each Document records the SHA-256 of its source (``source_checksum``): the
+original file's bytes, or the record's content for a record of a .jsonl
+file. The conversion writes it into each converted record, and the loading
+job stores it on the Document. A file's state compares the checksum of the
+file on disk with the Document's, so it is known without converting the
+file, and a file changed on disk is converted again before it is loaded.
 """
 
 from __future__ import annotations
@@ -42,7 +46,10 @@ _SOURCE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # editor and Office lock files, and schema-extraction samples.
 _SKIP_PREFIXES = (".", "~", "$", "_schema_")
 
-CHECKSUM_ATTR = "content_checksum"
+# Checksum of a document's source: the SHA-256 of the original file's bytes,
+# or of the record's content for a .jsonl record. Graphs set up before the
+# rename may still have an unused ``content_checksum`` attribute.
+CHECKSUM_ATTR = "source_checksum"
 OUTDATED_ATTR = "outdated"
 SUPERSEDED_BY = "SUPERSEDED_BY"
 
@@ -193,30 +200,62 @@ def converted_path(graphname: str, source: str, name: str) -> str:
 
 
 def content_checksum(content) -> str:
-    """SHA-256 of a document's converted content."""
+    """SHA-256 of a text, for a document that has no file of its own (a
+    record of a .jsonl file, a document from a connector)."""
     return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
 
 
-def add_checksums(records: Iterable[dict]) -> list[dict]:
-    """Set ``content_checksum`` on each converted record. A record without
-    content (an image entry) gets an empty checksum, so every line has the
-    field the loading job reads."""
+# path -> (size, mtime_ns, checksum); a file is read again only when its size
+# or modification time changes.
+_FILE_CHECKSUMS: dict = {}
+
+
+def file_checksum(path: str) -> str:
+    """SHA-256 of a file's bytes."""
+    st = os.stat(path)
+    key = os.path.realpath(path)
+    cached = _FILE_CHECKSUMS.get(key)
+    if cached and cached[0] == st.st_size and cached[1] == st.st_mtime_ns:
+        return cached[2]
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    _FILE_CHECKSUMS[key] = (st.st_size, st.st_mtime_ns, h.hexdigest())
+    return h.hexdigest()
+
+
+def add_checksums(records: Iterable[dict], source: Optional[str] = None) -> list[dict]:
+    """Set ``source_checksum`` on each converted record: ``source`` (the
+    checksum of the file the records were converted from) when given, else
+    the checksum of the record's own content. A record without content (an
+    image entry) gets an empty checksum, so every line has the field the
+    loading job reads."""
     out = []
     for rec in records:
         rec = dict(rec)
         content = rec.get("content")
-        rec[CHECKSUM_ATTR] = content_checksum(content) if content else ""
+        if not content:
+            rec[CHECKSUM_ATTR] = ""
+        elif source:
+            rec[CHECKSUM_ATTR] = source
+        else:
+            rec[CHECKSUM_ATTR] = rec.get(CHECKSUM_ATTR) or content_checksum(content)
         out.append(rec)
     return out
 
 
 def converted_documents(path: str) -> Optional[dict]:
-    """``{doc_id: checksum}`` of the documents in a converted JSONL file, or
-    ``None`` when the file does not exist. Image entries are left out."""
-    if not os.path.isfile(path):
-        return None
+    """``{doc_id: checksum}`` of the documents in a JSONL file (a converted
+    file, or a .jsonl source), or ``None`` when the file does not exist.
+    Image entries are left out."""
     docs: dict = {}
-    with open(path, encoding="utf-8") as f:
+    try:
+        f = open(path, encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+        # Missing, or deleted since the folder was listed.
+        return None
+    with f:
         for line in f:
             line = line.strip()
             if not line:
@@ -233,6 +272,26 @@ def converted_documents(path: str) -> Optional[dict]:
     return docs
 
 
+def source_documents(graphname: str, source: str, name: str) -> dict:
+    """``{doc_id: checksum}`` of a kept file, read from the file itself: one
+    document with the file's checksum, or for a .jsonl file one per record
+    with the record's checksum."""
+    path = kept_file_path(graphname, source, name)
+    if name.lower().endswith(".jsonl"):
+        return converted_documents(path) or {}
+    return {doc_id(name): file_checksum(path)}
+
+
+def conversion_is_current(graphname: str, source: str, name: str, documents: Optional[dict] = None) -> bool:
+    """True if the kept file has a converted file made from its current
+    bytes: the converted file records the same documents and checksums."""
+    converted = converted_documents(converted_path(graphname, source, name))
+    if converted is None:
+        return False
+    documents = source_documents(graphname, source, name) if documents is None else documents
+    return converted == documents
+
+
 # --------------------------------------------------------------------------
 # Kept files
 # --------------------------------------------------------------------------
@@ -243,8 +302,10 @@ class KeptFile:
     source: str
     size: int
     modified: float
-    # ``{doc_id: checksum}`` from the converted file; ``None`` until converted.
+    # ``{doc_id: checksum}`` read from the file itself (see source_documents).
     documents: Optional[dict] = None
+    # A converted file made from the file's current bytes exists.
+    converted: bool = False
     state: str = NOT_INGESTED
     conflict_with: list = field(default_factory=list)
     legacy_id: Optional[str] = None
@@ -262,7 +323,7 @@ class KeptFile:
             "size": self.size,
             "modified": self.modified,
             "doc_ids": self.doc_ids,
-            "converted": self.documents is not None,
+            "converted": self.converted,
             "state": self.state,
             "conflict_with": self.conflict_with,
             "legacy_id": self.legacy_id,
@@ -304,9 +365,11 @@ def list_kept_files(graphname: str, sources: Optional[Iterable[str]] = None) -> 
             continue
         for name in walk_files(folder):
             st = os.stat(os.path.join(folder, *name.split("/")))
+            documents = source_documents(graphname, source, name)
             files.append(KeptFile(
                 name=name, source=source, size=st.st_size, modified=st.st_mtime,
-                documents=converted_documents(converted_path(graphname, source, name)),
+                documents=documents,
+                converted=conversion_is_current(graphname, source, name, documents),
             ))
     return files
 
@@ -332,7 +395,7 @@ def id_conflicts(files: Iterable[KeptFile]) -> dict:
 def assign_states(files: list[KeptFile], graph_docs: dict, has_checksum: bool) -> list[KeptFile]:
     """Set the state of each kept file.
 
-    ``graph_docs`` is ``{doc_id: {"content_checksum": str, "outdated": bool}}``
+    ``graph_docs`` is ``{doc_id: {"source_checksum": str, "outdated": bool}}``
     for the Documents of the graph, outdated ones included. ``has_checksum``
     says whether the graph's Document type has the checksum attribute.
     """

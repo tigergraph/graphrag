@@ -377,7 +377,7 @@ Upgrading GraphRAG does not change graphs that already exist: their installed qu
 - **Queries** — installed queries that are outdated or missing. **Repair** reinstalls them in place, without rebuilding the knowledge graph.
 - **Prompt overrides** — saved custom prompts in a format the current release no longer uses.
 - **Data health** — vertices missing embeddings and communities missing summaries, each with its own regenerate action.
-- **Document versions** — whether the graph records the content of each document and which documents a newer one replaces. **Set up** adds this to the graph; [Stored Files](#stored-files) needs it to compare files with the graph and to replace older versions.
+- **Document versions** — whether the graph records a checksum of each document's source file and which documents a newer one replaces. **Set up** adds this to the graph; [Stored Files](#stored-files) needs it to compare files with the graph and to replace older versions.
 - **Chunk section paths and summaries** — whether chunks store their section path and summary in their own fields. **Store separately** updates a graph created before 2.1.0: it changes the graph schema, installs the graph's queries again (search on the graph is unavailable until this finishes) and moves each chunk's section path out of its text. **Generate summaries** creates summaries for chunks without one, with one model request per chunk.
 
 A graph created with a version earlier than 1.4 can't be repaired in place; the Migration Assistant reports this and does not offer **Repair**. Create a new graph and ingest its documents again.
@@ -565,9 +565,9 @@ Uploaded and downloaded files are pre-processed when they are added: multimodal 
 | State | Meaning |
 |---|---|
 | Not ingested | The graph has no document for the file. |
-| Ingested | The graph has the same content. |
-| Changed | The graph has different content for the file. |
-| Not verified | The graph has the document, but its content can't be compared, for example because it was ingested with an earlier release. |
+| Ingested | The graph has the document from this exact file. |
+| Changed | The file differs from the one the graph's document came from, for example because it was edited on disk. |
+| Not verified | The graph has the document, but without a checksum to compare, for example because it was ingested with an earlier release. |
 | Older version | The graph has the document under the name an earlier release gave it, without the extension. |
 | Conflict | Another stored file has the same path, apart from letter case, for example the same file in two sources. |
 
