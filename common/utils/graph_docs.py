@@ -10,10 +10,11 @@ subfolders. The configs folder is mounted in every deployment, so the files
 stay when the container is recreated.
 
 A file's name is its path under the graph's folder, such as ``q1.pdf`` or
-``reports/2023/q1.pdf``. Its document id is the file name with the
-extension, in lowercase (``q1.pdf``), the same value the loading job stores.
-Files with the same file name in different subfolders get the same id, so
-they show as a conflict until one is renamed or deleted. Each converted record carries a SHA-256 of
+``reports/2023/q1.pdf``. Its document id is that path with the folders joined
+by ``__`` (``reports__2023__q1.pdf``), in lowercase, the same value the
+loading job stores. A file at the top of the folder has its file name as id.
+TigerGraph's REST API cannot look up an id that contains ``/``, so the path
+separator is not used in ids. Each converted record carries a SHA-256 of
 its content (``content_checksum``), which the loading job stores on the
 Document. Comparing the two tells whether the graph holds the file's current
 content.
@@ -107,6 +108,20 @@ def safe_rel_path(name: str) -> str:
     return "/".join(parts)
 
 
+def cloud_rel_path(key: str, prefix: str = "") -> Optional[str]:
+    """Where a cloud object is kept, relative to the graph's downloads folder:
+    its key below the folder part of ``prefix`` (``eval/reports/q1.pdf``
+    with prefix ``eval/`` is ``reports/q1.pdf``). ``None`` for a key that is
+    not a safe relative path, such as one with ``..`` or a hidden part."""
+    prefix = str(prefix or "")
+    folder = prefix[: prefix.rfind("/") + 1] if "/" in prefix else ""
+    rel = key[len(folder):] if folder and key.startswith(folder) else key
+    try:
+        return safe_rel_path(rel)
+    except ValueError:
+        return None
+
+
 def kept_file_path(graphname: str, source: str, name: str) -> str:
     folder = source_dir(graphname, source)
     path = os.path.join(folder, *safe_rel_path(name).split("/"))
@@ -137,16 +152,30 @@ def _base(file_name: str) -> str:
     return os.path.basename(str(file_name).replace("\\", "/"))
 
 
+ID_SEPARATOR = "__"
+
+
+def doc_id_text(file_name: str) -> str:
+    """Document id of a kept file as written in its converted file: its path
+    under the graph's folder, with the folders joined by ``__``, keeping the
+    letter case (the loading job lowercases it)."""
+    parts = [p for p in str(file_name).replace("\\", "/").split("/") if p]
+    return ID_SEPARATOR.join(parts)
+
+
 def doc_id(file_name: str) -> str:
-    """Document id of a kept file: its file name with the extension, in
-    lowercase (the loading job lowercases the id it stores). The subfolder
-    is not part of the id."""
-    return _base(file_name).lower()
+    """Document id of a kept file, as stored in the graph: ``doc_id_text``
+    in lowercase. A file at the top of the graph's folder has its file name
+    with the extension as id."""
+    return doc_id_text(file_name).lower()
 
 
-def legacy_doc_id(file_name: str) -> str:
+def legacy_doc_id(file_name: str) -> Optional[str]:
     """Document id that releases before 2.1.0 gave the file: its name without
-    the extension, in lowercase."""
+    the extension, in lowercase. ``None`` for a file in a subfolder: those
+    releases added files at the top of the folder only."""
+    if "/" in str(file_name).replace("\\", "/").strip("/"):
+        return None
     return os.path.splitext(_base(file_name))[0].lower()
 
 
@@ -240,7 +269,19 @@ class KeptFile:
         }
 
 
-def _walk_files(folder: str) -> list[str]:
+def remove_file(path: str, top: str) -> None:
+    """Delete ``path`` if it exists, then the folders above it that became
+    empty, up to (not including) ``top``."""
+    if os.path.isfile(path):
+        os.remove(path)
+    top = os.path.realpath(top)
+    folder = os.path.dirname(os.path.realpath(path))
+    while folder.startswith(top + os.sep) and os.path.isdir(folder) and not os.listdir(folder):
+        os.rmdir(folder)
+        folder = os.path.dirname(folder)
+
+
+def walk_files(folder: str) -> list[str]:
     """Relative paths of the files under ``folder``, subfolders included,
     without hidden, temporary and schema-sample entries."""
     out = []
@@ -261,7 +302,7 @@ def list_kept_files(graphname: str, sources: Optional[Iterable[str]] = None) -> 
         folder = source_dir(graphname, source)
         if not os.path.isdir(folder):
             continue
-        for name in _walk_files(folder):
+        for name in walk_files(folder):
             st = os.stat(os.path.join(folder, *name.split("/")))
             files.append(KeptFile(
                 name=name, source=source, size=st.st_size, modified=st.st_mtime,
@@ -307,7 +348,8 @@ def assign_states(files: list[KeptFile], graph_docs: dict, has_checksum: bool) -
             doc = graph_docs.get(did)
             if doc is None:
                 legacy = legacy_doc_id(f.name)
-                old = graph_docs.get(legacy) if f.documents is None or did == doc_id(f.name) else None
+                old = (graph_docs.get(legacy) if legacy is not None
+                       and (f.documents is None or did == doc_id(f.name)) else None)
                 if old is not None and legacy != did and not old.get(OUTDATED_ATTR):
                     f.legacy_id = legacy
                     states.append(OLDER_VERSION)
@@ -345,22 +387,23 @@ def state_counts(files: Iterable[KeptFile]) -> dict:
 
 def upload_id_conflicts(graphname: str, names: Iterable[str]) -> dict:
     """``{name: [names of kept files]}`` for planned uploads whose document id
-    is the id of a different kept file. A kept upload with the same name is not a
-    conflict: the upload replaces it."""
+    is the id of a different kept file. ``names`` are paths under the graph's
+    uploads folder. A kept upload with the same path is not a conflict: the
+    upload replaces it."""
     kept = list_kept_files(graphname)
     out: dict = {}
     for name in names:
         try:
-            base = safe_file_name(name)
+            rel = safe_rel_path(name)
         except ValueError:
             continue
-        did = doc_id(base)
+        did = doc_id(rel)
         others = [
             f.name for f in kept
-            if did in f.doc_ids and not (f.source == UPLOADS and f.name == base)
+            if did in f.doc_ids and not (f.source == UPLOADS and f.name == rel)
         ]
         if others:
-            out[base] = others
+            out[rel] = others
     return out
 
 
@@ -374,22 +417,22 @@ class RenameError(ValueError):
 
 
 def _renamed_records(records: list[dict], old_name: str, new_name: str) -> list[dict]:
-    """Converted records of ``old_name`` with the document ids of
-    ``new_name``. Image ids, their parent id and the image references in the
-    content follow the new id; the checksum is made again for the new
-    content."""
-    old_id, new_id = doc_id(old_name), doc_id(new_name)
+    """Converted records of the file ``old_name`` with the document ids of
+    ``new_name`` (paths under the graph's folder). Image ids, their parent id
+    and the image references in the content follow the new id; the checksum
+    is made again for the new content."""
+    old_id, new_id, new_text = doc_id(old_name), doc_id(new_name), doc_id_text(new_name)
     old_img, new_img = f"{old_id}_image_", f"{new_id}_image_"
     out = []
     for rec in records:
         rec = dict(rec)
         did = str(rec.get("doc_id") or "")
         if did.lower() == old_id:
-            rec["doc_id"] = new_name
+            rec["doc_id"] = new_text
         elif did.lower().startswith(old_img):
             rec["doc_id"] = new_img + did[len(old_img):]
         if str(rec.get("parent_doc") or "").lower() == old_id:
-            rec["parent_doc"] = new_name
+            rec["parent_doc"] = new_text
         if isinstance(rec.get("content"), str):
             rec["content"] = rec["content"].replace(f"tg://{old_img}", f"tg://{new_img}")
         out.append(rec)
@@ -441,7 +484,7 @@ def rename_kept_file(graphname: str, source: str, name: str, new_name: str) -> s
     os.rename(src, dst)
     if records is not None:
         with open(new_conv, "w", encoding="utf-8") as f:
-            for rec in _renamed_records(records, old_base, new_base):
+            for rec in _renamed_records(records, old, new):
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         os.remove(old_conv)
     return new

@@ -545,8 +545,8 @@ Open **Knowledge Graph Admin → Ingest Document**. Only an admin can manage the
 
 Files are added to a graph in three ways, and are then ingested from **Stored Files**:
 
-- **Upload** — upload local files.
-- **Download from Cloud** — download files from S3, GCS or Azure with the provider's credentials.
+- **Upload** — upload local files, or a folder with its subfolders.
+- **Download from Cloud** — download files from S3, GCS or Azure with the provider's credentials. Each file keeps its path below the prefix, so `eval/2023/q1.pdf` with the prefix `eval/` is stored as `2023/q1.pdf`.
 - **Amazon BDA** — use **Amazon Bedrock Data Automation** as the document pre-processor. BDA reads documents from one S3 bucket and writes the converted output to another, and that output is ingested in one step.
 
 Uploaded and downloaded files are pre-processed when they are added: multimodal files such as PDFs are converted to text with extracted images, and each image gets a generated description and a reference in the text. The Upload and Download from Cloud tabs list their files, which can be deleted there. Each file becomes a document named after its file name, including the extension, so `notes.md` and `notes.pdf` are two documents. An upload is refused when another stored file has the same name apart from letter case, such as `Report.pdf` next to `report.pdf`, or a downloaded file with the same name; rename it or delete the other file first.
@@ -568,7 +568,7 @@ Uploaded and downloaded files are pre-processed when they are added: multimodal 
 | Changed | The graph has different content for the file. |
 | Not verified | The graph has the document, but its content can't be compared, for example because it was ingested with an earlier release. |
 | Older version | The graph has the document under the name an earlier release gave it, without the extension. |
-| Conflict | Another stored file has the same name, apart from letter case. |
+| Conflict | Another stored file has the same path, apart from letter case, for example the same file in two sources. |
 
 Select files one by one or by state, then:
 
@@ -579,7 +579,7 @@ To resolve a conflict, click **Rename** under a file in conflict and enter a new
 
 Ingest loads the document content only. Rebuild the knowledge graph to process the new and changed documents.
 
-Stored files are kept on the server in `configs/graph_docs/uploads/<graph>/` and `configs/graph_docs/downloads/<graph>/`, so they stay when the containers are recreated. To add files without the UI, put them in another folder under `configs/graph_docs/` with one subfolder per graph, such as `configs/graph_docs/server/<graph>/`. Stored Files lists them with the folder name as their source, together with the files in its subfolders. A file's document id is its file name, so files with the same name in different subfolders show as Conflict until one is renamed or deleted.
+Stored files are kept on the server in `configs/graph_docs/uploads/<graph>/` and `configs/graph_docs/downloads/<graph>/`, so they stay when the containers are recreated. To add files without the UI, put them in another folder under `configs/graph_docs/` with one subfolder per graph, such as `configs/graph_docs/server/<graph>/`. Stored Files lists them with the folder name as their source, together with the files in its subfolders. A file's document id is its path below the graph's folder, with the folders joined by `__`: `corpus/2023/q1.pdf` gets the id `corpus__2023__q1.pdf`, and a file at the top of the folder has its file name as id.
 
 ### Ingest Documents via API
 

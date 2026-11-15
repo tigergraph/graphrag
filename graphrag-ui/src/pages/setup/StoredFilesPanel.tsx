@@ -91,7 +91,7 @@ const STATE_INFO: Record<
   },
   conflict: {
     label: "Conflict",
-    tooltip: "Another stored file has the same name when letter case is ignored. Rename or delete one of them.",
+    tooltip: "Another stored file has the same path when letter case is ignored. Rename or delete one of them.",
     pill: "bg-red-50 text-red-700 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800",
   },
 };
