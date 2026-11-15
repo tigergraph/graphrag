@@ -16,7 +16,7 @@ import asyncio
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
 
-from common.utils.graph_docs import add_checksums, converted_name
+from common.utils.graph_docs import add_checksums, converted_name, doc_id_text
 
 logger = logging.getLogger(__name__)
 
@@ -571,7 +571,9 @@ class TextExtractor:
                 ctx.run,
                 extract_text_from_file_with_images_as_docs,
                 file_path,
-                graphname
+                graphname,
+                # A file in a subfolder gets its path as id (folders joined by __).
+                doc_id_text(rel_name) if rel_name else None,
             )
 
             # Create one JSONL file per input file, named after the full
@@ -796,15 +798,16 @@ class TextExtractor:
         return asyncio.run(self._process_folder_async(folder_path, graphname, temp_folder, filenames=filenames))
 
 
-def extract_text_from_file_with_images_as_docs(file_path, graphname=None):
+def extract_text_from_file_with_images_as_docs(file_path, graphname=None, doc_id=None):
     """
     Extract text and images from a file, treating images as separate document entries.
+    ``doc_id`` is the document id; by default the file name.
     """
     file_path = Path(file_path)
     extension = file_path.suffix.lower()
     # The document id keeps the extension, so that it shows the type of the
     # source file and notes.md and notes.pdf get different ids.
-    base_doc_id = str(file_path.name)
+    base_doc_id = doc_id or str(file_path.name)
 
     logger.debug(f"Extracting with images as docs: {file_path} (type: {extension})")
 

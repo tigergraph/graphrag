@@ -48,7 +48,7 @@ def _keep(source, name, content=None, records=None):
     if content is not None or records is not None:
         conv = Path(gd.converted_dir(G, source)) / gd.converted_name(name)
         conv.parent.mkdir(parents=True, exist_ok=True)
-        recs = records or [{"doc_id": os.path.basename(name), "doc_type": "markdown", "content": content}]
+        recs = records or [{"doc_id": gd.doc_id_text(name), "doc_type": "markdown", "content": content}]
         with open(conv, "w") as f:
             for r in gd.add_checksums(recs):
                 f.write(json.dumps(r) + "\n")
@@ -129,28 +129,53 @@ class TestFoldersAndSubfolders(unittest.TestCase):
             self.assertEqual(gd.all_sources(), ["uploads", "downloads", "server"])
             files = {(f.source, f.name): f for f in gd.list_kept_files(G)}
             self.assertEqual(set(files), {("uploads", "a.md"), ("server", "reports/2023/q1.pdf")})
-            # The document id is the file name only.
-            self.assertEqual(files[("server", "reports/2023/q1.pdf")].doc_ids, ["q1.pdf"])
+            # The document id is the path under the graph's folder, with __.
+            self.assertEqual(files[("server", "reports/2023/q1.pdf")].doc_ids, ["reports__2023__q1.pdf"])
+            self.assertEqual(files[("uploads", "a.md")].doc_ids, ["a.md"])
 
-    def test_same_file_name_in_two_subfolders_is_a_conflict(self):
+    def test_same_file_name_in_two_subfolders_does_not_conflict(self):
         with _InTempDir():
             _keep("server", "2023/q1.pdf")
             _keep("server", "2024/q1.pdf")
             files = {f.name: f for f in gd.assign_states(gd.list_kept_files(G), {}, True)}
-            self.assertEqual(files["2023/q1.pdf"].state, gd.CONFLICT)
-            self.assertEqual(files["2023/q1.pdf"].conflict_with, ["2024/q1.pdf"])
+            self.assertEqual(files["2023/q1.pdf"].state, gd.NOT_INGESTED)
+            self.assertEqual(files["2024/q1.pdf"].doc_ids, ["2024__q1.pdf"])
+
+    def test_same_path_in_two_sources_conflicts(self):
+        with _InTempDir():
+            _keep("server", "2023/q1.pdf")
+            _keep("downloads", "2023/Q1.pdf")
+            files = {(f.source, f.name): f for f in gd.assign_states(gd.list_kept_files(G), {}, True)}
+            self.assertEqual(files[("server", "2023/q1.pdf")].state, gd.CONFLICT)
+            self.assertEqual(files[("server", "2023/q1.pdf")].conflict_with, ["2023/Q1.pdf"])
+
+    def test_a_subfolder_file_is_never_an_older_version(self):
+        # Earlier releases added files at the top of the folder only, so a
+        # Document named after the file stem belongs to another file.
+        with _InTempDir():
+            _keep("server", "2023/q1.pdf")
+            files = gd.assign_states(gd.list_kept_files(G), {"q1": {"outdated": False}}, True)
+            self.assertEqual(files[0].state, gd.NOT_INGESTED)
 
     def test_rename_keeps_the_file_in_its_subfolder(self):
         with _InTempDir():
             _keep("server", "2023/q1.pdf", records=[
-                {"doc_id": "q1.pdf", "doc_type": "markdown", "content": "a"}])
-            _keep("server", "2024/q1.pdf")
+                {"doc_id": "2023__q1.pdf", "doc_type": "markdown", "content": "a"}])
+            _keep("downloads", "2023/Q1.pdf")
             self.assertEqual(gd.rename_kept_file(G, "server", "2023/q1.pdf", "q1-2023.pdf"), "2023/q1-2023.pdf")
             self.assertTrue(os.path.isfile(gd.kept_file_path(G, "server", "2023/q1-2023.pdf")))
             with open(gd.converted_path(G, "server", "2023/q1-2023.pdf")) as f:
-                self.assertEqual(json.loads(f.readline())["doc_id"], "q1-2023.pdf")
+                self.assertEqual(json.loads(f.readline())["doc_id"], "2023__q1-2023.pdf")
             with self.assertRaises(gd.RenameError):
                 gd.rename_kept_file(G, "server", "2024/q1.pdf", "other/q1.pdf")
+
+    def test_cloud_objects_keep_their_path_below_the_prefix(self):
+        self.assertEqual(gd.cloud_rel_path("eval/reports/2023/q1.pdf", "eval/"), "reports/2023/q1.pdf")
+        self.assertEqual(gd.cloud_rel_path("eval/reports/q1.pdf", "eval/rep"), "reports/q1.pdf")
+        self.assertEqual(gd.cloud_rel_path("eval/q1.pdf", "eval"), "eval/q1.pdf")
+        self.assertEqual(gd.cloud_rel_path("q1.pdf", ""), "q1.pdf")
+        for bad in ("eval/../x.pdf", "eval/.hidden/x.pdf", "/abs.pdf"):
+            self.assertIsNone(gd.cloud_rel_path(bad, ""), bad)
 
     def test_paths_and_source_names_cannot_leave_the_folder(self):
         for bad in ("../x.md", "/etc/passwd", "a/../../x.md", ".hidden/x.md"):
@@ -160,7 +185,7 @@ class TestFoldersAndSubfolders(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 gd.source_dir(G, bad)
 
-    def test_converter_keeps_subfolders_and_ids_the_file_name(self):
+    def test_converter_keeps_subfolders_and_ids_the_path(self):
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
             for year in ("2023", "2024"):
                 Path(src, year).mkdir()
@@ -168,7 +193,7 @@ class TestFoldersAndSubfolders(unittest.TestCase):
             TextExtractor().process_folder(src, G, out, filenames=["2024/notes.md"])
             self.assertFalse(Path(out, "2023", "notes.md.jsonl").exists())
             rec = json.loads(Path(out, "2024", "notes.md.jsonl").read_text().splitlines()[0])
-            self.assertEqual(rec["doc_id"], "notes.md")
+            self.assertEqual(rec["doc_id"], "2024__notes.md")
 
 
 class TestStates(unittest.TestCase):
@@ -457,7 +482,7 @@ class TestDocumentRoutes(unittest.TestCase):
             su = (["superuser"], {}, "u")
             listed = self._call("get", f"/ui/{G}/documents", su).json()["files"]
             self.assertEqual([(f["source"], f["name"], f["doc_ids"]) for f in listed],
-                             [("server", "reports/2023/q1.md", ["q1.md"])])
+                             [("server", "reports/2023/q1.md", ["reports__2023__q1.md"])])
             with patch("app.routers.ui.supportai.ingest", side_effect=fake_ingest) as ing:
                 body = self._call("post", f"/ui/{G}/documents/ingest", su, json={
                     "files": [{"source": "server", "name": "reports/2023/q1.md"}],
@@ -466,6 +491,41 @@ class TestDocumentRoutes(unittest.TestCase):
             info = ing.call_args.args[1]
             self.assertEqual(info.data_source_id["files"], ["reports/2023/q1.md.jsonl"])
             self.assertTrue(info.data_source_id["data_path"].endswith(os.path.join("server", "ingestion_temp", G)))
+
+    def test_folder_upload_keeps_subfolders_and_old_routes_follow(self):
+        import io
+        su = (["superuser"], {}, "u")
+        with _InTempDir():
+            resp = self._call("post", f"/ui/{G}/uploads", su, files=[
+                ("files", ("corpus/2023/q1.md", io.BytesIO(b"a"), "text/markdown")),
+                ("files", ("corpus/2024/q1.md", io.BytesIO(b"b"), "text/markdown")),
+                ("files", ("top.md", io.BytesIO(b"c"), "text/markdown")),
+            ])
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertTrue(os.path.isfile(gd.kept_file_path(G, "uploads", "corpus/2023/q1.md")))
+            names = sorted(f["filename"] for f in self._call("get", f"/ui/{G}/uploads/list", su).json()["files"])
+            self.assertEqual(names, ["corpus/2023/q1.md", "corpus/2024/q1.md", "top.md"])
+            listed = {f["name"]: f["doc_ids"] for f in self._call("get", f"/ui/{G}/documents", su).json()["files"]}
+            self.assertEqual(listed["corpus/2024/q1.md"], ["corpus__2024__q1.md"])
+            check = self._call("post", f"/ui/{G}/uploads/check", su, json={"filenames": ["corpus/2023/q1.md"]}).json()
+            self.assertEqual(check["conflicts"], ["corpus/2023/q1.md"])
+            resp = self._call("delete", f"/ui/{G}/uploads", su, params={"filename": "corpus/2023/q1.md"})
+            self.assertEqual(resp.status_code, 200, resp.text)
+            self.assertFalse(os.path.exists(gd.kept_file_path(G, "uploads", "corpus/2023/q1.md")))
+            # The emptied subfolder goes too; its sibling stays.
+            self.assertFalse(os.path.exists(os.path.join(gd.source_dir(G, "uploads"), "corpus", "2023")))
+            self.assertTrue(os.path.isdir(os.path.join(gd.source_dir(G, "uploads"), "corpus", "2024")))
+            resp = self._call("delete", f"/ui/{G}/uploads", su, params={"filename": "../../server_config.json"})
+            self.assertEqual(resp.status_code, 400, resp.text)
+            self._call("delete", f"/ui/{G}/uploads", su)
+            self.assertEqual(gd.list_kept_files(G), [])
+
+    def test_upload_refuses_a_name_that_leaves_the_folder(self):
+        import io
+        with _InTempDir():
+            resp = self._call("post", f"/ui/{G}/uploads", (["superuser"], {}, "u"), files=[
+                ("files", ("../escape.md", io.BytesIO(b"x"), "text/markdown"))])
+            self.assertEqual(resp.status_code, 400, resp.text)
 
     def _ingest(self, conn, override):
         def fake_ingest(graphname, info, _conn):

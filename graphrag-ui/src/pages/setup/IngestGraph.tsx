@@ -40,6 +40,15 @@ const MAX_UPLOAD_SIZE_MB =
     : DEFAULT_MAX_UPLOAD_SIZE_MB;
 const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
 
+// Name a file is stored under: its path inside a chosen folder (which keeps
+// the folder's subfolders), else its file name.
+const uploadPath = (file: File): string =>
+  (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+
+// Hidden files and folders (for example .DS_Store) are not uploaded.
+const isHiddenUpload = (file: File): boolean =>
+  uploadPath(file).split("/").some((part) => part.startsWith("."));
+
 const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   const [confirm, confirmDialog] = useConfirm();
   const [availableGraphs, setAvailableGraphs] = useState<string[]>([]);
@@ -50,6 +59,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   );
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
   // Number of files the last upload / download added to Stored Files;
@@ -298,7 +308,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     if (totalSize <= MAX_UPLOAD_SIZE_BYTES || files.length === 1) {
       setUploadMessage("Uploading files...");
       const formData = new FormData();
-      files.forEach((file) => formData.append("files", file));
+      files.forEach((file) => formData.append("files", file, uploadPath(file)));
       const response = await fetch(
         `/ui/${ingestGraphName}/uploads${queryString}`,
         {
@@ -314,7 +324,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       if (data.status !== "success") {
         throw new Error(data.message || "Upload failed.");
       }
-      return { uploaded: files.map((f) => f.name), failed: [] };
+      return { uploaded: files.map(uploadPath), failed: [] };
     }
 
     // Total size exceeds the limit: upload one file at a time.
@@ -323,12 +333,12 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       setUploadMessage(
-        `Uploading file ${i + 1}/${files.length}: ${file.name} (${formatBytes(
+        `Uploading file ${i + 1}/${files.length}: ${uploadPath(file)} (${formatBytes(
           file.size
         )})...`
       );
       const formData = new FormData();
-      formData.append("files", file);
+      formData.append("files", file, uploadPath(file));
       try {
         const response = await fetch(
           `/ui/${ingestGraphName}/uploads${queryString}`,
@@ -340,11 +350,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         );
         const data = await safeJson(response);
         if (!response.ok) {
-          failed.push(`${file.name} (${data.detail || `HTTP ${response.status}`})`);
+          failed.push(`${uploadPath(file)} (${data.detail || `HTTP ${response.status}`})`);
         } else if (data.status === "success") {
-          uploaded.push(file.name);
+          uploaded.push(uploadPath(file));
         } else {
-          failed.push(`${file.name} (${data.message || "unexpected response"})`);
+          failed.push(`${uploadPath(file)} (${data.message || "unexpected response"})`);
         }
       } catch (err: unknown) {
         failed.push(`${file.name} (${errorMessage(err) || "unknown error"})`);
@@ -365,7 +375,11 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       return;
     }
 
-    const filesArray = Array.from(selectedFiles);
+    const filesArray = Array.from(selectedFiles).filter((f) => !isHiddenUpload(f));
+    if (filesArray.length === 0) {
+      setUploadMessage("The selection has no files to upload.");
+      return;
+    }
 
     // Check if any single file exceeds the server limit
     const oversizedFiles = filesArray.filter(
@@ -396,7 +410,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       // Pre-flight the whole set once so the user sees a single prompt.
       const plan = await resolveUploadPlan(
         ingestGraphName,
-        filesArray.map((f) => f.name),
+        filesArray.map(uploadPath),
         creds,
         confirm
       );
@@ -418,7 +432,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             "Rename these files, or delete the stored files first."
         );
       }
-      const toUpload = filesArray.filter((f) => !(f.name in plan.blocked));
+      const toUpload = filesArray.filter((f) => !(uploadPath(f) in plan.blocked));
       if (toUpload.length === 0) {
         setUploadMessage("");
         return;
@@ -431,6 +445,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
       );
       setSelectedFiles(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
+      if (folderInputRef.current) folderInputRef.current.value = "";
 
       if (uploaded.length === 0) {
         setUploadMessage(`❌ No files were uploaded. Failed: ${failed.join(", ")}`);
@@ -1008,12 +1023,22 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                 </p>
                 <div>
                   <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                    Select Files
+                    Select Files or a Folder
                   </label>
                   <input
                     ref={fileInputRef}
                     type="file"
                     multiple
+                    onChange={(e) => setSelectedFiles(e.target.files)}
+                    disabled={isUploading}
+                    className="hidden"
+                  />
+                  {/* A chosen folder is uploaded with its subfolders. */}
+                  <input
+                    ref={folderInputRef}
+                    type="file"
+                    multiple
+                    {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
                     onChange={(e) => setSelectedFiles(e.target.files)}
                     disabled={isUploading}
                     className="hidden"
@@ -1028,6 +1053,16 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     >
                       <FolderUp className="h-4 w-4 mr-2" />
                       Choose Files
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => folderInputRef.current?.click()}
+                      disabled={isUploading}
+                      className="border-blue-500 text-blue-600 hover:bg-blue-50 dark:border-blue-400 dark:text-blue-400 dark:hover:bg-blue-900/20"
+                    >
+                      <FolderUp className="h-4 w-4 mr-2" />
+                      Choose Folder
                     </Button>
                     <span className="text-sm italic text-gray-400 dark:text-gray-500">
                       {selectedFiles && selectedFiles.length > 0

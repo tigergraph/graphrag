@@ -3707,8 +3707,9 @@ async def list_uploaded_files(
         files_info = []
         total_size = 0
         
-        for filename in os.listdir(upload_dir):
-            file_path = os.path.join(upload_dir, filename)
+        # Subfolders come from folder uploads; each file is named by its path.
+        for filename in graph_docs.walk_files(upload_dir):
+            file_path = graph_docs.kept_file_path(graphname, graph_docs.UPLOADS, filename)
             if os.path.isfile(file_path):
                 file_stat = os.stat(file_path)
                 files_info.append({
@@ -3778,9 +3779,12 @@ async def check_upload_conflicts(
     for name in requested:
         if not isinstance(name, str) or not name:
             continue
-        safe_name = os.path.basename(name)
-        if os.path.exists(os.path.join(upload_dir, safe_name)):
-            conflicts.append(safe_name)
+        try:
+            rel = graph_docs.safe_rel_path(name)
+        except ValueError:
+            continue
+        if os.path.exists(graph_docs.kept_file_path(graphname, graph_docs.UPLOADS, rel)):
+            conflicts.append(rel)
     return {"graphname": graphname, "conflicts": conflicts, "id_conflicts": id_conflicts}
 
 
@@ -3825,18 +3829,21 @@ async def upload_files(
         os.makedirs(upload_dir, exist_ok=True)
         temp_folder = graph_docs.converted_dir(graphname, graph_docs.UPLOADS)
 
+        # A file's name may be a path (a folder upload keeps its
+        # subfolders); it must stay inside the graph's uploads folder.
+        def rel_name(name: str) -> str:
+            try:
+                return graph_docs.safe_rel_path(name)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid file name: {name}")
+
         skip_set: set[str] = set()
         if skip:
-            skip_set = {
-                os.path.basename(s.strip()) for s in skip.split(",") if s.strip()
-            }
-        accepted = [
-            f for f in files
-            if os.path.basename(f.filename or "") not in skip_set
-        ]
+            skip_set = {rel_name(s.strip()) for s in skip.split(",") if s.strip()}
+        accepted = [f for f in files if rel_name(f.filename or "") not in skip_set]
 
         id_conflicts = graph_docs.upload_id_conflicts(
-            graphname, [f.filename or "" for f in accepted]
+            graphname, [rel_name(f.filename or "") for f in accepted]
         )
         if id_conflicts:
             raise HTTPException(
@@ -3848,11 +3855,9 @@ async def upload_files(
         if not overwrite:
             existing_files = []
             for file in accepted:
-                file_path = os.path.join(
-                    upload_dir, os.path.basename(file.filename or "")
-                )
-                if os.path.exists(file_path):
-                    existing_files.append(os.path.basename(file.filename or ""))
+                rel = rel_name(file.filename or "")
+                if os.path.exists(graph_docs.kept_file_path(graphname, graph_docs.UPLOADS, rel)):
+                    existing_files.append(rel)
 
             if existing_files:
                 return {
@@ -3870,14 +3875,15 @@ async def upload_files(
         total_size = 0
 
         for file in accepted:
-            safe_name = os.path.basename(file.filename or "")
-            file_path = os.path.join(upload_dir, safe_name)
+            safe_name = rel_name(file.filename or "")
+            file_path = graph_docs.kept_file_path(graphname, graph_docs.UPLOADS, safe_name)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
             # On overwrite, drop the cached JSONL so the next ingest
             # re-converts the new bytes instead of silently reusing the
             # stale extract.
             if overwrite and os.path.isdir(temp_folder):
-                cached_jsonl = os.path.join(temp_folder, graph_docs.converted_name(safe_name))
+                cached_jsonl = graph_docs.converted_path(graphname, graph_docs.UPLOADS, safe_name)
                 if os.path.exists(cached_jsonl):
                     try:
                         os.remove(cached_jsonl)
@@ -3950,11 +3956,17 @@ async def clear_uploaded_files(
         if filename:
             # Delete corresponding JSONL file from temp folder FIRST
             temp_folder = graph_docs.converted_dir(graphname, graph_docs.UPLOADS)
+            try:
+                # The name may be a path in a subfolder; it must stay inside
+                # the graph's folder.
+                file_path = graph_docs.kept_file_path(graphname, graph_docs.UPLOADS, filename)
+                jsonl_file = graph_docs.converted_path(graphname, graph_docs.UPLOADS, filename)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid file name: {filename}")
             if os.path.exists(temp_folder):
-                jsonl_file = os.path.join(temp_folder, graph_docs.converted_name(filename))
 
                 if os.path.exists(jsonl_file):
-                    os.remove(jsonl_file)
+                    graph_docs.remove_file(jsonl_file, temp_folder)
                     logger.info(f"Deleted corresponding JSONL file: {os.path.basename(jsonl_file)}")
                     
                     # If temp folder is now empty, remove it
@@ -3962,25 +3974,18 @@ async def clear_uploaded_files(
                         os.rmdir(temp_folder)
                         logger.info(f"Removed empty temp folder for graph {graphname}")
             
-            # Then delete the raw file
-            file_path = os.path.join(upload_dir, filename)
+            # Then delete the raw file, and the subfolders it leaves empty
             if os.path.exists(file_path) and os.path.isfile(file_path):
-                os.remove(file_path)
+                graph_docs.remove_file(file_path, graph_docs.source_dir(graphname, graph_docs.UPLOADS))
                 deleted_files.append(filename)
                 logger.info(f"Deleted file {filename} for graph {graphname}")
             else:
                 raise HTTPException(status_code=404, detail=f"File {filename} not found")
         else:
-            # Delete all files in the directory
-            for filename in os.listdir(upload_dir):
-                file_path = os.path.join(upload_dir, filename)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                    deleted_files.append(filename)
-            
-            # Remove the directory if it's empty
-            if not os.listdir(upload_dir):
-                os.rmdir(upload_dir)
+            # Delete all files in the directory, subfolders included
+            import shutil
+            deleted_files = graph_docs.walk_files(upload_dir)
+            shutil.rmtree(upload_dir, ignore_errors=True)
             
             # Also delete the entire temp folder for this graph
             temp_folder = graph_docs.converted_dir(graphname, graph_docs.UPLOADS)
@@ -4267,10 +4272,10 @@ def delete_documents(
     try:
         deleted = []
         for source, name in selected:
-            converted = graph_docs.converted_path(graphname, source, name)
-            if os.path.exists(converted):
-                os.remove(converted)
-            os.remove(graph_docs.kept_file_path(graphname, source, name))
+            graph_docs.remove_file(graph_docs.converted_path(graphname, source, name),
+                                   graph_docs.converted_dir(graphname, source))
+            graph_docs.remove_file(graph_docs.kept_file_path(graphname, source, name),
+                                   graph_docs.source_dir(graphname, source))
             deleted.append({"source": source, "name": name})
         return {"graphname": graphname, "deleted": deleted}
     finally:
@@ -4397,9 +4402,13 @@ async def download_from_cloud(
                         if key.endswith('/'):
                             continue
                         
-                        # Get filename
-                        filename = os.path.basename(key)
-                        local_path = os.path.join(download_dir, filename)
+                        # Keep the key's path below the prefix's folder.
+                        filename = graph_docs.cloud_rel_path(key, prefix)
+                        if filename is None:
+                            logger.warning(f"Skipped cloud object with an unsafe name: {key}")
+                            continue
+                        local_path = graph_docs.kept_file_path(graphname, graph_docs.DOWNLOADS, filename)
+                        os.makedirs(os.path.dirname(local_path), exist_ok=True)
                         
                         # Download file
                         s3_client.download_file(bucket, key, local_path)
@@ -4444,9 +4453,13 @@ async def download_from_cloud(
                     if blob.name.endswith('/'):
                         continue
                     
-                    # Get filename
-                    filename = os.path.basename(blob.name)
-                    local_path = os.path.join(download_dir, filename)
+                    # Keep the blob's path below the prefix's folder.
+                    filename = graph_docs.cloud_rel_path(blob.name, prefix)
+                    if filename is None:
+                        logger.warning(f"Skipped cloud object with an unsafe name: {blob.name}")
+                        continue
+                    local_path = graph_docs.kept_file_path(graphname, graph_docs.DOWNLOADS, filename)
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
                     
                     # Download blob
                     blob.download_to_filename(local_path)
@@ -4489,9 +4502,13 @@ async def download_from_cloud(
                     if blob.name.endswith('/'):
                         continue
                     
-                    # Get filename
-                    filename = os.path.basename(blob.name)
-                    local_path = os.path.join(download_dir, filename)
+                    # Keep the blob's path below the prefix's folder.
+                    filename = graph_docs.cloud_rel_path(blob.name, prefix)
+                    if filename is None:
+                        logger.warning(f"Skipped cloud object with an unsafe name: {blob.name}")
+                        continue
+                    local_path = graph_docs.kept_file_path(graphname, graph_docs.DOWNLOADS, filename)
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
                     
                     # Download blob
                     blob_client = container_client.get_blob_client(blob.name)
@@ -4524,7 +4541,7 @@ async def download_from_cloud(
         kept_conflicts = graph_docs.id_conflicts(graph_docs.list_kept_files(graphname))
         conflicts = {
             name: kept_conflicts[(graph_docs.DOWNLOADS, name)]
-            for name in sorted({os.path.basename(n) for n in downloaded_files})
+            for name in sorted(set(downloaded_files))
             if (graph_docs.DOWNLOADS, name) in kept_conflicts
         }
         
@@ -4573,8 +4590,9 @@ async def list_cloud_downloads(
             }
         
         files = []
-        for filename in os.listdir(download_dir):
-            file_path = os.path.join(download_dir, filename)
+        # Downloads keep the object's path below the prefix, so walk subfolders.
+        for filename in graph_docs.walk_files(download_dir):
+            file_path = graph_docs.kept_file_path(graphname, graph_docs.DOWNLOADS, filename)
             if os.path.isfile(file_path):
                 file_stat = os.stat(file_path)
                 files.append({
@@ -4626,11 +4644,17 @@ async def delete_cloud_downloads(
         if filename:
             # Delete corresponding JSONL file from temp folder FIRST
             temp_folder = graph_docs.converted_dir(graphname, graph_docs.DOWNLOADS)
+            try:
+                # The name may be a path in a subfolder; it must stay inside
+                # the graph's folder.
+                file_path = graph_docs.kept_file_path(graphname, graph_docs.DOWNLOADS, filename)
+                jsonl_file = graph_docs.converted_path(graphname, graph_docs.DOWNLOADS, filename)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f"Invalid file name: {filename}")
             if os.path.exists(temp_folder):
-                jsonl_file = os.path.join(temp_folder, graph_docs.converted_name(filename))
 
                 if os.path.exists(jsonl_file):
-                    os.remove(jsonl_file)
+                    graph_docs.remove_file(jsonl_file, temp_folder)
                     logger.info(f"Deleted corresponding JSONL file: {os.path.basename(jsonl_file)}")
                     
                     # If temp folder is now empty, remove it
@@ -4638,25 +4662,18 @@ async def delete_cloud_downloads(
                         os.rmdir(temp_folder)
                         logger.info(f"Removed empty temp folder for graph {graphname}")
             
-            # Then delete the raw file
-            file_path = os.path.join(download_dir, filename)
+            # Then delete the raw file, and the subfolders it leaves empty
             if os.path.exists(file_path) and os.path.isfile(file_path):
-                os.remove(file_path)
+                graph_docs.remove_file(file_path, graph_docs.source_dir(graphname, graph_docs.DOWNLOADS))
                 deleted_files.append(filename)
                 logger.info(f"Deleted cloud download {filename} for graph {graphname}")
             else:
                 raise HTTPException(status_code=404, detail=f"File {filename} not found")
         else:
-            # Delete all files in the directory
-            for filename in os.listdir(download_dir):
-                file_path = os.path.join(download_dir, filename)
-                if os.path.isfile(file_path):
-                    os.remove(file_path)
-                    deleted_files.append(filename)
-            
-            # Remove the directory if it's empty
-            if not os.listdir(download_dir):
-                os.rmdir(download_dir)
+            # Delete all files in the directory, subfolders included
+            import shutil
+            deleted_files = graph_docs.walk_files(download_dir)
+            shutil.rmtree(download_dir, ignore_errors=True)
             
             # Also delete the entire temp folder for this graph
             temp_folder = graph_docs.converted_dir(graphname, graph_docs.DOWNLOADS)
