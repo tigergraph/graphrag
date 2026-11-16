@@ -1,0 +1,34 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ * Returns index IDs only. Fact text and ownership remain in PostgreSQL.
+ */
+
+CREATE OR REPLACE DISTRIBUTED QUERY Memory_Search_Embeddings(
+  STRING scope_pattern,
+  LIST<FLOAT> query_vector,
+  INT top_k = 8
+) {
+  TYPEDEF TUPLE<STRING index_id, FLOAT score> MemoryHit;
+  HeapAccum<MemoryHit>(top_k, score DESC) @@hits;
+
+  candidates = SELECT m
+               FROM MemoryEmbedding:m
+               WHERE m.id LIKE scope_pattern
+                 AND m.embedding.size() > 0;
+
+  nearest = vectorSearch(
+    {MemoryEmbedding.embedding},
+    query_vector,
+    top_k,
+    {candidate_set: candidates}
+  );
+
+  ranked = SELECT m
+           FROM nearest:m
+           POST-ACCUM @@hits += MemoryHit(
+             m.id,
+             1 - gds.vector.distance(query_vector, m.embedding, "COSINE")
+           );
+
+  PRINT @@hits AS hits;
+}

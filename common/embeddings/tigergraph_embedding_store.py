@@ -15,6 +15,7 @@
 import logging
 import traceback
 import json
+from pathlib import Path
 from time import sleep, time
 from collections import defaultdict
 from typing import Iterable, List, Optional, Tuple
@@ -34,6 +35,22 @@ from pyTigerGraph import TigerGraphConnection
 logger = logging.getLogger(__name__)
 
 
+def _extract_gsql_job(source: str, job_name: str) -> str:
+    marker = f"CREATE SCHEMA_CHANGE JOB {job_name}"
+    start = source.find(marker)
+    if start < 0:
+        raise RuntimeError(f"Missing schema-change job {job_name}")
+    depth = 0
+    for index, char in enumerate(source[start:], start):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise RuntimeError(f"Unclosed schema-change job {job_name}")
+
+
 class TigerGraphEmbeddingStore(EmbeddingStore):
     def __init__(
         self,
@@ -46,6 +63,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         self.support_ai_instance = support_ai_instance
         self.default_vector_attribute = default_vector_attribute
         self.vector_attr_cache = {}
+        self._memory_index_ready = False
 
         if isinstance(conn.apiToken, tuple):
             token = conn.apiToken[0]
@@ -152,9 +170,130 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         else:
             logger.info(f"All vector queries already installed, skipping.")
 
+    def ensure_memory_index(self, dimension: int = 1536) -> None:
+        """Create the internal vector-only memory type and its queries once."""
+        if self._memory_index_ready:
+            return
+        graphname = self.conn.graphname
+        if not graphname or graphname == "MyGraph":
+            raise RuntimeError("Memory embeddings require a bound graph")
+        schema = self.conn.gsql(f"USE GRAPH {graphname}\n ls")
+        has_vertex = "- VERTEX MemoryEmbedding" in schema
+        # Vector attributes are listed under "Vector Embeddings:", not
+        # next to the VERTEX line, so do not slice the vertex block.
+        self.refreshvector_attr_cache()
+        has_vector = self.has_vector_attribute("MemoryEmbedding", "embedding")
+        results = []
+        # Vertex must exist before the ALTER VECTOR job can be created.
+        if not has_vertex or not has_vector:
+            body = Path(
+                "common/gsql/supportai/SupportAI_Schema_Memory_Vector.gsql"
+            ).read_text().replace("dimension=1536", f"dimension={dimension}")
+            if not has_vertex:
+                results.append(self._run_memory_schema_job(
+                    graphname,
+                    "add_graphrag_memory_vertex",
+                    _extract_gsql_job(body, "add_graphrag_memory_vertex"),
+                ))
+            if not has_vector:
+                results.append(self._run_memory_schema_job(
+                    graphname,
+                    "add_graphrag_memory_vector",
+                    _extract_gsql_job(body, "add_graphrag_memory_vector"),
+                ))
+        if results:
+            self.vector_attr_cache = {}
+            schema = self.conn.gsql(f"USE GRAPH {graphname}\n ls")
+            self.refreshvector_attr_cache()
+            if (
+                "- VERTEX MemoryEmbedding" not in schema
+                or not self.has_vector_attribute("MemoryEmbedding", "embedding")
+            ):
+                raise RuntimeError(
+                    "Memory vector schema bootstrap failed: " + "\n".join(results)
+                )
+        installed = [
+            endpoint.split("/")[-1]
+            for endpoint in self.conn.getEndpoints(dynamic=True)
+            if f"/{graphname}/" in endpoint
+        ]
+        missing = []
+        for name in ("Memory_Search_Embeddings", "Memory_Delete_Embedding"):
+            if name not in installed:
+                missing.append(name)
+                body = Path(f"common/gsql/memory/{name}.gsql").read_text()
+                self.conn.gsql(f"USE GRAPH {graphname}\nBEGIN\n{body}\nEND")
+        if missing:
+            self.conn.gsql(
+                f"USE GRAPH {graphname}\nINSTALL QUERY " + ", ".join(missing)
+            )
+        self._memory_index_ready = True
+
+    def _run_memory_schema_job(
+        self, graphname: str, job_name: str, body: str
+    ) -> str:
+        create_result = self.conn.gsql(f"USE GRAPH {graphname}\n{body}")
+        run_result = self.conn.gsql(
+            f"USE GRAPH {graphname}\nRUN SCHEMA_CHANGE JOB {job_name}"
+        )
+        try:
+            self.conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {job_name}")
+        except Exception:
+            logger.warning("Could not drop memory schema-change job %s", job_name)
+        return f"{create_result}\n{run_result}"
+
+    def upsert_memory_embedding(self, index_id: str, vector: List[float]) -> None:
+        """Persist a mem0-provided vector without embedding the text again."""
+        self.ensure_memory_index(len(vector))
+        result = self.conn.upsertData(
+            json.dumps(
+                {
+                    "vertices": {
+                        "MemoryEmbedding": {
+                            index_id: {"embedding": {"value": vector}}
+                        }
+                    }
+                }
+            )
+        )
+        if not result:
+            raise RuntimeError(f"Failed to upsert memory embedding {index_id}")
+
+    def search_memory_embeddings(
+        self,
+        scope_pattern: str,
+        query_vector: List[float],
+        top_k: int,
+    ) -> List[Tuple[str, float]]:
+        self.ensure_memory_index(len(query_vector))
+        result = self.conn.runInstalledQuery(
+            "Memory_Search_Embeddings",
+            {
+                "scope_pattern": scope_pattern,
+                "query_vector": query_vector,
+                "top_k": top_k,
+            },
+        )
+        hits = []
+        for block in result or []:
+            for item in block.get("hits", []):
+                value = item.get("value", item)
+                if value.get("index_id"):
+                    hits.append(
+                        (str(value["index_id"]), float(value.get("score", 0)))
+                    )
+        return sorted(hits, key=lambda pair: pair[1], reverse=True)
+
+    def delete_memory_embedding(self, index_id: str) -> None:
+        self.ensure_memory_index()
+        self.conn.runInstalledQuery(
+            "Memory_Delete_Embedding", {"index_id": index_id}
+        )
+
     def set_graphname(self, graphname):
         self.conn.graphname = graphname
         self.vector_attr_cache = {}
+        self._memory_index_ready = False
         if self.conn.apiToken or self.conn.jwtToken:
             self.conn.getToken()
         # Re-verify GDS presence on every graphname switch. Cheap when
@@ -188,6 +327,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
              )
 
         self.vector_attr_cache = {}
+        self._memory_index_ready = False
         self.install_vector_queries()
 
     def refreshvector_attr_cache(self):

@@ -10,7 +10,6 @@
   "graphrag_config": {
     "reuse_embedding": true,
     "ecc": "http://graphrag-ecc:8001",
-    "chat_history_api": "http://chat-history:8002",
     "chunker_config": {}
   },
   "llm_config": {
@@ -38,14 +37,16 @@
       }
     }
   },
-  "chat_config": {
-    "apiPort": "8002",
-    "dbPath": "chats.db",
-    "dbLogPath": "db.log",
-    "logPath": "requestLogs.jsonl",
-    "conversationAccessRoles": [
-      "superuser",
-      "globaldesigner"
-    ]
+  "memory_config": {
+    "enabled": true,
+    "database_url": "postgresql+psycopg://graphrag:graphrag@postgres:5432/graphrag",
+    "stm_context_tokens": 6000,
+    "ltm_top_k": 5,
+    "ltm_score_threshold": 0.7,
+    "ltm_retention_days": 365,
+    "max_facts_per_scope": 1000,
+    "fact_extract_async": true,
+    "outbox_batch_size": 100,
+    "outbox_max_retries": 8
   }
 }

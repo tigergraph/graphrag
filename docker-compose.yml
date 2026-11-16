@@ -10,7 +10,7 @@ services:
       - 8000:8000
     depends_on:
       - graphrag-ecc
-      - chat-history
+      - postgres
 #      - tigergraph
     environment:
       SERVER_CONFIG: "/code/configs/server_config.json"
@@ -35,20 +35,20 @@ services:
     volumes:
       - ./configs/:/code/configs
 
-  chat-history:
-    image: tigergraph/chat-history:latest
-    platform: linux/amd64
-    container_name: chat-history
-    build:
-      context: chat-history/
-      dockerfile: Dockerfile
-    ports:
-      - 8002:8002
+  postgres:
+    image: postgres:16-alpine
+    container_name: graphrag-postgres
     environment:
-      CONFIG_FILES: "/configs/server_config.json"
-      LOGLEVEL: "INFO"
+      POSTGRES_DB: graphrag
+      POSTGRES_USER: graphrag
+      POSTGRES_PASSWORD: graphrag
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U graphrag -d graphrag"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
     volumes:
-      - ./configs/:/configs
+      - graphrag_postgres_data:/var/lib/postgresql/data
 
   graphrag-ui:
     image: tigergraph/graphrag-ui:latest
@@ -84,5 +84,6 @@ services:
 #     volumes:
 #       - tigergraph_data:/home/tigergraph/tigergraph/data
 # 
-# volumes:
-#   tigergraph_data:
+volumes:
+  graphrag_postgres_data:
+# tigergraph_data:

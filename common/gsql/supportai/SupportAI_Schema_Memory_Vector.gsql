@@ -1,0 +1,14 @@
+/*
+ * Copyright (c) 2024-2026 TigerGraph, Inc.
+ * Internal memory index: canonical payloads remain in PostgreSQL.
+ * Vertex and vector attribute are separate jobs — TigerGraph cannot
+ * ADD a vertex and ALTER it in the same schema-change job.
+ */
+
+CREATE SCHEMA_CHANGE JOB add_graphrag_memory_vertex {
+  ADD VERTEX MemoryEmbedding(PRIMARY_ID id STRING) WITH primary_id_as_attribute="true";
+}
+
+CREATE SCHEMA_CHANGE JOB add_graphrag_memory_vector {
+  ALTER VERTEX MemoryEmbedding ADD VECTOR ATTRIBUTE embedding(dimension=1536, metric="cosine");
+}

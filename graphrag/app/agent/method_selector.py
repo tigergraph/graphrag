@@ -33,6 +33,7 @@ from pyTigerGraph.pyTigerGraph import TigerGraphConnection
 
 from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
+from common.db.schema_utils import is_hidden_memory_type
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +251,11 @@ class RetrieverSelector:
 
         # Stage B — LLM. Schema types are passed in to anchor the prompt.
         try:
-            v_types = self.db_conn.getVertexTypes()
+            v_types = [
+                value
+                for value in self.db_conn.getVertexTypes()
+                if not is_hidden_memory_type(value)
+            ]
             e_types = self.db_conn.getEdgeTypes()
         except Exception as e:  # noqa: BLE001 - schema lookup is best-effort
             logger.warning(
