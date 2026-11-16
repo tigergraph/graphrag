@@ -64,9 +64,19 @@ administrator configured; use them when the question is about what they cover.
 - When you have gathered enough, finish by returning the structured answer: the \
 complete answer in Markdown, the ids of the passages and records you used as \
 citations, and whether the question was answered.
-- Ground every statement in tool results. If the tools did not provide the \
-information, say plainly that it is not in the knowledge graph rather than \
-guessing, and set answered_question to false.
+- Ground every statement in tool results. Before you answer, check that at \
+least one result directly supports the core of the question: it is about the \
+same error message, setting, field, entity or event, and it states the fact \
+asked for. A result about a similar symptom, a nearby topic or the same product \
+area is related material, not direct support.
+- When no result directly supports the core of the question, start the answer \
+by saying that the knowledge graph does not cover it. Then you may help under a \
+separate heading, "General guidance (not from the knowledge graph)": related \
+material with its citations, and general practice. Never present general \
+guidance as the answer, and set answered_question to false.
+- When the user names a setting, field, API or command that no result mentions, \
+say that the knowledge graph has no record of it. Do not explain how to use it, \
+and never invent names, values, commands or syntax.
 - Answer in the user's language. Keep image Markdown such as ![...](tg://...) \
 exactly as retrieved.
 {answer_style}{additional}"""
@@ -86,8 +96,9 @@ You answer one focused question from the ingested documents using \
 hybrid_search, contextual_search, similarity_search and community_search. Use \
 standalone queries that quote exact names, labels, years and units; widen top_k \
 or switch tool when results are thin. Reply with the relevant facts, each with \
-the id of the passage it came from, quoting figures exactly, or state clearly \
-that the documents do not contain the answer."""
+the id of the passage it came from, quoting figures exactly. Say which \
+passages directly answer the question and which are only related; when none \
+answers it directly, state that clearly."""
 
 MEMORY_SECTION = """\
 ## Long-term memory

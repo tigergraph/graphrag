@@ -62,7 +62,8 @@ class DeepAgentAnswer(BaseModel):
     )
     answered_question: bool = Field(
         default=True,
-        description="False when the tools did not provide the information asked for.",
+        description="True only when tool results directly support the core of the answer. "
+        "False when they do not, even if related material or general guidance is given.",
     )
 
 

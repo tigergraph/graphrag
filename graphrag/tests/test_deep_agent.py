@@ -466,3 +466,19 @@ class TestMemorySettings(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnswerGrounding(unittest.TestCase):
+    """The agent says when nothing it found directly supports the answer."""
+
+    def test_the_main_prompt_requires_direct_support(self):
+        from deep_agent.prompts import main_prompt
+        p = main_prompt("G", "2026-11-16", use_cypher=False)
+        self.assertIn("directly supports the core of the question", p)
+        self.assertIn("General guidance (not from the knowledge graph)", p)
+        self.assertIn("set answered_question to false", p)
+        self.assertIn("has no record of it", p)
+
+    def test_the_document_researcher_separates_direct_and_related_passages(self):
+        from deep_agent.prompts import document_researcher_prompt
+        self.assertIn("only related", document_researcher_prompt("G"))
