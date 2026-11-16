@@ -5598,6 +5598,9 @@ async def get_prompts(
             # Agentic (react) agent system prompt — runs through the chat service.
             "agentic_agent":
                 (chat_llm, "agentic_agent_prompt"),
+            # Deep Agent additional instructions — split, user portion only.
+            "deep_agent":
+                (chat_llm, None),
             # Agentic planner system prompt — runs through the chat service.
             "agentic_planner":
                 (chat_llm, "agentic_planner_prompt"),
@@ -5617,6 +5620,7 @@ async def get_prompts(
             "community_summarization": "community_summarization.txt",
             "schema_extraction": "schema_extraction.txt",
             "agentic_agent": "agentic_agent.txt",
+            "deep_agent": "deep_agent.txt",
             "agentic_planner": "agentic_planner.txt",
             "agentic_triage": "agentic_triage.txt",
             "route_response": "route_response.txt",
@@ -5682,7 +5686,7 @@ async def save_prompts(
     """
     Save customized prompts.
     Expects: {
-        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation|schema_extraction|query_guidance|route_response|agentic_agent|agentic_planner|agentic_triage",
+        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation|schema_extraction|query_guidance|route_response|agentic_agent|deep_agent|agentic_planner|agentic_triage",
         "editable_content": "...",
         "graphname": "..."  (optional - graph-admin users must supply this)
     }
@@ -5780,6 +5784,7 @@ async def save_prompts(
             "schema_extraction": "schema_extraction.txt",
             "query_guidance": "query_guidance.txt",
             "agentic_agent": "agentic_agent.txt",
+            "deep_agent": "deep_agent.txt",
             "agentic_planner": "agentic_planner.txt",
             "agentic_triage": "agentic_triage.txt",
             "route_response": "route_response.txt",
@@ -5854,6 +5859,7 @@ async def save_prompts(
             "schema_extraction": "Schema extraction prompt saved successfully",
             "query_guidance": "Query guidance saved successfully",
             "agentic_agent": "React agent prompt saved successfully",
+            "deep_agent": "Deep Agent instructions saved successfully",
             "agentic_planner": "Agentic planner prompt saved successfully",
             "agentic_triage": "Agent routing prompt saved successfully",
             "route_response": "Question routing prompt saved successfully",

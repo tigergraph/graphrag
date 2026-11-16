@@ -482,3 +482,47 @@ class TestAnswerGrounding(unittest.TestCase):
     def test_the_document_researcher_separates_direct_and_related_passages(self):
         from deep_agent.prompts import document_researcher_prompt
         self.assertIn("only related", document_researcher_prompt("G"))
+
+
+class TestDeepAgentInstructions(unittest.TestCase):
+    """The Deep Agent has its own per-graph instructions, separate from the
+    React agent's prompt."""
+
+    def test_the_agent_reads_its_own_instructions(self):
+        asked = []
+        llm = SimpleNamespace(get_user_portion=lambda name: asked.append(name) or f"text of {name}")
+        agent = DeepGraphRAGAgent.__new__(DeepGraphRAGAgent)
+        agent.llm = llm
+        style, extra = agent._instructions()
+        self.assertEqual(extra, "text of deep_agent.txt")
+        self.assertNotIn("agentic_agent.txt", asked)
+
+    def _model(self, prompt_dir):
+        from common.llm_services.base_llm import LLM_Model
+        m = LLM_Model.__new__(LLM_Model)
+        m.prompt_path = prompt_dir + "/"
+        m._graphname = None
+        return m
+
+    def test_empty_by_default_without_the_react_agent_strategy(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            m = self._model(d)
+            self.assertEqual(m.get_user_portion("deep_agent.txt"), "")
+            self.assertNotEqual(m.get_user_portion("agentic_agent.txt"), "")
+
+    def test_saved_instructions_are_used(self):
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "deep_agent.txt"), "w") as f:
+                f.write("Search error messages verbatim first.")
+            self.assertEqual(self._model(d).get_user_portion("deep_agent.txt"),
+                             "Search error messages verbatim first.")
+
+
+class TestSearchGuidance(unittest.TestCase):
+    def test_the_prompt_leads_with_documents_and_follows_exact_references(self):
+        from deep_agent.prompts import main_prompt
+        p = main_prompt("G", "2026-11-16", use_cypher=False)
+        self.assertIn("start with a document", p)
+        self.assertIn("search for those exact words", p)

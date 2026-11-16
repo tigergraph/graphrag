@@ -1226,7 +1226,8 @@ Customize prompts via the UI: *Settings → Customize Prompts*. Customization is
 - **Schema Instructions** (`query_generation`) — instructions used when generating GSQL / Cypher and when filtering the schema for a structured query. Tune if your domain has unusual type names that aren't matching user phrasing, or if generated queries miss obvious joins.
 - **Community Summarization** (`community_summarization`) — how community summaries are produced during knowledge-graph build. Tune for length / tone and to bias summaries toward domain-specific framing.
 - **Chatbot Responses** (`chatbot_response`) — the final answer template. Keep it short; the LLM responds best to clear constraints (*"answer in ≤3 sentences, cite the doc id"*).
-- **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — the retrieval strategy for each agentic engine: which methods to use, when, and in what order. The role and act model stay fixed.
+- **Deep Agent** (`deep_agent`) — additional instructions for the Deep Agent, appended to its fixed rules. Empty by default; use it to describe what the graph contains and how to search and answer for it.
+- **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — the retrieval strategy of each legacy agent style: which methods to use, when, and in what order. The role and act model stay fixed. Used only when `agent_engine` is `"legacy"`.
 - **Agent Routing** (`agentic_triage`) — the policy that decides whether a message is answered directly (greetings, questions about the assistant) or sent to the agent to retrieve / use a tool.
 
 When customizing:

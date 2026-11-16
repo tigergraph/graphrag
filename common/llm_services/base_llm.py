@@ -310,6 +310,8 @@ class LLM_Model:
             "_CONTEXTUALIZE_QUESTION_SYSTEM", "_CONTEXTUALIZE_QUESTION_USER_DEFAULT"),
         "agentic_agent.txt": (
             "_AGENTIC_AGENT_SYSTEM", "_AGENTIC_AGENT_USER_DEFAULT"),
+        "deep_agent.txt": (
+            "_DEEP_AGENT_SYSTEM", "_DEEP_AGENT_USER_DEFAULT"),
         "agentic_planner.txt": (
             "_AGENTIC_PLANNER_SYSTEM", "_AGENTIC_PLANNER_USER_DEFAULT"),
         "agentic_triage.txt": (
@@ -1193,6 +1195,26 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
 - Let each observation drive the next action: if the passages you got back name specific entities or relationships you still need hard facts about, follow up with a structural query; if a result is thin, empty, or off-target, widen its parameters (top_k, num_hops) or switch method rather than repeating the same call.
 - Before answering, check that every part of the question is covered with the specific facts and figures it asks for; if a required value, table, or entity is still missing, retrieve again (widen top_k / num_hops or switch method) rather than answering vaguely or partially.
 - For a specific value, row, total, ranking, or year-over-year comparison, use graphrag__hybrid_search or graphrag__contextual_search with top_k >= 10 (they return atomic table chunks that keep full row/column structure), and quote the exact label, column, year, or unit from the question so the retriever can match it."""
+
+    # Deep Agent additional instructions. The Deep Agent builds its own system
+    # prompt (deep_agent/prompts.py); this split entry only holds the per-graph
+    # instructions appended to it, so it is empty by default and never falls
+    # back to the React agent's default strategy.
+    _DEEP_AGENT_USER_DEFAULT = ""
+
+    @property
+    def _DEEP_AGENT_SYSTEM(self):
+        """The Deep Agent's fixed prompt with the instructions slot, for the
+        save-time conflict check. Plain slot when the agent package is absent
+        (for example in the ECC service)."""
+        try:
+            from datetime import date
+            from deep_agent.prompts import main_prompt
+            fixed = main_prompt(graphname=self._graphname or "the graph",
+                                today=date.today().isoformat(), use_cypher=False)
+        except Exception:
+            return "{user_prompt}"
+        return fixed.rstrip() + "\n\n## Additional instructions\n{user_prompt}"
 
     @property
     def agentic_agent_prompt(self):

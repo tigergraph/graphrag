@@ -54,6 +54,12 @@ query may already answer.
 community_search answer them.
 - When a question could be answered by both structured data and documents, use \
 both and reconcile them.
+- Unless the question is purely about structured data (an exact count, an id \
+or attribute lookup, a relationship, an aggregation), start with a document \
+search: it gives the broadest grounding.
+- When a passage refers to another by an exact name that you have not \
+retrieved (for example "see Note 5", a section title, a regulation or a table \
+label), search for those exact words.
 - If a result is empty, thin or off-target, change the approach — rephrase the \
 query, widen top_k or num_hops, switch tool — instead of repeating the same call. \
 Stop when every part of the question is covered.
