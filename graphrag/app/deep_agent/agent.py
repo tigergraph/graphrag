@@ -319,12 +319,13 @@ class DeepGraphRAGAgent:
         groups = build_tools(env, external_tools)
         graphrag_tools, tg_tools, mcp_tools = groups["graphrag"], groups["tigergraph"], groups["mcp"]
         all_tools = graphrag_tools + tg_tools + mcp_tools
+        tool_names = {t.name for t in graphrag_tools}
 
         style, extra = self._instructions()
         ltm = bool(settings.long_term_memory and store is not None and self.user)
         system_prompt = prompts.main_prompt(
             self.graphname, date.today().isoformat(), env.use_cypher, style, extra,
-            long_term_memory=ltm,
+            long_term_memory=ltm, keyword_search="keyword_search" in tool_names,
         )
 
         subagents = []
@@ -343,9 +344,11 @@ class DeepGraphRAGAgent:
                     "name": "document-researcher",
                     "description": "Answers one focused question from the ingested documents "
                                    "and community summaries, returning facts with passage ids.",
-                    "system_prompt": prompts.document_researcher_prompt(self.graphname),
+                    "system_prompt": prompts.document_researcher_prompt(
+                        self.graphname, keyword_search="keyword_search" in tool_names),
                     "tools": [by_name[n] for n in ("hybrid_search", "contextual_search",
-                                                   "similarity_search", "community_search")],
+                                                   "similarity_search", "keyword_search",
+                                                   "community_search") if n in by_name],
                 },
             ]
 
@@ -529,6 +532,9 @@ class DeepGraphRAGAgent:
             "reasoning": reasoning,
             "token_usage": usage.totals(),
             "hit_step_limit": hit_limit,
+            # The passages the tools returned, in retrieval order, in the shape
+            # the other chat modes use; the table view and the evaluators read it.
+            "result": {"final_retrieval": {pid: env.retrieved[pid] for pid in retrieved}},
         }
         if structured_rows is not None:
             query_sources["structured_source"] = {"tool": structured_rows["tool"],

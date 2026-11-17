@@ -165,6 +165,10 @@ def _search_output(env: ToolEnv, out: dict) -> dict:
     for pid, text in passages.items():
         env.retrieved.setdefault(pid, text)
     view = {"ok": bool(out.get("ok")) and bool(passages), "summary": out.get("summary", "")}
+    result = (out.get("context") or {}).get("result") if isinstance(out.get("context"), dict) else None
+    match = result.get("keyword_match") if isinstance(result, dict) else None
+    if match and match.get("missing_terms"):
+        view["missing_terms"] = match["missing_terms"]
     if passages:
         view["passages"] = passages
     elif out.get("ok") and out.get("context") is not None:
@@ -208,7 +212,9 @@ def _graphrag_tools(env: ToolEnv) -> List[BaseTool]:
     def hybrid_search(query: str, top_k: Optional[int] = None, num_hops: Optional[int] = None) -> str:
         return _run_tool(env, "hybrid_search", "Searching the documents",
                          {"query": query, "top_k": top_k, "num_hops": num_hops},
-                         lambda: _search_output(env, gt.hybrid_search(ctx, query, top_k=top_k, num_hops=num_hops)))
+                         lambda: _search_output(env, gt.hybrid_search(
+                             # keyword_search is a tool of its own here
+                             ctx, query, top_k=top_k, num_hops=num_hops, keyword_matches=False)))
 
     def similarity_search(query: str, top_k: Optional[int] = None) -> str:
         return _run_tool(env, "similarity_search", "Searching the documents",
@@ -220,6 +226,11 @@ def _graphrag_tools(env: ToolEnv) -> List[BaseTool]:
                          {"query": query, "top_k": top_k},
                          lambda: _search_output(env, gt.contextual_search(ctx, query, top_k=top_k)))
 
+    def keyword_search(query: str, top_k: Optional[int] = None) -> str:
+        return _run_tool(env, "keyword_search", "Searching the documents",
+                         {"query": query, "top_k": top_k},
+                         lambda: _search_output(env, gt.keyword_search(ctx, query, top_k=top_k)))
+
     def community_search(query: str, top_k: Optional[int] = None,
                          community_level: Optional[int] = None) -> str:
         return _run_tool(env, "community_search", "Searching community summaries",
@@ -227,7 +238,7 @@ def _graphrag_tools(env: ToolEnv) -> List[BaseTool]:
                          lambda: _search_output(env, gt.community_search(
                              ctx, query, top_k=top_k, community_level=community_level)))
 
-    return [
+    tools = [
         StructuredTool.from_function(
             get_graph_schema, name="get_graph_schema", args_schema=_NoArgs,
             description="Return the knowledge graph schema: vertex types with attributes, "
@@ -256,6 +267,19 @@ def _graphrag_tools(env: ToolEnv) -> List[BaseTool]:
             description="Search the summaries of entity communities. For broad, thematic or "
                         "'overall' questions about the whole corpus."),
     ]
+    if keyword_search_enabled(env):
+        tools.append(StructuredTool.from_function(
+            keyword_search, name="keyword_search", args_schema=_SearchArgs,
+            description="Keyword (BM25) search over document passages. Finds passages that "
+                        "contain the exact names, terms, numbers or labels in the query, also "
+                        "when their wording is not similar to the question."))
+    return tools
+
+
+def keyword_search_enabled(env: ToolEnv) -> bool:
+    """Keyword search is offered only on graphs where it is turned on."""
+    cfg = getattr(env.graph_ctx, "graphrag_cfg", None) or {}
+    return bool(cfg.get("keyword_search", False))
 
 
 # --------------------------------------------------------------------------
@@ -538,7 +562,7 @@ def _mcp_tools(env: ToolEnv, external: Dict[str, Any]) -> List[BaseTool]:
 # --------------------------------------------------------------------------
 
 GRAPHRAG_TOOL_NAMES = ("get_graph_schema", "query_graph", "hybrid_search", "similarity_search",
-                       "contextual_search", "community_search")
+                       "contextual_search", "keyword_search", "community_search")
 
 
 def build_tools(env: ToolEnv, external_tools: Optional[Dict[str, Any]] = None) -> Dict[str, List[BaseTool]]:

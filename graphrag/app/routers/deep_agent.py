@@ -151,7 +151,8 @@ def agent_tools(graphname: str, request: Request,
     from deep_agent.tools import ToolEnv, build_tools
 
     conn, _user = _access(request, graphname)
-    settings = agent_settings(get_graphrag_config(graphname))
+    graphrag_cfg = get_graphrag_config(graphname) or {}
+    settings = agent_settings(graphrag_cfg)
     external = {}
     try:
         from mcp_addons import discover_tools, get_manager, run_sync
@@ -160,7 +161,7 @@ def agent_tools(graphname: str, request: Request,
             external = discover_tools(manager)
     except Exception as exc:
         logger.info(f"deep_agent tools: mcp discovery skipped: {exc}")
-    env = ToolEnv(graph_ctx=SimpleNamespace(conn=conn),
+    env = ToolEnv(graph_ctx=SimpleNamespace(conn=conn, graphrag_cfg=graphrag_cfg),
                   allow_installed_queries=settings.allow_installed_queries,
                   use_cypher=use_cypher)
     groups = build_tools(env, external)

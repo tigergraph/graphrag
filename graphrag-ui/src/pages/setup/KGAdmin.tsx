@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TagInput, TypeHint } from "@/components/ui/tag-input";
-import { Database, Loader2, RefreshCw, Upload, Wrench } from "lucide-react";
+import { Database, Loader2, RefreshCw, Search, Upload, Wrench } from "lucide-react";
 import { pauseIdleTimer, resumeIdleTimer, pingIdleTimer } from "@/hooks/useIdleTimeout";
 import {
   Dialog,
@@ -69,6 +69,20 @@ const KGAdmin = () => {
   const [refreshDialogOpen, setRefreshDialogOpen] = useState(false);
   const [ingestDialogOpen, setIngestDialogOpen] = useState(false);
   const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
+
+  // Keyword search state
+  const [keywordDialogOpen, setKeywordDialogOpen] = useState(false);
+  const [keywordGraph, setKeywordGraph] = useState("");
+  const [keywordStatus, setKeywordStatus] = useState<{
+    enabled: boolean;
+    built: boolean;
+    chunks: number;
+    terms: number;
+    built_at: number | null;
+    build_seconds: number | null;
+  } | null>(null);
+  const [keywordBusy, setKeywordBusy] = useState(false);
+  const [keywordMessage, setKeywordMessage] = useState("");
 
   // Migration Assistant state
   const [migrationGraph, setMigrationGraph] = useState("");
@@ -427,6 +441,53 @@ const KGAdmin = () => {
       setMigrationMessage(`❌ ${err.message || err}`);
     } finally {
       setMigrationRegenerating("");
+    }
+  };
+
+  const loadKeywordStatus = async (graph: string) => {
+    const auth = sessionStorage.getItem("auth");
+    if (!auth || !graph) return;
+    try {
+      const resp = await fetch(`/ui/${graph}/keyword_index`, {
+        headers: { Authorization: auth },
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setKeywordMessage(`Could not read keyword search status: ${data.detail || resp.statusText}`);
+        return;
+      }
+      setKeywordStatus(data);
+    } catch (err: any) {
+      setKeywordMessage(`Could not read keyword search status: ${err.message || err}`);
+    }
+  };
+
+  const updateKeywordSearch = async (enabled: boolean) => {
+    const auth = sessionStorage.getItem("auth");
+    if (!auth || !keywordGraph) return;
+    setKeywordBusy(true);
+    setKeywordMessage(enabled ? "Building the keyword index…" : "Turning off keyword search…");
+    try {
+      const resp = await fetch(`/ui/${keywordGraph}/keyword_index`, {
+        method: "POST",
+        headers: { Authorization: auth, "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setKeywordMessage(`❌ ${data.detail || resp.statusText}`);
+        return;
+      }
+      setKeywordStatus(data);
+      setKeywordMessage(
+        enabled
+          ? `✅ Keyword search is on. Indexed ${data.chunks} chunks.`
+          : "✅ Keyword search is off."
+      );
+    } catch (err: any) {
+      setKeywordMessage(`❌ ${err.message || err}`);
+    } finally {
+      setKeywordBusy(false);
     }
   };
 
@@ -1621,6 +1682,35 @@ const KGAdmin = () => {
               >
                 <Wrench className="h-4 w-4 mr-2" />
                 Open Migration Assistant
+              </Button>
+            </div>
+          </div>
+
+          {/* Keyword Search Card */}
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+            <div className="mb-4">
+              <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
+                <Search className="h-6 w-6 text-tigerOrange" />
+              </div>
+              <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
+                Keyword Search
+              </h2>
+              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
+                Find passages by the exact words in a question, such as names, codes, numbers and table labels.
+              </p>
+            </div>
+            <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
+              <Button
+                onClick={() => {
+                  setKeywordMessage("");
+                  setKeywordStatus(null);
+                  setKeywordDialogOpen(true);
+                  if (keywordGraph) loadKeywordStatus(keywordGraph);
+                }}
+                className="gradient w-full text-white"
+              >
+                <Search className="h-4 w-4 mr-2" />
+                Manage Keyword Search
               </Button>
             </div>
           </div>
@@ -2987,6 +3077,124 @@ const KGAdmin = () => {
                     <RefreshCw className="h-4 w-4 mr-2" />
                     Confirm & Rebuild
                   </>
+                )}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Keyword Search Dialog */}
+        <Dialog open={keywordDialogOpen} onOpenChange={setKeywordDialogOpen}>
+          <DialogContent
+            className="sm:max-w-[560px] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+            onInteractOutside={(e) => e.preventDefault()}
+          >
+            <DialogHeader>
+              <DialogTitle className="text-black dark:text-white">
+                Keyword Search
+              </DialogTitle>
+              <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
+                When keyword search is on for a graph, document search also returns the passages that
+                contain the question&apos;s exact words, and the chat agent can search by keyword.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="py-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                  Graph
+                </label>
+                <Select
+                  value={keywordGraph}
+                  onValueChange={(v) => {
+                    setKeywordGraph(v);
+                    setKeywordStatus(null);
+                    setKeywordMessage("");
+                    loadKeywordStatus(v);
+                  }}
+                  disabled={keywordBusy}
+                >
+                  <SelectTrigger className="dark:border-[#3D3D3D] dark:bg-shadeA" disabled={keywordBusy}>
+                    <SelectValue placeholder="Pick a graph" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableGraphs.length > 0 ? (
+                      availableGraphs.map((g) => (
+                        <SelectItem key={g} value={g}>
+                          {g}
+                        </SelectItem>
+                      ))
+                    ) : (
+                      <SelectItem value="no-graphs" disabled>
+                        No graphs available
+                      </SelectItem>
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {keywordStatus && (
+                <div
+                  className={`p-3 rounded border text-sm ${
+                    keywordStatus.enabled
+                      ? "bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800"
+                      : "bg-gray-50 dark:bg-shadeA border-gray-200 dark:border-[#3D3D3D]"
+                  }`}
+                >
+                  <div className="font-medium text-black dark:text-white">
+                    {keywordStatus.enabled ? "On" : "Off"}
+                  </div>
+                  {keywordStatus.built && (
+                    <div className="text-gray-600 dark:text-[#D9D9D9] mt-1">
+                      {keywordStatus.chunks.toLocaleString()} chunks indexed
+                      {keywordStatus.built_at
+                        ? ` · built ${new Date(keywordStatus.built_at * 1000).toLocaleString()}`
+                        : ""}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {keywordMessage && (
+                <div
+                  className={`p-3 rounded-lg text-sm ${
+                    keywordMessage.includes("❌")
+                      ? "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
+                      : keywordMessage.includes("✅")
+                      ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
+                      : "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300"
+                  }`}
+                >
+                  {keywordMessage}
+                </div>
+              )}
+            </div>
+
+            <DialogFooter className="gap-2">
+              {keywordStatus?.enabled && (
+                <Button
+                  variant="outline"
+                  onClick={() => updateKeywordSearch(false)}
+                  disabled={!keywordGraph || keywordBusy}
+                  className="dark:border-[#3D3D3D]"
+                >
+                  Turn Off
+                </Button>
+              )}
+              <Button
+                onClick={() => updateKeywordSearch(true)}
+                disabled={!keywordGraph || !keywordStatus || keywordBusy || isRebuildRunning}
+                className="gradient text-white"
+              >
+                {keywordBusy ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Working…
+                  </>
+                ) : keywordStatus?.enabled ? (
+                  "Rebuild Index"
+                ) : (
+                  "Turn On"
                 )}
               </Button>
             </DialogFooter>

@@ -252,6 +252,8 @@ class TestSubagents(_Base):
         self.assertEqual([s["node"] for s in resp.query_sources["agent_steps"]],
                          ["1: hybrid_search", "2: answer"])
         self.assertEqual(resp.query_sources["retrieved_citations"], ["doc1_chunk_0"])
+        # Evaluators and the table view read the passage text from final_retrieval.
+        self.assertEqual(list(resp.query_sources["result"]["final_retrieval"]), ["doc1_chunk_0"])
 
 
 class TestRouter(_Base):
@@ -274,6 +276,9 @@ class TestRouter(_Base):
 
         self.make_agent([answer("Hi!")], conversation_id="conv9").question_for_agent("Hello")
         threads = client.get("/TestGraph/agent/threads").json()["threads"]
+        with mock.patch("common.config.get_graphrag_config", return_value={"keyword_search": True}):
+            listed = [t["name"] for t in client.get("/TestGraph/agent/tools").json()["graphrag"]]
+        self.assertIn("keyword_search", listed)
         self.assertEqual([t["conversation_id"] for t in threads], ["conv9"])
         msgs = client.get("/TestGraph/agent/threads/conv9").json()["messages"]
         self.assertEqual(msgs[0], {"type": "human", "content": "Hello"})
@@ -309,6 +314,46 @@ class TestTools(_Base):
         self.assertIn("run_installed_query", names["tigergraph"])
         env2 = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn()), allow_installed_queries=False)
         self.assertNotIn("run_installed_query", [t.name for t in build_tools(env2)["tigergraph"]])
+
+    def test_keyword_search_only_when_turned_on_for_the_graph(self):
+        off = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn(), graphrag_cfg={}))
+        self.assertNotIn("keyword_search", [t.name for t in build_tools(off)["graphrag"]])
+        on = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn(),
+                                               graphrag_cfg={"keyword_search": True}))
+        self.assertIn("keyword_search", [t.name for t in build_tools(on)["graphrag"]])
+        self.assertIn("keyword_search", prompts.main_prompt("g", "2026-01-01", False,
+                                                            keyword_search=True))
+        self.assertNotIn("keyword_search", prompts.main_prompt("g", "2026-01-01", False))
+        # keyword_search is one tool among the others; no rule makes it go first.
+        on_prompt = prompts.main_prompt("g", "2026-01-01", False, keyword_search=True)
+        self.assertNotIn("keyword_search first", on_prompt)
+        researcher = prompts.document_researcher_prompt("g", keyword_search=True)
+        self.assertIn("keyword_search", researcher)
+        self.assertNotIn("keyword_search first", researcher)
+        self.assertNotIn("keyword_search", prompts.document_researcher_prompt("g"))
+
+    def test_keyword_search_shows_missing_words_not_a_strength(self):
+        env = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn(),
+                                               graphrag_cfg={"keyword_search": True}))
+        tool = next(t for t in build_tools(env)["graphrag"] if t.name == "keyword_search")
+        out = {"ok": True, "summary": "BM25_Keyword_Search returned 1 chunk(s)",
+               "context": {"function_call": "BM25_Keyword_Search", "result": {
+                   "final_retrieval": {"d_chunk_1": ["text"]},
+                   "keyword_match": {"missing_terms": ["escrow"], "text": "x"}}}}
+        with mock.patch("tools.graphrag_tools.keyword_search", return_value=out, create=True):
+            view = str(tool.invoke({"query": "state aid escrow"}))
+        self.assertIn("escrow", view)
+        self.assertNotIn("strength", view)
+        self.assertNotIn("coverage", view)
+
+    def test_deep_agent_hybrid_search_adds_no_keyword_matches(self):
+        env = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn(),
+                                               graphrag_cfg={"keyword_search": True}))
+        hybrid = next(t for t in build_tools(env)["graphrag"] if t.name == "hybrid_search")
+        with mock.patch("tools.graphrag_tools.hybrid_search",
+                        return_value={"ok": True, "summary": "", "context": None}) as hs:
+            hybrid.invoke({"query": "q"})
+        self.assertIs(hs.call_args.kwargs["keyword_matches"], False)
 
     def test_installed_queries_exclude_graphrag_internal_and_mutating(self):
         self.assertFalse(query_is_runnable("graphrag_delete_all_communities", ["*"]))

@@ -230,9 +230,12 @@ def hybrid_search(
     chunk_only: Optional[bool] = None,
     similarity_threshold: Optional[float] = None,
     max_results: Optional[int] = None,
+    keyword_matches: bool = True,
 ) -> dict:
     """Hybrid vector + graph-expansion search over document chunks.
     Good for questions needing supporting passages plus related context.
+    ``keyword_matches`` adds strong keyword matches when keyword search is on
+    for the graph; a caller with its own keyword search turns it off.
     """
     from supportai.retrievers import HybridRetriever
     cfg = ctx.graphrag_cfg
@@ -249,6 +252,7 @@ def hybrid_search(
         chunk_only=cfg.get("chunk_only", True) if chunk_only is None else chunk_only,
         doc_only=cfg.get("doc_only", False),
         max_results=max_results or 0,  # 0 -> retriever resolves from graphrag_config
+        keyword_matches=keyword_matches,
     )
     return _unstructured_result("GraphRAG_Hybrid_Vector_Search", step)
 
@@ -287,6 +291,43 @@ def contextual_search(
         top_k=guards.clamp_top_k(top_k, ctx.graphrag_cfg.get("top_k", 5)),
     )
     return _unstructured_result("Chunk_Sibling_Vector_Search", step)
+
+
+def keyword_search(
+    ctx: GraphRAGToolContext, question: str, top_k: Optional[int] = None
+) -> dict:
+    """BM25 keyword search over document chunks. Finds passages that contain
+    the exact words, names, numbers or labels in ``question``, also when the
+    passage is not similar in meaning.
+    """
+    from supportai.keyword_index import chunk_texts, keyword_match
+    ctx.emit("Running keyword search")
+    k = guards.clamp_top_k(top_k, ctx.graphrag_cfg.get("top_k", 5))
+    match = keyword_match(ctx.conn, question, k)
+    matches = match.chunks if match else []
+    texts = chunk_texts(ctx.conn, [cid for cid, _ in matches])
+    retrieved = {cid: [texts[cid]] for cid, _ in matches if cid in texts}
+    result = {"final_retrieval": retrieved, "scores": {cid: round(s, 3) for cid, s in matches}}
+    if match is not None:
+        result["keyword_match"] = describe_keyword_match(match)
+        logger.info(
+            "keyword match: strength=%s coverage=%.3f union=%.3f ratio=%.3f terms=%d k=%d",
+            match.strength, match.coverage, match.union_coverage,
+            match.top_score_ratio, match.query_terms, k,
+        )
+    out = _unstructured_result("BM25_Keyword_Search", [result])
+    if match is not None and result["keyword_match"]["text"]:
+        out["summary"] = f"{out.get('summary', '')}. {result['keyword_match']['text']}".lstrip(". ")
+    return out
+
+
+def describe_keyword_match(match) -> dict:
+    """What the model sees about keyword results: the query words that no
+    passage holds, which tell what to search for next. The match strength is
+    only logged and used by hybrid search."""
+    missing = match.missing_terms[:8]
+    text = f"No passage contains these query words: {', '.join(missing)}" if missing else ""
+    return {"missing_terms": missing, "text": text}
 
 
 def community_search(
