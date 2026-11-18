@@ -167,6 +167,8 @@ def _search_output(env: ToolEnv, out: dict) -> dict:
     view = {"ok": bool(out.get("ok")) and bool(passages), "summary": out.get("summary", "")}
     result = (out.get("context") or {}).get("result") if isinstance(out.get("context"), dict) else None
     match = result.get("keyword_match") if isinstance(result, dict) else None
+    if match and match.get("absent_terms"):
+        view["words_in_no_passage"] = match["absent_terms"]
     if match and match.get("missing_terms"):
         view["missing_terms"] = match["missing_terms"]
     if passages:

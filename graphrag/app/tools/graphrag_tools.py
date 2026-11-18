@@ -323,11 +323,18 @@ def keyword_search(
 
 def describe_keyword_match(match) -> dict:
     """What the model sees about keyword results: the query words that no
-    passage holds, which tell what to search for next. The match strength is
-    only logged and used by hybrid search."""
-    missing = match.missing_terms[:8]
-    text = f"No passage contains these query words: {', '.join(missing)}" if missing else ""
-    return {"missing_terms": missing, "text": text}
+    passage of the graph holds, which can show that a quoted name or error is
+    not covered, and the words the returned passages lack, which tell what to
+    search for next. The match strength is only logged and used by hybrid
+    search."""
+    absent = match.absent_terms[:8]
+    missing = [t for t in match.missing_terms if t not in match.absent_terms][:8]
+    parts = []
+    if absent:
+        parts.append(f"No passage in the knowledge graph contains these query words: {', '.join(absent)}")
+    if missing:
+        parts.append(f"The returned passages do not contain these query words: {', '.join(missing)}")
+    return {"absent_terms": absent, "missing_terms": missing, "text": ". ".join(parts)}
 
 
 def community_search(

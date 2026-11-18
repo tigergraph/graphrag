@@ -105,6 +105,7 @@ class BM25Index:
         chunks = self.search(tokens, top_k)
         terms = list(dict.fromkeys(tokens))
         out = KeywordMatch(chunks=chunks, query_terms=len(terms))
+        out.absent_terms = [t for t in terms if not self.postings.get(t)]
         if not terms or not chunks:
             out.missing_terms = terms
             return out
@@ -140,6 +141,8 @@ class KeywordMatch:
     top_score_ratio: float = 0.0
     # Query words that no returned chunk contains, most distinctive first.
     missing_terms: list[str] = field(default_factory=list)
+    # Query words that no chunk of the graph contains.
+    absent_terms: list[str] = field(default_factory=list)
     query_terms: int = 0
 
     @property

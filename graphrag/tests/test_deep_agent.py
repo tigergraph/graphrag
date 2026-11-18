@@ -346,6 +346,25 @@ class TestTools(_Base):
         self.assertNotIn("strength", view)
         self.assertNotIn("coverage", view)
 
+    def test_quoted_words_in_no_passage_mean_not_covered(self):
+        on = prompts.main_prompt("g", "2026-01-01", False, keyword_search=True)
+        self.assertIn("no passage in the knowledge graph contains a distinctive word", on)
+        self.assertIn("placeholders such as <node>", on)
+        off = prompts.main_prompt("g", "2026-01-01", False)
+        self.assertNotIn("no passage in the knowledge graph contains", off)
+        env = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn(),
+                                               graphrag_cfg={"keyword_search": True}))
+        tool = next(t for t in build_tools(env)["graphrag"] if t.name == "keyword_search")
+        out = {"ok": True, "summary": "BM25_Keyword_Search returned 1 chunk(s)",
+               "context": {"function_call": "BM25_Keyword_Search", "result": {
+                   "final_retrieval": {"d_chunk_1": ["text"]},
+                   "keyword_match": {"absent_terms": ["syssh.dial"], "missing_terms": [],
+                                     "text": "x"}}}}
+        with mock.patch("tools.graphrag_tools.keyword_search", return_value=out, create=True):
+            view = str(tool.invoke({"query": "sysSsh.Dial handshake"}))
+        self.assertIn("words_in_no_passage", view)
+        self.assertIn("syssh.dial", view)
+
     def test_deep_agent_hybrid_search_adds_no_keyword_matches(self):
         env = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn(),
                                                graphrag_cfg={"keyword_search": True}))

@@ -137,6 +137,13 @@ does, search once more with those exact words. If still no result contains \
 them, no result directly supports that part: answer it as described above. \
 Common words, and placeholders such as <node> or <path>, do not count.
 """
+EXACT_TERM_RULE = """\
+- When the question quotes an exact error message, setting, command, code or \
+identifier, search for those exact words with keyword_search. If it reports \
+that no passage in the knowledge graph contains a distinctive word of it, no \
+result directly supports that part: answer it as described above. Common \
+words, and placeholders such as <node> or <path>, do not count.
+"""
 KEYWORD_HINT = ("; keyword_search for a passage that must contain an exact name, term, "
                 "number or label, such as a note or section another passage refers to")
 
@@ -149,8 +156,8 @@ def main_prompt(graphname: str, today: str, use_cypher: bool,
     return MAIN_PROMPT.format(
         graphname=graphname, today=today,
         cypher_hint=CYPHER_HINT if use_cypher else "",
-        exact_term_rule=RESULT_TERM_RULE,
         keyword_hint=KEYWORD_HINT if keyword_search else "",
+        exact_term_rule=EXACT_TERM_RULE if keyword_search else RESULT_TERM_RULE,
         answer_style=style, additional=extra,
         memory_section=MEMORY_SECTION if long_term_memory else NO_MEMORY_SECTION,
     )

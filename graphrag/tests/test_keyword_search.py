@@ -104,6 +104,19 @@ class TestKeywordMatch(unittest.TestCase):
         m = self._index().match(tokenize("zebra"), 5)
         self.assertEqual(m.strength, "none")
         self.assertEqual(m.missing_terms, ["zebra"])
+        self.assertEqual(m.absent_terms, ["zebra"])
+
+    def test_words_in_no_chunk_are_told_apart_from_words_not_returned(self):
+        # "filler" is in the graph but not in the one passage returned.
+        m = self._index().match(tokenize("state aid escrow filler"), 1)
+        self.assertEqual(m.absent_terms, ["escrow"])
+        self.assertIn("filler", m.missing_terms)
+        from tools.graphrag_tools import describe_keyword_match
+        view = describe_keyword_match(m)
+        self.assertEqual(view["absent_terms"], ["escrow"])
+        self.assertEqual(view["missing_terms"], ["filler"])
+        self.assertIn("No passage in the knowledge graph contains these query words: escrow", view["text"])
+        self.assertIn("The returned passages do not contain these query words: filler", view["text"])
 
 
 class TestHybridAddsOnlyStrongMatches(unittest.TestCase):
