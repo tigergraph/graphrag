@@ -80,7 +80,7 @@ by saying that the knowledge graph does not cover it. Then you may help under a 
 separate heading, "General guidance (not from the knowledge graph)": related \
 material with its citations, and general practice. Never present general \
 guidance as the answer, and set answered_question to false.
-- When the user names a setting, field, API or command that no result mentions, \
+{exact_term_rule}- When the user names a setting, field, API or command that no result mentions, \
 say that the knowledge graph has no record of it. Do not explain how to use it, \
 and never invent names, values, commands or syntax.
 - Answer in the user's language. Keep image Markdown such as ![...](tg://...) \
@@ -128,6 +128,13 @@ remembered across conversations.
 """
 
 CYPHER_HINT = ", or write your own read-only openCypher with run_cypher_query"
+RESULT_TERM_RULE = """\
+- When the question quotes an exact error message, setting, command, code or \
+identifier, check whether a result contains its distinctive words. If none \
+does, search once more with those exact words. If still no result contains \
+them, no result directly supports that part: answer it as described above. \
+Common words, and placeholders such as <node> or <path>, do not count.
+"""
 
 
 def main_prompt(graphname: str, today: str, use_cypher: bool,
@@ -138,6 +145,7 @@ def main_prompt(graphname: str, today: str, use_cypher: bool,
     return MAIN_PROMPT.format(
         graphname=graphname, today=today,
         cypher_hint=CYPHER_HINT if use_cypher else "",
+        exact_term_rule=RESULT_TERM_RULE,
         answer_style=style, additional=extra,
         memory_section=MEMORY_SECTION if long_term_memory else NO_MEMORY_SECTION,
     )

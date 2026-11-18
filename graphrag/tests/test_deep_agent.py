@@ -17,7 +17,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 
 from deep_agent import memory as mem
 from deep_agent.agent import DeepGraphRAGAgent, history_messages
-from deep_agent import settings
+from deep_agent import prompts, settings
 from deep_agent.settings import memory_settings, use_deep_agent
 from deep_agent.tools import ToolEnv, build_tools, query_is_runnable
 
@@ -294,6 +294,11 @@ class TestRouter(_Base):
 
 
 class TestTools(_Base):
+    def test_quoted_words_no_result_contains_mean_not_covered(self):
+        p = prompts.main_prompt("g", "2026-01-01", False)
+        self.assertIn("search once more with those exact words", p)
+        self.assertIn("placeholders such as <node>", p)
+
     def test_tool_catalog(self):
         env = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn()), use_cypher=True)
         groups = build_tools(env)
