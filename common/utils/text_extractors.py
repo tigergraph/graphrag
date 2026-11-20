@@ -545,7 +545,8 @@ class TextExtractor:
             '.jpg': 'image/jpeg',
             '.png': 'image/png',
             '.gif': 'image/gif',
-            '.jsonl': 'application/x-jsonlines'
+            '.jsonl': 'application/x-jsonlines',
+            '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
         }
 
     async def _process_file_async(self, file_path, graphname, temp_folder, rel_name=None):
@@ -815,6 +816,21 @@ def extract_text_from_file_with_images_as_docs(file_path, graphname=None, doc_id
     base_doc_id = doc_id or str(file_path.name)
 
     logger.debug(f"Extracting with images as docs: {file_path} (type: {extension})")
+
+    from common.utils import docling_extractor
+    if docling_extractor.use_docling(extension, graphname):
+        try:
+            return docling_extractor.extract_with_docling(file_path, base_doc_id, graphname)
+        except Exception as e:  # noqa: BLE001 — the default extractor may still read it
+            if extension in docling_extractor.DOCLING_ONLY_EXTENSIONS:
+                logger.error(f"Docling failed for {file_path.name}: {e}")
+                raise ExtractionError(
+                    f"Could not read {file_path.name}. The file may be corrupt "
+                    "or password-protected."
+                ) from e
+            logger.warning(
+                f"Docling failed for {file_path.name}, using the default extractor: {e}"
+            )
 
     if extension == '.pdf':
         return _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname)
@@ -1468,7 +1484,7 @@ def get_supported_extensions():
     """Get list of supported file extensions."""
     # '.doc' (legacy OLE) is deliberately absent: python-docx reads only the
     # OOXML '.docx' form, so it was never actually supported (GML-2196).
-    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls', '.jsonl'}
+    return {'.txt', '.md', '.html', '.htm', '.csv', '.json', '.pdf', '.docx', '.xml', '.jpeg', '.jpg', '.png', '.gif', '.xlsx', '.xls', '.jsonl', '.pptx'}
 
 def is_supported_file(file_path):
     """Check if a file is supported for text extraction."""
