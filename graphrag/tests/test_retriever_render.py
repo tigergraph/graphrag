@@ -180,4 +180,6 @@ def test_templated_retrievers_list_is_stable():
         "GraphRAG_Hybrid_Vector_Search",
         "GraphRAG_Community_Search",
         "GraphRAG_Community_Vector_Search",
+        "Chunk_Sibling_Vector_Search",
+        "Content_Similarity_Vector_Search",
     )

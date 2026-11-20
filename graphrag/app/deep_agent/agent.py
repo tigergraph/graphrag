@@ -62,7 +62,8 @@ class DeepAgentAnswer(BaseModel):
     )
     answered_question: bool = Field(
         default=True,
-        description="False when the tools did not provide the information asked for.",
+        description="True only when tool results directly support the core of the answer. "
+        "False when they do not, even if related material or general guidance is given.",
     )
 
 
@@ -295,9 +296,9 @@ class DeepGraphRAGAgent:
 
     def _instructions(self) -> tuple:
         """Operator-customized prompt text: the answer guidance of the chatbot
-        response prompt and the additional instructions of the agent prompt."""
+        response prompt and the Deep Agent's additional instructions."""
         style = extra = ""
-        for name, attr in (("chatbot_response.txt", "style"), ("agentic_agent.txt", "extra")):
+        for name, attr in (("chatbot_response.txt", "style"), ("deep_agent.txt", "extra")):
             try:
                 text = self.llm.get_user_portion(name) or ""
             except Exception:

@@ -28,6 +28,12 @@ from langchain_community.graphs.graph_document import GraphDocument, Node
 from pyTigerGraph import AsyncTigerGraphConnection
 
 from common.db.schema_utils import gsql_output_error
+from common.utils.chunk_context import (
+    HEADING_PATH_ATTR,
+    SUMMARY_ATTR,
+    chunk_parts,
+    embedding_text,
+)
 from common.embeddings.embedding_services import EmbeddingModel
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.extractors import BaseExtractor, LLMEntityRelationshipExtractor
@@ -167,17 +173,23 @@ async def chunk_doc(
         # worker can't complete a chunk before the tracker knows to expect it.
         if tracker is not None:
             tracker.register(v_id, chunk_ids)
+        # On a graph with the chunk context attributes, the breadcrumb is
+        # kept out of the chunk text; otherwise the text keeps it.
+        separate = conn.graphname in util.chunk_context_graphs
         for i, chunk in enumerate(chunks):
             chunk_id = chunk_ids[i]
             logger.debug(f"Processing chunk {chunk_id}")
+            heading_path, body = chunk_parts(chunk) if separate else ("", str(chunk))
 
             # send chunks to be upserted (func, args)
             logger.debug("chunk writes to upsert_chan")
-            await upsert_chan.put((upsert_chunk, (conn, v_id, chunk_id, chunk, i)))
+            await upsert_chan.put(
+                (upsert_chunk, (conn, v_id, chunk_id, body, i, heading_path if separate else None))
+            )
 
             # send chunks to have entities extracted
             logger.debug("chunk writes to extract_chan")
-            await extract_chan.put((chunk, chunk_id))
+            await extract_chan.put((body, chunk_id, heading_path))
 
             # When extraction is enabled the extract worker pushes the
             # summary-augmented embed message itself (Contextual Retrieval),
@@ -185,7 +197,9 @@ async def chunk_doc(
             from common.config import entity_extraction_switch
             if not entity_extraction_switch:
                 logger.debug("chunk writes to embed_chan (no extraction)")
-                await embed_chan.put((chunk_id, chunk, "DocumentChunk"))
+                await embed_chan.put(
+                    (chunk_id, embedding_text(heading_path, "", body), "DocumentChunk")
+                )
 
     return v_id
 
@@ -208,7 +222,7 @@ async def upsert_doc(conn: AsyncTigerGraphConnection, doc_id, ctype, content_tex
         conn, "Document", doc_id, "HAS_CONTENT", "Content", doc_id
     )
 
-async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk, idx):
+async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk, idx, heading_path=None):
     logger.debug(f"Upserting chunk {chunk_id}")
     date_added = int(time.time())
     # Build the chunk's full vertex + edge bundle and enqueue atomically.
@@ -216,12 +230,15 @@ async def upsert_chunk(conn: AsyncTigerGraphConnection, doc_id, chunk_id, chunk,
     # asyncio cancellation split DocumentChunk from its sibling Content,
     # producing the "chunk exists but Content missing" pattern that
     # surfaces as repeated "No content row for chunk" warnings.
+    chunk_attrs = {
+        "epoch_added": date_added,
+        "epoch_processed": date_added,
+        "idx": idx,
+    }
+    if heading_path is not None:
+        chunk_attrs[HEADING_PATH_ATTR] = heading_path
     vertices = [
-        ("DocumentChunk", chunk_id, {
-            "epoch_added": date_added,
-            "epoch_processed": date_added,
-            "idx": idx,
-        }),
+        ("DocumentChunk", chunk_id, chunk_attrs),
         ("Content", chunk_id, {"text": chunk, "epoch_added": date_added}),
     ]
     edges = [
@@ -312,7 +329,10 @@ async def extract(
     conn: AsyncTigerGraphConnection,
     chunk: str,
     chunk_id: str,
+    heading_path: str = "",
 ):
+    # ``chunk`` is the chunk body; on graphs without the chunk context
+    # attributes it still starts with the breadcrumb.
     # if loader is running, wait until it's done
     if not util.loading_event.is_set():
         logger.info("Extract worker waiting for loading event to finish")
@@ -341,8 +361,13 @@ async def extract(
         if extracted:
             md = getattr(extracted[0].source, "metadata", None) or {}
             chunk_summary = (md.get("chunk_summary") or "").strip()
-        embed_input = (chunk_summary + "\n\n" + str(chunk)) if chunk_summary else str(chunk)
-        await embed_chan.put((chunk_id, embed_input, "DocumentChunk"))
+        await embed_chan.put(
+            (chunk_id, embedding_text(heading_path, chunk_summary, str(chunk)), "DocumentChunk")
+        )
+        if chunk_summary and conn.graphname in util.chunk_context_graphs:
+            await util.upsert_vertex(
+                conn, "DocumentChunk", chunk_id, attributes={SUMMARY_ATTR: chunk_summary}
+            )
 
         # Schema-aware ingest helpers — derive case-insensitive
         # lookups from the extractor once per chunk so the loops below

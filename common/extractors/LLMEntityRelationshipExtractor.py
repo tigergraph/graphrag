@@ -22,6 +22,7 @@ from common.llm_services import LLM_Model
 from common.py_schemas import KnowledgeGraph
 from langchain_community.graphs.graph_document import Node, Relationship, GraphDocument
 from langchain_core.documents import Document
+from langchain_community.callbacks.manager import get_openai_callback
 
 logger = logging.getLogger(__name__)
 
@@ -192,35 +193,76 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
         ))
         return msgs
 
-    def _parse_json_output(self, content: str) -> dict:
-        """Parse JSON from LLM output with multiple fallback strategies.
+    _TRAILING_COMMA = re.compile(r",(\s*[}\]])")
 
-        Tries in order:
-          1. Direct json.loads
-          2. Extract from ```json code fences
-          3. Regex extraction of first JSON object
-        """
-        # Try direct parse
-        try:
-            return json.loads(content.strip("content="))
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        # Try ```json code fence
-        if "```json" in content:
+    @staticmethod
+    def _top_level_objects(text: str) -> list:
+        """Every top-level JSON object in ``text``, in order: bare, inside
+        code fences, or between sentences. Objects nested in another object
+        are part of it, not separate entries."""
+        decoder = json.JSONDecoder()
+        objects, pos = [], 0
+        while True:
+            start = text.find("{", pos)
+            if start < 0:
+                return objects
             try:
-                return json.loads(
-                    content.split("```")[1].strip("```").strip("json").strip()
-                )
-            except (json.JSONDecodeError, ValueError, IndexError):
-                pass
+                obj, end = decoder.raw_decode(text, start)
+            except ValueError:
+                pos = start + 1
+                continue
+            if isinstance(obj, dict):
+                objects.append(obj)
+            pos = end
 
-        # Regex fallback: extract first JSON object
-        match = re.search(r'\{[\s\S]*\}', content)
-        if match:
-            return json.loads(match.group())
+    @staticmethod
+    def _combine(objects: list) -> dict:
+        """One extraction result from several objects: the nodes and the rels
+        of all of them, without duplicates, and the first non-empty summary."""
+        nodes, rels, seen_nodes, seen_rels, summary = [], [], set(), set(), ""
+        for obj in objects:
+            for node in obj.get("nodes") or []:
+                key = (str(node.get("id", "")).lower(), str(node.get("node_type", "")).lower()) \
+                    if isinstance(node, dict) else json.dumps(node, sort_keys=True)
+                if key not in seen_nodes:
+                    seen_nodes.add(key)
+                    nodes.append(node)
+            for rel in obj.get("rels") or []:
+                key = json.dumps(rel, sort_keys=True, default=str)
+                if key not in seen_rels:
+                    seen_rels.add(key)
+                    rels.append(rel)
+            if not summary and obj.get("summary"):
+                summary = obj["summary"]
+        return {"nodes": nodes, "rels": rels, "summary": summary}
 
-        raise ValueError(f"Could not extract JSON from LLM output: {content[:200]}")
+    def _parse_json_output(self, content: str) -> dict:
+        """Parse the extraction JSON from a model's reply text.
+
+        Models differ in how they wrap the JSON: bare, in a code fence with or
+        without a language tag, or between sentences of prose, sometimes split
+        into several objects. They also make small mistakes: invalid backslash
+        escapes (Windows paths, LaTeX) and trailing commas.
+
+        The text is read three ways: as is, with invalid escapes removed, and
+        also without trailing commas. The reading that finds the most objects
+        with ``nodes`` or ``rels`` is used (the repairs only change text that
+        is not valid JSON), and those objects are combined into one result.
+        When no object has them, the first object found is returned.
+        """
+        from common.llm_services.base_llm import LLM_Model
+
+        text = str(content or "").strip()
+        repaired = LLM_Model._repair_json_escapes(text)
+        readings = [self._top_level_objects(t)
+                    for t in (text, repaired, self._TRAILING_COMMA.sub(r"\1", repaired))]
+        answers = max(([o for o in objs if "nodes" in o or "rels" in o] for objs in readings), key=len)
+        if answers:
+            return self._combine(answers)
+        for objs in readings:
+            if objs:
+                return objs[0]
+        raise ValueError(f"Could not extract JSON from LLM output: {text[:200]}")
 
     def _summary_text(self, json_out: dict) -> str:
         """Format the optional ``summary`` block from the extractor output
@@ -228,30 +270,44 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
         the chunk's dense embedding. Returns an empty string when the
         summary is absent or malformed.
         """
+        from common.utils.chunk_context import format_chunk_summary
         s = json_out.get("summary") if isinstance(json_out, dict) else None
-        if not isinstance(s, dict):
-            return ""
-        topic = str(s.get("topic", "")).strip()
-        section = str(s.get("section", "")).strip()
-        ents = s.get("entities") or []
-        ents_s = ", ".join(str(x).strip() for x in ents if str(x).strip()) if isinstance(ents, list) else ""
-        parts = []
-        if topic:   parts.append(f"TOPIC: {topic}")
-        if section: parts.append(f"SECTION: {section}")
-        if ents_s:  parts.append(f"ENTITIES: {ents_s}")
-        return "\n".join(parts)
+        return format_chunk_summary(s)
+
+    def _record_usage(self, cb, out) -> None:
+        """Record the usage of one extraction call, as the other model calls
+        that go through the LLM service do."""
+        from common.llm_services.base_llm import _record_usage, usage_from
+        _record_usage("entity_extraction", usage_from(cb, out),
+                      getattr(self.llm_service, "config", None))
+
+    def _reply_text(self, out) -> str:
+        """Text of the model's reply. Thinking and reasoning models (Gemini 3,
+        Claude with extended thinking, OpenAI reasoning models) return the
+        content as a list of parts, not a string; the LLM service's
+        ``_message_text`` keeps the text parts."""
+        to_text = getattr(self.llm_service, "_message_text", None)
+        if callable(to_text):
+            return to_text(out) or ""
+        content = getattr(out, "content", out)
+        return content if isinstance(content, str) else str(content)
 
     async def _aextract_kg_from_doc(self, doc, chain, parser) -> list[GraphDocument]:
         try:
             logger.debug(str(doc))
-            out = await chain.ainvoke(
-                {"input": doc, "format_instructions": parser.get_format_instructions()}
-            )
+            with get_openai_callback() as cb:
+                out = await chain.ainvoke(
+                    {"input": doc, "format_instructions": parser.get_format_instructions()}
+                )
+                self._record_usage(cb, out)
             logger.debug(str(out))
         except Exception as e:
+            logger.warning(f"Entity extraction call failed: {type(e).__name__}: {e}")
             return [GraphDocument(nodes=[], relationships=[], source=Document(page_content=doc))]
+        text = ""
         try:
-            json_out = self._parse_json_output(out.content)
+            text = self._reply_text(out)
+            json_out = self._parse_json_output(text)
 
             formatted_rels = self._format_rels(json_out["rels"])
             formatted_nodes = self._format_nodes(json_out["nodes"])
@@ -283,18 +339,29 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                 source=Document(page_content=doc, metadata={"chunk_summary": summary}),
             )]
 
-        except:
+        except Exception as e:
+            # Without this line a reply that cannot be read leaves the chunk
+            # with no entities and no trace of why.
+            logger.warning(
+                f"Entity extraction reply could not be read ({type(e).__name__}: {e}); "
+                f"reply starts: {text[:200]!r}"
+            )
             return [GraphDocument(nodes=[], relationships=[], source=Document(page_content=doc))]
 
     def _extract_kg_from_doc(self, doc, chain, parser) -> list[GraphDocument]:
         try:
-            out = chain.invoke(
-                {"input": doc, "format_instructions": parser.get_format_instructions()}
-            )
+            with get_openai_callback() as cb:
+                out = chain.invoke(
+                    {"input": doc, "format_instructions": parser.get_format_instructions()}
+                )
+                self._record_usage(cb, out)
         except Exception as e:
+            logger.warning(f"Entity extraction call failed: {type(e).__name__}: {e}")
             return [GraphDocument(nodes=[], relationships=[], source=Document(page_content=doc))]
+        text = ""
         try:
-            json_out = self._parse_json_output(out.content)
+            text = self._reply_text(out)
+            json_out = self._parse_json_output(text)
 
             formatted_rels = self._format_rels(json_out["rels"])
             formatted_nodes = self._format_nodes(json_out["nodes"])
@@ -321,7 +388,13 @@ class LLMEntityRelationshipExtractor(BaseExtractor):
                 source=Document(page_content=doc, metadata={"chunk_summary": summary}),
             )]
 
-        except:
+        except Exception as e:
+            # Without this line a reply that cannot be read leaves the chunk
+            # with no entities and no trace of why.
+            logger.warning(
+                f"Entity extraction reply could not be read ({type(e).__name__}: {e}); "
+                f"reply starts: {text[:200]!r}"
+            )
             return [GraphDocument(nodes=[], relationships=[], source=Document(page_content=doc))]
 
     # --- LLM-output normalization helpers (shared by sync + async) ----

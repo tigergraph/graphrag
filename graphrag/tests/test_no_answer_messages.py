@@ -22,8 +22,15 @@ class TestNoAnswerMessages(unittest.TestCase):
                 self.assertNotIn(word, message.lower() if word != "search)" else message)
 
     def test_answer_prompts_ask_to_rephrase_when_not_answered(self):
-        self.assertIn("ask the user to rephrase the question with more specific information",
+        self.assertIn("ask the user to rephrase it with more specific information",
                       LLM_Model._CHATBOT_RESPONSE_SYSTEM)
+
+    def test_answer_prompt_separates_direct_support_from_general_guidance(self):
+        prompt = LLM_Model._CHATBOT_RESPONSE_SYSTEM
+        self.assertIn("directly supports the core of the question", prompt)
+        self.assertIn("is related material, not direct support", prompt)
+        self.assertIn("General guidance (not from the knowledge graph)", prompt)
+        self.assertIn("the knowledge graph has no record of it", prompt)
         self.assertIn("When the tool results do not answer the question",
                       LLM_Model._AGENTIC_AGENT_SYSTEM)
 

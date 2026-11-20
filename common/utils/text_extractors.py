@@ -13,6 +13,7 @@ import threading
 from pathlib import Path
 import shutil
 import asyncio
+import contextvars
 from concurrent.futures import ThreadPoolExecutor
 
 from common.utils.graph_docs import CHECKSUM_ATTR, add_checksums, converted_name, doc_id_text, file_checksum
@@ -563,8 +564,12 @@ class TextExtractor:
         try:
             loop = asyncio.get_event_loop()
 
+            # The worker thread gets this context, so the model calls of the
+            # conversion count toward the ingest run being tracked.
+            ctx = contextvars.copy_context()
             doc_entries = await loop.run_in_executor(
                 None,
+                ctx.run,
                 extract_text_from_file_with_images_as_docs,
                 file_path,
                 graphname,
@@ -1032,8 +1037,14 @@ def _extract_pdf_with_images_as_docs(file_path, base_doc_id, graphname=None):
                 max_workers=max(1, min(image_workers, len(image_refs)))
             ) as ex:
                 # executor.map preserves input ordering, which is what
-                # the markdown-mutation phase below relies on.
-                described = list(ex.map(_describe_and_encode, image_refs))
+                # the markdown-mutation phase below relies on. Each call runs
+                # in its own copy of this context (a copy cannot be entered by
+                # two threads at once), so it counts toward the tracked run.
+                contexts = [contextvars.copy_context() for _ in image_refs]
+                described = list(ex.map(
+                    lambda pair: pair[0].run(_describe_and_encode, pair[1]),
+                    zip(contexts, image_refs),
+                ))
         else:
             described = []
 

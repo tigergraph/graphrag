@@ -163,6 +163,25 @@ def estimate_cost_from_config(
     )
 
 
+def usage_from(cb, response=None) -> dict:
+    """Token counts and cost of one call. LangChain's OpenAI callback counts
+    only OpenAI responses; other providers return their counts with the
+    response (``usage_metadata``), which is used when the callback has none."""
+    usage = {
+        "input_tokens": getattr(cb, "prompt_tokens", 0) or 0,
+        "output_tokens": getattr(cb, "completion_tokens", 0) or 0,
+        "total_tokens": getattr(cb, "total_tokens", 0) or 0,
+        "cost": getattr(cb, "total_cost", 0.0) or 0.0,
+    }
+    meta = getattr(response, "usage_metadata", None)
+    if not usage["total_tokens"] and isinstance(meta, dict):
+        usage["input_tokens"] = int(meta.get("input_tokens") or 0)
+        usage["output_tokens"] = int(meta.get("output_tokens") or 0)
+        usage["total_tokens"] = int(meta.get("total_tokens")
+                                    or usage["input_tokens"] + usage["output_tokens"])
+    return usage
+
+
 def _record_usage(caller_name: str, usage_data: dict, config: Optional[dict] = None):
     # User-configured rates replace LangChain cost entirely; otherwise keep
     # whatever LangChain reported (may be 0 for unknown models).
@@ -174,6 +193,9 @@ def _record_usage(caller_name: str, usage_data: dict, config: Optional[dict] = N
     if user_cost is not None:
         usage_data["cost"] = user_cost
     logger.info(f"{caller_name} usage: {usage_data}")
+    from common.utils import run_usage
+    run_usage.record(caller_name, usage_data.get("input_tokens", 0),
+                     usage_data.get("output_tokens", 0), usage_data.get("cost", 0.0))
     bucket = _usage_collector.get()
     if bucket is not None:
         bucket.append({"caller_name": caller_name, **usage_data})
@@ -288,6 +310,8 @@ class LLM_Model:
             "_CONTEXTUALIZE_QUESTION_SYSTEM", "_CONTEXTUALIZE_QUESTION_USER_DEFAULT"),
         "agentic_agent.txt": (
             "_AGENTIC_AGENT_SYSTEM", "_AGENTIC_AGENT_USER_DEFAULT"),
+        "deep_agent.txt": (
+            "_DEEP_AGENT_SYSTEM", "_DEEP_AGENT_USER_DEFAULT"),
         "agentic_planner.txt": (
             "_AGENTIC_PLANNER_SYSTEM", "_AGENTIC_PLANNER_USER_DEFAULT"),
         "agentic_triage.txt": (
@@ -461,7 +485,12 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             for b in content:
                 if isinstance(b, str):
                     parts.append(b)
-                elif isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+                elif (isinstance(b, dict) and isinstance(b.get("text"), str)
+                      and b.get("type") in ("text", "output_text", None)):
+                    # "text" (most providers), "output_text" (OpenAI
+                    # Responses API), or a part without a type (some Gemini
+                    # versions). Thinking and reasoning parts carry their
+                    # text under other keys or types and are dropped.
                     parts.append(b["text"])
             return "".join(parts)
         return str(content)
@@ -587,10 +616,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         with get_openai_callback() as cb:
             raw_output = chain.invoke(input_variables)
 
-            usage_data["input_tokens"] = cb.prompt_tokens
-            usage_data["output_tokens"] = cb.completion_tokens
-            usage_data["total_tokens"] = cb.total_tokens
-            usage_data["cost"] = cb.total_cost
+            usage_data.update(usage_from(cb, raw_output))
             _record_usage(caller_name, usage_data, self.config)
 
         raw_text = self._message_text(raw_output)
@@ -631,10 +657,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         usage_data = {}
         with get_openai_callback() as cb:
             resp = bound.invoke(messages)
-            usage_data["input_tokens"] = cb.prompt_tokens
-            usage_data["output_tokens"] = cb.completion_tokens
-            usage_data["total_tokens"] = cb.total_tokens
-            usage_data["cost"] = cb.total_cost
+            usage_data.update(usage_from(cb, resp))
             _record_usage(caller_name, usage_data, self.config)
         return resp
 
@@ -762,10 +785,7 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
         with get_openai_callback() as cb:
             raw_output = await chain.ainvoke(input_variables)
 
-            usage_data["input_tokens"] = cb.prompt_tokens
-            usage_data["output_tokens"] = cb.completion_tokens
-            usage_data["total_tokens"] = cb.total_tokens
-            usage_data["cost"] = cb.total_cost
+            usage_data.update(usage_from(cb, raw_output))
             _record_usage(caller_name, usage_data, self.config)
 
         raw_text = self._message_text(raw_output)
@@ -1176,6 +1196,26 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
 - Before answering, check that every part of the question is covered with the specific facts and figures it asks for; if a required value, table, or entity is still missing, retrieve again (widen top_k / num_hops or switch method) rather than answering vaguely or partially.
 - For a specific value, row, total, ranking, or year-over-year comparison, use graphrag__hybrid_search or graphrag__contextual_search with top_k >= 10 (they return atomic table chunks that keep full row/column structure), and quote the exact label, column, year, or unit from the question so the retriever can match it."""
 
+    # Deep Agent additional instructions. The Deep Agent builds its own system
+    # prompt (deep_agent/prompts.py); this split entry only holds the per-graph
+    # instructions appended to it, so it is empty by default and never falls
+    # back to the React agent's default strategy.
+    _DEEP_AGENT_USER_DEFAULT = ""
+
+    @property
+    def _DEEP_AGENT_SYSTEM(self):
+        """The Deep Agent's fixed prompt with the instructions slot, for the
+        save-time conflict check. Plain slot when the agent package is absent
+        (for example in the ECC service)."""
+        try:
+            from datetime import date
+            from deep_agent.prompts import main_prompt
+            fixed = main_prompt(graphname=self._graphname or "the graph",
+                                today=date.today().isoformat(), use_cypher=False)
+        except Exception:
+            return "{user_prompt}"
+        return fixed.rstrip() + "\n\n## Additional instructions\n{user_prompt}"
+
     @property
     def agentic_agent_prompt(self):
         """Agentic (react) agent system prompt: fixed rules + Authority + injected
@@ -1326,7 +1366,9 @@ provided contexts to answer the user's question.
 ## Rules
 - The contexts arrive as JSON key-context pairs. **Combine and rephrase** them to answer the question.
 - **Preserve** image links exactly as `![description](url)` in the final answer when used. Do NOT modify or omit them.
-- When the contexts do not answer the question, or a part of it, say so plainly for that part instead of guessing. Then ask the user to rephrase the question with more specific information or a narrower scope, for example the exact name, time period, or document. Write this in the user's language.
+- Before you answer, check that at least one context directly supports the core of the question: it is about the same error message, setting, field, entity or event, and it states the fact asked for. A context about a similar symptom, a nearby topic or the same product area is related material, not direct support.
+- When no context directly supports the core of the question, or a part of it, start the answer for that part by saying that the knowledge graph does not cover it, instead of guessing. Then you may help under a separate heading, "General guidance (not from the knowledge graph)": related material and general practice. Never present general guidance as the answer. When the question is vague, also ask the user to rephrase it with more specific information or a narrower scope, for example the exact name, time period, or document. Write this in the user's language.
+- When the user names a setting, field, API or command that no context mentions, say that the knowledge graph has no record of it. Do not explain how to use it, and never invent names, values, commands or syntax.
 - The context "earlier_conversation", when present, holds earlier questions and answers from this chat. Use it to resolve references, and to answer when it holds the answer. When it conflicts with another context, the other context is correct. An earlier answer that says information was not found is not evidence that it does not exist.
 - The context "conversation_selected", when present, holds the earlier turns from "earlier_conversation" that state the facts for this answer. Answer from them; use the other turns only to resolve references.
 - The context "graph_schema", when present, describes the graph this chat uses: its name, and its vertex and edge types with their descriptions. Use it to answer questions about the knowledge base itself (what data or datasets it has, what the graph is about) from the type names and descriptions. Describe the data in plain words. Do not list GraphRAG's own types (Document, DocumentChunk, Content, Entity, EntityType, RelationshipType, Community, Image) one by one: together they are the uploaded documents and the knowledge extracted from them. Do not state counts or values that the schema does not give.

@@ -55,7 +55,7 @@ from tools.validation_utils import MapQuestionToSchemaException
 from common.config import db_config, graphrag_config, embedding_service, llm_config, service_status, get_chat_config, get_completion_config, get_embedding_config, get_multimodal_config, validate_graphname, get_llm_service, resolve_llm_services
 from common.db.connections import get_db_connection_pwd_manual
 from common.db import schema_utils as schema_utils_mod
-from common.utils import graph_docs
+from common.utils import graph_docs, run_usage
 from common.db import schema_extraction as schema_extraction_mod
 from common.utils.text_extractors import (
     ExtractionError,
@@ -1251,13 +1251,16 @@ def suggest_type_descriptions(
 def _get_domain_schema_for_render(conn, graphname: str):
     """Snapshot the live domain schema for templated-retriever rendering.
 
-    Returns ``(domain_vts, domain_edges, include_entity)`` sorted for
-    deterministic rendering. Returns empty lists on any failure — the
-    caller falls back to comparing the unrendered template (acceptable
-    for graphs without dynamic schema).
+    Returns ``(domain_vts, domain_edges, include_entity, chunk_context)``
+    sorted for deterministic rendering; ``chunk_context`` is true when
+    DocumentChunk has the heading_path attribute. Returns empty lists on any
+    failure — the caller falls back to comparing the unrendered template
+    (acceptable for graphs without dynamic schema).
     """
     try:
         from common.db.schema_utils import read_existing_schema, is_structural_type
+        from common.utils.chunk_context import schema_has_chunk_context
+        chunk_context = schema_has_chunk_context(conn.getSchema(force=True))
         snapshot = read_existing_schema(conn)
         domain_vts = sorted(
             v for v in snapshot.vertex_types if not is_structural_type(v)
@@ -1268,17 +1271,18 @@ def _get_domain_schema_for_render(conn, graphname: str):
         )
         # Always include Entity in the community-walk start set, matching
         # what install_retrievers does at init.
-        return domain_vts, domain_edges, True
+        return domain_vts, domain_edges, True, chunk_context
     except Exception as e:
         logger.warning(
             f"_get_domain_schema_for_render({graphname}) failed: {e}; "
             f"templated retrievers will be checked against unrendered template"
         )
-        return [], [], False
+        return [], [], False, False
 
 
 def _local_query_hash(q_path: str, q_name: str,
-                     domain_vts: list, domain_edges: list, include_entity: bool):
+                     domain_vts: list, domain_edges: list, include_entity: bool,
+                     chunk_context: bool = False):
     """Return the normalized hash for the LOCAL query body.
 
     For templated retrievers, render the template with the graph's live
@@ -1298,6 +1302,7 @@ def _local_query_hash(q_path: str, q_name: str,
             domain_vts=domain_vts,
             domain_edges=domain_edges,
             include_entity=include_entity,
+            chunk_context=chunk_context,
         )
     return _gsql_hash(body)
 
@@ -1347,7 +1352,7 @@ def migration_status(
     schema_compatible, schema_check_failed = _schema_compatibility(conn, graphname)
 
     # Read live domain schema once for templated-retriever rendering.
-    domain_vts, domain_edges, include_entity = _get_domain_schema_for_render(conn, graphname)
+    domain_vts, domain_edges, include_entity, chunk_context = _get_domain_schema_for_render(conn, graphname)
 
     outdated: list[str] = []
     up_to_date: list[str] = []
@@ -1365,7 +1370,7 @@ def migration_status(
             continue
         q_name = os.path.splitext(os.path.basename(q_path))[0]
         local_hash = _local_query_hash(
-            q_path, q_name, domain_vts, domain_edges, include_entity
+            q_path, q_name, domain_vts, domain_edges, include_entity, chunk_context
         )
         if local_hash is None:
             missing_files.append(q_path)
@@ -1432,11 +1437,13 @@ def migration_status(
     embeddings_by_type: dict = {}
     embeddings_total_missing = 0
     community_summaries: dict = {}
+    chunk_context: dict = {}
     try:
         from common.db.health import (
             embeddable_types,
             embedding_coverage,
             community_summary_health,
+            chunk_context_health,
         )
 
         for vt in embeddable_types(conn):
@@ -1447,6 +1454,9 @@ def migration_status(
         csh = community_summary_health(conn)
         if csh is not None:
             community_summaries = csh
+        cch = chunk_context_health(conn)
+        if cch is not None:
+            chunk_context = cch
     except Exception as e:
         logger.warning(f"migration_status health check failed: {e}")
 
@@ -1473,6 +1483,8 @@ def migration_status(
             community_summaries.get("needs_resummarize", 0)
         ),
         "document_versions_missing": _document_versions_missing(conn),
+        "chunk_context": chunk_context,
+        "chunk_context_missing": bool(chunk_context) and not chunk_context.get("schema_ready"),
         "needs_repair": bool(outdated) or bool(not_installed) or bool(prompt_issues),
         "repairable": schema_compatible,
     }
@@ -1533,6 +1545,117 @@ async def migration_regenerate_summaries(
     """Re-summarize communities with placeholder/empty summaries and re-embed
     (GML-2176). Targeted — not a full rebuild. Returns {resummarized, skipped}."""
     return await _proxy_regen(graphname, creds, "regenerate_summaries")
+
+
+_SCHEMA_CHANGE_WAIT_SECONDS = 1800
+
+
+def _graph_has_chunk_context(conn) -> bool:
+    from common.utils.chunk_context import schema_has_chunk_context
+    return schema_has_chunk_context(conn.getSchema(force=True))
+
+
+def _add_chunk_context_schema(graphname, creds) -> dict:
+    """Add the heading_path and summary attributes to DocumentChunk, then
+    install again the queries that the schema change uninstalled. The
+    templated retrievers are installed in the form that shows the heading
+    path. Returns the reinstall result; empty when the graph had the
+    attributes."""
+    from common.db.migrate import get_installed_query_names
+    from common.db.retriever_render import TEMPLATED_RETRIEVERS
+    from common.utils.chunk_context import SCHEMA_JOB, schema_change_gsql
+
+    if get_rebuilding_graph() == graphname:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is being rebuilt; retry after it completes.",
+        )
+    conn = get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password)
+    if _graph_has_chunk_context(conn):
+        return {}
+    compatible, check_failed = _schema_compatibility(conn, graphname)
+    if check_failed:
+        raise HTTPException(status_code=503, detail="The graph's schema could not be checked. Try again shortly.")
+    if not compatible:
+        raise HTTPException(status_code=409, detail=_INCOMPATIBLE_SCHEMA_MESSAGE)
+    if not acquire_graph_lock(graphname, "migration"):
+        current = get_current_operation(graphname) or "another operation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is currently busy with '{current}'. "
+                   f"Wait for it to finish, then try again.",
+        )
+    try:
+        installed = get_installed_query_names(conn, graphname)
+        if SCHEMA_JOB in conn.gsql(f"USE GRAPH {graphname}\nls"):
+            # Left by an earlier attempt that did not finish.
+            conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {SCHEMA_JOB}")
+        try:
+            err = gsql_output_error(conn.gsql(schema_change_gsql(graphname)))
+        except Exception as e:
+            # TigerGraph can close a long schema-change request while the
+            # change goes on; wait for the attributes below.
+            logger.warning(f"chunk context schema change on {graphname}: {e}")
+            err = None
+        if err:
+            logger.error(f"chunk context schema change failed on {graphname}: {err}")
+            raise HTTPException(
+                status_code=500,
+                detail="Could not add the chunk attributes to the graph schema.",
+            )
+        deadline = time.time() + _SCHEMA_CHANGE_WAIT_SECONDS
+        while not _graph_has_chunk_context(conn):
+            if time.time() > deadline:
+                raise HTTPException(
+                    status_code=504,
+                    detail="Adding the chunk attributes did not finish. Check again later.",
+                )
+            time.sleep(15)
+        if SCHEMA_JOB in conn.gsql(f"USE GRAPH {graphname}\nls"):
+            conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {SCHEMA_JOB}")
+
+        managed = {os.path.splitext(os.path.basename(p))[0] for p in _MIGRATION_QUERY_PATHS}
+        now_installed = get_installed_query_names(conn, graphname)
+        missing = installed - now_installed
+        rerender = sorted((installed & set(TEMPLATED_RETRIEVERS) & managed) - missing)
+        result = _migration_apply_inner(
+            graphname, conn,
+            apply_schema=False,
+            queries_outdated=rerender,
+            queries_not_installed=sorted(missing & managed),
+        )
+        others = sorted(missing - managed)
+        if others:
+            logger.info(f"Reinstalling {len(others)} other queries on {graphname} after the schema change")
+            conn.installQueries(others)
+        return result
+    finally:
+        release_graph_lock(graphname, "migration")
+
+
+@router.post(route_prefix + "/{graphname}/migration/chunk_context")
+async def migration_chunk_context(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Add the chunk heading_path and summary attributes (GML-2369), install
+    the queries again, and move existing chunk breadcrumbs from the chunk
+    text to heading_path. Returns {moved, unchanged, not_matched}."""
+    reinstall = await asyncio.to_thread(_add_chunk_context_schema, graphname, creds)
+    result = await _proxy_regen(graphname, creds, "move_heading_paths")
+    if reinstall.get("errors"):
+        result["query_errors"] = reinstall["errors"]
+    return result
+
+
+@router.post(route_prefix + "/{graphname}/migration/regenerate_chunk_summaries")
+async def migration_regenerate_chunk_summaries(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Generate summaries for chunks without one and re-embed them
+    (GML-2369). Returns {summarized, skipped}."""
+    return await _proxy_regen(graphname, creds, "regenerate_chunk_summaries")
 
 
 @router.post(route_prefix + "/{graphname}/migration/apply")
@@ -1752,7 +1875,7 @@ def _migration_apply_inner(
     import os.path
 
     # Read live domain schema for templated-retriever rendering.
-    domain_vts, domain_edges, include_entity = _get_domain_schema_for_render(conn, graphname)
+    domain_vts, domain_edges, include_entity, chunk_context = _get_domain_schema_for_render(conn, graphname)
 
     reinstalled: list[str] = []
     installed_new: list[str] = []
@@ -1795,7 +1918,7 @@ def _migration_apply_inner(
                 continue
             q_name = os.path.splitext(os.path.basename(q_path))[0]
             local_hash = _local_query_hash(
-                q_path, q_name, domain_vts, domain_edges, include_entity
+                q_path, q_name, domain_vts, domain_edges, include_entity, chunk_context
             )
             if local_hash is None:
                 continue
@@ -1827,6 +1950,7 @@ def _migration_apply_inner(
                     domain_vts=domain_vts,
                     domain_edges=domain_edges,
                     include_entity=include_entity,
+                    chunk_context=chunk_context,
                 )
             # Create/replace the body via the pyTigerGraph query API
             # (createQuery -> POST /gsql/v1/queries). Distinguish a TigerGraph
@@ -2739,11 +2863,13 @@ def create_ingest(
         ).decode()
         _, conn = ws_basic_auth(auth, graphname)
 
-        # Create the ingest configuration
+        # Create the ingest configuration. Converting the files is where the
+        # model describes images, so the conversion is tracked as a run.
         LogWriter.info(f"Creating ingest configuration for graph: {graphname}")
-        result = supportai.create_ingest(graphname, cfg, conn)
+        with run_usage.track_run(run_usage.CONVERSION, graphname) as usage:
+            result = supportai.create_ingest(graphname, cfg, conn)
 
-        return result
+        return {**result, "usage": usage.summary()} if isinstance(result, dict) else result
 
     except HTTPException:
         raise
@@ -3977,12 +4103,32 @@ def list_documents(
     }
 
 
+@router.get(route_prefix + "/{graphname}/run_usage")
+def get_run_usage(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """The last run of each kind on the graph (ingest, conversion, rebuild,
+    summaries): its time, model calls, tokens and cost."""
+    _require_document_admin(creds[1], graphname)
+    return {"graphname": graphname, "runs": run_usage.load_summaries(graphname)}
+
+
 @router.post(route_prefix + "/{graphname}/documents/ingest")
 def ingest_documents(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     payload: Annotated[dict, Body(...)],
 ):
+    """Load selected kept files into the graph (see ``_ingest_documents``).
+    The response also has ``usage``: the time, model calls, tokens and cost
+    of this ingest."""
+    with run_usage.track_run(run_usage.INGEST, graphname) as usage:
+        result = _ingest_documents(graphname, creds, payload)
+    return {**result, "usage": usage.summary()}
+
+
+def _ingest_documents(graphname: str, creds, payload: dict) -> dict:
     """Load selected kept files into the graph.
 
     Body: ``{"files": [{"source": "uploads", "name": "a.pdf"}], "override": false}``
@@ -5452,6 +5598,9 @@ async def get_prompts(
             # Agentic (react) agent system prompt — runs through the chat service.
             "agentic_agent":
                 (chat_llm, "agentic_agent_prompt"),
+            # Deep Agent additional instructions — split, user portion only.
+            "deep_agent":
+                (chat_llm, None),
             # Agentic planner system prompt — runs through the chat service.
             "agentic_planner":
                 (chat_llm, "agentic_planner_prompt"),
@@ -5471,6 +5620,7 @@ async def get_prompts(
             "community_summarization": "community_summarization.txt",
             "schema_extraction": "schema_extraction.txt",
             "agentic_agent": "agentic_agent.txt",
+            "deep_agent": "deep_agent.txt",
             "agentic_planner": "agentic_planner.txt",
             "agentic_triage": "agentic_triage.txt",
             "route_response": "route_response.txt",
@@ -5536,7 +5686,7 @@ async def save_prompts(
     """
     Save customized prompts.
     Expects: {
-        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation|schema_extraction|query_guidance|route_response|agentic_agent|agentic_planner|agentic_triage",
+        "prompt_type": "chatbot_response|entity_relationship|community_summarization|query_generation|schema_extraction|query_guidance|route_response|agentic_agent|deep_agent|agentic_planner|agentic_triage",
         "editable_content": "...",
         "graphname": "..."  (optional - graph-admin users must supply this)
     }
@@ -5634,6 +5784,7 @@ async def save_prompts(
             "schema_extraction": "schema_extraction.txt",
             "query_guidance": "query_guidance.txt",
             "agentic_agent": "agentic_agent.txt",
+            "deep_agent": "deep_agent.txt",
             "agentic_planner": "agentic_planner.txt",
             "agentic_triage": "agentic_triage.txt",
             "route_response": "route_response.txt",
@@ -5708,6 +5859,7 @@ async def save_prompts(
             "schema_extraction": "Schema extraction prompt saved successfully",
             "query_guidance": "Query guidance saved successfully",
             "agentic_agent": "React agent prompt saved successfully",
+            "deep_agent": "Deep Agent instructions saved successfully",
             "agentic_planner": "Agentic planner prompt saved successfully",
             "agentic_triage": "Agent routing prompt saved successfully",
             "route_response": "Question routing prompt saved successfully",

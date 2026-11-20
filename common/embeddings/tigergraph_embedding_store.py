@@ -341,7 +341,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         """
         batch = None
         try:
-            LogWriter.info(
+            LogWriter.debug(
                 f"request_id={req_id_cv.get()} TigerGraph ENTRY add_embeddings()"
             )
 
@@ -381,7 +381,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
 
             duration = time() - start_time
 
-            LogWriter.info(f"request_id={req_id_cv.get()} TigerGraph EXIT add_embeddings()")
+            LogWriter.debug(f"request_id={req_id_cv.get()} TigerGraph EXIT add_embeddings()")
 
             if added:
                 success_message = f"Document registered with id: {added[0]}"
@@ -416,7 +416,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         """
         batch = None
         try:
-            LogWriter.info(
+            LogWriter.debug(
                 f"request_id={req_id_cv.get()} TigerGraph ENTRY aadd_embeddings()"
             )
 
@@ -460,7 +460,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
 
             duration = time() - start_time
 
-            LogWriter.info(f"request_id={req_id_cv.get()} TigerGraph EXIT aadd_embeddings()")
+            LogWriter.debug(f"request_id={req_id_cv.get()} TigerGraph EXIT aadd_embeddings()")
 
             if added:
                 success_message = f"Document {metadatas} registered with status: {added}"

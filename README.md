@@ -378,6 +378,7 @@ Upgrading GraphRAG does not change graphs that already exist: their installed qu
 - **Prompt overrides** — saved custom prompts in a format the current release no longer uses.
 - **Data health** — vertices missing embeddings and communities missing summaries, each with its own regenerate action.
 - **Document versions** — whether the graph records a checksum of each document's source file and which documents a newer one replaces. **Set up** adds this to the graph; [Stored Files](#stored-files) needs it to compare files with the graph and to replace older versions.
+- **Chunk section paths and summaries** — whether chunks store their section path and summary in their own fields. **Store separately** updates a graph created before 2.1.0: it changes the graph schema, installs the graph's queries again (search on the graph is unavailable until this finishes) and moves each chunk's section path out of its text. **Generate summaries** creates summaries for chunks without one, with one model request per chunk.
 
 A graph created with a version earlier than 1.4 can't be repaired in place; the Migration Assistant reports this and does not offer **Repair**. Create a new graph and ingest its documents again.
 
@@ -580,6 +581,10 @@ To resolve a conflict, click **Rename** under a file in conflict and enter a new
 Ingest loads the document content only. Rebuild the knowledge graph to process the new and changed documents.
 
 Stored files are kept on the server in `configs/graph_docs/uploads/<graph>/` and `configs/graph_docs/downloads/<graph>/`, so they stay when the containers are recreated. To add files without the UI, put them in another folder under `configs/graph_docs/` with one subfolder per graph, such as `configs/graph_docs/server/<graph>/`. Stored Files lists them with the folder name as their source, together with the files in its subfolders. A file's document id is its path below the graph's folder, with the folders joined by `__`: `corpus/2023/q1.pdf` gets the id `corpus__2023__q1.pdf`, and a file at the top of the folder has its file name as id.
+
+#### Time and model use of ingest and rebuild
+
+Adding files, an ingest from Stored Files, a rebuild and the Migration Assistant's **Generate summaries** each report how long they took, how many model calls they made, the tokens they used and the cost. The result message shows them, and the log has one summary line per run, which starts with the kind of run (`Ingest Usage:`, `Conversion Usage:`, `Rebuild Usage:`, `Chunk Summaries Usage:`) and gives the totals by kind of call (entity extraction, image descriptions, chunk and community summaries, embeddings). `grep 'Usage:'` finds all of them. The cost uses `input_cost_per_1m` and `output_cost_per_1m` of the service when they are set. The last run of each kind is kept in `configs/graph_data/<graph>/run_usage.json`, and `GET /ui/{graph}/run_usage` returns it to an admin of the graph.
 
 ### Ingest Documents via API
 
@@ -1221,7 +1226,8 @@ Customize prompts via the UI: *Settings → Customize Prompts*. Customization is
 - **Schema Instructions** (`query_generation`) — instructions used when generating GSQL / Cypher and when filtering the schema for a structured query. Tune if your domain has unusual type names that aren't matching user phrasing, or if generated queries miss obvious joins.
 - **Community Summarization** (`community_summarization`) — how community summaries are produced during knowledge-graph build. Tune for length / tone and to bias summaries toward domain-specific framing.
 - **Chatbot Responses** (`chatbot_response`) — the final answer template. Keep it short; the LLM responds best to clear constraints (*"answer in ≤3 sentences, cite the doc id"*).
-- **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — the retrieval strategy for each agentic engine: which methods to use, when, and in what order. The role and act model stay fixed.
+- **Deep Agent** (`deep_agent`) — additional instructions for the Deep Agent, appended to its fixed rules. Empty by default; use it to describe what the graph contains and how to search and answer for it.
+- **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — the retrieval strategy of each legacy agent style: which methods to use, when, and in what order. The role and act model stay fixed. Used only when `agent_engine` is `"legacy"`.
 - **Agent Routing** (`agentic_triage`) — the policy that decides whether a message is answered directly (greetings, questions about the assistant) or sent to the agent to retrieve / use a tool.
 
 When customizing:
