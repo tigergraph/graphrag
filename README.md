@@ -696,7 +696,7 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `entity_extraction_switch` | bool | same as `doc_process_switch` | Enable/disable entity extraction during knowledge graph build. |
 | `community_detection_switch` | bool | same as `entity_extraction_switch` | Enable/disable community detection during knowledge graph build. |
 | `extract_images` | bool | `true` | Run the multimodal LLM on images extracted from documents to generate alt-text. Set to `false` to skip the image-description pass entirely — much faster, at the cost of losing image content from retrieval. Configurable per graph. |
-| `document_parser` | string | `"default"` | How PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files are converted to text: `"default"` or `"docling"`. See *Document parser* under the ingestion tuning tips. Configurable per graph, and under *Ingestion Settings* on the *GraphRAG Configuration* page. |
+| `document_parser` | string | `"default"` | The parser for PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files: `"default"` or `"docling"`. See *Document parser* in the ingestion tuning tips. Also in *Ingestion Settings* on the *GraphRAG Configuration* page. Configurable per graph. |
 | `min_image_dim_px` | int | `100` | Smallest side (in px) an image must have to be sent to the multimodal LLM. Smaller images are tagged "decorative image" without an LLM call. Configurable per graph. |
 | `load_batch_size` | int | `500` | Batch size for document loading. |
 | `upsert_delay` | int | `0` | Delay in seconds between loading batches. |
@@ -1258,11 +1258,21 @@ When customizing:
     - Multimodal calls share the same `default_concurrency` semaphore as the rest of the pipeline — raise it to parallelize more describe calls; lower it if the multimodal provider's rate limit is hit.
     - AWS Bedrock users can further tune connection pool sizing via `boto3_config` in `llm_config`.
 
-- **Document parser.** `document_parser` (also under *Ingestion Settings* on the *GraphRAG Configuration* page) chooses how PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files are converted to text. It applies to files ingested after the change.
-    - `"default"` — fast and lightweight, with little CPU and memory. Good for reports, articles, manuals and simple tables. It can lose the layout of complex tables (merged cells, multi-level headers), mixes the text inside charts into the body text, reads formulas as plain text, and cannot read scanned pages or pages with damaged text.
-    - `"docling"` — keeps complex tables with merged cells and multi-level headers, keeps each chart as one description without its loose text, keeps formulas, reads scanned pages and pages with damaged text, keeps section headings and leaves out page headers and footers. Converting a file often takes 5 to 15 times as long, more for files with many tables or scanned pages, and uses much more CPU and memory. Choose it when the source files contain complex tables, charts or formulas.
-    - With `"docling"`, each formula is sent to the multimodal model to be transcribed as LaTeX. Charts and other pictures are described by the multimodal model with either value, when `extract_images` is on.
-    - PowerPoint (`.pptx`) files always use Docling. Markdown, text, JSON, `.xls` and image files are not affected.
+- **Document parser.** The `document_parser` setting selects the parser for PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files. It is also in *Ingestion Settings* on the *GraphRAG Configuration* page. A change applies only to files that are ingested after the change.
+    - `"default"` uses a separate extractor for each format. It is fast and uses little CPU and memory. Use it for documents that are mostly text, with simple tables. It has these limits:
+        - A complex table, for example a table with merged cells or multi-level headers, can lose its layout.
+        - The text inside a chart goes into the body text.
+        - A formula stays as plain text.
+        - The parser cannot read scanned pages or pages with damaged text.
+    - `"docling"` uses Docling. Use it when the files contain complex tables, charts or formulas. Docling does these things:
+        - It keeps merged cells and multi-level headers in tables.
+        - It keeps each chart as one description, without the loose text of the chart.
+        - It sends each formula to the multimodal model, which writes the formula as LaTeX.
+        - It reads scanned pages and pages with damaged text.
+        - It keeps section headings and removes page headers and page footers.
+    - Docling is slower. The conversion of a file often takes 5 to 15 times as long as with `"default"`. Files with many tables or scanned pages take longer. Docling also uses much more CPU and memory.
+    - With both values, the multimodal model describes charts and other pictures when `extract_images` is `true`.
+    - PowerPoint (`.pptx`) files always use Docling. The setting has no effect on Markdown, text, JSON, `.xls` and image files.
 
 ### 7. A working tuning loop
 
