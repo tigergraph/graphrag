@@ -6,6 +6,13 @@ COPY common/requirements.txt requirements.txt
 RUN apt-get update && apt-get upgrade -y
 RUN pip install -r requirements.txt
 
+# Docling and its models, kept in the image so that parsing needs no
+# internet access.
+COPY common/requirements-docling.txt requirements-docling.txt
+RUN pip install -r requirements-docling.txt
+ENV DOCLING_ARTIFACTS_PATH="/opt/docling-models"
+RUN docling-tools models download -o /opt/docling-models layout tableformer picture_classifier rapidocr
+
 COPY graphrag/app /code
 COPY common /code/common
 
