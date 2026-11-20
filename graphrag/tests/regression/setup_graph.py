@@ -156,7 +156,7 @@ def _ingest_documents(client: _Client, graphname: str, doc_files: List[str]) -> 
     folder_path = f"uploads/{graphname}"
     ingest_info = client.post(f"/ui/{graphname}/create_ingest", json_body={
         "data_source":        "server",
-        "data_source_config": {"data_path": folder_path},
+        "data_source_config": {"source": "uploads"},
         "loader_config":      {},
         "file_format":        file_format,
     })
