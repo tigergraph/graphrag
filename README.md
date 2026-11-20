@@ -1258,21 +1258,10 @@ When customizing:
     - Multimodal calls share the same `default_concurrency` semaphore as the rest of the pipeline — raise it to parallelize more describe calls; lower it if the multimodal provider's rate limit is hit.
     - AWS Bedrock users can further tune connection pool sizing via `boto3_config` in `llm_config`.
 
-- **Document parser.** The `document_parser` setting selects the parser for PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files. It is also in *Ingestion Settings* on the *GraphRAG Configuration* page. A change applies only to files that are ingested after the change.
-    - `"default"` uses a separate extractor for each format. It is fast and uses little CPU and memory. Use it for documents that are mostly text, with simple tables. It has these limits:
-        - A complex table, for example a table with merged cells or multi-level headers, can lose its layout.
-        - The text inside a chart goes into the body text.
-        - A formula stays as plain text.
-        - The parser cannot read scanned pages or pages with damaged text.
-    - `"docling"` uses Docling. Use it when the files contain complex tables, charts or formulas. Docling does these things:
-        - It keeps merged cells and multi-level headers in tables.
-        - It keeps each chart as one description, without the loose text of the chart.
-        - It sends each formula to the multimodal model, which writes the formula as LaTeX.
-        - It reads scanned pages and pages with damaged text.
-        - It keeps section headings and removes page headers and page footers.
-    - Docling is slower. The conversion of a file often takes 5 to 15 times as long as with `"default"`. Files with many tables or scanned pages take longer. Docling also uses much more CPU and memory.
-    - With both values, the multimodal model describes charts and other pictures when `extract_images` is `true`.
-    - PowerPoint (`.pptx`) files always use Docling. The setting has no effect on Markdown, text, JSON, `.xls` and image files.
+- **Document parser.** The `document_parser` setting selects how PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files are converted to text. It is also in *Ingestion Settings* on the *GraphRAG Configuration* page. A change applies to files that are ingested after the change.
+    - `"default"` is fast and light. Use it for documents that are mostly text, with simple tables.
+    - `"docling"` keeps more of the document structure, such as complex tables, charts, formulas and scanned pages. It is several times slower and uses more CPU and memory. Use it when the files have complex tables, charts or formulas.
+    - PowerPoint (`.pptx`) files always use Docling.
 
 ### 7. A working tuning loop
 
