@@ -66,6 +66,11 @@ class ContextualSearchArgs(BaseModel):
     top_k: Optional[int] = Field(default=None, description="Max chunks to return; raise on thin results.")
 
 
+class KeywordSearchArgs(BaseModel):
+    question: str = Field(description="The words to search for: names, terms, numbers or labels that must appear in the passage.")
+    top_k: Optional[int] = Field(default=None, description="Max chunks to return; raise on thin results.")
+
+
 class CommunitySearchArgs(BaseModel):
     question: str = Field(description="The query to search for.")
     top_k: Optional[int] = Field(default=None, description="Max community summaries to return.")
@@ -93,6 +98,8 @@ class ToolSpec:
 # --- Registry ---------------------------------------------------------------
 
 _TOOLS: dict[str, ToolSpec] = {}
+
+KEYWORD_SEARCH_TOOL = "graphrag__keyword_search"
 
 
 def _register(name: str, description: str, args_model: Type[BaseModel], fn: Callable) -> None:
@@ -145,12 +152,20 @@ def _merged_specs(ctx) -> dict:
     """Built-ins overlaid with ``ctx.external_tools`` (external names win
     only via the namespaced ``<server>.<tool>`` form, so collisions with
     built-ins like ``graphrag__hybrid_search`` cannot happen in practice).
+    Keyword search is offered only for graphs where it is enabled.
     """
-    if ctx is None:
-        return dict(_TOOLS)
     merged = dict(_TOOLS)
+    if not _keyword_search_enabled(ctx):
+        merged.pop(KEYWORD_SEARCH_TOOL, None)
+    if ctx is None:
+        return merged
     merged.update(_ctx_external_tools(ctx))
     return merged
+
+
+def _keyword_search_enabled(ctx) -> bool:
+    cfg = getattr(ctx, "graphrag_cfg", None) or {}
+    return bool(cfg.get("keyword_search", False))
 
 
 _register(
@@ -180,6 +195,12 @@ _register(
     "graphrag__contextual_search",
     "Vector search that also returns sibling chunks for surrounding context.",
     ContextualSearchArgs, gt.contextual_search,
+)
+_register(
+    KEYWORD_SEARCH_TOOL,
+    "Keyword (BM25) search over document text. Use to find passages that contain exact "
+    "names, terms, numbers or labels, such as a note or section that another passage refers to.",
+    KeywordSearchArgs, gt.keyword_search,
 )
 _register(
     "graphrag__community_search",

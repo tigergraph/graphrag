@@ -27,6 +27,10 @@ const GraphRAGConfig = () => {
   const [numSeenMin, setNumSeenMin] = useState("2");
   const [communityLevel, setCommunityLevel] = useState("2");
   const [maxResults, setMaxResults] = useState("");
+  // Set from the Keyword Search card on the setup page; kept here so saving
+  // this form does not drop it.
+  const [keywordSearch, setKeywordSearch] = useState(false);
+  const [keywordTopK, setKeywordTopK] = useState("");
   const [docOnly, setDocOnly] = useState(false);
   const [enableRouterFallback, setEnableRouterFallback] = useState(true);
   const [agentMode, setAgentMode] = useState<"agentic" | "classic">("agentic");
@@ -99,6 +103,8 @@ const GraphRAGConfig = () => {
     setNumSeenMin(String(graphragConfig.num_seen_min ?? 2));
     setCommunityLevel(String(graphragConfig.community_level ?? 2));
     setMaxResults(graphragConfig.max_results != null ? String(graphragConfig.max_results) : "");
+    setKeywordSearch(graphragConfig.keyword_search ?? false);
+    setKeywordTopK(graphragConfig.keyword_top_k != null ? String(graphragConfig.keyword_top_k) : "");
     setDocOnly(graphragConfig.doc_only ?? false);
     setEnableRouterFallback(graphragConfig.enable_router_fallback ?? true);
     setAgentMode(graphragConfig.agent_mode === "classic" ? "classic" : "agentic");
@@ -254,6 +260,7 @@ const GraphRAGConfig = () => {
         num_seen_min: parseInt(numSeenMin),
         community_level: parseInt(communityLevel),
         doc_only: docOnly,
+        keyword_search: keywordSearch,
         enable_router_fallback: enableRouterFallback,
         agent_mode: agentMode,
         load_batch_size: parseInt(loadBatchSize),
@@ -276,6 +283,10 @@ const GraphRAGConfig = () => {
       if (maxResults) {
         currentConfig.max_results = parseInt(maxResults);
       }
+      // Blank means "use Top K".
+      if (keywordTopK) {
+        currentConfig.keyword_top_k = parseInt(keywordTopK);
+      }
 
       // Display defaults — used to avoid saving values the user never changed
       const displayDefaults: Record<string, any> = {
@@ -288,6 +299,7 @@ const GraphRAGConfig = () => {
         num_seen_min: 2,
         community_level: 2,
         doc_only: false,
+        keyword_search: false,
         enable_router_fallback: true,
         agent_mode: "agentic",
         load_batch_size: 500,
@@ -578,6 +590,23 @@ const GraphRAGConfig = () => {
                   />
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     Maximum number of result chunks returned by search, ranked by relevance. Leave blank to use the default (twice Top K).
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Keyword Top K
+                  </label>
+                  <Input
+                    type="number"
+                    min="1"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
+                    placeholder="Defaults to Top K"
+                    value={keywordTopK}
+                    onChange={(e) => setKeywordTopK(e.target.value)}
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Number of keyword matches added to document search results. Leave blank to use Top K.
                   </p>
                 </div>
               </div>
