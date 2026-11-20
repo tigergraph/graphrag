@@ -21,3 +21,6 @@ __pycache__/
 
 # Deep Agent memory (SQLite checkpointer + store)
 configs/graph_data/
+
+# Documents kept for each graph (uploads and cloud downloads)
+configs/graph_docs/
