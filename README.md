@@ -408,7 +408,7 @@ The Deep Agent decides everything itself: whether the question needs tools (gree
 
 The agent works with these tools, always as the signed-in TigerGraph user:
 
-- **GraphRAG search** — the graph schema, questions answered by a generated graph query, and hybrid, similarity, contextual and community search.
+- **GraphRAG search** — the graph schema, questions answered by a generated graph query, hybrid, similarity, contextual and community search, and keyword search when it is on for the graph.
 - **TigerGraph lookups (read-only)** — vertex and edge counts, vertex and edge lookups, the installed queries of the graph, and read-only openCypher when Cypher is enabled.
 - **MCP tools** — the [MCP servers](#mcp-servers-agentic-tools) configured for the graph.
 
@@ -416,7 +416,7 @@ The agent cannot change data, ingest documents or install queries. TigerGraph pe
 
 #### Legacy engine (Planned / Reactive)
 
-With `agent_engine: "legacy"`, the Agentic engine runs the Planned / Reactive agent. The agent decides its **own** retrieval instead of following a fixed pipeline: it picks which methods to use (structural graph queries, vector search, community search), can call external [MCP tools](#mcp-servers-agentic-tools), answers greetings and questions about itself directly, reuses what the conversation already answers and retrieves only what is missing, and cites the chunks and queries it used. It comes in two styles:
+With `agent_engine: "legacy"`, the Agentic engine runs the Planned / Reactive agent. The agent decides its **own** retrieval instead of following a fixed pipeline: it picks which methods to use (structural graph queries, vector search, keyword search, community search), can call external [MCP tools](#mcp-servers-agentic-tools), answers greetings and questions about itself directly, reuses what the conversation already answers and retrieves only what is missing, and cites the chunks and queries it used. It comes in two styles:
 
 - **Planned** *(default)* — analyzes the question against the graph's schema up front, answers directly when the conversation or the schema already holds the answer (for example "what data do we have?"), and otherwise lays out the whole retrieval plan (which methods, how many, in what order) as a small DAG, executes it, then synthesizes one grounded answer. Predictable and efficient; a strong fit for most questions, including multi-part ones.
 - **Reactive** — reasons and acts one step at a time, deciding each next retrieval from what the previous step returned, and keeps going until it can answer completely and accurately. More adaptive to what it finds, at the cost of more steps (and tokens) on complex questions.
@@ -670,6 +670,9 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `num_hops` | int | `2` | Number of graph hops to traverse from seed nodes during hybrid search. More hops expand the result set with related context. |
 | `num_seen_min` | int | `2` | Minimum occurrence count for a node to be included during hybrid search traversal. Higher values filter out loosely connected nodes, reducing context size. |
 | `max_results` | int | `2 × top_k` | Caps the number of result chunks hybrid and community search return, ranked by relevance to the question, instead of every chunk the expansion (or community membership) reaches. When unset it is twice `top_k`, which is also the minimum; set higher to return more context. Lowering it reduces the context sent to the LLM. |
+| `keyword_search` | bool | `false` | If true, hybrid search also returns the chunks whose section path and text hold most of the question's distinctive words (BM25 keyword search), such as names, codes, numbers and table labels that vector search can miss, and the agentic engines can run a keyword search. Turn it on per graph with the **Keyword Search** card on the Knowledge Graph Setup page, which also builds the graph's keyword index. The index is saved in `configs/graph_data/<graph>/` and reused after a restart. |
+| `keyword_top_k` | int | `top_k` | How many keyword matches hybrid search considers adding to its results. |
+| `rerank` | bool | same as `keyword_search` | If true, hybrid search gathers about three times as many candidate passages, including keyword matches when keyword search is on, and the chat model orders them by how directly each answers the question. The usual number of results is kept. Adds one model call per hybrid search. |
 | `community_level` | int | `2` | Community hierarchy level for community search. Higher levels retrieve broader, higher-order community summaries. |
 | `agent_engine` | string | `"default"` | Agent that the Agentic engine runs: `"default"` (the default agent, the Deep Agent), `"deepagent"` (the Deep Agent) or `"legacy"` (the Planned / Reactive agent). See [Agentic](#agentic). |
 | `deep_agent` | object | `{}` | Deep Agent settings (see sub-parameters below). |
@@ -693,6 +696,7 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `entity_extraction_switch` | bool | same as `doc_process_switch` | Enable/disable entity extraction during knowledge graph build. |
 | `community_detection_switch` | bool | same as `entity_extraction_switch` | Enable/disable community detection during knowledge graph build. |
 | `extract_images` | bool | `true` | Run the multimodal LLM on images extracted from documents to generate alt-text. Set to `false` to skip the image-description pass entirely — much faster, at the cost of losing image content from retrieval. Configurable per graph. |
+| `document_parser` | string | `"default"` | The parser for PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files: `"default"` or `"docling"`. See *Document parser* in the ingestion tuning tips. Also in *Ingestion Settings* on the *GraphRAG Configuration* page. Configurable per graph. |
 | `min_image_dim_px` | int | `100` | Smallest side (in px) an image must have to be sent to the multimodal LLM. Smaller images are tagged "decorative image" without an LLM call. Configurable per graph. |
 | `load_batch_size` | int | `500` | Batch size for document loading. |
 | `upsert_delay` | int | `0` | Delay in seconds between loading batches. |
@@ -1253,6 +1257,11 @@ When customizing:
     - `min_image_dim_px` (default `100`) — smaller images are tagged "decorative image" without an LLM call.
     - Multimodal calls share the same `default_concurrency` semaphore as the rest of the pipeline — raise it to parallelize more describe calls; lower it if the multimodal provider's rate limit is hit.
     - AWS Bedrock users can further tune connection pool sizing via `boto3_config` in `llm_config`.
+
+- **Document parser.** The `document_parser` setting selects how PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files are converted to text. It is also in *Ingestion Settings* on the *GraphRAG Configuration* page. A change applies to files that are ingested after the change.
+    - `"default"` is fast and light. Use it for documents that are mostly text, with simple tables.
+    - `"docling"` keeps more of the document structure, such as complex tables, charts, formulas and scanned pages. It is several times slower and uses more CPU and memory. Use it when the files have complex tables, charts or formulas.
+    - PowerPoint (`.pptx`) files always use Docling.
 
 ### 7. A working tuning loop
 

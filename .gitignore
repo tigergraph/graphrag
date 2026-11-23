@@ -19,7 +19,7 @@ __pycache__/
 # Release docs
 /RELEASE_NOTES.md
 
-# Deep Agent memory (SQLite checkpointer + store)
+# Per-graph data kept by GraphRAG (keyword indexes, agent memory)
 configs/graph_data/
 
 # Documents kept for each graph (uploads and cloud downloads)

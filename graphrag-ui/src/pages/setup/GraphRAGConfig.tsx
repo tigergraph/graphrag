@@ -20,6 +20,7 @@ const GraphRAGConfig = () => {
 
   // Default chunker (used when no chunker specified in document)
   const [defaultChunker, setDefaultChunker] = useState("semantic");
+  const [documentParser, setDocumentParser] = useState<"default" | "docling">("default");
 
   // Retrieval settings
   const [topK, setTopK] = useState("5");
@@ -27,6 +28,10 @@ const GraphRAGConfig = () => {
   const [numSeenMin, setNumSeenMin] = useState("2");
   const [communityLevel, setCommunityLevel] = useState("2");
   const [maxResults, setMaxResults] = useState("");
+  // Set from the Keyword Search card on the setup page; kept here so saving
+  // this form does not drop it.
+  const [keywordSearch, setKeywordSearch] = useState(false);
+  const [keywordTopK, setKeywordTopK] = useState("");
   const [docOnly, setDocOnly] = useState(false);
   const [enableRouterFallback, setEnableRouterFallback] = useState(true);
   const [agentMode, setAgentMode] = useState<"agentic" | "classic">("agentic");
@@ -94,11 +99,14 @@ const GraphRAGConfig = () => {
     setEccUrl(graphragConfig.ecc || "http://graphrag-ecc:8001");
     setChatHistoryUrl(graphragConfig.chat_history_api || "http://chat-history:8002");
     setDefaultChunker(graphragConfig.chunker || "semantic");
+    setDocumentParser(graphragConfig.document_parser === "docling" ? "docling" : "default");
     setTopK(String(graphragConfig.top_k ?? 5));
     setNumHops(String(graphragConfig.num_hops ?? 2));
     setNumSeenMin(String(graphragConfig.num_seen_min ?? 2));
     setCommunityLevel(String(graphragConfig.community_level ?? 2));
     setMaxResults(graphragConfig.max_results != null ? String(graphragConfig.max_results) : "");
+    setKeywordSearch(graphragConfig.keyword_search ?? false);
+    setKeywordTopK(graphragConfig.keyword_top_k != null ? String(graphragConfig.keyword_top_k) : "");
     setDocOnly(graphragConfig.doc_only ?? false);
     setEnableRouterFallback(graphragConfig.enable_router_fallback ?? true);
     setAgentMode(graphragConfig.agent_mode === "classic" ? "classic" : "agentic");
@@ -249,11 +257,13 @@ const GraphRAGConfig = () => {
         chat_history_api: chatHistoryUrl,
         chunker: defaultChunker,
         chunker_config: currentChunkerConfig,
+        document_parser: documentParser,
         top_k: parseInt(topK),
         num_hops: parseInt(numHops),
         num_seen_min: parseInt(numSeenMin),
         community_level: parseInt(communityLevel),
         doc_only: docOnly,
+        keyword_search: keywordSearch,
         enable_router_fallback: enableRouterFallback,
         agent_mode: agentMode,
         load_batch_size: parseInt(loadBatchSize),
@@ -276,6 +286,10 @@ const GraphRAGConfig = () => {
       if (maxResults) {
         currentConfig.max_results = parseInt(maxResults);
       }
+      // Blank means "use Top K".
+      if (keywordTopK) {
+        currentConfig.keyword_top_k = parseInt(keywordTopK);
+      }
 
       // Display defaults — used to avoid saving values the user never changed
       const displayDefaults: Record<string, any> = {
@@ -283,11 +297,13 @@ const GraphRAGConfig = () => {
         ecc: "http://graphrag-ecc:8001",
         chat_history_api: "http://chat-history:8002",
         chunker: "semantic",
+        document_parser: "default",
         top_k: 5,
         num_hops: 2,
         num_seen_min: 2,
         community_level: 2,
         doc_only: false,
+        keyword_search: false,
         enable_router_fallback: true,
         agent_mode: "agentic",
         load_batch_size: 500,
@@ -580,6 +596,23 @@ const GraphRAGConfig = () => {
                     Maximum number of result chunks returned by search, ranked by relevance. Leave blank to use the default (twice Top K).
                   </p>
                 </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Keyword Top K
+                  </label>
+                  <Input
+                    type="number"
+                    min="1"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
+                    placeholder="Defaults to Top K"
+                    value={keywordTopK}
+                    onChange={(e) => setKeywordTopK(e.target.value)}
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Number of keyword matches added to document search results. Leave blank to use Top K.
+                  </p>
+                </div>
               </div>
 
               <div>
@@ -639,6 +672,141 @@ const GraphRAGConfig = () => {
                 </p>
               </div>
             </div>
+          </div>
+
+          {/* Ingestion Settings */}
+          <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="w-full flex items-center justify-between"
+            >
+              <h2 className="text-lg font-semibold text-black dark:text-white">
+                Ingestion Settings
+              </h2>
+              <span className="text-sm text-gray-500 dark:text-gray-400">
+                {showAdvanced ? "▲ Collapse" : "▼ Expand"}
+              </span>
+            </button>
+            {!showAdvanced && (
+              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mt-2">
+                Parser: {documentParser === "docling" ? "Docling" : "Default"} · Image descriptions {extractImages ? "on" : "off"}
+              </p>
+            )}
+
+            {showAdvanced && (
+              <div className="space-y-4 mt-4">
+                <div>
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Document Parser
+                  </label>
+                  <Select value={documentParser} onValueChange={(v) => setDocumentParser(v as "default" | "docling")}>
+                    <SelectTrigger className="max-w-sm dark:border-[#3D3D3D] dark:bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">Default</SelectItem>
+                      <SelectItem value="docling">Docling</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Default is fast and lightweight; Docling better handles complex tables, charts, formulas and scanned pages, but is 5–15× slower.
+                  </p>
+                </div>
+
+                <div className="pt-4 border-t border-gray-200 dark:border-[#3D3D3D]">
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="extractImages"
+                      className="rounded border-gray-300 dark:border-[#3D3D3D]"
+                      checked={extractImages}
+                      onChange={(e) => setExtractImages(e.target.checked)}
+                    />
+                    <label htmlFor="extractImages" className="text-sm font-medium text-black dark:text-white">
+                      Generate image descriptions during PDF ingestion
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 ml-6">
+                    Sends each extracted image to the multimodal LLM for alt-text. Disable to skip image content entirely.
+                  </p>
+                </div>
+
+                <div className="mt-4 max-w-sm">
+                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Min Image Dimension
+                  </label>
+                  <Input
+                    type="number"
+                    min="0"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
+                    placeholder="100"
+                    value={minImageDimPx}
+                    onChange={(e) => setMinImageDimPx(e.target.value)}
+                    disabled={!extractImages}
+                  />
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Smallest side (in px) an image must have to be described.
+                  </p>
+                </div>
+
+                <h3 className="text-sm font-semibold text-black dark:text-white pt-4 border-t border-gray-200 dark:border-[#3D3D3D]">
+                  Performance
+                </h3>
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                      Batch Size
+                    </label>
+                    <Input
+                      type="number"
+                      min="1"
+                      className="dark:border-[#3D3D3D] dark:bg-background"
+                      placeholder="500"
+                      value={loadBatchSize}
+                      onChange={(e) => setLoadBatchSize(e.target.value)}
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      Number of vertices written per batch.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                      Upsert Delay
+                    </label>
+                    <Input
+                      type="number"
+                      min="0"
+                      className="dark:border-[#3D3D3D] dark:bg-background"
+                      placeholder="0"
+                      value={upsertDelay}
+                      onChange={(e) => setUpsertDelay(e.target.value)}
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      Seconds between batches
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium mb-2 text-black dark:text-white">
+                      Default Concurrency
+                    </label>
+                    <Input
+                      type="number"
+                      min="1"
+                      className="dark:border-[#3D3D3D] dark:bg-background"
+                      placeholder="10"
+                      value={maxConcurrency}
+                      onChange={(e) => setMaxConcurrency(e.target.value)}
+                    />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                      Maximum LLM, embedding, and graph database requests running at the same time.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Chunker Settings */}
@@ -807,124 +975,6 @@ const GraphRAGConfig = () => {
               {message}
             </div>
           )}
-
-          {/* Advanced Ingestion Settings */}
-          <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
-            <button
-              type="button"
-              onClick={() => setShowAdvanced(!showAdvanced)}
-              className="w-full flex items-center justify-between"
-            >
-              <h2 className="text-lg font-semibold text-black dark:text-white">
-                Advanced Ingestion Settings
-              </h2>
-              <span className="text-sm text-gray-500 dark:text-gray-400">
-                {showAdvanced ? "▲ Collapse" : "▼ Expand"}
-              </span>
-            </button>
-            {!showAdvanced && (
-              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mt-2">
-                Performance tuning for document ingestion and batch processing.
-              </p>
-            )}
-
-            {showAdvanced && (
-              <div className="space-y-4 mt-4">
-                <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-2">
-                  Performance tuning for document ingestion and batch processing.
-                </p>
-
-                <div className="grid grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                      Batch Size
-                    </label>
-                    <Input
-                      type="number"
-                      min="1"
-                      className="dark:border-[#3D3D3D] dark:bg-background"
-                      placeholder="500"
-                      value={loadBatchSize}
-                      onChange={(e) => setLoadBatchSize(e.target.value)}
-                    />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Number of vertices written per batch.
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                      Upsert Delay
-                    </label>
-                    <Input
-                      type="number"
-                      min="0"
-                      className="dark:border-[#3D3D3D] dark:bg-background"
-                      placeholder="0"
-                      value={upsertDelay}
-                      onChange={(e) => setUpsertDelay(e.target.value)}
-                    />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Seconds between batches
-                    </p>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                      Default Concurrency
-                    </label>
-                    <Input
-                      type="number"
-                      min="1"
-                      className="dark:border-[#3D3D3D] dark:bg-background"
-                      placeholder="10"
-                      value={maxConcurrency}
-                      onChange={(e) => setMaxConcurrency(e.target.value)}
-                    />
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                      Maximum LLM, embedding, and graph database requests running at the same time.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="mt-6">
-                  <div className="flex items-center space-x-2">
-                    <input
-                      type="checkbox"
-                      id="extractImages"
-                      className="rounded border-gray-300 dark:border-[#3D3D3D]"
-                      checked={extractImages}
-                      onChange={(e) => setExtractImages(e.target.checked)}
-                    />
-                    <label htmlFor="extractImages" className="text-sm font-medium text-black dark:text-white">
-                      Generate image descriptions during PDF ingestion
-                    </label>
-                  </div>
-                  <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 ml-6">
-                    Sends each extracted image to the multimodal LLM for alt-text. Disable to skip image content entirely.
-                  </p>
-                </div>
-
-                <div className="mt-4 max-w-sm">
-                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                    Min Image Dimension
-                  </label>
-                  <Input
-                    type="number"
-                    min="0"
-                    className="dark:border-[#3D3D3D] dark:bg-background"
-                    placeholder="100"
-                    value={minImageDimPx}
-                    onChange={(e) => setMinImageDimPx(e.target.value)}
-                    disabled={!extractImages}
-                  />
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Smallest side (in px) an image must have to be described.
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
 
           {/* Schema extraction (sample-doc proposal path) + dynamic schema
               behavior (how domain types are enforced and retrieved). */}

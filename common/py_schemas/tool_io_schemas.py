@@ -167,6 +167,12 @@ class GraphRAGAnswerOutput(BaseModel):
     citation: Optional[list[str]] = Field(description="The citation for the answer. List the metadata, mostly the keys, of the parts of the context used.", default=[])
 
 
+class RerankOutput(BaseModel):
+    ranked: List[int] = Field(
+        description="Passage numbers, most useful for answering the question first."
+    )
+
+
 class CandidateScore(BaseModel):
     candidate: str = Field(description="The candidate answer according to the prompt.")
     quality_score: int = Field(description="The quality of the candidate answer, based on how well it meets the requirement in the prompt. Rate the candidate from 0 (poor) to 100 (excellent).")

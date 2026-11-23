@@ -51,6 +51,7 @@ _TOOL_LABELS = {
     "graphrag__hybrid_search": "Searching the documents",
     "graphrag__contextual_search": "Searching the documents",
     "graphrag__similarity_search": "Searching the documents",
+    "graphrag__keyword_search": "Searching the documents",
     "graphrag__community_search": "Searching community summaries",
 }
 
