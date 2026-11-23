@@ -33,6 +33,15 @@ from connectors.jira.schema import (
 )
 from connectors.jira.state import JiraSourceStore
 from connectors.jira.sync import JiraSyncService
+from connectors.confluence.config import ConfluenceDataSource
+from connectors.confluence.service import (
+    ConnectorCallError as ConfluenceCallError,
+    install_schema as install_confluence_schema,
+    list_spaces as list_confluence_spaces,
+    schema_status as confluence_schema_status,
+    test_connection as test_confluence_connection,
+)
+from connectors.confluence.state import ConfluenceSourceStore
 from connectors.zendesk.config import ZendeskDataSource, ZendeskScope
 from connectors.zendesk.service import (
     ConnectorCallError,
@@ -49,6 +58,7 @@ router = APIRouter(tags=["Data Sources"])
 route_prefix = "/ui"
 store = JiraSourceStore()
 zendesk_store = ZendeskSourceStore()
+confluence_store = ConfluenceSourceStore()
 
 _sync_state: dict[str, dict[str, Any]] = {}
 _sync_state_lock = threading.Lock()
@@ -58,6 +68,8 @@ _jira_tokens: dict[tuple[str, str], str] = {}
 _jira_tokens_lock = threading.Lock()
 _zendesk_tokens: dict[tuple[str, str], str] = {}
 _zendesk_tokens_lock = threading.Lock()
+_confluence_tokens: dict[tuple[str, str], str] = {}
+_confluence_tokens_lock = threading.Lock()
 
 
 def _ui_basic_auth():
@@ -1144,3 +1156,303 @@ def get_zendesk_sync_status(
     ],
 ):
     return get_sync_status(graphname, source_id, run_id, auth)
+
+
+def _confluence_with_credentials(graphname: str, source_id: str) -> ConfluenceDataSource:
+    try:
+        source = confluence_store.get(graphname, source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Data source not found.")
+    with _confluence_tokens_lock:
+        token = _confluence_tokens.get((graphname, source_id))
+    if not token:
+        raise HTTPException(
+            status_code=409,
+            detail="The Confluence API token is not available. Test the connection again.",
+        )
+    resolved = source.model_copy(deep=True)
+    resolved.connection.api_token = token
+    return resolved
+
+
+def _confluence_call_error(exc: ConfluenceCallError) -> HTTPException:
+    status_code = 400 if 400 <= exc.status_code < 500 else 502
+    return HTTPException(status_code=status_code, detail=exc.detail)
+
+
+@router.get(f"{route_prefix}/{{graphname}}/data-sources/confluence")
+def list_confluence_sources(
+    graphname: str,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    with _confluence_tokens_lock:
+        tokens = dict(_confluence_tokens)
+    operation = get_current_operation(graphname)
+    sources = _with_token_availability(
+        graphname, confluence_store.list(graphname), tokens
+    )
+    for source in sources:
+        source["sync_running"] = operation == f"confluence_sync:{source.get('id')}"
+    return {"sources": sources}
+
+
+@router.put(f"{route_prefix}/{{graphname}}/data-sources/confluence/{{source_id}}")
+def save_confluence_source(
+    graphname: str,
+    source_id: str,
+    source: ConfluenceDataSource,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    if source.id != source_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Path source id must match the request body.",
+        )
+    try:
+        saved = confluence_store.upsert(graphname, source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"source": confluence_store.redact(saved)}
+
+
+@router.delete(f"{route_prefix}/{{graphname}}/data-sources/confluence/{{source_id}}")
+def delete_confluence_source(
+    graphname: str,
+    source_id: str,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    try:
+        confluence_store.delete(graphname, source_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Data source not found.")
+    with _confluence_tokens_lock:
+        _confluence_tokens.pop((graphname, source_id), None)
+    return {"status": "deleted"}
+
+
+@router.post(f"{route_prefix}/{{graphname}}/data-sources/confluence/{{source_id}}/test")
+def test_confluence_source(
+    graphname: str,
+    source_id: str,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+    candidate: ConfluenceDataSource | None = None,
+):
+    _require_access(graphname, auth)
+    if candidate is None or not candidate.connection.api_token.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Enter the Confluence API token before testing the connection.",
+        )
+    if candidate.id != source_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Path source id must match the request body.",
+        )
+    token = candidate.connection.api_token.strip()
+    try:
+        tested = test_confluence_connection(candidate)
+    except ConfluenceCallError as exc:
+        raise _confluence_call_error(exc)
+    try:
+        source = confluence_store.upsert(graphname, candidate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    with _confluence_tokens_lock:
+        _confluence_tokens[(graphname, source_id)] = token
+    source.sync.last_tested_at = datetime.now(timezone.utc)
+    if source.sync.last_error and "API token is not available" in source.sync.last_error:
+        source.sync.last_error = None
+    confluence_store.update_runtime_state(graphname, source)
+    return {
+        "status": "connected",
+        "account": tested["account"],
+        "tested_at": source.sync.last_tested_at.isoformat(),
+        "source": confluence_store.redact(source),
+    }
+
+
+@router.get(f"{route_prefix}/{{graphname}}/data-sources/confluence/{{source_id}}/spaces")
+def list_confluence_space_picker(
+    graphname: str,
+    source_id: str,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    source = _confluence_with_credentials(graphname, source_id)
+    if source.sync.last_tested_at is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Test this Confluence connection before listing spaces.",
+        )
+    try:
+        spaces = list_confluence_spaces(source)
+    except ConfluenceCallError as exc:
+        raise _confluence_call_error(exc)
+    return {"spaces": spaces}
+
+
+@router.get(f"{route_prefix}/{{graphname}}/data-sources/confluence/schema")
+def get_confluence_schema_status(
+    graphname: str,
+    request: Request,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    try:
+        status = confluence_schema_status(_connection(request, graphname))
+    except Exception as exc:
+        deferred = _status_during_catalog_lock(graphname, "install_confluence_schema")
+        if deferred is not None and _catalog_busy(exc):
+            return deferred
+        raise
+    status["install"] = _visible_install(graphname, "install_confluence_schema")
+    return status
+
+
+@router.post(f"{route_prefix}/{{graphname}}/data-sources/confluence/schema/install")
+def install_confluence_schema_route(
+    graphname: str,
+    request: Request,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    sources = confluence_store.load(graphname).confluence_sources
+    if not sources:
+        raise HTTPException(
+            status_code=409,
+            detail="Save a Confluence connection before installing its schema.",
+        )
+    if not any(source.sync.last_tested_at for source in sources):
+        raise HTTPException(
+            status_code=409,
+            detail="Test a Confluence connection before installing its schema.",
+        )
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+    operation = "install_confluence_schema"
+    if not acquire_graph_lock(graphname, operation):
+        current = get_current_operation(graphname) or "another operation"
+        if current == operation:
+            return {
+                "status": "submitted",
+                "install": _install_snapshot(graphname) or {"status": "running"},
+            }
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is busy with '{current}'.",
+        )
+
+    install = _set_install_state(
+        graphname,
+        operation=operation,
+        status="queued",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        completed_at=None,
+        error=None,
+    )
+
+    def run() -> None:
+        error: Exception | None = None
+        try:
+            _set_install_state(graphname, status="running")
+            from routers.ui import ws_basic_auth
+
+            _, conn = ws_basic_auth(authorization, graphname)
+            before = confluence_schema_status(conn)
+            if before["status"] == "not_initialized":
+                raise RuntimeError(
+                    "Initialize the knowledge graph before installing "
+                    "the Confluence connector schema."
+                )
+            if before["status"] == "conflict":
+                conflicts = "; ".join(before.get("conflicts") or [])
+                raise RuntimeError(
+                    "Existing graph schema conflicts with Confluence schema."
+                    + (f" {conflicts}" if conflicts else "")
+                )
+            if before["status"] != "installed":
+                result = install_confluence_schema(conn, graphname)
+                if result.get("status") == "error":
+                    raise RuntimeError(
+                        result.get("error") or "Confluence schema installation failed."
+                    )
+                retrievers = result.get("retrievers") or {}
+                if retrievers.get("status") == "error":
+                    raise RuntimeError(
+                        "Confluence schema was applied, but retriever installation failed: "
+                        f"{retrievers.get('error', 'unknown error')}"
+                    )
+            _, verification_conn = ws_basic_auth(authorization, graphname)
+            after = confluence_schema_status(verification_conn)
+            if after["status"] != "installed":
+                logger.error(
+                    "Confluence schema verification failed for graph %s: %s",
+                    graphname,
+                    after,
+                )
+                missing = after.get("missing") or {}
+                conflicts = "; ".join(after.get("conflicts") or [])
+                raise RuntimeError(
+                    "Confluence schema installation completed, but verification "
+                    "did not find a compatible schema."
+                    + (f" Missing: {missing}." if missing else "")
+                    + (f" Conflicts: {conflicts}." if conflicts else "")
+                )
+        except Exception as exc:
+            error = exc
+            logger.exception(
+                "Confluence schema installation failed graph=%s", graphname
+            )
+        finally:
+            release_graph_lock(graphname, operation)
+
+        if error is not None:
+            _set_install_state(
+                graphname,
+                status="failed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=str(error)[:1000],
+            )
+        else:
+            _set_install_state(
+                graphname,
+                status="completed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=None,
+            )
+
+    try:
+        threading.Thread(
+            target=run,
+            name=f"confluence-schema-install-{graphname}",
+            daemon=True,
+        ).start()
+    except Exception:
+        release_graph_lock(graphname, operation)
+        raise
+    return {"status": "submitted", "install": install}
