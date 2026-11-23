@@ -878,9 +878,9 @@ def test_open_zendesk_question_is_search_and_an_unknown_field_is_refused():
     assert "not on the ticket" in answer
     assert guidance_for("What is the ticket status?", "planner") == (
         "The source system is ambiguous. Ask the user whether they mean a Jira "
-        "issue or a Zendesk ticket before answering, unless the conversation has "
-        "already established the source. Do not guess from a bare number, and do "
-        "not apply either connector's rules until the source is known."
+        "issue, a Zendesk ticket, or a Confluence page before answering, unless "
+        "the conversation has already established the source. Do not guess from a "
+        "bare number, and do not apply a connector's rules until the source is known."
     )
     guidance = guidance_for(
         "How is Zendesk ticket 59326 linked to TSE-1073?",

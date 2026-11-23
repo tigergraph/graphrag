@@ -17,8 +17,12 @@ _ZENDESK_URL = re.compile(
     r"zendesk\.com/\S*?/tickets/\d+|\bzendesk\b",
     re.IGNORECASE,
 )
+_CONFLUENCE = re.compile(
+    r"/wiki/|/pages/|\bconfluence\b",
+    re.IGNORECASE,
+)
 _RECORD_QUESTION = re.compile(
-    r"\b(ticket|issue|assignee|reporter|comment|status|priority)\b",
+    r"\b(ticket|issue|assignee|reporter|comment|status|priority|page)\b",
     re.IGNORECASE,
 )
 
@@ -160,6 +164,49 @@ _GUIDANCE = {
             "server is configured, fetch those details with issue_key."
         ),
     },
+    "confluence": {
+        "planner": (
+            "## Confluence guidance\n"
+            "Apply this section to ConfluencePage, ConfluenceComment, Person, "
+            "Organization, Attachment, authored, edited, owned, member, "
+            "links_issue, and links_ticket.\n"
+            "- Read title, body, status, space_key, space_name, labels, "
+            "parent_id, version_number, url, created, and updated from "
+            "ConfluencePage. A summary reads title, body, status, and the "
+            "comment bodies for that page_id. Comments store page_id. The "
+            "creator and the comment author are authored. The current editor "
+            "is edited. The owner is owned.\n"
+            "- A Jira issue key or a /browse/ URL on the page is links_issue "
+            "from ConfluencePage to JiraIssue. A Zendesk ticket URL is "
+            "links_ticket from ConfluencePage to ZendeskTicket. A bare number "
+            "is not a ticket.\n"
+            "- The same email is one Person. An email domain that matches an "
+            "existing Organization is member. Use word search only when the "
+            "question names no field."
+        ),
+        "query": (
+            "## Confluence query guidance\n"
+            "- Match ConfluencePage.page_id or title and return named "
+            "attributes, including title, body, status, space_key, labels, "
+            "created, and updated. Do not return a bare vertex.\n"
+            "- Comments have no edge to the page. Filter "
+            "ConfluenceComment.page_id and return body, comment_type, and "
+            "created. The author is authored.\n"
+            "- Traverse links_issue for a Jira issue on the page and "
+            "links_ticket for a Zendesk ticket URL on the page. Do not treat "
+            "a bare number as a Zendesk ticket."
+        ),
+        "answer": (
+            "## Confluence answer guidance\n"
+            "- Quote title, body, and comment body from the stored attributes. "
+            "A linked Jira issue is reached by links_issue. A linked Zendesk "
+            "ticket is reached by links_ticket. Use Person.display_name and "
+            "Organization.name. Do not print internal vertex ids.\n"
+            "- If several pages match, list page id, title, space key, and "
+            "status and ask which one. If a requested fact is not stored, "
+            "say that fact is not on the page."
+        ),
+    },
 }
 
 _CROSS = {
@@ -188,9 +235,9 @@ _CROSS = {
 
 _CLARIFY = (
     "The source system is ambiguous. Ask the user whether they mean a Jira "
-    "issue or a Zendesk ticket before answering, unless the conversation has "
-    "already established the source. Do not guess from a bare number, and do "
-    "not apply either connector's rules until the source is known."
+    "issue, a Zendesk ticket, or a Confluence page before answering, unless "
+    "the conversation has already established the source. Do not guess from a "
+    "bare number, and do not apply a connector's rules until the source is known."
 )
 
 def normalize_connector_question(text: str) -> str:
@@ -208,6 +255,8 @@ def selected_connectors(question: str) -> set[str]:
         selected.add("jira")
     if _ZENDESK_URL.search(text):
         selected.add("zendesk")
+    if _CONFLUENCE.search(text):
+        selected.add("confluence")
     return selected
 
 
@@ -219,12 +268,15 @@ def guidance_for(question: str, step: str) -> str:
             return _CLARIFY
         return ""
     parts = [_GUIDANCE[name][step] for name in sorted(selected) if step in _GUIDANCE[name]]
-    if selected == {"jira", "zendesk"} and re.search(
+    linked = re.search(
         r"\b(related|relationship|link|linked|mention|reference|connected|"
         r"compare|comparison|versus|vs|both|across)\b",
         question or "",
         re.IGNORECASE,
-    ):
+    )
+    if selected == {"jira", "zendesk"} and linked:
+        parts.append(_CROSS[step])
+    if "confluence" in selected and selected - {"confluence"} and linked and step in _CROSS:
         parts.append(_CROSS[step])
     return "\n".join(parts)
 
@@ -240,6 +292,13 @@ def allows_type(type_name: str, selected: set[str]) -> bool:
     if "jira" in selected and (name.startswith("Jira") or name == "ZendeskTicket"):
         return True
     if "zendesk" in selected and (name in zendesk_types or name == "JiraIssue"):
+        return True
+    if "confluence" in selected and name in {
+        "ConfluencePage",
+        "ConfluenceComment",
+        "JiraIssue",
+        "ZendeskTicket",
+    }:
         return True
     if not selected:
         return True

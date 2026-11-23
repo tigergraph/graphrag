@@ -17,6 +17,8 @@ from .schema import (
     confluence_schema_status,
     drop_reused_vertices,
 )
+from .state import ConfluenceSourceStore
+from .sync import ConfluenceSyncService
 
 
 class ConnectorCallError(Exception):
@@ -90,3 +92,12 @@ def install_schema(conn, graphname: str) -> dict[str, Any]:
 
 def schema_status(conn) -> dict[str, Any]:
     return confluence_schema_status(conn)
+
+
+def sync(graphname: str, source: ConfluenceDataSource, conn, store=None) -> dict[str, Any]:
+    return ConfluenceSyncService(
+        graphname,
+        source,
+        conn,
+        store=store or ConfluenceSourceStore(),
+    ).run()
