@@ -74,6 +74,41 @@ export interface ZendeskSource {
   };
 }
 
+export interface ConfluenceSource {
+  id: string;
+  type: "confluence";
+  enabled: boolean;
+  display_name: string;
+  token_available?: boolean;
+  sync_running?: boolean;
+  connection: {
+    site: string;
+    email: string;
+    api_token?: string;
+  };
+  scope: {
+    space_keys?: string[];
+    content_types?: Array<"page" | "blogpost">;
+    updated_after?: string | null;
+  };
+  sync: {
+    overlap_seconds: number;
+    checkpoint?: string | null;
+    last_content_id?: string | null;
+    failed_content_ids?: string[];
+    pending_comment_content_ids?: string[];
+    last_tested_at?: string | null;
+    last_started_at?: string | null;
+    last_completed_at?: string | null;
+    last_error?: string | null;
+    last_link_error?: string | null;
+    last_page_count: number;
+    progress_checked?: number;
+    progress_written?: number;
+    progress_phase?: string | null;
+  };
+}
+
 export interface JiraSchemaStatus {
   status:
     | "not_initialized"
