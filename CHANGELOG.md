@@ -22,6 +22,7 @@
 - **Entity extraction finds entities with models that reply in parts.** Gemini 3, Claude with extended thinking and OpenAI reasoning models return their reply as a list of parts. Extraction read no entities from such replies, without an error, and image descriptions from these models were stored as raw reply data. Extraction and image descriptions now read the text of the reply. Extraction also combines a reply's JSON when it comes in several blocks, accepts small JSON mistakes such as trailing commas, and logs a warning when a reply cannot be read.
 
 ### Security
+- **UI and chat-history dependencies with known vulnerabilities are upgraded.** Dependency scans reported known vulnerabilities in packages of the UI and of the chat-history service. The UI no longer lists packages it does not use, and moves to vite 6, React Router 7 and i18next 27. The chat-history service moves to a newer version of its router library and builds with Go 1.27; building it needs Go 1.24 or later.
 - **Only an admin of a graph can manage its documents.** Any user who could sign in to a graph could upload, download, list, delete and ingest its documents, and could ingest folders on the GraphRAG server outside the graph's own files. A superuser or globaldesigner can now manage the documents of all graphs, and a user with the admin role on a graph can manage that graph's documents. The UI ingests only the graph's own stored files. The ingest API accepts a server folder only from an admin.
 
 ## [2.0.4]
