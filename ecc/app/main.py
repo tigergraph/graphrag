@@ -30,6 +30,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Request, Response, status
 from fastapi.security.http import HTTPBasicCredentials, HTTPAuthorizationCredentials
 from base64 import b64decode
 
+from common.utils import run_usage
 from common.config import (
     db_config,
     graphrag_config,
@@ -235,6 +236,7 @@ def rebuild_status(
             "error": task_info.get("error"),
             "warnings": task_info.get("warnings"),
             "communities_incomplete": task_info.get("communities_incomplete"),
+            "usage": task_info.get("usage"),
         }
     
     return {
@@ -346,11 +348,13 @@ async def run_with_tracking(task_key: str, run_func, graphname: str, conn):
                 clear_progress=clear_progress,
             )
 
-        try:
-            result = await run_func(graphname, conn, progress=progress_cb)
-        except TypeError:
-            result = await run_func(graphname, conn)
-        completion = {"status": "completed", "completed_at": time.time()}
+        with run_usage.track_run(run_usage.REBUILD, graphname) as usage:
+            try:
+                result = await run_func(graphname, conn, progress=progress_cb)
+            except TypeError:
+                result = await run_func(graphname, conn)
+        completion = {"status": "completed", "completed_at": time.time(),
+                      "usage": usage.summary()}
         # Carry any partial-success info (e.g. community summaries left
         # incomplete) into the completion status so the UI can warn instead of
         # reporting a flat success.
@@ -483,9 +487,10 @@ def _run_regen(graphname, credentials, task_suffix, run_func):
     conn = _regen_build_conn(graphname, credentials)
     running_tasks[task_key] = {"status": "running", "started_at": time.time()}
     try:
-        result = asyncio.run(run_func(graphname, conn))
+        with run_usage.track_run(task_suffix, graphname) as usage:
+            result = asyncio.run(run_func(graphname, conn))
         LogWriter.info(f"Completed ECC task: {task_key} -> {result}")
-        return {"status": "completed", **result}
+        return {"status": "completed", **result, "usage": usage.summary()}
     finally:
         running_tasks.pop(task_key, None)
 
@@ -504,3 +509,19 @@ def regenerate_summaries_endpoint(graphname: str, credentials=Depends(auth_crede
     (GML-2176). Targeted, not a full rebuild. Returns {resummarized, skipped}."""
     from graphrag.regenerate import regenerate_summaries
     return _run_regen(graphname, credentials, "regenerate_summaries", regenerate_summaries)
+
+
+@app.get("/{graphname}/graphrag/move_heading_paths")
+def move_heading_paths_endpoint(graphname: str, credentials=Depends(auth_credentials)):
+    """Move chunk breadcrumbs from the chunk text to heading_path (GML-2369).
+    Returns {moved, unchanged, not_matched}."""
+    from graphrag.regenerate import move_heading_paths
+    return _run_regen(graphname, credentials, "move_heading_paths", move_heading_paths)
+
+
+@app.get("/{graphname}/graphrag/regenerate_chunk_summaries")
+def regenerate_chunk_summaries_endpoint(graphname: str, credentials=Depends(auth_credentials)):
+    """Generate summaries for chunks without one and re-embed them (GML-2369).
+    Returns {summarized, skipped}."""
+    from graphrag.regenerate import regenerate_chunk_summaries
+    return _run_regen(graphname, credentials, "regenerate_chunk_summaries", regenerate_chunk_summaries)

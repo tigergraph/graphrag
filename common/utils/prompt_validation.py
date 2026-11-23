@@ -60,6 +60,7 @@ SPLIT_PROMPT_TYPES: Set[str] = {
     "community_summarization",
     "schema_extraction",
     "agentic_agent",
+    "deep_agent",
     "agentic_planner",
     "agentic_triage",
     "route_response",
@@ -75,6 +76,8 @@ REQUIRED_VARS_BY_PROMPT_TYPE: dict = {
     # Agentic (react) agent system prompt — split; user portion has no
     # required placeholders (the react loop has none).
     "agentic_agent": set(),
+    # Deep Agent additional instructions — split; empty by default.
+    "deep_agent": set(),
     # Agentic planner system prompt — split; no required placeholders.
     "agentic_planner": set(),
     # Agentic front-desk triage — split; routing policy only.
@@ -111,6 +114,7 @@ ALLOWED_PARTIALS_BY_PROMPT_TYPE: dict = {
     "schema_extraction": set(),
     "query_guidance": set(),
     "agentic_agent": set(),
+    "deep_agent": set(),
     "agentic_planner": set(),
     "agentic_triage": set(),
     "route_response": set(),

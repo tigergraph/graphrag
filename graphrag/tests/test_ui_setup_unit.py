@@ -176,6 +176,12 @@ class TestUISetupUnit(unittest.TestCase):
             "completion_service": {"llm_service": "openai", "llm_model": "gpt-4.1-mini"},
         },
     )
+    # The route reads the global chat model through get_chat_config, which
+    # otherwise reads the server config of the machine running the test.
+    @patch(
+        "app.routers.ui.get_chat_config",
+        lambda graphname=None: {"llm_service": "openai", "llm_model": "gpt-4.1-mini"},
+    )
     def test_get_config_chatbot_only_returns_global_chat_info(self, _mock):
         response = self.client.get(
             "/ui/config?graphname=mygraph", auth=("testuser", "testpass")

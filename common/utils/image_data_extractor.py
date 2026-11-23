@@ -167,13 +167,21 @@ def describe_image_with_llm(file_path):
             f"model={model_name} provider={_multimodal_provider}"
         )
         t0 = time.monotonic()
-        response = langchain_client.invoke(messages)
+        from langchain_community.callbacks.manager import get_openai_callback
+        from common.llm_services.base_llm import _record_usage, usage_from
+        with get_openai_callback() as cb:
+            response = langchain_client.invoke(messages)
+            _record_usage("image_description", usage_from(cb, response),
+                          getattr(client, "config", None))
         elapsed = time.monotonic() - t0
         logger.info(
             f"multimodal_describe done: image={image_basename} "
             f"elapsed={elapsed:.2f}s"
         )
-        return response.content if hasattr(response, "content") else str(response)
+        # Thinking models (Gemini 3 and others) return the reply as a list
+        # of parts; keep the text parts.
+        from common.llm_services.base_llm import LLM_Model
+        return LLM_Model._message_text(response)
     except Exception as e:
         error_str = str(e).lower()
         if "throttl" in error_str or "rate" in error_str or "too many" in error_str:

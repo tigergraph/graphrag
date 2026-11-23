@@ -33,7 +33,58 @@ TEMPLATED_RETRIEVERS: tuple = (
     "GraphRAG_Hybrid_Vector_Search",
     "GraphRAG_Community_Search",
     "GraphRAG_Community_Vector_Search",
+    "Chunk_Sibling_Vector_Search",
+    "Content_Similarity_Vector_Search",
 )
+
+
+def _with_path(path_expr: str, text_expr: str) -> str:
+    """GSQL expression: the chunk text, after the heading path when the chunk
+    has one."""
+    return (
+        f'(CASE WHEN {path_expr} == "" THEN {text_expr} '
+        f'ELSE {path_expr} + "\\n\\n" + {text_expr} END)'
+    )
+
+
+# (needle, replacement) pairs that show a chunk's heading path before its
+# text. Only chunk-level text is changed; Document has no heading path.
+_CHUNK_CONTEXT_SUBSTITUTIONS = (
+    # GraphRAG_Hybrid_Vector_Search / GraphRAG_Hybrid_Search, chunk branch
+    ("ACCUM s.@context += t.text\n",
+     f"ACCUM s.@context += {_with_path('s.heading_path', 't.text')}\n"),
+    # Chunk_Sibling_Vector_Search
+    ("ACCUM s.@content += t.text;",
+     f"ACCUM s.@content += {_with_path('s.heading_path', 't.text')};"),
+    # Content_Similarity_Vector_Search: s can be a Document or a
+    # DocumentChunk, so the path is read with getAttr, which TigerGraph does
+    # not allow inside CASE.
+    ("@@final_retrieval += (s.id -> tgt.text)",
+     'IF s.type == "DocumentChunk" AND s.getAttr("heading_path", "STRING") != "" THEN '
+     '@@final_retrieval += (s.id -> s.getAttr("heading_path", "STRING") + "\\n\\n" + tgt.text) '
+     'ELSE @@final_retrieval += (s.id -> tgt.text) END'),
+)
+
+# GraphRAG_Community_Vector_Search / GraphRAG_Community_Search: the chunk
+# branch reaches Content from a DocumentChunk named d.
+_COMMUNITY_CHUNK_BRANCH = "-(<HAS_CONTENT)- DocumentChunk:d"
+_COMMUNITY_TEXT = "m.@context += c.text"
+
+
+def _chunk_context_pattern(body: str) -> str:
+    """Show each chunk's heading path before its text."""
+    for needle, replacement in _CHUNK_CONTEXT_SUBSTITUTIONS:
+        body = body.replace(needle, replacement)
+    start = body.find(_COMMUNITY_CHUNK_BRANCH)
+    if start >= 0:
+        at = body.find(_COMMUNITY_TEXT, start)
+        if at >= 0:
+            body = (
+                body[:at]
+                + f"m.@context += {_with_path('d.heading_path', 'c.text')}"
+                + body[at + len(_COMMUNITY_TEXT):]
+            )
+    return body
 
 
 def _hop_edge_pattern(body: str, domain_edges: Iterable[str]) -> str:
@@ -87,11 +138,16 @@ def render_retriever_body(
     domain_vts: Iterable[str],
     domain_edges: Iterable[str],
     include_entity: bool,
+    chunk_context: bool = False,
 ) -> str:
-    """Apply every schema-aware substitution to one retriever body."""
+    """Apply every schema-aware substitution to one retriever body.
+    ``chunk_context`` is true when DocumentChunk has the heading_path
+    attribute."""
     body = template_text
     body = _hop_edge_pattern(body, domain_edges)
     body = _community_member_pattern(body, domain_vts, include_entity=include_entity)
+    if chunk_context:
+        body = _chunk_context_pattern(body)
     return body
 
 
@@ -104,6 +160,7 @@ def render_retrievers(
     domain_edges: Iterable[str],
     include_entity: bool,
     retriever_dir: str = _RETRIEVER_DIR,
+    chunk_context: bool = False,
 ) -> dict:
     """Return ``{query_name: rendered_body}`` for every templated retriever."""
     rendered: dict = {}
@@ -118,6 +175,7 @@ def render_retrievers(
             domain_vts=domain_vts,
             domain_edges=domain_edges,
             include_entity=include_entity,
+            chunk_context=chunk_context,
         )
     return rendered
 
@@ -144,6 +202,7 @@ def install_retrievers(
     include_entity: bool,
     retriever_dir: str = _RETRIEVER_DIR,
     progress: Optional["Callable[[str], None]"] = None,
+    chunk_context: bool = False,
 ) -> dict:
     """Render and install every templated retriever (sync).
 
@@ -152,7 +211,7 @@ def install_retrievers(
     in a UI (init dialog poll, etc.).
     """
     rendered = render_retrievers(
-        domain_vts, domain_edges, include_entity, retriever_dir
+        domain_vts, domain_edges, include_entity, retriever_dir, chunk_context
     )
     logger.info(
         f"install_retrievers: graph={graphname} include_entity={include_entity} "
@@ -213,10 +272,11 @@ async def install_retrievers_async(
     include_entity: bool,
     retriever_dir: str = _RETRIEVER_DIR,
     sem: Optional["object"] = None,
+    chunk_context: bool = False,
 ) -> dict:
     """Render and install every templated retriever (async)."""
     rendered = render_retrievers(
-        domain_vts, domain_edges, include_entity, retriever_dir
+        domain_vts, domain_edges, include_entity, retriever_dir, chunk_context
     )
     results: dict = {}
     for query_name, body in rendered.items():

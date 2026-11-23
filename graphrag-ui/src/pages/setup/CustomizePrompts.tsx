@@ -27,7 +27,8 @@ const ALL_PROMPT_TYPES = [
   { id: "chatbot_response", name: "Chatbot Responses", description: "Extra instructions/examples for how the chatbot composes the final answer. Appended to fixed system rules." },
   { id: "route_response", name: "Question Routing", description: "Classic chat routing policy — whether a question goes to structured functions, document vectorstore, or conversation history. Pre-filled with the default and fully editable. The allowed datasources and output format stay fixed." },
   { id: "agentic_planner", name: "Agentic Planner", description: "The planner's retrieval strategy — which methods to use, how many, and in what order — pre-filled with the default and fully editable. The role, plan model, and output format stay fixed." },
-  { id: "agentic_agent", name: "React Agent", description: "The React agent's retrieval strategy — which methods to prioritize and when, step by step — pre-filled with the default and fully editable. The role and reason-act-observe model stay fixed." },
+  { id: "deep_agent", name: "Deep Agent", description: "Additional instructions for the Deep Agent, such as what the knowledge graph contains and how to search and answer for it. Empty by default." },
+  { id: "agentic_agent", name: "React Agent", description: "Legacy agent engine only. The React agent's retrieval strategy — which methods to prioritize and when, step by step — pre-filled with the default and fully editable. The role and reason-act-observe model stay fixed." },
   { id: "agentic_triage", name: "Agent Routing", description: "The routing policy that decides whether a question is answered directly (greetings, about the assistant) or sent to the agent to retrieve/use a tool — pre-filled with the default and fully editable. The output contract stays fixed." },
 ];
 
@@ -50,6 +51,7 @@ const CustomizePrompts = () => {
     query_guidance: "",
     route_response: "",
     agentic_agent: "",
+    deep_agent: "",
     agentic_planner: "",
     agentic_triage: "",
   });
@@ -64,6 +66,7 @@ const CustomizePrompts = () => {
     query_guidance: "",
     route_response: "",
     agentic_agent: "",
+    deep_agent: "",
     agentic_planner: "",
     agentic_triage: "",
   });
@@ -168,6 +171,9 @@ const CustomizePrompts = () => {
         agentic_agent: data.prompts.agentic_agent?.editable_content !== undefined
           ? data.prompts.agentic_agent.editable_content
           : (typeof data.prompts.agentic_agent === 'string' ? data.prompts.agentic_agent : ""),
+        deep_agent: data.prompts.deep_agent?.editable_content !== undefined
+          ? data.prompts.deep_agent.editable_content
+          : (typeof data.prompts.deep_agent === 'string' ? data.prompts.deep_agent : ""),
         agentic_planner: data.prompts.agentic_planner?.editable_content !== undefined
           ? data.prompts.agentic_planner.editable_content
           : (typeof data.prompts.agentic_planner === 'string' ? data.prompts.agentic_planner : ""),
@@ -186,6 +192,7 @@ const CustomizePrompts = () => {
         query_guidance: data.prompts.query_guidance?.template_variables || "",
         route_response: data.prompts.route_response?.template_variables || "",
         agentic_agent: data.prompts.agentic_agent?.template_variables || "",
+        deep_agent: data.prompts.deep_agent?.template_variables || "",
         agentic_planner: data.prompts.agentic_planner?.template_variables || "",
         agentic_triage: data.prompts.agentic_triage?.template_variables || "",
       });
