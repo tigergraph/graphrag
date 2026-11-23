@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { FileText, Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { safeJson } from "@/utils/safeJson";
 import type { ConfluenceSource, JiraSchemaStatus } from "@/types/dataSources";
@@ -48,6 +55,7 @@ const ConfluenceSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<"success" | "error" | "">("");
+  const [open, setOpen] = useState(false);
 
   const loadSchema = useCallback(async () => {
     if (!graph) return;
@@ -223,23 +231,50 @@ const ConfluenceSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
     setEditing({ ...editing, scope: { ...editing.scope, content_types } });
   };
 
+  const summary = !sources.length
+    ? "No connections yet"
+    : schema?.status === "installed"
+      ? `${sources.length} connection${sources.length === 1 ? "" : "s"} · Schema installed`
+      : `${sources.length} connection${sources.length === 1 ? "" : "s"} · Schema not installed`;
+
   return (
-    <div className="rounded-lg border border-gray-300 dark:border-[#3D3D3D] p-4 bg-white dark:bg-background flex flex-col">
-      <div className="flex items-start gap-3">
-        <FileText className="h-5 w-5 mt-1" />
-        <div>
-          <h2 className="text-lg font-semibold text-black dark:text-white">
-            Confluence
-          </h2>
-          <p className="text-sm text-gray-600 dark:text-[#D9D9D9]">
+    <>
+    <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+      <div className="mb-4">
+        <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
+          <FileText className="h-6 w-6 text-tigerOrange" />
+        </div>
+        <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
+          Confluence
+        </h2>
+        <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
+          Connect a site, test the API token, install the schema, then ingest
+          pages and blog posts.
+        </p>
+        <p className="text-sm text-black dark:text-white">{summary}</p>
+      </div>
+      <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
+        <Button onClick={() => setOpen(true)} className="gradient w-full text-white">
+          <FileText className="h-4 w-4 mr-2" />
+          Set up Confluence
+        </Button>
+      </div>
+    </div>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent
+        className="sm:max-w-4xl max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+        onInteractOutside={(event) => event.preventDefault()}
+      >
+        <DialogHeader>
+          <DialogTitle className="text-black dark:text-white">Confluence</DialogTitle>
+          <DialogDescription className="text-gray-600 dark:text-[#D9D9D9]">
             Connect a site, test the API token, install the schema, then ingest
             pages and blog posts.
-          </p>
-        </div>
-      </div>
+          </DialogDescription>
+        </DialogHeader>
       {message && (
         <p
-          className={`mt-3 text-sm ${
+          className={`text-sm ${
             messageType === "error" ? "text-red-600" : "text-green-700"
           }`}
           role={messageType === "error" ? "alert" : "status"}
@@ -247,7 +282,7 @@ const ConfluenceSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
           {message}
         </p>
       )}
-      <div className="mt-4 space-y-3">
+      <div className="space-y-3">
         {loading && <Loader2 className="h-4 w-4 animate-spin" />}
         {sources.map((source) => (
           <div key={source.id} className="rounded-md border p-3 text-sm">
@@ -407,7 +442,9 @@ const ConfluenceSourcesCard: React.FC<{ graph: string }> = ({ graph }) => {
           </div>
         </div>
       )}
-    </div>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 };
 
