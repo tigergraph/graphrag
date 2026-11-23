@@ -23,6 +23,7 @@ import type { JiraSchemaStatus, JiraSource } from "@/types/dataSources";
 import ConnectorPromptGuide from "@/pages/setup/ConnectorPromptGuide";
 import RestoreApiTokenCard from "@/pages/setup/RestoreApiTokenCard";
 import ZendeskSourcesCard from "@/pages/setup/ZendeskSourcesCard";
+import ConfluenceSourcesCard from "@/pages/setup/ConfluenceSourcesCard";
 
 const editingSourceKey = (graph: string) =>
   `graphrag:jira-editing-source:${graph}`;
@@ -1021,6 +1022,7 @@ const DataSourcesConfig: React.FC = () => {
           </div>
         </div>
         <ZendeskSourcesCard graph={selectedGraph} />
+        <ConfluenceSourcesCard graph={selectedGraph} />
       </div>
 
       <Dialog open={jiraDialogOpen} onOpenChange={setJiraDialogOpen}>
