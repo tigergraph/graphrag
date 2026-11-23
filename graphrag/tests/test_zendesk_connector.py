@@ -889,6 +889,18 @@ def test_open_zendesk_question_is_search_and_an_unknown_field_is_refused():
     assert "links_issue" in guidance
     assert "CROSS_SOURCE_LINK" not in guidance
     assert "ZendeskTicketRef" not in guidance
+    linked_query = guidance_for(
+        "List all linked tickets for Zendesk ticket 58617",
+        "query",
+    )
+    assert "return its problem_id, followup_ids" in linked_query
+    assert "Do not MATCH a second ZendeskTicket" in linked_query
+    linked_plan = guidance_for(
+        "List all linked tickets for Zendesk ticket 58617",
+        "planner",
+    )
+    assert "independent structured lookups" in linked_plan
+    assert "Do not combine these lookups into one query" in linked_plan
     assert allows_type("ZendeskTicket", {"jira"})
     assert allows_type("JiraIssue", {"zendesk"})
     assert not allows_type("ZendeskTicketRef", {"jira", "zendesk"})
