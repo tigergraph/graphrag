@@ -39,6 +39,7 @@ from connectors.confluence.service import (
     install_schema as install_confluence_schema,
     list_spaces as list_confluence_spaces,
     schema_status as confluence_schema_status,
+    sync as sync_confluence,
     test_connection as test_confluence_connection,
 )
 from connectors.confluence.state import ConfluenceSourceStore
@@ -1449,10 +1450,128 @@ def install_confluence_schema_route(
     try:
         threading.Thread(
             target=run,
-            name=f"confluence-schema-install-{graphname}",
-            daemon=True,
-        ).start()
+        name=f"confluence-schema-install-{graphname}",
+        daemon=True,
+    ).start()
     except Exception:
         release_graph_lock(graphname, operation)
         raise
     return {"status": "submitted", "install": install}
+
+
+@router.post(
+    f"{route_prefix}/{{graphname}}/data-sources/confluence/{{source_id}}/sync"
+)
+def start_confluence_sync(
+    graphname: str,
+    source_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    source = _confluence_with_credentials(graphname, source_id)
+    if not source.enabled:
+        raise HTTPException(status_code=409, detail="Confluence data source is disabled.")
+    if source.sync.last_tested_at is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Test this Confluence connection before synchronization.",
+        )
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
+    conn = _connection(request, graphname)
+    schema = confluence_schema_status(conn)
+    if schema["status"] != "installed":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Confluence schema is not installed for this graph. "
+                "Install it from Data Sources before synchronization."
+            ),
+        )
+    operation = f"confluence_sync:{source_id}"
+    if not acquire_graph_lock(graphname, operation):
+        current = get_current_operation(graphname) or "another operation"
+        raise HTTPException(
+            status_code=409,
+            detail=f"Graph '{graphname}' is busy with '{current}'.",
+        )
+    run_id = uuid.uuid4().hex
+    try:
+        _set_sync_state(
+            run_id,
+            run_id=run_id,
+            graphname=graphname,
+            source_id=source_id,
+            status="queued",
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:
+        release_graph_lock(graphname, operation)
+        raise
+
+    def run() -> None:
+        result: dict[str, Any] | None = None
+        error: Exception | None = None
+        try:
+            _set_sync_state(run_id, status="running")
+            from routers.ui import ws_basic_auth
+
+            _, fresh_conn = ws_basic_auth(authorization, graphname)
+            fresh_source = _confluence_with_credentials(graphname, source_id)
+            result = sync_confluence(
+                graphname,
+                fresh_source,
+                fresh_conn,
+                store=confluence_store,
+            )
+        except Exception as exc:
+            error = exc
+            logger.exception(
+                "Confluence data-source sync failed graph=%s source=%s",
+                graphname,
+                source_id,
+            )
+        finally:
+            release_graph_lock(graphname, operation)
+        if error is not None:
+            _set_sync_state(
+                run_id,
+                status="failed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                error=str(error)[:1000],
+            )
+        else:
+            _set_sync_state(
+                run_id,
+                status="completed",
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                result=result,
+            )
+
+    try:
+        background_tasks.add_task(run)
+    except Exception:
+        release_graph_lock(graphname, operation)
+        raise
+    return {"status": "submitted", "run_id": run_id}
+
+
+@router.get(
+    f"{route_prefix}/{{graphname}}/data-sources/confluence/{{source_id}}/sync/{{run_id}}"
+)
+def get_confluence_sync_status(
+    graphname: str,
+    source_id: str,
+    run_id: str,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    return get_sync_status(graphname, source_id, run_id, auth)

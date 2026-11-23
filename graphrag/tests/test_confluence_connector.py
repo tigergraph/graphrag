@@ -12,6 +12,11 @@ from connectors.confluence.client import (
     content_cql,
     wiki_base_url,
 )
+from connectors.confluence.html import storage_to_markdown
+from connectors.confluence.links import issue_keys, zendesk_tickets
+from connectors.confluence.mapper import ConfluenceMapper
+from connectors.confluence.sync import ConfluenceSyncService
+from connectors.prompt_selection import allows_type, guidance_for
 from connectors.confluence.config import ConfluenceDataSource
 from connectors.confluence.schema import (
     LINKS_ISSUE,
@@ -377,3 +382,224 @@ def test_source_ids_cannot_collide_and_the_token_is_not_stored(tmp_path):
     assert document["confluence_sources"][0]["id"] == "conf-acme"
     assert "api_token" not in document["confluence_sources"][0]["connection"]
     assert confluence_store.redact(source())["connection"].get("api_token") is None
+
+
+def test_storage_html_and_links_keep_a_bare_number_as_text():
+    text = storage_to_markdown("<p>See GML-2186 and <a href=\"https://tigergraph.zendesk.com/agent/tickets/59326\">ticket</a>. #12 stays text.</p>")
+    assert "GML-2186" in text
+    assert "59326" in text
+    assert issue_keys(text) == ["GML-2186"]
+    assert zendesk_tickets(text) == [("tigergraph", "59326")]
+    assert zendesk_tickets("zendesk #12") == []
+
+
+class PageGraph:
+    def __init__(self):
+        self.graphname = "TestGraph"
+        self.present = set()
+        self.attrs = {}
+        self.edges = {}
+        self.vertex_types = [
+            "Document",
+            "DocumentChunk",
+            "Content",
+            "ConfluencePage",
+            "ConfluenceComment",
+            "Person",
+            "Organization",
+            "Attachment",
+            "JiraIssue",
+            "ZendeskTicket",
+        ]
+        self.edge_types = ["CONTAINS_ENTITY", "HAS_CHILD", "HAS_CONTENT", "links_issue", "links_ticket", "authored", "edited", "owned", "member"]
+
+    def getVertexTypes(self):
+        return self.vertex_types
+
+    def getVertexType(self, name):
+        proposal = confluence_schema_proposal({"JiraIssue", "ZendeskTicket"})
+        vertex = next((item for item in proposal.vertices if item.name == name), None)
+        attributes = [] if vertex is None else [attribute.name for attribute in vertex.attributes]
+        if name == "JiraIssue":
+            attributes = ["issue_key"]
+        if name == "ZendeskTicket":
+            attributes = ["ticket_id"]
+        return {
+            "PrimaryId": {"AttributeName": "id"},
+            "Attributes": [
+                {"AttributeName": attribute, "AttributeType": {"Name": "STRING"}}
+                for attribute in attributes
+            ],
+        }
+
+    def getEdgeTypes(self):
+        return self.edge_types
+
+    def getEdgeType(self, name):
+        pairs = {
+            "authored": [("ConfluencePage", "Person"), ("ConfluenceComment", "Person")],
+            "edited": [("ConfluencePage", "Person")],
+            "owned": [("ConfluencePage", "Person")],
+            "member": [("Organization", "Person")],
+            "links_issue": [("ConfluencePage", "JiraIssue")],
+            "links_ticket": [("ConfluencePage", "ZendeskTicket")],
+            "CONTAINS_ENTITY": [("DocumentChunk", "ConfluencePage"), ("Document", "ConfluencePage"), ("DocumentChunk", "ConfluenceComment"), ("Document", "ConfluenceComment")],
+            "HAS_CHILD": [("Document", "DocumentChunk")],
+            "HAS_CONTENT": [("DocumentChunk", "Content")],
+        }.get(name, [])
+        return {
+            "IsDirected": True,
+            "Attributes": [],
+            "FromVertexTypeName": pairs[0][0] if pairs else "*",
+            "ToVertexTypeName": pairs[0][1] if pairs else "*",
+            "EdgePairs": [{"From": source, "To": target} for source, target in pairs],
+        }
+
+    def getVerticesById(self, vertex_type, ids):
+        return [
+            {"v_id": vertex_id, "attributes": self.attrs.get((vertex_type, vertex_id), {})}
+            for vertex_id in ids
+            if (vertex_type, vertex_id) in self.present
+        ]
+
+    def upsertData(self, payload):
+        data = json.loads(payload)
+        for vertex_type, items in data.get("vertices", {}).items():
+            for vertex_id, attributes in items.items():
+                self.present.add((vertex_type, vertex_id))
+                stored = self.attrs.setdefault((vertex_type, vertex_id), {})
+                for name, value in attributes.items():
+                    stored[name] = value.get("value") if isinstance(value, dict) else value
+        return {}
+
+    def delEdges(self, vertex_type, vertex_id, edge_type):
+        self.edges.pop((vertex_type, vertex_id, edge_type), None)
+
+    def upsertVertex(self, vertex_type, vertex_id, attributes=None):
+        self.present.add((vertex_type, vertex_id))
+        self.attrs.setdefault((vertex_type, vertex_id), {}).update(attributes or {})
+
+
+class PageClient:
+    def __init__(self):
+        self.closed = False
+
+    def search(self, cql):
+        yield {"id": "65541", "type": "page"}
+
+    def content(self, page_id, content_type):
+        return {
+            "id": page_id,
+            "status": "current",
+            "title": "Backup runbook",
+            "spaceId": "131073",
+            "parentId": "65540",
+            "authorId": "712020:abc",
+            "ownerId": "712020:def",
+            "createdAt": "2026-07-01T00:00:00.000Z",
+            "version": {"number": 4, "authorId": "712020:def", "createdAt": "2026-10-02T00:00:00.000Z"},
+            "body": {"storage": {"value": "<p>See GML-2186 and https://tigergraph.zendesk.com/agent/tickets/59326.</p>"}},
+        }
+
+    def footer_comments(self, page_id, content_type="page"):
+        return [{
+            "id": "9001",
+            "version": {"authorId": "712020:abc", "createdAt": "2026-10-03T00:00:00.000Z"},
+            "body": {"storage": {"value": "<p>Updated the pause step.</p>"}},
+        }]
+
+    def inline_comments(self, page_id, content_type="page"):
+        return []
+
+    def labels(self, page_id, content_type="page"):
+        return [{"name": "runbook"}]
+
+    def attachments(self, page_id, content_type="page"):
+        return [{"id": "att77", "title": "pause.png", "downloadLink": "/download/att77"}]
+
+    def space(self, space_id):
+        return {"id": space_id, "key": "DOCS", "name": "Docs"}
+
+    def users(self, account_ids):
+        return [
+            {"accountId": "712020:abc", "displayName": "Ada", "email": "ada@example.com"},
+            {"accountId": "712020:def", "displayName": "Bea", "email": "bea@tigergraph.com"},
+        ]
+
+    def close(self):
+        self.closed = True
+
+
+class Embeddings:
+    def __init__(self):
+        self.added = []
+
+    async def aadd_embeddings(self, texts, metadatas):
+        self.added.append(texts)
+
+
+def test_sync_writes_the_page_links_and_checkpoint(tmp_path, monkeypatch):
+    embeddings = Embeddings()
+    monkeypatch.setattr(
+        "connectors.confluence.sync.get_embedding_store",
+        lambda graphname=None: embeddings,
+    )
+    store = ConfluenceSourceStore(str(tmp_path))
+    saved = store.upsert("TestGraph", source())
+    saved.sync.last_tested_at = source().sync.last_tested_at
+    graph = PageGraph()
+    graph.present.add(("Organization", "organization:tigergraph.com"))
+    graph.attrs[("Organization", "organization:tigergraph.com")] = {"domain": "tigergraph.com", "name": "TigerGraph"}
+    result = ConfluenceSyncService(
+        "TestGraph", saved, graph, store=store, client=PageClient()
+    ).run()
+    page_id = "confluence:acme.atlassian.net:page:65541"
+    assert ( "ConfluencePage", page_id) in graph.present
+    assert graph.attrs[("ConfluencePage", page_id)]["title"] == "Backup runbook"
+    assert ("JiraIssue", "jira:gml-2186:issue") in graph.present
+    assert graph.attrs[("JiraIssue", "jira:gml-2186:issue")]["issue_key"] == "GML-2186"
+    assert "summary" not in graph.attrs[("JiraIssue", "jira:gml-2186:issue")]
+    assert ("ZendeskTicket", "zendesk:tigergraph:ticket:59326") in graph.present
+    assert ("Person", "person:ada@example.com") in graph.present
+    assert result["last_content_id"] == "65541"
+    assert store.get("TestGraph", "conf-acme").sync.checkpoint is not None
+    assert embeddings.added
+
+
+def test_sync_refuses_a_disabled_source_and_a_missing_schema(tmp_path):
+    store = ConfluenceSourceStore(str(tmp_path))
+    saved = store.upsert("TestGraph", source())
+    saved.enabled = False
+    with pytest.raises(RuntimeError, match="disabled"):
+        ConfluenceSyncService("TestGraph", saved, PageGraph(), store=store, client=PageClient()).run()
+    saved.enabled = True
+    empty = PageGraph()
+    empty.vertex_types = []
+    with pytest.raises(RuntimeError, match="not installed"):
+        ConfluenceSyncService("TestGraph", saved, empty, store=store, client=PageClient()).run()
+
+
+def test_confluence_question_selects_page_guidance():
+    guidance = guidance_for("Summarize the Confluence page about backups", "answer")
+    assert "links_issue" in guidance
+    assert "not on the page" in guidance
+    assert allows_type("ConfluencePage", {"confluence"})
+    assert allows_type("JiraIssue", {"confluence"})
+    mapped = ConfluenceMapper(source()).map_page(
+        {
+            "id": "1",
+            "title": "Notes",
+            "status": "current",
+            "body": {"storage": {"value": "<p>Hello</p>"}},
+            "version": {"number": 1, "createdAt": "2026-10-02T00:00:00.000Z"},
+        },
+        content_type="page",
+        comments=[],
+        labels=[],
+        attachments=[],
+        users={},
+        space_key="DOCS",
+        space_name="Docs",
+    )
+    assert mapped.vertex_id == "confluence:acme.atlassian.net:page:1"
+    assert mapped.vertices[0].attributes["body"] == "Hello"
