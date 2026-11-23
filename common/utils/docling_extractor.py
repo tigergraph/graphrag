@@ -2,22 +2,20 @@
 
 Docling detects each element of a document — headings with their levels,
 paragraphs, lists, tables, pictures, formulas, captions, page headers and
-footers — and its page. This module writes that structure as HTML for the
-structured chunker:
+footers — and its page. This module writes that structure as Markdown in the
+same shape as the default PDF extractor, so the structured chunker reads both
+the same way:
 
-- ``<body data-parser="docling">`` marks the format, so the chunker renders
-  each chunk as Markdown.
-- Every block carries ``data-page`` when the source has pages.
-- Headings use ``<h1>``–``<h6>`` by their detected level.
-- Tables keep merged cells; each caption stays with its table or figure.
-- Charts and other pictures become ``<figure>`` elements with the image
-  reference and the full description from the multimodal model.
+- A ``<!-- PAGE n -->`` marker starts each page when the source has pages.
+- Headings use ``#``–``######`` by their detected level.
+- Tables are Markdown tables; each caption stays with its table or figure.
+- Charts and other pictures become ``![description](tg://id)`` links to the
+  image documents described by the multimodal model.
 - Formulas become LaTeX, transcribed by the multimodal model.
-- Page headers, page footers, logos and icons are left out.
+- Page headers, page footers, page numbers, logos and icons are left out.
 """
 import base64
 import contextvars
-import html
 import io
 import logging
 import os
@@ -36,7 +34,6 @@ DOCLING_ONLY_EXTENSIONS = {".pptx"}
 
 # Picture classes that carry no content for retrieval.
 _SKIP_PICTURE_CLASSES = {"logo", "icon", "qr_code", "bar_code", "signature", "stamp"}
-_SKIP_TEXT_LABELS = {"page_header", "page_footer"}
 
 _converter = None
 _converter_lock = threading.Lock()
@@ -106,32 +103,7 @@ def convert(file_path):
     return result.document
 
 
-# --- HTML writer ------------------------------------------------------------
-
-
-# Some PDF text layers map glyphs to control characters.
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
-
-
-def _esc(text: str) -> str:
-    return html.escape(_CONTROL_CHARS.sub(" ", text or ""), quote=True)
-
-
-def _page(item):
-    prov = getattr(item, "prov", None) or []
-    return prov[0].page_no if prov else None
-
-
-def _attrs(item, **extra) -> str:
-    parts = []
-    page = _page(item)
-    if page is not None:
-        parts.append(f'data-page="{page}"')
-    for k, v in extra.items():
-        if v:
-            parts.append(f'{k.replace("_", "-")}="{_esc(str(v))}"')
-    return (" " + " ".join(parts)) if parts else ""
-
+# --- Markdown writer --------------------------------------------------------
 
 def _picture_class(pic) -> str:
     meta = getattr(pic, "meta", None)
@@ -140,107 +112,132 @@ def _picture_class(pic) -> str:
     return preds[0].class_name if preds else ""
 
 
-def _label(item) -> str:
-    label = getattr(item, "label", "")
-    return str(getattr(label, "value", label))
+_IMAGE_SLOT = "<!-- docling-image -->"
+_HEAD_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+_PAGE_RE = re.compile(r"^<!-- PAGE \d+ -->$")
+_BULLETS = ("●", "•", "・", "※", "○", "◆")
+# Text found on this many pages is a running header or footer, not content.
+_RUNNING_MIN_PAGES = 3
+_RUNNING_MAX_CHARS = 120
+# Some PDF text layers map glyphs to control characters.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
-class _Writer:
-    """Collect the HTML blocks of one document in reading order."""
-
-    def __init__(self):
-        self.blocks: list[str] = []
-        self._list_parent = None
-        self._list_tag = None
-
-    def close_list(self):
-        if self._list_tag:
-            self.blocks.append(f"</{self._list_tag}>")
-        self._list_parent = None
-        self._list_tag = None
-
-    def list_item(self, item):
-        parent = item.parent.cref if item.parent else None
-        tag = "ol" if getattr(item, "enumerated", False) else "ul"
-        if parent != self._list_parent or tag != self._list_tag:
-            self.close_list()
-            self.blocks.append(f"<{tag}{_attrs(item)}>")
-            self._list_parent, self._list_tag = parent, tag
-        self.blocks.append(f"<li>{_esc(item.text)}</li>")
-
-    def add(self, block: str):
-        self.close_list()
-        self.blocks.append(block)
+def _norm(text: str) -> str:
+    return re.sub(r"\d+", "#", re.sub(r"\s+", " ", text)).strip()
 
 
-def document_to_html(doc, figures: dict, formulas: dict) -> str:
-    """Write a DoclingDocument as HTML for the structured chunker.
+def _body_like(text: str) -> bool:
+    """A heading that reads as a sentence or a bullet is body text."""
+    t = text.strip()
+    return t.endswith("。") or "。" in t[:-1] or t.startswith(_BULLETS)
+
+
+def _clean_markdown(blocks: list) -> list:
+    """Drop running headers and footers and headings that start no section;
+    turn body-like headings into paragraphs. ``blocks`` holds
+    ``(page, text)`` pairs."""
+    # Running text sits among the first or last two blocks of a page.
+    edge = set()
+    by_page = {}
+    for i, (page, _) in enumerate(blocks):
+        by_page.setdefault(page, []).append(i)
+    for idx in by_page.values():
+        edge.update(idx[:2] + idx[-2:])
+
+    def key(i):
+        text = blocks[i][1]
+        if i not in edge or len(text) > _RUNNING_MAX_CHARS or text.startswith(("|", "![", "<!--")):
+            return None
+        return _norm(_HEAD_RE.sub(r"\2", text)) or None
+
+    pages = {}
+    for i, (page, _) in enumerate(blocks):
+        k = key(i)
+        if k:
+            pages.setdefault(k, set()).add(page)
+    running = {k for k, v in pages.items() if len(v) >= _RUNNING_MIN_PAGES}
+
+    out = []
+    for i, (page, text) in enumerate(blocks):
+        if key(i) in running or (i in edge and re.fullmatch(r"[-–]?\s*\d{1,4}\s*[-–]?", text)):
+            continue
+        m = _HEAD_RE.match(text)
+        if m and _body_like(m.group(2)):
+            text = m.group(2)
+        out.append((page, text))
+
+    # A heading followed by a heading of the same or a higher level, or by
+    # nothing, starts no section.
+    keep = []
+    for i, (page, text) in enumerate(out):
+        m = _HEAD_RE.match(text)
+        if m:
+            nxt = next((t for _, t in out[i + 1:]), None)
+            n = _HEAD_RE.match(nxt) if nxt else None
+            if nxt is None or (n and len(n.group(1)) <= len(m.group(1))):
+                continue
+        keep.append((page, text))
+    return keep
+
+
+def document_to_markdown(doc, figures: dict, formulas: dict) -> str:
+    """Write a DoclingDocument as Markdown in the same shape as the default
+    PDF extractor: ``<!-- PAGE n -->`` markers and ``![alt](tg://id)``
+    images.
 
     ``figures`` maps a picture's reference to ``{"src", "description"}``, or
     to ``None`` to leave the picture out. ``formulas`` maps a formula's
     reference to its LaTeX.
     """
-    from docling_core.types.doc.document import (
-        CodeItem, FormulaItem, ListItem, PictureItem, SectionHeaderItem,
-        TableItem, TitleItem,
-    )
+    from docling_core.types.doc.base import ImageRefMode
+    from docling_core.types.doc.common.content_layer import ContentLayer
+    from docling_core.types.doc.document import FormulaItem, PictureItem
+    from common.utils.text_extractors import _sanitize_alt_text
 
-    captions = set()
-    for item in list(doc.tables) + list(doc.pictures):
-        for ref in getattr(item, "captions", []) or []:
-            captions.add(ref.cref)
+    for item in doc.texts:
+        if str(getattr(item.label, "value", item.label)) in ("page_header", "page_footer"):
+            item.content_layer = ContentLayer.FURNITURE
+    for pic in doc.pictures:
+        fig = figures.get(pic.self_ref)
+        if fig is None and not pic.caption_text(doc):
+            pic.content_layer = ContentLayer.FURNITURE
+    for item, _ in doc.iterate_items():
+        if isinstance(item, FormulaItem) and formulas.get(item.self_ref):
+            item.text = formulas[item.self_ref]
 
-    w = _Writer()
-    for item, _level in doc.iterate_items(traverse_pictures=False):
-        label = _label(item)
-        if label in _SKIP_TEXT_LABELS or item.self_ref in captions:
-            continue
-        if isinstance(item, ListItem):
-            if item.text.strip():
-                w.list_item(item)
-            continue
-        if isinstance(item, TitleItem):
-            w.add(f"<h1{_attrs(item)}>{_esc(item.text)}</h1>")
-        elif isinstance(item, SectionHeaderItem):
-            level = min(max(int(getattr(item, "level", 1) or 1), 1), 6)
-            w.add(f"<h{level}{_attrs(item)}>{_esc(item.text)}</h{level}>")
-        elif isinstance(item, TableItem):
-            table = item.export_to_html(doc=doc, add_caption=False)
-            if not table.strip():
-                continue
-            caption = item.caption_text(doc)
-            # Some docling-core versions add the caption themselves.
-            if caption and "<caption" not in table:
-                table = table.replace("<table>", f"<table><caption>{_esc(caption)}</caption>", 1)
-            w.add(table.replace("<table", f"<table{_attrs(item)}", 1))
-        elif isinstance(item, PictureItem):
-            fig = figures.get(item.self_ref)
-            caption = item.caption_text(doc)
-            if fig is None and not caption:
-                continue
-            parts = [f"<figure{_attrs(item, data_kind=_picture_class(item))}>"]
-            if fig and fig.get("src"):
-                parts.append(f'<img src="{_esc(fig["src"])}" alt="{_esc(caption)}">')
-            if caption:
-                parts.append(f"<figcaption>{_esc(caption)}</figcaption>")
-            if fig and fig.get("description"):
-                parts.append(f'<div class="figure-description">{_esc(fig["description"])}</div>')
-            parts.append("</figure>")
-            w.add("".join(parts))
-        elif isinstance(item, FormulaItem):
-            latex = formulas.get(item.self_ref) or item.text
-            if latex.strip():
-                w.add(f'<div class="formula"{_attrs(item)}>$${_esc(latex)}$$</div>')
-        elif isinstance(item, CodeItem):
-            w.add(f"<pre{_attrs(item)}>{_esc(item.text)}</pre>")
-        else:
-            text = getattr(item, "text", "") or ""
-            if not text.strip():
-                continue
-            cls = ' class="footnote"' if label == "footnote" else ""
-            w.add(f"<p{cls}{_attrs(item)}>{_esc(text)}</p>")
-    w.close_list()
-    return '<html><body data-parser="docling">\n' + "\n".join(w.blocks) + "\n</body></html>"
+    page_nos = sorted(doc.pages) if doc.pages else [None]
+    blocks = []
+    for page in page_nos:
+        md = doc.export_to_markdown(
+            page_no=page, image_mode=ImageRefMode.PLACEHOLDER,
+            image_placeholder=_IMAGE_SLOT, include_annotations=False,
+            include_picture_classification=False, compact_tables=True,
+            escape_html=False, escape_underscores=False,
+        )
+        pics = [it for it, _ in doc.iterate_items(page_no=page)
+                if isinstance(it, PictureItem)]
+        slots = md.count(_IMAGE_SLOT)
+        if slots != len(pics):
+            logger.warning(f"Docling page {page}: {slots} image slots for {len(pics)} pictures")
+        for pic in pics:
+            fig = figures.get(pic.self_ref) or {}
+            img = (f"![{_sanitize_alt_text(fig['description'])}]({fig['src']})"
+                   if fig.get("src") else "")
+            md = md.replace(_IMAGE_SLOT, img, 1)
+        md = _CONTROL_CHARS.sub(" ", md.replace(_IMAGE_SLOT, ""))
+        for part in re.split(r"\n\s*\n", md):
+            part = part.strip()
+            if part:
+                blocks.append((page, part))
+
+    out, cur = [], object()
+    for page, text in _clean_markdown(blocks):
+        if page is not None and page != cur:
+            out.append(f"<!-- PAGE {page} -->")
+            cur = page
+        out.append(text)
+    return "\n\n".join(out)
 
 
 # --- extraction -------------------------------------------------------------
@@ -250,7 +247,7 @@ def extract_with_docling(file_path, base_doc_id, graphname=None) -> list:
     """Extract one file with Docling.
 
     Returns the same entries as the other extractors: the document itself
-    (``doc_type`` "html"), then one entry per described image.
+    (``doc_type`` "markdown"), then one entry per described image.
     """
     from docling_core.types.doc.document import FormulaItem
     from common.utils.image_data_extractor import (
@@ -327,5 +324,5 @@ def extract_with_docling(file_path, base_doc_id, graphname=None) -> list:
             "position": len(images) + 1,
         })
 
-    content = document_to_html(doc, figures, formulas)
-    return [{"doc_id": base_doc_id, "doc_type": "html", "content": content, "position": 0}] + images
+    content = document_to_markdown(doc, figures, formulas)
+    return [{"doc_id": base_doc_id, "doc_type": "markdown", "content": content, "position": 0}] + images
