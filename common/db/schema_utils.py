@@ -97,6 +97,7 @@ GRAPHRAG_STRUCTURAL_EDGE_TYPES: frozenset = frozenset({
     "HAS_PARENT",
     "HAS_IMAGE",
     "REFERENCES_IMAGE",
+    "SUPERSEDED_BY",
 })
 
 
