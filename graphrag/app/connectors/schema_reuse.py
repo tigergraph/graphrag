@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-_SEPARATE = {frozenset({"jiraissue", "zendeskticket"})}
+_SEPARATE = {
+    frozenset({"jiraissue", "zendeskticket"}),
+    frozenset({"confluencepage", "jiraissue"}),
+    frozenset({"confluencepage", "zendeskticket"}),
+}
 
 
 def must_remain_separate(proposed_name: str, existing_name: str) -> bool:

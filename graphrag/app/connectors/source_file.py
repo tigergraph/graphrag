@@ -1,7 +1,8 @@
 """One data_sources.json per graph.
 
 Each connector replaces only its own key. Jira uses ``sources``. Zendesk uses
-``zendesk_sources``. Source ids cannot collide across those keys.
+``zendesk_sources``. Confluence uses ``confluence_sources``. Source ids cannot
+collide across those keys.
 """
 
 from __future__ import annotations
