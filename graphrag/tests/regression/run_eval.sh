@@ -18,24 +18,27 @@
 #
 # Usage (from repo root, on the host):
 #
-#   Planned Agent (default):
-#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode planned
+#   Agent mode as the graph runs it (default; the Deep Agent unless the
+#   graph sets agent_engine to "legacy"):
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph
 #
-#   ReAct Agent:
-#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode reactive
+#   Legacy agent engine styles (only when the graph sets agent_engine to "legacy"):
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --agent planned
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --agent reactive
 #
 #   Classic engine (auto retriever):
-#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode classic/auto
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --agent classic
 #
 #   Classic with specific retriever:
-#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode classic/hybridsearch
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --agent classic --search-type hybridsearch
 #
 #   Detailed per-question output:
-#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode planned --detailed
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --detailed
 #
 #   Limit to first N questions (quick smoke test):
-#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --mode planned --limit 5
+#     ./graphrag/tests/regression/run_eval.sh --dataset MyDataset --graphname my_graph --limit 5
 #
+# The summary shows the engine that answered each question.
 # Override the container name with GRAPHRAG_CONTAINER if needed.
 # Results are written to graphrag/tests/regression/results/ on the host.
 # All arguments are forwarded to evaluator.py.

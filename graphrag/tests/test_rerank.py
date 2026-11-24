@@ -80,7 +80,7 @@ class TestRerank(unittest.TestCase):
 
 
 class TestHybridSearchReranks(unittest.TestCase):
-    def _search(self, cfg, keyword_matches=False):
+    def _search(self, cfg, keyword_matches=True):
         r, seen = _retriever(ranked=[3, 2, 1])
         r._generate_embedding = lambda q: [0.0]
         r._check_query_install = lambda name: None
@@ -110,8 +110,15 @@ class TestHybridSearchReranks(unittest.TestCase):
         self.assertEqual(params["top_k"], 3)
         self.assertTrue(out["reranked"])
 
+    def test_a_caller_without_keyword_matches_gets_none_when_reranking(self):
+        out, params = self._search({"keyword_search": True}, keyword_matches=False)
+        self.assertEqual(params["top_k"], 3)
+        self.assertEqual(list(out["final_retrieval"]), ["v2", "v1"])
+        self.assertNotIn("keyword_matches", out)
+        self.assertTrue(out["reranked"])
+
     def test_without_rerank_the_search_is_unchanged(self):
-        out, params = self._search({"keyword_search": True, "rerank": False}, keyword_matches=True)
+        out, params = self._search({"keyword_search": True, "rerank": False})
         self.assertEqual(params["top_k"], 1)
         self.assertEqual(list(out["final_retrieval"]), ["v1", "v2"])
         self.assertNotIn("reranked", out)

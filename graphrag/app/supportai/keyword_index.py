@@ -360,8 +360,31 @@ def invalidate_keyword_index(graphname: str) -> None:
         _remove_saved(graphname)
 
 
-def keyword_index_status(graphname: str) -> dict:
-    """What the setup page shows for the graph's keyword index."""
+def _load_saved_into_cache(graphname: str, connect) -> None:
+    """Keep the saved index in memory when none is there yet, as the next
+    search would; ``connect`` returns a database connection."""
+    if graphname in _indexes:
+        return
+    now = time.time()
+    with _lock:
+        if graphname in _indexes:
+            return
+        try:
+            chunk_count = int(connect().getVertexCount("DocumentChunk"))
+            entry = _load_saved(graphname, chunk_count, now)
+        except Exception as e:
+            logger.warning(f"saved keyword index for {graphname} not checked: {e}")
+            return
+        if entry is not None:
+            _indexes[graphname] = entry
+
+
+def keyword_index_status(graphname: str, connect=None) -> dict:
+    """What the setup page shows for the graph's keyword index. With
+    ``connect``, a saved index that the next search would use counts as
+    built, also before the first search after a restart."""
+    if connect is not None and keyword_search_enabled(graphname):
+        _load_saved_into_cache(graphname, connect)
     entry = _indexes.get(graphname)
     built = entry is not None and entry.built_at > 0
     return {
