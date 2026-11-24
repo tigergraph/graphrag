@@ -95,7 +95,7 @@ const KGAdmin = () => {
     };
     needs_repair?: boolean;
     repairable?: boolean;
-    schema?: { compatible: boolean; check_failed: boolean };
+    schema?: { compatible: boolean; check_failed: boolean; missing_pairs?: string[] };
     embeddings?: {
       by_type: Record<string, { total: number; missing: number }>;
       total_missing: number;
@@ -194,6 +194,9 @@ const KGAdmin = () => {
         setMigrationMessage("✅ Graph is up to date — no repairs needed.");
       } else {
         const parts: string[] = [];
+        const pairs = data.schema?.missing_pairs?.length || 0;
+        if (pairs)
+          parts.push(`${pairs} missing edge connection(s) in the schema`);
         const out = data.queries?.outdated?.length || 0;
         const miss = data.queries?.not_installed?.length || 0;
         if (out || miss)
@@ -272,8 +275,10 @@ const KGAdmin = () => {
         );
         return;
       }
+      const pairsAdded = data.edge_pairs_added?.length || 0;
       setMigrationMessage(
-        `✅ Repaired ${reinst} outdated; installed ${newInst} new query(s).`
+        (pairsAdded ? `✅ Added ${pairsAdded} edge connection(s); ` : "✅ ") +
+        `Repaired ${reinst} outdated; installed ${newInst} new query(s).`
       );
       // Re-run the check so the user sees the now-clean state.
       await runMigrationCheck(migrationGraph);
@@ -3288,6 +3293,16 @@ const KGAdmin = () => {
 
               {migrationStatus && (
                 <div className="space-y-2 text-sm">
+                  {(migrationStatus.schema?.missing_pairs?.length ?? 0) > 0 && (
+                    <div className="p-3 rounded bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+                      <div className="font-medium text-yellow-800 dark:text-yellow-200">
+                        Missing edge connections ({migrationStatus.schema!.missing_pairs!.length}) — Repair adds them:
+                      </div>
+                      <div className="text-yellow-700 dark:text-yellow-300 mt-1 font-mono text-xs">
+                        {migrationStatus.schema!.missing_pairs!.join(", ")}
+                      </div>
+                    </div>
+                  )}
                   {(migrationStatus.queries?.outdated?.length ?? 0) > 0 && (
                     <div className="p-3 rounded bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
                       <div className="font-medium text-yellow-800 dark:text-yellow-200">

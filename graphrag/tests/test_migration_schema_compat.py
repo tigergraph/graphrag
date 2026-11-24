@@ -79,25 +79,50 @@ class TestSchemaCompatibility(unittest.TestCase):
         vertices["Company"] = {"name", "industry"}
         vertices["Image"] = {"image_data", "image_format"}
         edges["WORKS_FOR"] = {"pairs": {("Company", "Company")}, "attrs": set()}
-        edges["CONTAINS_ENTITY"]["pairs"].add(("DocumentChunk", "Company"))
-        self.assertTrue(_check(vertices, edges).compatible)
+        for pair in (("Document", "Company"), ("DocumentChunk", "Company")):
+            edges["CONTAINS_ENTITY"]["pairs"].add(pair)
+        edges["IN_COMMUNITY"]["pairs"].add(("Company", "Community"))
+        result = _check(vertices, edges)
+        self.assertTrue(result.compatible, result.differences)
+        self.assertEqual(result.missing_pairs, [])
 
-    def test_wildcard_source_accepts_every_type(self):
-        """IN_COMMUNITY on a graph with domain types, as TigerGraph reports it."""
+    def test_domain_type_without_structural_pairs_is_repairable(self):
         vertices, edges = _current_graph()
+        vertices["Company"] = {"name"}
+        edges["CONTAINS_ENTITY"]["pairs"].add(("DocumentChunk", "Company"))
+        result = _check(vertices, edges)
+        self.assertTrue(result.compatible, result.differences)
+        self.assertEqual(result.missing_pairs, [
+            ("CONTAINS_ENTITY", "Document", "Company"),
+            ("IN_COMMUNITY", "Company", "Community"),
+        ])
+
+    def test_edge_with_wildcard_and_no_pairs_connects_nothing(self):
+        """IN_COMMUNITY as TigerGraph reports it when the edge has no pairs
+        (the GSQL catalog shows IN_COMMUNITY())."""
+        vertices, edges = _current_graph()
+        vertices["Company"] = {"name"}
+        for pair in (("Document", "Company"), ("DocumentChunk", "Company")):
+            edges["CONTAINS_ENTITY"]["pairs"].add(pair)
         edges["IN_COMMUNITY"]["meta"] = {
             "Name": "IN_COMMUNITY", "FromVertexTypeName": "*",
             "ToVertexTypeName": "Community", "EdgePairs": [], "IsDirected": True,
         }
-        self.assertTrue(_check(vertices, edges).compatible)
+        result = _check(vertices, edges)
+        self.assertTrue(result.compatible, result.differences)
+        self.assertEqual(result.missing_pairs, [
+            ("IN_COMMUNITY", "Entity", "Community"),
+            ("IN_COMMUNITY", "Company", "Community"),
+        ])
 
-    def test_wildcard_with_the_wrong_target_is_incompatible(self):
+    def test_single_pair_edge_reports_its_endpoints(self):
         vertices, edges = _current_graph()
         edges["IN_COMMUNITY"]["meta"] = {
-            "Name": "IN_COMMUNITY", "FromVertexTypeName": "*",
-            "ToVertexTypeName": "EntityType", "EdgePairs": [],
+            "Name": "IN_COMMUNITY", "FromVertexTypeName": "Entity",
+            "ToVertexTypeName": "Community", "EdgePairs": [],
         }
-        self.assertFalse(_check(vertices, edges).compatible)
+        result = _check(vertices, edges)
+        self.assertEqual(result.missing_pairs, [])
 
     def test_13_style_meta_edges_are_incompatible(self):
         vertices, edges = _current_graph()
@@ -126,13 +151,28 @@ class TestSchemaCompatibility(unittest.TestCase):
         self.assertTrue(any("Entity" in d and "entity_type" in d for d in result.differences))
         self.assertTrue(any("RELATIONSHIP" in d and "relation_type" in d for d in result.differences))
 
-    def test_missing_edge_pair_is_incompatible(self):
+    def test_missing_structural_pair_is_repairable(self):
         vertices, edges = _current_graph()
         edges["CONTAINS_ENTITY"]["pairs"].discard(("Document", "Entity"))
         result = _check(vertices, edges)
+        self.assertTrue(result.compatible, result.differences)
+        self.assertEqual(result.missing_pairs, [("CONTAINS_ENTITY", "Document", "Entity")])
+
+    def test_missing_pair_of_another_edge_is_incompatible(self):
+        vertices, edges = _current_graph()
+        edges["HAS_CONTENT"]["pairs"].discard(("Document", "Content"))
+        result = _check(vertices, edges)
         self.assertFalse(result.compatible)
-        self.assertTrue(any("CONTAINS_ENTITY" in d and "Document->Entity" in d
+        self.assertTrue(any("HAS_CONTENT" in d and "Document->Content" in d
                             for d in result.differences))
+
+    def test_add_pairs_gsql_is_one_job(self):
+        from common.db.migrate import add_edge_pairs_gsql, EDGE_PAIRS_JOB
+        gsql = add_edge_pairs_gsql("G", [("IN_COMMUNITY", "Entity", "Community"),
+                                         ("IN_COMMUNITY", "Company", "Community")])
+        self.assertEqual(gsql.count("CREATE SCHEMA_CHANGE JOB"), 1)
+        self.assertIn("ALTER EDGE IN_COMMUNITY ADD PAIR (FROM Company, TO Community);", gsql)
+        self.assertTrue(gsql.endswith(f"DROP JOB {EDGE_PAIRS_JOB}"))
 
     def test_unreadable_schema_raises(self):
         class Broken(FakeConn):
@@ -197,6 +237,21 @@ class TestRepairGate(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertIn("older version of GraphRAG", ctx.exception.detail)
         self.inner.assert_not_called()
+
+    def test_missing_pairs_are_added_before_the_queries(self):
+        from unittest import mock
+        vertices, edges = _current_graph()
+        edges["IN_COMMUNITY"]["pairs"] = set()
+        self.conn = FakeConn(vertices, edges)
+        with mock.patch.object(self.ui, "_add_edge_pairs", return_value=[]) as add:
+            out = self._apply()
+        add.assert_called_once_with(self.conn, "g", [("IN_COMMUNITY", "Entity", "Community")])
+        # The query lists from before the schema change are dropped; apply
+        # detects the repair set again.
+        kwargs = self.inner.call_args.kwargs
+        self.assertIsNone(kwargs["queries_outdated"])
+        self.assertIsNone(kwargs["queries_not_installed"])
+        self.assertEqual(out["edge_pairs_added"], ["IN_COMMUNITY: Entity -> Community"])
 
     def test_unreadable_schema_is_refused(self):
         from fastapi import HTTPException
