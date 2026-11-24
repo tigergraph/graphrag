@@ -103,8 +103,14 @@ def test_a_data_question_naming_no_source_gets_every_connector_and_shared_rule()
     assert "A customer's records are the tickets requested by members" in customer
 
 
-def test_relation_guidance_needs_two_sources(monkeypatch):
-    assert cross_source_prompts.guidance_for({"jira"}, "is GML-1 linked", "planner") == ""
+def test_relation_guidance_uses_installed_pairs(monkeypatch):
+    # One source: only pairs whose connectors are all installed.
+    assert cross_source_prompts.guidance_for(
+        {"jira"}, "is ABC-1 linked", "planner", installed={"jira"}
+    ) == ""
+    assert "Jira and Zendesk" in cross_source_prompts.guidance_for(
+        {"jira"}, "is ABC-1 linked", "planner", installed={"jira", "zendesk"}
+    )
     text = cross_source_prompts.guidance_for(
         {"jira", "zendesk"}, "Does this Zendesk ticket exist in Jira?", "planner"
     )
@@ -147,3 +153,9 @@ def test_jira_status_categories_are_the_stored_values():
 def test_a_step_can_depend_on_an_identifier_found_earlier():
     planner = guidance_for("Who reported ABC-102 and what did they comment?", "planner")
     assert "list that step in depends_on" in planner
+
+
+def test_zendesk_counts_filter_dates_before_traversing():
+    query = guidance_for("How many Zendesk tickets did each assignee get in March 2025?", "query")
+    assert "WITH t MATCH (p:Person)-[:assigned]->(t)" in query
+    assert "tags is a reserved word" in query

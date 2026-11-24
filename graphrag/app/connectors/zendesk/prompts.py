@@ -120,6 +120,8 @@ QUERY = (
     "\"2025-03-31T23:10:05Z\". For a calendar month compare "
     "t.created >= \"2025-03-01\" AND t.created < \"2025-04-01\" (first day of "
     "the next month), so the last day of the month is included.\n"
+    "- The attribute tags is a reserved word in TigerGraph openCypher and "
+    "cannot be read in a query; leave it out.\n"
     "- Stored status and priority values are lowercase: status is new, open, "
     "pending, hold, solved, closed, or deleted; priority is low, normal, "
     "high, urgent, or empty. Compare with toLower(). A ticket is still open "
@@ -128,10 +130,11 @@ QUERY = (
     "-[:requested]->(t:ZendeskTicket) WHERE toLower(o.name) CONTAINS "
     "\"<customer>\" RETURN t.ticket_id, t.subject, t.priority, t.status, "
     "t.created.\n"
-    "- Counts per assignee: MATCH (p:Person)-[:assigned]->(t:ZendeskTicket) "
-    "WHERE <filter> RETURN p.display_name, count(t). Counts per customer: "
-    "MATCH (o:Organization)-[:member]->(p:Person)-[:requested]->"
-    "(t:ZendeskTicket) WHERE <filter> RETURN o.name, count(t)."
+    "- Counts per assignee in a date range: MATCH (t:ZendeskTicket) WHERE "
+    "t.created >= \"<from>\" AND t.created < \"<to>\" WITH t MATCH "
+    "(p:Person)-[:assigned]->(t) RETURN p.display_name, count(t). Counts per "
+    "customer: the same first MATCH, then WITH t MATCH (o:Organization)"
+    "-[:member]->(p:Person)-[:requested]->(t) RETURN o.name, count(t)."
 )
 
 ANSWER = (
