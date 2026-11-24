@@ -20,11 +20,15 @@ from connectors.jira import prompts as jira_prompts
 _CONNECTORS = {module.NAME: module for module in (jira_prompts,)}
 
 _SPACED_JIRA_KEY = re.compile(r"\b([A-Za-z][A-Za-z0-9]+)\s*-\s*(\d+)\b")
+# A question about stored records, as opposed to a general question: it
+# names a record type or field of an installed connector (RECORD_WORDS).
 _RECORD_QUESTION = re.compile(
-    r"\b(ticket|issue|assignee|reporter|comment|status|priority|page)\b",
+    r"\b("
+    + "|".join(sorted({w for m in _CONNECTORS.values() for w in m.RECORD_WORDS}))
+    + r")s?\b",
     re.IGNORECASE,
 )
-# A record number on its own, such as "#58617" or "summarize 59224". Four-digit
+# A record number on its own, such as "#12345" or "summarize 67890". Four-digit
 # years are not record numbers.
 _BARE_NUMBER = re.compile(r"(?<![\w-])#?(\d{4,})\b")
 _YEAR = re.compile(r"(?:19|20)\d{2}")
@@ -32,19 +36,17 @@ _YEAR = re.compile(r"(?:19|20)\d{2}")
 _SHARED = {
     "planner": (
         "## Record question guidance\n"
-        "- A question that asks only for stored fields of a record, such as "
-        "its status, assignee, priority, dates, or URL, uses structural steps "
-        "only. Do not add a hybrid search for it.\n"
-        "- A summary, 'tell me about', what-happened, why, or next-steps "
-        "question uses structural steps for the record plus a hybrid search "
-        "for its description and discussion text.\n"
+        "- When the answer is made of stored attribute values of identified "
+        "records, use structural steps only. Do not add a hybrid search.\n"
+        "- When the answer also needs a record's own text (description, "
+        "comments, or page body), use structural steps for its attributes "
+        "plus a hybrid search that includes the record's identifier.\n"
         "- A count, existence, list, or filter question over records is "
         "answered by a structural step. An empty result is the answer (none, "
         "or 0); it is not a reason to search the documents instead.\n"
-        "- An overview question, such as a picture of the workload, is several "
-        "grouped counts: one structural step per grouping (for example by "
-        "month, status, priority, group, or assignee), each over the same "
-        "filter."
+        "- When the answer needs several breakdowns of the same set of "
+        "records, plan one structural step per breakdown, each a grouped "
+        "count over the same filter."
     ),
     "query": (
         "## Record query guidance\n"
@@ -59,9 +61,10 @@ _SHARED = {
         "- Do not use OPTIONAL MATCH: TigerGraph often rejects these queries "
         "or returns no rows for them. Fetch each related record in its own "
         "query with MATCH instead.\n"
-        "- Do not use CASE or alternative edge types such as "
-        "[:requested|assigned]. To break counts down, group by the stored "
-        "attribute itself."
+        "- Do not use CASE, coalesce, or alternative edge types such as "
+        "[:requested|assigned]; TigerGraph does not run them here. To break "
+        "counts down, group by the stored attribute itself. Records without "
+        "the related record are counted in a separate query."
     ),
     "answer": (
         "## Record answer guidance\n"
@@ -75,10 +78,21 @@ _SHARED = {
     ),
 }
 
-_CLARIFY = (
-    "The source system is ambiguous. Ask the user which source they mean "
-    "before answering, unless the conversation has already established it."
-)
+_UNNAMED = {
+    "planner": (
+        "## Source guidance\n"
+        "The question names no source. Use every installed source below whose "
+        "records fit the question, following that source's guidance. Ask the "
+        "user which source they mean only when the question is about one "
+        "record that it does not identify."
+    ),
+    "answer": (
+        "## Source guidance\n"
+        "The question names no source. Say which source each fact comes from. "
+        "Ask the user which source they mean only when the question is about "
+        "one record that it does not identify."
+    ),
+}
 
 
 def normalize_connector_question(text: str) -> str:
@@ -114,9 +128,9 @@ def _identifier_guidance(number: str, step: str) -> str:
             "below; each step looks the number up in that one source only, "
             "because each step runs one query:\n"
             f"{lookups.replace('<number>', number)}\n"
-            "In the same plan, add for each source the steps the question "
-            "needs, such as the assignee, the comments, or linked records, "
-            "with the number as that source's identifier and following that "
+            "In the same plan, add for each source the steps for the related "
+            "records the question asks for, with the number as that source's "
+            "identifier and following that "
             "source's guidance below. Steps for a source that has no such "
             "record return no rows. If several sources have a record, list the "
             "matches and ask which one is meant."
@@ -156,8 +170,17 @@ def guidance_for(question: str, step: str) -> str:
             ]
             parts.append(_SHARED.get(step, ""))
             return "\n".join(part for part in parts if part)
-        if step in {"planner", "answer"} and _RECORD_QUESTION.search(question or ""):
-            return _CLARIFY
+        if _RECORD_QUESTION.search(question or ""):
+            # No source named: every connector's rules apply, and the
+            # shared record rules always do.
+            parts = [_UNNAMED.get(step, "")]
+            parts += [
+                _CONNECTORS[name].GUIDANCE[step]
+                for name in sorted(_CONNECTORS)
+                if step in _CONNECTORS[name].GUIDANCE
+            ]
+            parts.append(_SHARED.get(step, ""))
+            return "\n".join(part for part in parts if part)
         return ""
     parts = [
         _CONNECTORS[name].GUIDANCE[step]

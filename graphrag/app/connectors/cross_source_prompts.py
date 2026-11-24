@@ -1,7 +1,7 @@
 """Guidance for questions that relate records from two connectors.
 
-Examples: "does Zendesk ticket 59038 have a Jira issue?", "what does the
-Confluence design say about GML-2348?". prompt_selection.py adds this text
+Examples: "does Zendesk ticket 12345 have a Jira issue?", "what does the
+Confluence design say about ABC-123?". prompt_selection.py adds this text
 when a question selects two or more connectors and asks about a relation.
 
 A connector that writes a cross-source edge registers the pair in PAIRS with
@@ -37,8 +37,8 @@ _DEFAULT = {
         "identify the record in the source the user names, with that source's "
         "identifier. Then follow the cross-source edge from that record and "
         "retrieve the other source's records it reaches. Use one focused "
-        "structural step per source; add a hybrid search only for text the "
-        "question asks about, such as what a page says.\n"
+        "structural step per source; add a hybrid search only for record text "
+        "the question asks about.\n"
         "- A relation exists only when the graph stores an edge for it. Do "
         "not join records by similar numbers, titles, customer names, or text."
     ),

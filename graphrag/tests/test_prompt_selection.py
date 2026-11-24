@@ -39,19 +39,19 @@ def test_jira_guidance_names_only_the_installed_schema(step):
 
 
 def test_jira_guidance_is_added_to_each_step_with_the_shared_rules():
-    planner = guidance_for("When will GLE-13162 be fixed?", "planner")
+    planner = guidance_for("When will ABC-101 be fixed?", "planner")
     assert "## Jira guidance" in planner
     assert "merged_<version>" in planner
     assert "An empty result is the answer" in planner
-    query = guidance_for("How many jira issues were created in October 2026?", "query")
+    query = guidance_for("How many jira issues were created in March 2025?", "query")
     assert "returns only the count, for example RETURN" in query
     assert "project_key is not empty" in query
-    answer = guidance_for("Summarize TSE-1073", "answer")
+    answer = guidance_for("Summarize ABC-102", "answer")
     assert "documentation, not record data" in answer
 
 
 def test_query_guidance_asks_for_one_query_without_optional_match():
-    query = guidance_for("Summarize TSE-1073.", "query")
+    query = guidance_for("Summarize ABC-102.", "query")
     assert "Write exactly one query" in query
     assert "no semicolon" in query
     assert "Do not use OPTIONAL MATCH" in query
@@ -59,36 +59,45 @@ def test_query_guidance_asks_for_one_query_without_optional_match():
 
 
 def test_field_questions_are_structural_and_summaries_add_hybrid():
-    planner = guidance_for("Give the current status of GML-2348.", "planner")
-    assert "uses structural steps only. Do not add a hybrid search" in planner
-    summary = guidance_for("Summarize TSE-1073.", "planner")
-    assert "plus a hybrid search for its description and discussion text" in summary
+    planner = guidance_for("Status of ABC-103?", "planner")
+    assert "use structural steps only. Do not add a hybrid search" in planner
+    summary = guidance_for("Summarize ABC-102.", "planner")
+    assert "plus a hybrid search that includes the record's identifier" in summary
     assert "a hybrid search that includes the issue key" in summary
 
 
 def test_a_bare_number_is_looked_up_in_every_source_before_asking():
-    question = "Current status and the next steps for #58617."
+    question = "Status and plan for #12345."
     assert selected_connectors(question) == set()
-    assert bare_record_number(question) == "58617"
+    assert bare_record_number(question) == "12345"
     planner = guidance_for(question, "planner")
-    assert "58617" in planner
-    assert 'issue_key ends with "-58617"' in planner
+    assert "12345" in planner
+    assert 'issue_key ends with "-12345"' in planner
     assert "Plan one structural step for each source" in planner
     assert "## Jira guidance" in planner
-    assert "add for each source the steps the question needs" in planner
+    assert "add for each source the steps for the related records" in planner
     assert "ask which" in guidance_for(question, "answer")
     assert "graph_queries_with_no_rows" in guidance_for(question, "answer")
 
 
 def test_a_year_is_not_a_record_number():
-    assert bare_record_number("How many tickets were created in October 2026?") is None
-    assert bare_record_number("Summarize 59224.") == "59224"
+    assert bare_record_number("How many tickets were created in March 2025?") is None
+    assert bare_record_number("Summarize 67890.") == "67890"
     assert bare_record_number("Summarize GML-2186") is None
 
 
 def test_a_record_question_without_a_number_or_source_asks_which_source():
     text = guidance_for("What is the status of the ticket?", "planner")
     assert "Ask the user which source" in text
+    assert "only when the question is about one record" in text
+
+
+def test_a_data_question_naming_no_source_gets_every_connector_and_shared_rule():
+    workload = guidance_for("Break down open issues by priority and by status.", "planner")
+    assert "## Source guidance" in workload
+    assert "## Jira guidance" in workload
+    assert "one structural step per breakdown" in workload
+    assert guidance_for("What is our refund policy?", "planner") == ""
 
 
 def test_relation_guidance_needs_two_sources(monkeypatch):
@@ -104,7 +113,7 @@ def test_relation_guidance_needs_two_sources(monkeypatch):
         {"planner": "Follow links_issue from ZendeskTicket to JiraIssue."},
     )
     text = cross_source_prompts.guidance_for(
-        {"jira", "zendesk"}, "Which Jira issue is linked to ticket 59038?", "planner"
+        {"jira", "zendesk"}, "Which Jira issue is linked to Zendesk ticket 24680?", "planner"
     )
     assert "Follow links_issue" in text
     assert cross_source_prompts.guidance_for(

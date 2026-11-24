@@ -23,6 +23,14 @@ def owns_type(name: str) -> bool:
     return name.startswith("Jira")
 
 
+# Record types and fields of this schema that mark a question as being about
+# stored records.
+RECORD_WORDS = (
+    "issue", "comment", "assignee", "reporter", "status", "priority",
+    "resolution", "label", "component", "epic",
+)
+
+
 # How a bare number is looked up in Jira when the question names no source.
 IDENTIFIER = (
     "Jira: JiraIssue rows whose issue_key ends with \"-<number>\" "
@@ -34,7 +42,7 @@ PLANNER = (
     "Applies to JiraIssue, JiraComment, JiraChange, Person, Attachment, and "
     "the edges assigned_to, reported, authored, changed, part_of, and "
     "relates_to.\n"
-    "- A project key plus a number, such as GML-2186, identifies one issue. "
+    "- A project key plus a number, such as ABC-123, identifies one issue. "
     "Match issue_key case-insensitively. A follow-up that does not repeat "
     "the key refers to the issue already established in the conversation; "
     "carry that key into every retrieval step.\n"
@@ -52,25 +60,26 @@ PLANNER = (
     "part_of. Linked issues are relates_to, whose link_type holds the Jira "
     "phrase such as blocks. Files are Attachment rows whose parent_id is the "
     "issue key.\n"
-    "- Synced issues have project_key and status set. Issues reached only "
-    "through part_of or relates_to, or created by another connector's link, "
-    "store only issue_key and sometimes summary and url. Exclude them from "
-    "counts, distributions, and lists of ingested or open issues unless the "
-    "question asks about links.\n"
+    "- An ingested (synced) issue is one whose project_key is set; that "
+    "filter alone identifies it. Other JiraIssue rows, written for a link, "
+    "store only issue_key and sometimes summary and url, so counts, "
+    "distributions, and lists of issues filter on project_key.\n"
     "- Each structural step asks for one kind of record, because each step "
     "runs one query: the issue fields, the assignee and reporter, the "
     "comments with their authors, or the changes with their authors. Plan "
     "only the kinds the question needs.\n"
-    "- A summary or 'tell me about' question needs the issue fields, the "
+    "- An answer about the issue as a whole needs the issue fields, the "
     "assignee and reporter, the recent comments, and a hybrid search that "
-    "includes the issue key. Add the changes for history questions.\n"
-    "- A release, 'when will it be fixed', or 'which version' question reads "
+    "includes the issue key. History needs the changes. When the answer is "
+    "not a stored field of the issue, add a structural step for its "
+    "comments.\n"
+    "- When the answer involves a release, a version, or a fix date, read "
     "fix_versions, due, status, resolution, and labels, plus the comments. "
     "When fix_versions is empty, the release evidence is the labels and the "
     "comments: merged_<version> means merged into that version, "
     "tg_<version> is only the target release, and a comment saying the fix "
     "was cancelled, not possible, or moved overrides any label. Always "
-    "retrieve the comments for these questions.\n"
+    "retrieve the comments when release information is needed.\n"
     "- Counts, lists, filters, and distributions over issue attributes are "
     "structural only, unless the question also needs description or comment "
     "text."
@@ -87,7 +96,10 @@ QUERY = (
     "(JiraChange)-[:changed]->(Person), (JiraIssue)-[:part_of]->(JiraIssue), "
     "(JiraIssue)-[:relates_to]->(JiraIssue).\n"
     "- Write exactly one query: one connected MATCH pattern, one RETURN, no "
-    "semicolon. Use the pattern for the kind of record the step asks for:\n"
+    "semicolon. A MATCH on a relation the issue does not have, such as a "
+    "parent or a linked issue, removes the issue from the result, so add "
+    "part_of or relates_to only when the step asks for them. Use the pattern "
+    "for the kind of record the step asks for:\n"
     "  - issue fields: MATCH (i:JiraIssue) WHERE toLower(i.issue_key) = "
     "\"<key>\" RETURN the fields\n"
     "  - assignee: MATCH (i:JiraIssue)-[:assigned_to]->(p:Person) WHERE "
@@ -101,7 +113,7 @@ QUERY = (
     "ch.to_value, ch.created, p.display_name\n"
     "  There is no edge from a comment or change to its issue, so never MATCH "
     "the JiraIssue together with its comments or changes.\n"
-    "- Project keys listed together, such as \"GML TSE and GLE\", are separate "
+    "- Project keys listed together, such as \"ABC DEF and XYZ\", are separate "
     "keys: filter with project_key IN the list and group by project_key, "
     "returning every listed key.\n"
     "- created, updated, and due are DATETIME. For a calendar month, use "
@@ -120,13 +132,12 @@ ANSWER = (
     "description and discussion.\n"
     "- Never show internal ids such as jira:user, jira:comment, or "
     "jira:change. Use display_name, or say the name is unavailable.\n"
-    "- A release answer states the version from fix_versions. When that is "
+    "- For release information, state the version from fix_versions. When that is "
     "empty, a merged_<version> label means merged into that version; a "
     "tg_<version> label is only the target; a comment saying the fix was "
     "cancelled, not possible, or moved overrides the labels. If none of "
     "these give a version, say no version is recorded; do not invent one.\n"
-    "- A history answer lists changes in time order and ends with the current "
-    "status.\n"
+    "- List changes in time order and end with the current status.\n"
     "- If a bare number matches several Jira keys, list those keys and ask "
     "which issue is meant without mixing their details."
 )
