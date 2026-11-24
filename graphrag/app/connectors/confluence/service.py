@@ -10,7 +10,7 @@ from typing import Any
 
 from common.db.schema_utils import apply_proposal, read_existing_schema
 
-from .client import ConfluenceAPIError, ConfluenceClient
+from .client import ConfluenceAPIError, ConfluenceClient, content_cql
 from .config import ConfluenceDataSource
 from .schema import (
     confluence_schema_proposal,
@@ -81,6 +81,20 @@ def list_spaces(source: ConfluenceDataSource) -> list[dict[str, Any]]:
             }
         )
     return spaces
+
+
+def count_content(source: ConfluenceDataSource) -> int:
+    """Count pages and blog posts that match the source scope.
+
+    Uses only the scope (spaces, content types, updated_after), not the sync
+    checkpoint, so the number previews what a first ingest would read.
+    """
+    cql = content_cql(source, source.scope.updated_after).split(" ORDER BY ")[0]
+    try:
+        with ConfluenceClient(source) as client:
+            return client.count(cql)
+    except ConfluenceAPIError as exc:
+        raise _http_error(exc) from exc
 
 
 def install_schema(conn, graphname: str) -> dict[str, Any]:

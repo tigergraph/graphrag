@@ -33,9 +33,10 @@ from connectors.jira.schema import (
 )
 from connectors.jira.state import JiraSourceStore
 from connectors.jira.sync import JiraSyncService
-from connectors.confluence.config import ConfluenceDataSource
+from connectors.confluence.config import ConfluenceDataSource, ConfluenceScope
 from connectors.confluence.service import (
     ConnectorCallError as ConfluenceCallError,
+    count_content as count_confluence_content,
     install_schema as install_confluence_schema,
     list_spaces as list_confluence_spaces,
     schema_status as confluence_schema_status,
@@ -1308,6 +1309,34 @@ def list_confluence_space_picker(
     except ConfluenceCallError as exc:
         raise _confluence_call_error(exc)
     return {"spaces": spaces}
+
+
+@router.post(
+    f"{route_prefix}/{{graphname}}/data-sources/confluence/{{source_id}}/content/count"
+)
+def preview_confluence_content_count(
+    graphname: str,
+    source_id: str,
+    scope: ConfluenceScope,
+    auth: Annotated[
+        tuple[list[str], HTTPBasicCredentials],
+        Depends(_ui_basic_auth()),
+    ],
+):
+    _require_access(graphname, auth)
+    source = _confluence_with_credentials(graphname, source_id)
+    if source.sync.last_tested_at is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Test this Confluence connection before previewing content.",
+        )
+    preview = source.model_copy(deep=True)
+    preview.scope = scope
+    try:
+        count = count_confluence_content(preview)
+    except ConfluenceCallError as exc:
+        raise _confluence_call_error(exc)
+    return {"count": count}
 
 
 @router.get(f"{route_prefix}/{{graphname}}/data-sources/confluence/schema")

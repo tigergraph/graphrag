@@ -20,6 +20,7 @@ from .client import (
     search_since,
 )
 from .config import ConfluenceDataSource
+from .links import jira_project, known_issue_keys
 from .mapper import (
     MappedChunk,
     MappedPage,
@@ -62,6 +63,7 @@ class ConfluenceSyncService:
         self.client = client
         self.mapper = ConfluenceMapper(source)
         self._spaces: dict[str, tuple[str, str]] = {}
+        self._jira_projects: set[str] | None = None
         self._owns_client = client is None
 
     def run(self) -> dict[str, Any]:
@@ -237,7 +239,9 @@ class ConfluenceSyncService:
                 "JiraIssue",
                 [
                     (jira_issue_vertex_id(key), {"issue_key": key})
-                    for key in mapped.issue_keys
+                    for key in known_issue_keys(
+                        mapped.issue_keys, self._known_jira_projects()
+                    )
                 ],
             )
             self._replace_link(
@@ -255,6 +259,31 @@ class ConfluenceSyncService:
             self.source.sync.last_link_error = None
         except Exception as exc:
             self.source.sync.last_link_error = str(exc)[:1000]
+
+    def _known_jira_projects(self) -> set[str]:
+        """Jira project keys a page may link to, looked up once per run.
+
+        Jira on the same site is the source of truth. When this account cannot
+        read Jira, fall back to the projects of the Jira sources configured on
+        this graph and the projects of issues the graph already holds.
+        """
+        if self._jira_projects is not None:
+            return self._jira_projects
+        projects: set[str] = set()
+        try:
+            projects |= self.client.jira_project_keys()
+        except Exception as exc:
+            logger.warning(
+                "Confluence sync could not list Jira projects on %s; "
+                "using projects known to graph %s: %s",
+                self.source.connection.site,
+                self.graphname,
+                exc,
+            )
+            projects |= _graph_jira_projects(self.conn)
+        projects |= _configured_jira_projects(self.store, self.graphname)
+        self._jira_projects = {project.upper() for project in projects if project}
+        return self._jira_projects
 
     def _replace_link(
         self,
@@ -482,6 +511,37 @@ def _chunk_edges(
             )
         )
     return edges
+
+
+def _configured_jira_projects(store, graphname: str) -> set[str]:
+    try:
+        from connectors.jira.state import JiraSourceStore
+
+        root = getattr(store, "config_root", None)
+        jira_store = JiraSourceStore(str(root)) if root else JiraSourceStore()
+        sources = jira_store.list(graphname)
+    except Exception:
+        return set()
+    projects: set[str] = set()
+    for source in sources:
+        for key in (source.get("scope") or {}).get("project_keys") or []:
+            projects.add(str(key).upper())
+    return projects
+
+
+def _graph_jira_projects(conn) -> set[str]:
+    """Projects of Jira issues that were ingested, not stubs from a link."""
+    try:
+        rows = conn.getVertices("JiraIssue", select="issue_key,summary") or []
+    except Exception:
+        return set()
+    projects: set[str] = set()
+    for row in rows:
+        attributes = row.get("attributes") or {}
+        key = str(attributes.get("issue_key") or "")
+        if key and attributes.get("summary"):
+            projects.add(jira_project(key))
+    return projects
 
 
 def _has_type(conn, name: str) -> bool:

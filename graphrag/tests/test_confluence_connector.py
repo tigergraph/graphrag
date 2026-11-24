@@ -13,7 +13,7 @@ from connectors.confluence.client import (
     wiki_base_url,
 )
 from connectors.confluence.html import storage_to_markdown
-from connectors.confluence.links import issue_keys, zendesk_tickets
+from connectors.confluence.links import issue_keys, known_issue_keys, zendesk_tickets
 from connectors.confluence.mapper import ConfluenceMapper
 from connectors.confluence.sync import ConfluenceSyncService
 from connectors.prompt_selection import allows_type, guidance_for
@@ -24,7 +24,7 @@ from connectors.confluence.schema import (
     confluence_schema_proposal,
     confluence_schema_status,
 )
-from connectors.confluence.service import ConnectorCallError
+from connectors.confluence.service import ConnectorCallError, count_content
 from connectors.confluence.service import test_connection as check_connection
 from connectors.confluence.state import ConfluenceSourceStore
 from connectors.jira.state import JiraSourceStore
@@ -334,6 +334,32 @@ def test_connection_reports_the_current_user(monkeypatch):
     assert tested["account"]["email"] == "ada@example.com"
 
 
+def test_preview_count_uses_the_scope_and_search_total(monkeypatch):
+    calls = []
+
+    class RecordingClient:
+        def __init__(self, **kwargs):
+            self.base_url = kwargs["base_url"]
+
+        def request(self, method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            return Response(200, {"results": [{}], "size": 1, "totalSize": 42})
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("connectors.confluence.client.httpx.Client", RecordingClient)
+    saved = source()
+    saved.sync.checkpoint = saved.scope.updated_after.replace(year=2026, month=9)
+    assert count_content(saved) == 42
+    method, path, kwargs = calls[0]
+    assert (method, path) == ("GET", "/rest/api/search")
+    cql = kwargs["params"]["cql"]
+    assert 'space in ("DOCS")' in cql
+    assert 'lastModified >= "2026-07-01 00:00"' in cql
+    assert "ORDER BY" not in cql
+
+
 def test_rejected_credentials_name_the_token(monkeypatch):
     class StubClient:
         def __init__(self, source, **kwargs):
@@ -391,6 +417,44 @@ def test_storage_html_and_links_keep_a_bare_number_as_text():
     assert issue_keys(text) == ["GML-2186"]
     assert zendesk_tickets(text) == [("tigergraph", "59326")]
     assert zendesk_tickets("zendesk #12") == []
+
+
+def test_issue_keys_skip_fragments_of_longer_ids():
+    text = (
+        "Fixed in GML-2186, see /browse/TSE-1099. CVE-2022-1234 is a CVE id. "
+        "Cluster a32fd086-90177-11423 is not a key. Branch GML-2427-Confluence is."
+    )
+    assert issue_keys(text) == ["GML-2186", "TSE-1099", "GML-2427"]
+
+
+def test_only_keys_of_known_jira_projects_become_links():
+    keys = issue_keys("GML-2186 TC-12 FROM-3 core-6017 WEST-2 SE-11")
+    assert known_issue_keys(keys, {"GML", "core"}) == ["GML-2186", "CORE-6017"]
+    assert known_issue_keys(keys, set()) == []
+
+
+def test_sync_falls_back_to_configured_jira_projects(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "connectors.confluence.sync.get_embedding_store",
+        lambda graphname=None: Embeddings(),
+    )
+    jira = jira_source()
+    jira.scope.project_keys = ["GML"]
+    JiraSourceStore(str(tmp_path)).upsert("TestGraph", jira)
+    store = ConfluenceSourceStore(str(tmp_path))
+    saved = store.upsert("TestGraph", source())
+    saved.sync.last_tested_at = source().sync.last_tested_at
+
+    class NoJiraAccess(PageClient):
+        def jira_project_keys(self):
+            raise ConfluenceAPIError(403, "no Jira access")
+
+    graph = PageGraph()
+    ConfluenceSyncService(
+        "TestGraph", saved, graph, store=store, client=NoJiraAccess()
+    ).run()
+    assert ("JiraIssue", "jira:gml-2186:issue") in graph.present
+    assert ("JiraIssue", "jira:tc-12:issue") not in graph.present
 
 
 class PageGraph:
@@ -498,7 +562,7 @@ class PageClient:
             "ownerId": "712020:def",
             "createdAt": "2026-07-01T00:00:00.000Z",
             "version": {"number": 4, "authorId": "712020:def", "createdAt": "2026-10-02T00:00:00.000Z"},
-            "body": {"storage": {"value": "<p>See GML-2186 and https://tigergraph.zendesk.com/agent/tickets/59326.</p>"}},
+            "body": {"storage": {"value": "<p>See GML-2186 and https://tigergraph.zendesk.com/agent/tickets/59326. Steps TC-12 and FROM-3 are test ids.</p>"}},
         }
 
     def footer_comments(self, page_id, content_type="page"):
@@ -519,6 +583,9 @@ class PageClient:
 
     def space(self, space_id):
         return {"id": space_id, "key": "DOCS", "name": "Docs"}
+
+    def jira_project_keys(self):
+        return {"GML", "TSE"}
 
     def users(self, account_ids):
         return [
@@ -559,6 +626,8 @@ def test_sync_writes_the_page_links_and_checkpoint(tmp_path, monkeypatch):
     assert ("JiraIssue", "jira:gml-2186:issue") in graph.present
     assert graph.attrs[("JiraIssue", "jira:gml-2186:issue")]["issue_key"] == "GML-2186"
     assert "summary" not in graph.attrs[("JiraIssue", "jira:gml-2186:issue")]
+    assert ("JiraIssue", "jira:tc-12:issue") not in graph.present
+    assert ("JiraIssue", "jira:from-3:issue") not in graph.present
     assert ("ZendeskTicket", "zendesk:tigergraph:ticket:59326") in graph.present
     assert ("Person", "person:ada@example.com") in graph.present
     assert result["last_content_id"] == "65541"

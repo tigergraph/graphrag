@@ -183,6 +183,44 @@ class ConfluenceClient:
             {"cql": cql, "limit": 100},
         )
 
+    def count(self, cql: str) -> int:
+        """Total number of results for a CQL query, without paging through them."""
+        payload = self._request(
+            "GET",
+            "/rest/api/search",
+            params={"cql": cql, "limit": 1},
+        )
+        if not isinstance(payload, dict):
+            raise ConfluenceAPIError(502, "Confluence did not return a search result")
+        total = payload.get("totalSize")
+        if total is None:
+            total = payload.get("size", 0)
+        return int(total)
+
+    def jira_project_keys(self) -> set[str]:
+        """Project keys visible in Jira on the same Atlassian site.
+
+        The Confluence email and API token are Atlassian credentials, so they
+        also authenticate against Jira on this site when the account has
+        Jira access.
+        """
+        url = f"https://{self.source.connection.site}/rest/api/3/project/search"
+        keys: set[str] = set()
+        start = 0
+        while True:
+            payload = self._request(
+                "GET", url, params={"startAt": start, "maxResults": 50}
+            )
+            if not isinstance(payload, dict):
+                raise ConfluenceAPIError(502, "Jira did not return a project list")
+            values = payload.get("values") or []
+            for row in values:
+                if isinstance(row, dict) and row.get("key"):
+                    keys.add(str(row["key"]).upper())
+            if payload.get("isLast", True) or not values:
+                return keys
+            start += len(values)
+
     def page(self, page_id: str) -> dict[str, Any]:
         return self._request(
             "GET",
