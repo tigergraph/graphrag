@@ -696,6 +696,7 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `entity_extraction_switch` | bool | same as `doc_process_switch` | Enable/disable entity extraction during knowledge graph build. |
 | `community_detection_switch` | bool | same as `entity_extraction_switch` | Enable/disable community detection during knowledge graph build. |
 | `extract_images` | bool | `true` | Run the multimodal LLM on images extracted from documents to generate alt-text. Set to `false` to skip the image-description pass entirely — much faster, at the cost of losing image content from retrieval. Configurable per graph. |
+| `document_parser` | string | `"default"` | The parser for PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files: `"default"` or `"docling"`. See *Document parser* in the ingestion tuning tips. Also in *Ingestion Settings* on the *GraphRAG Configuration* page. Configurable per graph. |
 | `min_image_dim_px` | int | `100` | Smallest side (in px) an image must have to be sent to the multimodal LLM. Smaller images are tagged "decorative image" without an LLM call. Configurable per graph. |
 | `load_batch_size` | int | `500` | Batch size for document loading. |
 | `upsert_delay` | int | `0` | Delay in seconds between loading batches. |
@@ -1256,6 +1257,11 @@ When customizing:
     - `min_image_dim_px` (default `100`) — smaller images are tagged "decorative image" without an LLM call.
     - Multimodal calls share the same `default_concurrency` semaphore as the rest of the pipeline — raise it to parallelize more describe calls; lower it if the multimodal provider's rate limit is hit.
     - AWS Bedrock users can further tune connection pool sizing via `boto3_config` in `llm_config`.
+
+- **Document parser.** The `document_parser` setting selects how PDF, Word, Excel (`.xlsx`), HTML, CSV and XML files are converted to text. It is also in *Ingestion Settings* on the *GraphRAG Configuration* page. A change applies to files that are ingested after the change.
+    - `"default"` is fast and light. Use it for documents that are mostly text, with simple tables.
+    - `"docling"` keeps more of the document structure, such as complex tables, charts, formulas and scanned pages. It is several times slower and uses more CPU and memory. Use it when the files have complex tables, charts or formulas.
+    - PowerPoint (`.pptx`) files always use Docling.
 
 ### 7. A working tuning loop
 
