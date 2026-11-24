@@ -129,6 +129,19 @@ def with_conversation(combined: dict, conversation, context: dict = None) -> dic
     return {**ctx, "earlier_conversation": earlier} if earlier else ctx
 
 
+def empty_lookups(results: dict, plan=None) -> list:
+    """The questions of planned structural steps whose graph query returned no
+    rows. The answer model needs them: for a count or an existence question,
+    no rows is the answer (0, or none), not missing context."""
+    if plan is None:
+        return []
+    asked = {s.id: (s.args or {}).get("question", "") for s in plan.steps
+             if s.kind == "structural"}
+    return [asked[sr.step_id] for sr in results.values()
+            if sr.step_id in asked and asked[sr.step_id] and not sr.ok
+            and "no rows" in (sr.summary or "")]
+
+
 def has_context(results: dict) -> bool:
     g = _gather(results)
     return bool(g["structural"] or g["unstructured"])
@@ -139,6 +152,9 @@ def synthesize(llm, question, results: dict, plan=None, conversation=None,
     """Produce the final answer from gathered step contexts. ``context`` is
     the planner context the plan passes to the answer step, ``{key: text}``."""
     combined = _gather(results, log=True)
+    no_rows = empty_lookups(results, plan)
+    if no_rows:
+        context = {**(context or {}), "graph_queries_with_no_rows": no_rows}
     answer_ctx = with_conversation(combined, conversation, context)
     generator = TigerGraphAgentGenerator(llm)
     answer = generator.generate_answer(question, answer_ctx)
@@ -151,7 +167,8 @@ def synthesize(llm, question, results: dict, plan=None, conversation=None,
     from_context = (plan is not None
                     and ("earlier_conversation" in answer_ctx or bool(context))
                     and not any(s.kind != "answer" and s.tool for s in plan.steps))
-    answered = retrieved or from_context
+    # A graph query that returned no rows is evidence too: 0, or none.
+    answered = retrieved or from_context or bool(no_rows)
 
     # Chunk ids the plan FETCHED (across all unstructured steps), de-duped in
     # order — the agent's record of what was retrieved, distinct from the

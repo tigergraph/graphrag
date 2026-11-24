@@ -44,7 +44,7 @@ def test_jira_guidance_is_added_to_each_step_with_the_shared_rules():
     assert "merged_<version>" in planner
     assert "An empty result is the answer" in planner
     query = guidance_for("How many jira issues were created in October 2026?", "query")
-    assert "returns one row with the count, 0 when nothing" in query
+    assert "returns only the count, for example RETURN" in query
     assert "project_key is not empty" in query
     answer = guidance_for("Summarize TSE-1073", "answer")
     assert "documentation, not record data" in answer
@@ -73,8 +73,11 @@ def test_a_bare_number_is_looked_up_in_every_source_before_asking():
     planner = guidance_for(question, "planner")
     assert "58617" in planner
     assert 'issue_key ends with "-58617"' in planner
-    assert "do not ask first" in planner
+    assert "Plan one structural step for each source" in planner
+    assert "## Jira guidance" in planner
+    assert "add for each source the steps the question needs" in planner
     assert "ask which" in guidance_for(question, "answer")
+    assert "graph_queries_with_no_rows" in guidance_for(question, "answer")
 
 
 def test_a_year_is_not_a_record_number():

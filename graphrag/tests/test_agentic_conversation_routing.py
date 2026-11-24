@@ -314,3 +314,40 @@ class TestPrompts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnswerStepSeesEmptyGraphQueries(unittest.TestCase):
+    def _context(self, results, plan):
+        seen = {}
+
+        class Gen:
+            def __init__(self, llm):
+                pass
+
+            def generate_answer(self, question, context):
+                seen["context"] = context
+                return types.SimpleNamespace(generated_answer="0", citation=[])
+
+        with mock.patch.object(syn, "TigerGraphAgentGenerator", Gen):
+            resp = syn.synthesize(object(), "q", results, plan=plan)
+        return resp, seen["context"]
+
+    def test_a_structural_step_with_no_rows_is_named_for_the_answer(self):
+        plan = Plan(steps=[
+            PlanStep(id="S1", kind="structural", tool=g._STRUCTURAL_TOOL,
+                     args={"question": "Count tickets created in October 2026"}),
+            PlanStep(id="A", kind="answer", tool="", depends_on=["S1"]),
+        ])
+        results = {"S1": StepResult(step_id="S1", ok=False,
+                                    summary="structural query returned no rows")}
+        resp, ctx = self._context(results, plan)
+        self.assertEqual(ctx["graph_queries_with_no_rows"],
+                         ["Count tickets created in October 2026"])
+        self.assertTrue(resp.answered_question)
+
+    def test_a_failed_query_is_not_reported_as_no_rows(self):
+        plan = Plan(steps=[PlanStep(id="S1", kind="structural", tool=g._STRUCTURAL_TOOL,
+                                    args={"question": "q"})])
+        results = {"S1": StepResult(step_id="S1", ok=False, summary="query failed check")}
+        _, ctx = self._context(results, plan)
+        self.assertNotIn("graph_queries_with_no_rows", ctx)

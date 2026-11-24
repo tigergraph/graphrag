@@ -40,27 +40,38 @@ _SHARED = {
         "for its description and discussion text.\n"
         "- A count, existence, list, or filter question over records is "
         "answered by a structural step. An empty result is the answer (none, "
-        "or 0); it is not a reason to search the documents instead."
+        "or 0); it is not a reason to search the documents instead.\n"
+        "- An overview question, such as a picture of the workload, is several "
+        "grouped counts: one structural step per grouping (for example by "
+        "month, status, priority, group, or assignee), each over the same "
+        "filter."
     ),
     "query": (
         "## Record query guidance\n"
-        "- A count question returns one row with the count, 0 when nothing "
-        "matches. An existence or list question also returns the number of "
-        "matching records.\n"
+        "- A count question returns only the count, for example RETURN "
+        "count(t) AS total, so the result is one row and 0 when nothing "
+        "matches. Do not add other columns or literals to a count. A count per "
+        "group returns the group value and its count.\n"
         "- Group and count in the query instead of returning every row. Match "
         "the identifier or filter first, then traverse typed edges in their "
         "schema direction (->); never use untyped patterns such as -[]-. "
         "Never return every vertex of a type.\n"
         "- Do not use OPTIONAL MATCH: TigerGraph often rejects these queries "
         "or returns no rows for them. Fetch each related record in its own "
-        "query with MATCH instead."
+        "query with MATCH instead.\n"
+        "- Do not use CASE or alternative edge types such as "
+        "[:requested|assigned]. To break counts down, group by the stored "
+        "attribute itself."
     ),
     "answer": (
         "## Record answer guidance\n"
         "- Text that explains the schema, a field's possible values, or how a "
         "connector works is documentation, not record data. Never answer a "
-        "question about specific records from it. When the structured result "
-        "is empty, say that no matching records were found, or 0 for a count."
+        "question about specific records from it.\n"
+        "- graph_queries_with_no_rows lists graph queries that ran and found "
+        "nothing. For a count or existence question that is the answer: 0, or "
+        "no matching records. For a record lookup it means that source has no "
+        "such record."
     ),
 }
 
@@ -99,18 +110,23 @@ def _identifier_guidance(number: str, step: str) -> str:
         return (
             "## Record number guidance\n"
             f"The question gives the number {number} without naming a source. "
-            "Plan one structural step that looks the number up in every "
-            "installed source below, and do not ask first:\n"
+            "Do not ask first. Plan one structural step for each source "
+            "below; each step looks the number up in that one source only, "
+            "because each step runs one query:\n"
             f"{lookups.replace('<number>', number)}\n"
-            "If exactly one source has a record, continue with that record "
-            "using that source's guidance. If several sources match, list the "
+            "In the same plan, add for each source the steps the question "
+            "needs, such as the assignee, the comments, or linked records, "
+            "with the number as that source's identifier and following that "
+            "source's guidance below. Steps for a source that has no such "
+            "record return no rows. If several sources have a record, list the "
             "matches and ask which one is meant."
         )
     if step == "query":
         return (
             "## Record number query guidance\n"
-            f"Look {number} up in each source below and return which source "
-            "matched with the record's identifier and title or summary:\n"
+            f"The step looks {number} up in one of the sources below. Query "
+            "only the source the step names, with that source's lookup, and "
+            "return the record's identifier and title or summary:\n"
             f"{lookups.replace('<number>', number)}"
         )
     if step == "answer":
@@ -130,7 +146,15 @@ def guidance_for(question: str, step: str) -> str:
     if not selected:
         number = bare_record_number(question)
         if number:
-            parts = [_identifier_guidance(number, step), _SHARED.get(step, "")]
+            # The source is unknown, so every connector's rules apply until
+            # the lookup shows which source has the record.
+            parts = [_identifier_guidance(number, step)]
+            parts += [
+                _CONNECTORS[name].GUIDANCE[step]
+                for name in sorted(_CONNECTORS)
+                if step in _CONNECTORS[name].GUIDANCE
+            ]
+            parts.append(_SHARED.get(step, ""))
             return "\n".join(part for part in parts if part)
         if step in {"planner", "answer"} and _RECORD_QUESTION.search(question or ""):
             return _CLARIFY
