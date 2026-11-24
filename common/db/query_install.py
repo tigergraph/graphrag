@@ -116,3 +116,13 @@ async def poll_query_install_async(conn, request_id: str, timeout_s: int = DEFAU
         if _status_done(await conn.getQueryInstallationStatus(request_id)):
             return
     raise Exception(f"Query installation timed out after {timeout_s}s (requestId={request_id})")
+
+
+async def install_query_set_async(conn, query_names: list[str], force: bool = True,
+                                  timeout_s: int = DEFAULT_TIMEOUT_S) -> None:
+    """Async twin of :func:`install_query_set`. No-op on empty list."""
+    if not query_names:
+        return
+    logger.info(f"Installing {len(query_names)} query(ies): {', '.join(sorted(query_names))}")
+    request_id = await submit_query_install_async(conn, query_names, force)
+    await poll_query_install_async(conn, request_id, timeout_s)

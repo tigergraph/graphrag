@@ -2278,27 +2278,43 @@ def init_graph(
         )
 
     def _run_init():
+        setup_started = time.time()
         try:
+            # Check a pasted schema before the graph changes, so a bad
+            # schema fails the setup with the graph untouched.
+            proposal = None
+            if isinstance(schema_gsql, str) and schema_gsql.strip():
+                proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
+                problems = schema_utils_mod.check_pasted_schema(schema_gsql, proposal)
+                if problems:
+                    LogWriter.error(f"Pasted schema for {graphname} rejected: {'; '.join(problems)}")
+                    _set_init_state(
+                        graphname, state="error",
+                        message="The pasted schema has errors",
+                        error=" ".join(problems),
+                        completed_at=time.time(),
+                    )
+                    return
+                proposal.drop_dangling_pairs()
+            # With a domain schema, the queries are created and installed
+            # once, after the final schema (GraphRAG schema, domain types and
+            # edge pairs) exists.
+            defer_queries = proposal is not None or bool(use_existing_schema)
+
             _set_init_state(
                 graphname, state="running",
                 message="Initializing structural schema",
             )
             _, conn = ws_basic_auth(auth_header, graphname)
             LogWriter.info(f"Initializing graph: {graphname}")
-            resp = supportai.init_supportai(conn, graphname)
+            resp = supportai.init_supportai(conn, graphname, install_queries=not defer_queries)
             schema_res, index_res, query_res = resp[0], resp[1], resp[2]
 
-            domain_schema_status: dict | None = None
-            proposal = None
-            if isinstance(schema_gsql, str) and schema_gsql.strip():
-                proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
-                proposal.drop_dangling_pairs()
-            elif use_existing_schema:
+            if proposal is None and use_existing_schema:
                 # Build a proposal from the live user-defined types so
-                # apply_proposal registers them as the domain schema and
-                # installs retrievers. The diff is a no-op because the
-                # types already exist; this run only writes type
-                # metadata (descriptions) and re-creates retriever queries.
+                # apply_proposal registers them as the domain schema. The
+                # diff is a no-op because the types already exist; this run
+                # only writes type metadata (descriptions).
                 proposal = _build_proposal_from_live_schema(
                     conn,
                     vertex_descriptions=existing_vertex_descs,
@@ -2310,41 +2326,63 @@ def init_graph(
                     f"{len(proposal.edges)} edge types"
                 )
 
+            domain_schema_status: dict | None = None
+            domain_failed = False
             if proposal is not None:
                 _set_init_state(graphname, message="Applying domain schema")
                 LogWriter.info(
                     f"Applying domain schema proposal for graph: {graphname}"
                 )
-                # Surface apply_proposal's sub-phases (schema-change,
-                # metadata, retriever installs) in the init-dialog
-                # poll instead of a static "Applying domain schema".
                 domain_schema_status = schema_utils_mod.apply_proposal(
                     conn, graphname, proposal,
                     progress=lambda msg: _set_init_state(
                         graphname, message=msg
                     ),
+                    install_retrievers=False,
                 )
                 LogWriter.info(
                     f"Domain schema status for {graphname}: "
                     f"{domain_schema_status['status']} "
                     f"({len(domain_schema_status['statements'])} stmts)"
                 )
-                if domain_schema_status.get("status") == "error":
+                domain_failed = domain_schema_status.get("status") == "error"
+                if domain_failed:
                     LogWriter.error(
                         f"Domain schema apply failed for {graphname}: "
                         f"{domain_schema_status.get('error')}"
                     )
-                    _set_init_state(
-                        graphname,
-                        state="error",
-                        message="Domain schema apply failed",
-                        error=domain_schema_status.get("error"),
-                        completed_at=time.time(),
-                        result={"domain_schema_status": domain_schema_status},
-                    )
-                    return
 
-            LogWriter.info(f"Graph initialization completed for: {graphname}")
+            query_errors: list = []
+            if defer_queries:
+                _set_init_state(graphname, message="Installing queries")
+                render = {"domain_vts": [], "domain_edges": [], "include_entity": True}
+                if not domain_failed:
+                    render = schema_utils_mod.retriever_render_args(conn, graphname, proposal)
+                # After a failed domain apply, the GraphRAG queries are still
+                # installed for the GraphRAG schema, so the graph is usable.
+                qres = supportai.install_graph_queries(
+                    conn, graphname, render["domain_vts"], render["domain_edges"],
+                    render["include_entity"],
+                )
+                query_errors = qres["errors"]
+                query_res = (f"created {len(qres['created'])}, installed {len(qres['installed'])}"
+                             + (f", errors: {query_errors}" if query_errors else ""))
+
+            if domain_failed:
+                _set_init_state(
+                    graphname,
+                    state="error",
+                    message="Domain schema apply failed",
+                    error=domain_schema_status.get("error"),
+                    completed_at=time.time(),
+                    result={"domain_schema_status": domain_schema_status},
+                )
+                return
+
+            LogWriter.info(
+                f"Graph initialization completed for: {graphname} "
+                f"in {time.time() - setup_started:.1f}s"
+            )
 
             result = {
                 "status": "success",
@@ -2355,6 +2393,8 @@ def init_graph(
                 "index_creation_status": json.dumps(index_res),
                 "query_creation_status": json.dumps(query_res),
             }
+            if query_errors:
+                result["query_errors"] = query_errors
             if domain_schema_status is not None:
                 result["domain_schema_status"] = domain_schema_status
 
