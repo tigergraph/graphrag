@@ -2,182 +2,73 @@
 
 Global instructions stay in the existing prompt templates. This module only
 returns the connector text that should be added to ``{user_prompt}`` or
-``{query_guidance}`` for the current call.
+``{query_guidance}`` for the current call. The text is applied automatically,
+so a graph's own prompt files do not need connector rules.
+
+Each connector keeps its guidance in ``connectors/<name>/prompts.py`` and is
+listed in ``_CONNECTORS``. Questions that relate two sources also get the text
+from ``cross_source_prompts.py``.
 """
 
 from __future__ import annotations
 
 import re
 
-_JIRA_KEY = re.compile(r"\b[A-Za-z][A-Za-z0-9]+-\d+\b")
-_SPACED_JIRA_KEY = re.compile(
-    r"\b([A-Za-z][A-Za-z0-9]+)\s*-\s*(\d+)\b"
-)
-_ZENDESK_URL = re.compile(
-    r"zendesk\.com/\S*?/tickets/\d+|\bzendesk\b",
-    re.IGNORECASE,
-)
+from connectors import cross_source_prompts
+from connectors.jira import prompts as jira_prompts
+
+_CONNECTORS = {module.NAME: module for module in (jira_prompts,)}
+
+_SPACED_JIRA_KEY = re.compile(r"\b([A-Za-z][A-Za-z0-9]+)\s*-\s*(\d+)\b")
 _RECORD_QUESTION = re.compile(
-    r"\b(ticket|issue|assignee|reporter|comment|status|priority)\b",
+    r"\b(ticket|issue|assignee|reporter|comment|status|priority|page)\b",
     re.IGNORECASE,
 )
+# A record number on its own, such as "#58617" or "summarize 59224". Four-digit
+# years are not record numbers.
+_BARE_NUMBER = re.compile(r"(?<![\w-])#?(\d{4,})\b")
+_YEAR = re.compile(r"(?:19|20)\d{2}")
 
-_GUIDANCE = {
-    "jira": {
-        "planner": (
-            "## Jira guidance\n"
-            "Apply this section only to JiraIssue, JiraComment, JiraChange, "
-            "JiraUser, JiraProject, and JIRA_ relationships.\n"
-            "- A full project key and number, such as GML-2186, identifies one "
-            "issue. Match issue_key case-insensitively. A bare number does not "
-            "identify one issue: retrieve matching full keys and ask the user "
-            "to choose when more than one exists. A follow-up may use the Jira "
-            "issue already established in the conversation.\n"
-            "- Jira data has two complementary forms. Structural retrieval "
-            "contains current JiraIssue fields; assignee and reporter through "
-            "JIRA_ASSIGNED_TO and JIRA_REPORTED_BY; project through "
-            "JIRA_BELONGS_TO; comments through JIRA_COMMENT_ON and "
-            "JIRA_COMMENTED_BY; and status, assignee, priority, or resolution "
-            "events through JIRA_HAS_CHANGE and JIRA_CHANGE_BY. Hybrid search "
-            "contains the description and supporting text from comments and "
-            "changes. Include the exact issue key in retrieval questions.\n"
-            "- For a broad issue summary, plan structural retrieval for the "
-            "current record, assignee, reporter, and project, plus hybrid "
-            "search for the description and recent activity. Include a focused "
-            "structural traversal for Jira-visible ZendeskTicketRef records and "
-            "resolved ZendeskTicket records. For history or "
-            "who-did-what questions, retrieve JiraChange events and comments "
-            "with their authors. For release questions, retrieve fix_versions, "
-            "due, status, and resolution plus any release text in passages.\n"
-            "- Counts, lists, filters, and aggregations over issue attributes "
-            "are structural-only unless the question also needs description "
-            "or comment text. Keep parent and linked-issue traversals in "
-            "separate focused structural steps."
-        ),
-        "query": (
-            "## Jira query guidance\n"
-            "- Return scalar attributes, never a bare vertex. For JiraIssue, "
-            "return the requested fields such as issue_key, summary, status, "
-            "status_category, priority, resolution, fix_versions, due, "
-            "created, updated, and url. For JiraUser return display_name. For "
-            "JiraProject return project_key, name, and url.\n"
-            "- Use an exact case-insensitive issue_key match when a full key "
-            "is known. When only a number is known, return all matching full "
-            "issue keys and summaries so the user can disambiguate.\n"
-            "- Use focused queries: current issue with assignee, reporter, and "
-            "project; JiraComment body and author via JIRA_COMMENT_ON and "
-            "JIRA_COMMENTED_BY; JiraChange field, from_value, to_value, "
-            "created, and changer via JIRA_HAS_CHANGE and JIRA_CHANGE_BY.\n"
-            "- Query JIRA_HAS_PARENT and JIRA_LINKS_TO only when requested, in "
-            "a separate traversal. Return the related issue_key and requested "
-            "edge attributes rather than the edge object.\n"
-            "- For linked support records, traverse JIRA_REFERENCES_ZENDESK to "
-            "ZendeskTicketRef and CROSS_SOURCE_LINK to ZendeskTicket. Return "
-            "ticket_id, source_hint, URL, label, subject, and status fields "
-            "that actually exist."
-        ),
-        "answer": (
-            "## Jira answer guidance\n"
-            "- Treat structured rows and passages as complementary evidence "
-            "for the same issue. Prefer structured values for current status, "
-            "assignee, reporter, priority, resolution, fix version, and due "
-            "date. Use passages for description and supporting activity text.\n"
-            "- Never show internal ids such as jira:user, jira:comment, or "
-            "jira:change as display values. Use display_name; if unavailable, "
-            "say the name is unavailable.\n"
-            "- A broad question should include the issue key, summary, URL, "
-            "current fields, description, and relevant recent comments or "
-            "changes. Identify retrieved ZendeskTicketRef records as "
-            "Jira-visible references and ZendeskTicket records as full "
-            "Zendesk tickets. A history question should present changes in time order "
-            "and state the current status. A release question must not invent "
-            "a release when fix_versions, due date, and supporting text do not "
-            "provide one.\n"
-            "- If a bare number matches several Jira keys, list those keys and "
-            "ask which issue the user means without mixing their details."
-        ),
-    },
-    "zendesk": {
-        "planner": (
-            "## Zendesk guidance\n"
-            "Apply this section only to ZendeskTicket, ZendeskComment, "
-            "ZendeskUser, ZENDESK_REQUESTED_BY, and ZENDESK_COMMENT_ON.\n"
-            "- A Zendesk ticket is identified by its ticket_id together with "
-            "the configured Zendesk source. Do not apply Jira issue-key rules "
-            "or rewrite a ticket number as a Jira key. A bare ticket number is "
-            "ambiguous unless the user says Zendesk or the conversation has "
-            "already established Zendesk.\n"
-            "- Structural retrieval contains ZendeskTicket ticket_id, subject, "
-            "status, and url; its requester is a ZendeskUser reached through "
-            "ZENDESK_REQUESTED_BY; comments are ZendeskComment vertices reached "
-            "through ZENDESK_COMMENT_ON. Hybrid search contains ticket subject, "
-            "description, and comment text.\n"
-            "- For a broad ticket summary, plan structural retrieval for the "
-            "ticket and requester plus hybrid search for the description and "
-            "conversation. For status or requester questions, use structural "
-            "retrieval. For what-happened or discussion questions, combine the "
-            "ticket state with relevant comment passages.\n"
-            "- Do not request assignee, priority, dates, tags, or other fields "
-            "that are not present in the installed Zendesk schema."
-        ),
-        "query": (
-            "## Zendesk query guidance\n"
-            "- Match ZendeskTicket.ticket_id for a ticket lookup and return "
-            "named fields: ticket_id, subject, status, and url. Do not return "
-            "a bare ZendeskTicket vertex.\n"
-            "- Retrieve requester user_id and display_name through "
-            "ZENDESK_REQUESTED_BY. Retrieve comment_id and body from "
-            "ZendeskComment through ZENDESK_COMMENT_ON.\n"
-            "- A Zendesk ticket number is not a Jira issue key. Do not query "
-            "JiraIssue unless the question explicitly selects Jira too."
-        ),
-        "answer": (
-            "## Zendesk answer guidance\n"
-            "- Prefer the structured ZendeskTicket status, subject, URL, and "
-            "requester for current facts. Use description and comment passages "
-            "for the ticket narrative and conversation.\n"
-            "- Never present internal zendesk: vertex ids as user-facing names. "
-            "Use ZendeskUser.display_name when available.\n"
-            "- A broad summary should include ticket id, subject, URL, current "
-            "status, requester, description, and relevant comments. Do not "
-            "invent fields that are absent from the Zendesk schema, and never "
-            "treat the ticket number as a Jira issue key."
-        ),
-    },
-}
-
-_CROSS = {
+_SHARED = {
     "planner": (
-        "## Jira and Zendesk relationship guidance\n"
-        "Plan focused retrievals for both records and traverse "
-        "CROSS_SOURCE_LINK between JiraIssue and ZendeskTicket. Retrieve each "
-        "record's current structured fields and use source-specific hybrid "
-        "search only when description or comment evidence is needed. The edge "
-        "must exist; do not infer a relationship from similar numbers, titles, "
-        "customer names, or text."
+        "## Record question guidance\n"
+        "- A question that asks only for stored fields of a record, such as "
+        "its status, assignee, priority, dates, or URL, uses structural steps "
+        "only. Do not add a hybrid search for it.\n"
+        "- A summary, 'tell me about', what-happened, why, or next-steps "
+        "question uses structural steps for the record plus a hybrid search "
+        "for its description and discussion text.\n"
+        "- A count, existence, list, or filter question over records is "
+        "answered by a structural step. An empty result is the answer (none, "
+        "or 0); it is not a reason to search the documents instead."
     ),
     "query": (
-        "## Jira and Zendesk relationship query guidance\n"
-        "Traverse CROSS_SOURCE_LINK only between JiraIssue and ZendeskTicket. "
-        "Match each endpoint with its own identifier and return named fields "
-        "from both endpoints. Do not join issue_key to ticket_id and do not "
-        "infer an edge from matching text."
+        "## Record query guidance\n"
+        "- A count question returns one row with the count, 0 when nothing "
+        "matches. An existence or list question also returns the number of "
+        "matching records.\n"
+        "- Group and count in the query instead of returning every row. Match "
+        "the identifier or filter first, then traverse typed edges in their "
+        "schema direction (->); never use untyped patterns such as -[]-. "
+        "Never return every vertex of a type.\n"
+        "- Do not use OPTIONAL MATCH: TigerGraph often rejects these queries "
+        "or returns no rows for them. Fetch each related record in its own "
+        "query with MATCH instead."
     ),
     "answer": (
-        "## Jira and Zendesk relationship answer guidance\n"
-        "If CROSS_SOURCE_LINK is present, identify both records and explain "
-        "their source-specific facts separately before describing the link. "
-        "If the edge is absent, say that no explicit cross-source link was "
-        "found. Do not claim a relationship from similar content alone."
+        "## Record answer guidance\n"
+        "- Text that explains the schema, a field's possible values, or how a "
+        "connector works is documentation, not record data. Never answer a "
+        "question about specific records from it. When the structured result "
+        "is empty, say that no matching records were found, or 0 for a count."
     ),
 }
 
 _CLARIFY = (
-    "The source system is ambiguous. Ask the user whether they mean a Jira "
-    "issue or a Zendesk ticket before answering, unless the conversation has "
-    "already established the source. Do not guess from a bare number, and do "
-    "not apply either connector's rules until the source is known."
+    "The source system is ambiguous. Ask the user which source they mean "
+    "before answering, unless the conversation has already established it."
 )
+
 
 def normalize_connector_question(text: str) -> str:
     """Normalize qualified connector identifiers without changing bare ids."""
@@ -189,43 +80,81 @@ def normalize_connector_question(text: str) -> str:
 
 def selected_connectors(question: str) -> set[str]:
     text = normalize_connector_question(question)
-    selected: set[str] = set()
-    if _JIRA_KEY.search(text) or re.search(r"\bjira\b", text, re.IGNORECASE):
-        selected.add("jira")
-    if _ZENDESK_URL.search(text):
-        selected.add("zendesk")
-    return selected
+    return {name for name, module in _CONNECTORS.items() if module.selects(text)}
+
+
+def bare_record_number(question: str) -> str | None:
+    """The record number in a question that names no source, if any."""
+    for match in _BARE_NUMBER.finditer(question or ""):
+        number = match.group(1)
+        if not (len(number) == 4 and _YEAR.fullmatch(number)):
+            return number
+    return None
+
+
+def _identifier_guidance(number: str, step: str) -> str:
+    lookups = "\n".join(f"  - {module.IDENTIFIER}" for module in _CONNECTORS.values())
+    sources = ", ".join(module.LABEL for module in _CONNECTORS.values())
+    if step == "planner":
+        return (
+            "## Record number guidance\n"
+            f"The question gives the number {number} without naming a source. "
+            "Plan one structural step that looks the number up in every "
+            "installed source below, and do not ask first:\n"
+            f"{lookups.replace('<number>', number)}\n"
+            "If exactly one source has a record, continue with that record "
+            "using that source's guidance. If several sources match, list the "
+            "matches and ask which one is meant."
+        )
+    if step == "query":
+        return (
+            "## Record number query guidance\n"
+            f"Look {number} up in each source below and return which source "
+            "matched with the record's identifier and title or summary:\n"
+            f"{lookups.replace('<number>', number)}"
+        )
+    if step == "answer":
+        return (
+            "## Record number answer guidance\n"
+            f"{number} was given without a source ({sources}). Answer from the "
+            "single source that has a record with that number. If several "
+            "match, list them and ask which is meant. If none match, say the "
+            "number was not found in any source."
+        )
+    return ""
 
 
 def guidance_for(question: str, step: str) -> str:
     """Return connector guidance for this step, or a clarification request."""
     selected = selected_connectors(question)
     if not selected:
+        number = bare_record_number(question)
+        if number:
+            parts = [_identifier_guidance(number, step), _SHARED.get(step, "")]
+            return "\n".join(part for part in parts if part)
         if step in {"planner", "answer"} and _RECORD_QUESTION.search(question or ""):
             return _CLARIFY
         return ""
-    parts = [_GUIDANCE[name][step] for name in sorted(selected) if step in _GUIDANCE[name]]
-    if selected == {"jira", "zendesk"} and re.search(
-        r"\b(related|relationship|link|linked|mention|reference|connected|"
-        r"compare|comparison|versus|vs|both|across)\b",
-        question or "",
-        re.IGNORECASE,
-    ):
-        parts.append(_CROSS[step])
+    parts = [
+        _CONNECTORS[name].GUIDANCE[step]
+        for name in sorted(selected)
+        if step in _CONNECTORS[name].GUIDANCE
+    ]
+    if step in _SHARED:
+        parts.append(_SHARED[step])
+    cross = cross_source_prompts.guidance_for(selected, question, step)
+    if cross:
+        parts.append(cross)
     return "\n".join(parts)
 
 
 def allows_type(type_name: str, selected: set[str]) -> bool:
     """Keep core types plus the vertex types owned by the selected connectors."""
     name = type_name.split(" ", 1)[0]
-    if name in {"Document", "DocumentChunk", "Content", "PendingRef", "PendingLink"}:
+    if name in {"Document", "DocumentChunk", "Content"}:
         return True
-    if "jira" in selected and name.startswith("Jira"):
-        return True
-    if "jira" in selected and name in {"ZendeskTicketRef", "ZendeskTicket"}:
-        return True
-    if "zendesk" in selected and name.startswith("Zendesk"):
+    if name in {"Person", "Organization", "Attachment"}:
         return True
     if not selected:
         return True
-    return False
+    return any(_CONNECTORS[c].owns_type(name) for c in selected if c in _CONNECTORS)

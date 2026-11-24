@@ -194,9 +194,10 @@ const ConnectorPromptGuide: React.FC<{ connectorType: string }> = ({
             Multiple sources
           </h4>
           <p className="mt-1 text-xs leading-5 text-gray-600 dark:text-gray-400">
-            Jira summaries automatically include Zendesk references visible in
-            Jira. When the Zendesk source is also ingested, those references
-            resolve through CROSS_SOURCE_LINK to the full ticket details.
+            A question that relates two sources, such as a Zendesk ticket and
+            its Jira issue, also receives cross-source rules: follow the stored
+            link edge and say so when no link is stored. A record number with
+            no source is looked up in every installed source.
           </p>
         </div>
       </div>
@@ -220,11 +221,16 @@ const ConnectorPromptGuide: React.FC<{ connectorType: string }> = ({
           Guidance ownership
         </h4>
         <p className="mt-1 text-gray-600 dark:text-gray-400">
-          Connector guidance is product-managed and currently lives in
+          Connector guidance is product-managed. Each connector keeps its
+          planner, query, and answer rules in
+          <code className="mx-1 rounded bg-gray-100 dark:bg-background px-1 py-0.5 text-xs">
+            connectors/&lt;connector&gt;/prompts.py
+          </code>
+          and
           <code className="mx-1 rounded bg-gray-100 dark:bg-background px-1 py-0.5 text-xs">
             connectors/prompt_selection.py
           </code>
-          as separate planner, query, and answer rules. There is currently no
+          chooses them for each question. There is currently no
           user-editable connector-guidance field. If one is added later, it
           must keep those three steps separate and remain scoped to its
           connector instead of being appended to the global prompt.
