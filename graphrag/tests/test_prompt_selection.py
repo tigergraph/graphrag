@@ -98,6 +98,9 @@ def test_a_data_question_naming_no_source_gets_every_connector_and_shared_rule()
     assert "## Jira guidance" in workload
     assert "one structural step per breakdown" in workload
     assert guidance_for("What is our refund policy?", "planner") == ""
+    customer = guidance_for("Summarize the tickets of customer Acme.", "planner")
+    assert "## Zendesk guidance" in customer
+    assert "A customer's records are the tickets requested by members" in customer
 
 
 def test_relation_guidance_needs_two_sources(monkeypatch):
