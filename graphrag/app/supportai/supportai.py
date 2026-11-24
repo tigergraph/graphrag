@@ -118,9 +118,16 @@ def install_graph_queries(conn, graphname: str, domain_vts=(), domain_edges=(),
     schema_text = conn.gsql(f"USE GRAPH {graphname}\n ls")
     vector = "- embedding(Dimension=" in schema_text
     chunk_context = bool(re.search(r"- VERTEX DocumentChunk\([^)]*\bheading_path STRING", schema_text))
+    files = supportai_query_files(vector)
+    if domain_vts or domain_edges:
+        # A graph with a domain schema also gets every templated retriever
+        # rendered for it, including the non-vector ones.
+        from common.db.retriever_render import TEMPLATED_RETRIEVERS, _RETRIEVER_DIR
+        names = {os.path.splitext(os.path.basename(f))[0] for f in files}
+        files += [os.path.join(str(_RETRIEVER_DIR), f"{q}.gsql")
+                  for q in TEMPLATED_RETRIEVERS if q not in names]
     result = create_and_install_queries(
-        conn, graphname, supportai_query_files(vector), domain_vts, domain_edges,
-        include_entity, chunk_context,
+        conn, graphname, files, domain_vts, domain_edges, include_entity, chunk_context,
     )
     _install_vector_utility_queries(graphname)
     return result

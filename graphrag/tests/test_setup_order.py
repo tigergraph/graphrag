@@ -99,6 +99,38 @@ class TestGraphQueries(unittest.TestCase):
         self.assertIn("WORKS_FOR>", hybrid)
 
 
+class TestGraphQuerySet(unittest.TestCase):
+    """A graph with a domain schema gets every templated retriever, as the
+    setup did before the queries moved after the domain schema."""
+
+    def setUp(self):
+        try:
+            from supportai import supportai
+        except Exception as exc:  # needs the app environment
+            raise unittest.SkipTest(f"app environment unavailable: {exc}")
+        self.supportai = supportai
+
+    def _names(self, **domain):
+        conn = mock.Mock()
+        conn.gsql.return_value = "- VERTEX DocumentChunk(id STRING)\n- embedding(Dimension=1536)"
+        with mock.patch.object(self.supportai, "create_and_install_queries",
+                               return_value={"created": [], "errors": [], "installed": []}) as cai, \
+             mock.patch.object(self.supportai, "_install_vector_utility_queries"):
+            self.supportai.install_graph_queries(conn, "G", **domain)
+        files = cai.call_args.args[2]
+        return {f.rsplit("/", 1)[-1][:-5] for f in files}
+
+    def test_domain_graph_gets_the_text_retrievers_too(self):
+        names = self._names(domain_vts=["Company"], domain_edges=["WORKS_FOR"])
+        self.assertTrue({"GraphRAG_Hybrid_Search", "GraphRAG_Community_Search",
+                         "GraphRAG_Hybrid_Vector_Search"} <= names)
+
+    def test_graph_without_domain_schema_keeps_the_base_set(self):
+        names = self._names()
+        self.assertNotIn("GraphRAG_Hybrid_Search", names)
+        self.assertIn("GraphRAG_Hybrid_Vector_Search", names)
+
+
 class TestDomainApplyCanDeferRetrievers(unittest.TestCase):
     def test_retrievers_are_left_to_the_caller(self):
         conn = mock.Mock()
