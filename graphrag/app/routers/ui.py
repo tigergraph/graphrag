@@ -1643,6 +1643,10 @@ async def migration_chunk_context(
     text to heading_path. Returns {moved, unchanged, not_matched}."""
     reinstall = await asyncio.to_thread(_add_chunk_context_schema, graphname, creds)
     result = await _proxy_regen(graphname, creds, "move_heading_paths")
+    # The chunk text changed while the chunk count did not; build the keyword
+    # index again on next use.
+    from supportai.keyword_index import invalidate_keyword_index
+    invalidate_keyword_index(graphname)
     if reinstall.get("errors"):
         result["query_errors"] = reinstall["errors"]
     return result
@@ -1656,6 +1660,70 @@ async def migration_regenerate_chunk_summaries(
     """Generate summaries for chunks without one and re-embed them
     (GML-2369). Returns {summarized, skipped}."""
     return await _proxy_regen(graphname, creds, "regenerate_chunk_summaries")
+
+
+def _set_graph_keyword_search(graphname: str, enabled: bool) -> None:
+    """Set ``keyword_search`` in the graph's own settings, keeping its other
+    overrides."""
+    from common.config import _config_file_lock
+
+    path = os.path.join("configs", "graph_configs", graphname, "server_config.json")
+    with _config_file_lock:
+        graph_server_config = {}
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                graph_server_config = json.load(f)
+        overrides = graph_server_config.setdefault("graphrag_config", {})
+        overrides["keyword_search"] = enabled
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(graph_server_config, f, indent=2)
+        os.replace(tmp, path)
+
+
+@router.get(route_prefix + "/{graphname}/keyword_index")
+def keyword_index_status_endpoint(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Whether keyword search is on for the graph, and its index size."""
+    from supportai.keyword_index import keyword_index_status
+    return keyword_index_status(
+        graphname,
+        connect=lambda: get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password),
+    )
+
+
+@router.post(route_prefix + "/{graphname}/keyword_index")
+async def keyword_index_update(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict, Body()],
+):
+    """Turn keyword search on or off for the graph (``{"enabled": bool}``).
+    Turning it on builds the index now; a later call with ``enabled: true``
+    builds it again."""
+    from supportai.keyword_index import (
+        build_keyword_index,
+        invalidate_keyword_index,
+        keyword_index_status,
+    )
+
+    _require_roles(creds[1], {"superuser", "globaldesigner"})
+    enabled = bool(payload.get("enabled"))
+    if enabled:
+        if get_rebuilding_graph() == graphname:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Graph '{graphname}' is being rebuilt; retry after it completes.",
+            )
+        conn = get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password)
+        await asyncio.to_thread(build_keyword_index, conn)
+    else:
+        invalidate_keyword_index(graphname)
+    _set_graph_keyword_search(graphname, enabled)
+    return keyword_index_status(graphname)
 
 
 @router.post(route_prefix + "/{graphname}/migration/apply")
@@ -2693,6 +2761,8 @@ async def forceupdate(
                         if not is_running and status in ["completed", "failed", "idle"]:
                             LogWriter.info(f"ECC rebuild finished for {graphname} with status: {status} after {elapsed}s")
                             _last_ecc_status_cache.pop(graphname, None)
+                            from supportai.keyword_index import invalidate_keyword_index
+                            invalidate_keyword_index(graphname)
                             break
                     else:
                         LogWriter.warning(f"ECC status check returned {status_response.status_code} for {graphname}")

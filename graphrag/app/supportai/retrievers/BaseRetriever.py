@@ -2,7 +2,7 @@ from common.embeddings.embedding_services import EmbeddingModel
 from common.embeddings.base_embedding_store import EmbeddingStore
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 from common.llm_services.base_llm import LLM_Model
-from common.py_schemas import CandidateScore, CandidateGenerator, GraphRAGAnswerOutput, CommunityAnswer
+from common.py_schemas import CandidateScore, CandidateGenerator, GraphRAGAnswerOutput, CommunityAnswer, RerankOutput
 from common.utils.token_calculator import get_token_calculator
 from common.utils.retrieval_stats import describe_retrieval
 from common.config import get_chat_config, get_embedding_store, get_graphrag_config
@@ -155,6 +155,68 @@ class BaseRetriever:
             results = results[:top_k]
 
         return [{"candidate_answer": x.answer, "score": x.quality_score} for x in results]
+
+    # Reranking shows each passage as its section path, its summary and the
+    # start of its text; a chunk without a summary shows more of its text.
+    _RERANK_LEAD_CHARS = 400
+    _RERANK_NO_SUMMARY_CHARS = 1200
+
+    def _rerank(self, question, texts: dict, keep: int) -> list:
+        """Ids of ``texts`` ({chunk id: text}) in the order one ranking call
+        gives, at most ``keep``. The search order is kept when the call fails."""
+        ids = list(texts)
+        if len(ids) <= 1:
+            return ids[:keep]
+        labels = self._chunk_labels(ids)
+        passages = []
+        for n, cid in enumerate(ids, 1):
+            path, summary = labels.get(cid, ("", ""))
+            text = texts[cid] or ""
+            if summary:
+                body = f"Summary: {summary}\nStart: {text[:self._RERANK_LEAD_CHARS]}"
+            else:
+                body = text[:self._RERANK_NO_SUMMARY_CHARS]
+            passages.append(f"[{n}]" + (f" {path}" if path else "") + f"\n{body}")
+        try:
+            parser = PydanticOutputParser(pydantic_object=RerankOutput)
+            prompt = PromptTemplate(
+                template=self.llm_service.rerank_prompt,
+                input_variables=["question", "passages"],
+                partial_variables={"format_instructions": parser.get_format_instructions()},
+            )
+            out = self.llm_service.invoke_with_parser(
+                prompt, parser, {"question": question, "passages": "\n\n".join(passages)},
+                caller_name="rerank", light=True,
+            )
+            order = []
+            for n in out.ranked or []:
+                if isinstance(n, int) and 1 <= n <= len(ids) and ids[n - 1] not in order:
+                    order.append(ids[n - 1])
+            order += [c for c in ids if c not in order]
+        except Exception as e:
+            self.logger.warning(f"rerank failed ({e}); keeping the search order")
+            order = ids
+        return order[:keep]
+
+    def _chunk_labels(self, ids: list) -> dict:
+        """``{chunk id: (section path, summary)}``, read in parallel; empty
+        strings for a chunk or graph without them."""
+        from common.utils.chunk_context import HEADING_PATH_ATTR, SUMMARY_ATTR
+
+        def one(cid):
+            try:
+                rows = self.conn.getVerticesById(
+                    "DocumentChunk", cid, select=f"{HEADING_PATH_ATTR},{SUMMARY_ATTR}"
+                )
+                attrs = rows[0].get("attributes", {}) if rows else {}
+                return cid, (attrs.get(HEADING_PATH_ATTR) or "", attrs.get(SUMMARY_ATTR) or "")
+            except Exception:
+                return cid, ("", "")
+
+        cfg = get_graphrag_config(self.conn.graphname if self.conn else None)
+        workers = max(1, min(len(ids), int(cfg.get("default_concurrency", 10) or 10)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return dict(ex.map(one, ids))
 
     def _generate_response(self, question, retrieved, query = "", verbose = False):
         response_parser = PydanticOutputParser(pydantic_object=GraphRAGAnswerOutput)

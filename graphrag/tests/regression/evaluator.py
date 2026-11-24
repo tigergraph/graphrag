@@ -480,6 +480,19 @@ def _query_graphrag(
     return data
 
 
+def _engine_label(data: dict, query_sources: dict, mode: str) -> str:
+    """The engine that answered: "deep agent", "legacy planned",
+    "legacy react", "legacy triage" or "classic"."""
+    engine = str(query_sources.get("engine") or "").lower()
+    if engine == "deep_agent" or data.get("response_type") == "deep_agent":
+        return "deep agent"
+    if engine:
+        return f"legacy {engine}"
+    if mode == "classic":
+        return "classic"
+    return data.get("response_type") or "unknown"
+
+
 def _eval_one(
     idx: int,
     q: EvalQuestion,
@@ -509,8 +522,9 @@ def _eval_one(
         }
         _chosen = (query_sources.get("chosen_retriever") or "").lower().replace(" ", "")
         r.search_type_used = _RETRIEVER_LABELS.get(_chosen) or data.get("response_type") or None
-        # Record which agent was used for this run
-        r.agent_mode = f"{mode}/{rag_pattern}"
+        # Record the engine that answered, which can differ from the one
+        # requested: Agent mode runs the graph's agent engine.
+        r.agent_mode = _engine_label(data, query_sources, mode)
         contexts            = _flatten_context(query_sources)
     except httpx.HTTPStatusError as e:
         r.error = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
@@ -636,7 +650,7 @@ def run_eval(
     username: str,
     password: str,
     mode: str = "agentic",
-    rag_pattern: str = "planned",
+    rag_pattern: str = "auto",
     detailed: bool = False,
 ) -> List[EvalResult]:
     total    = len(questions)
@@ -668,7 +682,8 @@ _CSV_FIELDS = [
 ]
 
 
-def write_results(results: List[EvalResult], output_dir: str, detailed: bool = False) -> None:
+def write_results(results: List[EvalResult], output_dir: str, detailed: bool = False,
+                  requested_agent: Optional[str] = None) -> None:
     os.makedirs(output_dir, exist_ok=True)
     ts        = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path  = os.path.join(output_dir, f"results_{ts}.csv")
@@ -689,10 +704,19 @@ def write_results(results: List[EvalResult], output_dir: str, detailed: bool = F
     corr_vals = [r.answer_correctness for r in results if r.answer_correctness is not None]
     avg_corr  = sum(corr_vals) / len(corr_vals) if corr_vals else None
 
-    agent_label = results[0].agent_mode if results else "unknown"
+    engines = {}
+    for r in results:
+        if r.agent_mode:
+            engines[r.agent_mode] = engines.get(r.agent_mode, 0) + 1
+    agent_label = ", ".join(f"{e} ×{n}" for e, n in sorted(engines.items())) or "unknown"
     print(f"\n  {'═' * 60}")
     print(f"  {_B}Summary{_X}  [{_C}{agent_label}{_X}]")
     print(f"  {'═' * 60}")
+    print(f"  Answered by             : {agent_label}")
+    if requested_agent in ("planned", "reactive") and "deep agent" in engines:
+        print(f"  {_Y}--agent {requested_agent} asks for a style of the legacy agent engine, but this "
+              f"graph runs the Deep Agent. Set agent_engine to \"legacy\" for the graph to score "
+              f"the legacy engine.{_X}")
     print(f"  Answered                : {_G}{answered}{_X} / {len(results)}")
     if unanswered:
         print(f"  No answer               : {_Y}{len(unanswered)}{_X}"
@@ -735,12 +759,15 @@ if __name__ == "__main__":
                         help="Path to server_config.json")
     parser.add_argument("--url",         default=None,
                         help="GraphRAG base URL (overrides server_config.json graphrag_config.query_url)")
-    parser.add_argument("--agent", default="planned",
-                        choices=["planned", "reactive", "classic"],
+    parser.add_argument("--agent", default="agentic",
+                        choices=["agentic", "planned", "reactive", "classic"],
                         help=(
-                            "Agent to use: 'planned' (Planned Agent, default), "
-                            "'reactive' (ReAct Agent), or 'classic' (Classic engine). "
-                            "Use --search-type to override the Classic retriever."
+                            "Engine to use: 'agentic' (Agent mode as the graph runs it: the "
+                            "Deep Agent unless the graph sets agent_engine to \"legacy\"; default), "
+                            "'planned' or 'reactive' (styles of the legacy agent engine; they "
+                            "apply only when the graph sets agent_engine to \"legacy\"), or "
+                            "'classic' (Classic engine). Use --search-type to override the "
+                            "Classic retriever. The summary shows the engine that answered."
                         ))
     parser.add_argument("--search-type", default="auto",
                         help=(
@@ -791,6 +818,7 @@ if __name__ == "__main__":
 
     # Map --agent choice to (mode, rag_pattern) for the /query endpoint
     _AGENT_MAP = {
+        "agentic":  ("agentic", "auto"),
         "planned":  ("agentic", "planned"),
         "reactive": ("agentic", "reactive"),
         "classic":  ("classic", args.search_type.lower()),
@@ -818,7 +846,7 @@ if __name__ == "__main__":
         rag_pattern = rag_pattern,
         detailed    = args.detailed,
     )
-    write_results(results, output_dir, detailed=args.detailed)
+    write_results(results, output_dir, detailed=args.detailed, requested_agent=args.agent)
 
     # os._exit skips the interpreter shutdown phase, which otherwise emits
     # destructor/asyncio noise ("ImportError: sys.meta_path is None …") from

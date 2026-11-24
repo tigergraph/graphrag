@@ -42,7 +42,8 @@ definitions, figures in reports): hybrid_search is the best default; \
 contextual_search for tables and passages needing surrounding text (use \
 top_k >= 10 for a value, row, total, ranking or year-over-year comparison, and \
 quote the exact label, column, year or unit); similarity_search for a single \
-passage; community_search for broad, thematic or "overall" questions.
+passage; community_search for broad, thematic or "overall" questions\
+{keyword_hint}.
 - Structured data (counts, lookups by attribute or id, relationships, paths, \
 aggregations): read get_graph_schema first, then prefer exact TigerGraph tools \
 (get_vertex_count, get_edge_count, get_vertices, get_vertices_by_id, get_edges); \
@@ -99,7 +100,8 @@ them, or state clearly that the data is not in the graph."""
 DOCUMENT_RESEARCHER_PROMPT = """\
 You are a document researcher for the TigerGraph knowledge graph "{graphname}". \
 You answer one focused question from the ingested documents using \
-hybrid_search, contextual_search, similarity_search and community_search. Use \
+hybrid_search, contextual_search, similarity_search{keyword_tool} and \
+community_search. Use \
 standalone queries that quote exact names, labels, years and units; widen top_k \
 or switch tool when results are thin. Reply with the relevant facts, each with \
 the id of the passage it came from, quoting figures exactly. Say which \
@@ -135,17 +137,27 @@ does, search once more with those exact words. If still no result contains \
 them, no result directly supports that part: answer it as described above. \
 Common words, and placeholders such as <node> or <path>, do not count.
 """
+EXACT_TERM_RULE = """\
+- When the question quotes an exact error message, setting, command, code or \
+identifier, search for those exact words with keyword_search. If it reports \
+that no passage in the knowledge graph contains a distinctive word of it, no \
+result directly supports that part: answer it as described above. Common \
+words, and placeholders such as <node> or <path>, do not count.
+"""
+KEYWORD_HINT = ("; keyword_search for a passage that must contain an exact name, term, "
+                "number or label, such as a note or section another passage refers to")
 
 
 def main_prompt(graphname: str, today: str, use_cypher: bool,
                 answer_style: str = "", additional: str = "",
-                long_term_memory: bool = True) -> str:
+                long_term_memory: bool = True, keyword_search: bool = False) -> str:
     style = f"\n## Answer style\n{answer_style.strip()}\n" if answer_style.strip() else ""
     extra = f"\n## Additional instructions\n{additional.strip()}\n" if additional.strip() else ""
     return MAIN_PROMPT.format(
         graphname=graphname, today=today,
         cypher_hint=CYPHER_HINT if use_cypher else "",
-        exact_term_rule=RESULT_TERM_RULE,
+        keyword_hint=KEYWORD_HINT if keyword_search else "",
+        exact_term_rule=EXACT_TERM_RULE if keyword_search else RESULT_TERM_RULE,
         answer_style=style, additional=extra,
         memory_section=MEMORY_SECTION if long_term_memory else NO_MEMORY_SECTION,
     )
@@ -156,5 +168,6 @@ def graph_analyst_prompt(graphname: str, use_cypher: bool) -> str:
                                        cypher_hint=CYPHER_HINT if use_cypher else "")
 
 
-def document_researcher_prompt(graphname: str) -> str:
-    return DOCUMENT_RESEARCHER_PROMPT.format(graphname=graphname)
+def document_researcher_prompt(graphname: str, keyword_search: bool = False) -> str:
+    return DOCUMENT_RESEARCHER_PROMPT.format(
+        graphname=graphname, keyword_tool=", keyword_search" if keyword_search else "")

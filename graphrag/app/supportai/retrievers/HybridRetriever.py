@@ -2,6 +2,23 @@ import json
 from supportai.retrievers import BaseRetriever
 from common.metrics.tg_proxy import TigerGraphConnectionProxy
 
+def rerank_enabled(cfg) -> bool:
+    """The ``rerank`` setting; when unset, it follows ``keyword_search``."""
+    value = cfg.get("rerank")
+    if value is None:
+        value = cfg.get("keyword_search", False)
+    return bool(value)
+
+
+def rerank_on(retriever, doc_only) -> bool:
+    """Reranking is on for the graph and applies to this search."""
+    from common.config import get_graphrag_config
+    if doc_only:
+        return False
+    cfg = get_graphrag_config(retriever.conn.graphname if retriever.conn else None)
+    return rerank_enabled(cfg)
+
+
 class HybridRetriever(BaseRetriever):
     def __init__(
         self,
@@ -12,7 +29,7 @@ class HybridRetriever(BaseRetriever):
     ):
         super().__init__(embedding_service, embedding_store, llm_service, connection)
 
-    def search(self, question, indices, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand = False, method = "similarity", chunk_only=False, doc_only=False, verbose=False, max_results: int = 0):
+    def search(self, question, indices, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand = False, method = "similarity", chunk_only=False, doc_only=False, verbose=False, max_results: int = 0, keyword_matches: bool = True):
         if expand:
             questions = self._expand_question(question, top_k, verbose)
             verbose and self.logger.info(f"Expanded questions to use: {questions}")
@@ -66,13 +83,15 @@ class HybridRetriever(BaseRetriever):
             # query-relevant expansion). Unset -> top_k*2.
             from common.config import get_graphrag_config
             _floor = top_k * 2
-            max_results = max(
-                max_results
-                or get_graphrag_config(
-                    self.conn.graphname if self.conn else None
-                ).get("max_results", 0),
-                _floor,
-            )
+            cfg = get_graphrag_config(self.conn.graphname if self.conn else None)
+            max_results = max(max_results or cfg.get("max_results", 0), _floor)
+            # With reranking, search a larger pool and keep the best
+            # max_results after the ranking call.
+            rerank = rerank_enabled(cfg) and not doc_only
+            keep = max_results
+            if rerank:
+                top_k = min(top_k * self._RERANK_POOL, self._RERANK_MAX_SEEDS)
+                max_results = min(max_results * self._RERANK_POOL, self._RERANK_MAX_CANDIDATES)
             query_vector = self._generate_embedding(question)
             self._check_query_install("GraphRAG_Hybrid_Vector_Search")
             res = self.conn.runInstalledQuery(
@@ -92,6 +111,14 @@ class HybridRetriever(BaseRetriever):
                 sizeLimit=1000000000,
                 usePost=True
             )  
+        if not expand and rerank_on(self, doc_only):
+            # The ranking call judges keyword and vector candidates together,
+            # so keyword matches join without the strength gate.
+            if keyword_matches:
+                self._add_keyword_matches(question, res, top_k, strong_only=False)
+            self._apply_rerank(question, res, keep)
+        elif keyword_matches and not expand and not doc_only:
+            self._add_keyword_matches(question, res, top_k)
         if len(res) > 1 and "verbose" in res[1]:
             verbose_info = json.dumps(res[1]['verbose'])
             self.logger.info(f"Retrived HybridSearch query verbose info: {verbose_info}")
@@ -99,6 +126,49 @@ class HybridRetriever(BaseRetriever):
                 res[1]["verbose"]["expanded_questions"] = questions
         self._log_retrieval("GraphRAG_Hybrid_Vector_Search", res)
         return res
+
+    # Reranking pool: this many times the usual seeds and results, capped.
+    _RERANK_POOL = 3
+    _RERANK_MAX_SEEDS = 30
+    _RERANK_MAX_CANDIDATES = 60
+
+    def _apply_rerank(self, question, res, keep):
+        if not res or not isinstance(res[0], dict):
+            return
+        retrieved = res[0].get("final_retrieval") or {}
+        texts = {cid: "\n".join(v) if isinstance(v, list) else str(v) for cid, v in retrieved.items()}
+        order = self._rerank(question, texts, keep)
+        res[0]["final_retrieval"] = {cid: retrieved[cid] for cid in order}
+        res[0]["reranked"] = True
+
+    def _add_keyword_matches(self, question, res, top_k, strong_only=True):
+        """Add the chunks that best match the question's words (BM25) and are
+        not already in the result, when the match is strong. Their text goes
+        into ``final_retrieval`` and their ids into ``keyword_matches``.
+
+        Only a strong match is added: weaker matches share only common words
+        with the question and push relevant passages out of the answer."""
+        from common.config import get_graphrag_config
+        from supportai.keyword_index import chunk_texts, keyword_match
+
+        cfg = get_graphrag_config(self.conn.graphname if self.conn else None)
+        if not cfg.get("keyword_search", False) or not res or not isinstance(res[0], dict):
+            return
+        retrieved = res[0].setdefault("final_retrieval", {})
+        try:
+            match = keyword_match(self.conn, question, cfg.get("keyword_top_k", top_k))
+            if match is None or (strong_only and match.strength != "strong"):
+                return
+            matches = match.chunks
+            new_ids = [cid for cid, _ in matches if cid not in retrieved]
+            texts = chunk_texts(self.conn, new_ids)
+        except Exception as e:
+            self.logger.warning(f"Keyword search failed: {e}")
+            return
+        for cid in new_ids:
+            if cid in texts:
+                retrieved[cid] = [texts[cid]]
+        res[0]["keyword_matches"] = [cid for cid, _ in matches]
 
     def retrieve_answer(self, question, index, top_k=1, similarity_threshold=0.90, num_hops=2, num_seen_min=1, expand: bool = False, method: str = "similarity", chunk_only: bool = False, doc_only: bool = False, combine: bool = False, verbose: bool = False, max_results: int = 0):
         retrieved = self.search(question, index, top_k, similarity_threshold, num_hops, num_seen_min, expand, method, chunk_only, doc_only, verbose, max_results)

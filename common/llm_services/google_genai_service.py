@@ -58,3 +58,14 @@ class GoogleGenAI(LLM_Model):
         LogWriter.info(
             f"request_id={req_id_cv.get()} instantiated GoogleGenAI model_name={model_name}"
         )
+
+    def _light_llm(self):
+        """Gemini 3 takes a thinking level (Pro models have no "minimal");
+        Gemini 2.5 takes a thinking budget (2.5 Pro needs at least 128).
+        Earlier models do not reason."""
+        name = str(self.config.get("llm_model", "")).lower()
+        if name.startswith("gemini-2.5"):
+            return self.llm.bind(thinking_budget=128 if "pro" in name else 0)
+        if name.startswith("gemini-") and not name.startswith(("gemini-1", "gemini-2")):
+            return self.llm.bind(thinking_level="low" if "pro" in name else "minimal")
+        return self.llm
