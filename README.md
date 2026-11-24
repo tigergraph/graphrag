@@ -395,7 +395,7 @@ GraphRAG offers two chat engines, chosen from the chat menu (or set as a per-gra
 
 ### Agentic
 
-The Agentic engine runs one of two agents, chosen with `agent_engine` in the [GraphRAG configuration](#graphrag-configuration):
+The Agentic engine runs one of two agents, chosen with **Agent** in *General Settings* on the *GraphRAG Configuration* page, or with `agent_engine` in the [GraphRAG configuration](#graphrag-configuration):
 
 | `agent_engine` | Agent |
 |---|---|
@@ -672,7 +672,6 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `num_seen_min` | int | `2` | Minimum occurrence count for a node to be included during hybrid search traversal. Higher values filter out loosely connected nodes, reducing context size. |
 | `max_results` | int | `2 × top_k` | Caps the number of result chunks hybrid and community search return, ranked by relevance to the question, instead of every chunk the expansion (or community membership) reaches. When unset it is twice `top_k`, which is also the minimum; set higher to return more context. Lowering it reduces the context sent to the LLM. |
 | `keyword_search` | bool | `false` | If true, hybrid search also returns the chunks whose section path and text hold most of the question's distinctive words (BM25 keyword search), such as names, codes, numbers and table labels that vector search can miss, and the agentic engines can run a keyword search. Turn it on per graph with the **Keyword Search** card on the Knowledge Graph Setup page, which also builds the graph's keyword index. The index is saved in `configs/graph_data/<graph>/` and reused after a restart. |
-| `keyword_top_k` | int | `top_k` | How many keyword matches hybrid search considers adding to its results. |
 | `rerank` | bool | same as `keyword_search` | If true, hybrid search gathers about three times as many candidate passages, including keyword matches when keyword search is on, and the chat model orders them by how directly each answers the question. The usual number of results is kept. Adds one model call per hybrid search. |
 | `community_level` | int | `2` | Community hierarchy level for community search. Higher levels retrieve broader, higher-order community summaries. |
 | `agent_engine` | string | `"default"` | Agent that the Agentic engine runs: `"default"` (the default agent, the Deep Agent), `"deepagent"` (the Deep Agent) or `"legacy"` (the Planned / Reactive agent). See [Agentic](#agentic). |

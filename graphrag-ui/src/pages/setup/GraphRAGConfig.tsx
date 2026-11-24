@@ -31,10 +31,10 @@ const GraphRAGConfig = () => {
   // Set from the Keyword Search card on the setup page; kept here so saving
   // this form does not drop it.
   const [keywordSearch, setKeywordSearch] = useState(false);
-  const [keywordTopK, setKeywordTopK] = useState("");
   const [docOnly, setDocOnly] = useState(false);
   const [enableRouterFallback, setEnableRouterFallback] = useState(true);
   const [agentMode, setAgentMode] = useState<"agentic" | "classic">("agentic");
+  const [agentEngine, setAgentEngine] = useState<"default" | "legacy">("default");
 
   // Collapsible section toggles (Configuration Scope and General Settings
   // are always shown). Advanced Ingestion stays collapsed by default —
@@ -106,10 +106,10 @@ const GraphRAGConfig = () => {
     setCommunityLevel(String(graphragConfig.community_level ?? 2));
     setMaxResults(graphragConfig.max_results != null ? String(graphragConfig.max_results) : "");
     setKeywordSearch(graphragConfig.keyword_search ?? false);
-    setKeywordTopK(graphragConfig.keyword_top_k != null ? String(graphragConfig.keyword_top_k) : "");
     setDocOnly(graphragConfig.doc_only ?? false);
     setEnableRouterFallback(graphragConfig.enable_router_fallback ?? true);
     setAgentMode(graphragConfig.agent_mode === "classic" ? "classic" : "agentic");
+    setAgentEngine(graphragConfig.agent_engine === "legacy" ? "legacy" : "default");
     setLoadBatchSize(String(graphragConfig.load_batch_size ?? 500));
     setUpsertDelay(String(graphragConfig.upsert_delay ?? 0));
     setMaxConcurrency(String(graphragConfig.default_concurrency ?? 10));
@@ -266,6 +266,7 @@ const GraphRAGConfig = () => {
         keyword_search: keywordSearch,
         enable_router_fallback: enableRouterFallback,
         agent_mode: agentMode,
+        agent_engine: agentEngine,
         load_batch_size: parseInt(loadBatchSize),
         upsert_delay: parseInt(upsertDelay),
         default_concurrency: parseInt(maxConcurrency),
@@ -286,10 +287,6 @@ const GraphRAGConfig = () => {
       if (maxResults) {
         currentConfig.max_results = parseInt(maxResults);
       }
-      // Blank means "use Top K".
-      if (keywordTopK) {
-        currentConfig.keyword_top_k = parseInt(keywordTopK);
-      }
 
       // Display defaults — used to avoid saving values the user never changed
       const displayDefaults: Record<string, any> = {
@@ -306,6 +303,7 @@ const GraphRAGConfig = () => {
         keyword_search: false,
         enable_router_fallback: true,
         agent_mode: "agentic",
+        agent_engine: "default",
         load_batch_size: 500,
         upsert_delay: 0,
         default_concurrency: 10,
@@ -489,6 +487,45 @@ const GraphRAGConfig = () => {
             </p>
 
             <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="agentMode" className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Answer Engine
+                  </label>
+                  <select
+                    id="agentMode"
+                    value={agentMode}
+                    onChange={(e) => setAgentMode(e.target.value as "agentic" | "classic")}
+                    className="block w-full h-10 px-3 rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA text-sm"
+                  >
+                    <option value="agentic">Agentic</option>
+                    <option value="classic">Classic</option>
+                  </select>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Engine that answers chat questions. Agentic plans its own searches across graph data and documents; Classic picks one retrieval method per question.
+                  </p>
+                </div>
+
+                <div>
+                  <label htmlFor="agentEngine" className="block text-sm font-medium mb-2 text-black dark:text-white">
+                    Agent
+                  </label>
+                  <select
+                    id="agentEngine"
+                    value={agentEngine}
+                    onChange={(e) => setAgentEngine(e.target.value as "default" | "legacy")}
+                    disabled={agentMode !== "agentic"}
+                    className="block w-full h-10 px-3 rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA text-sm disabled:opacity-50"
+                  >
+                    <option value="default">Deep Agent</option>
+                    <option value="legacy">Legacy agents (Planned / Reactive)</option>
+                  </select>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                    Agent that the Agentic engine runs. With the legacy agents, the chat menu chooses Planned or Reactive.
+                  </p>
+                </div>
+              </div>
+
               <div>
                 <div className="flex items-center space-x-2">
                   <input
@@ -596,23 +633,6 @@ const GraphRAGConfig = () => {
                     Maximum number of result chunks returned by search, ranked by relevance. Leave blank to use the default (twice Top K).
                   </p>
                 </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                    Keyword Top K
-                  </label>
-                  <Input
-                    type="number"
-                    min="1"
-                    className="dark:border-[#3D3D3D] dark:bg-background"
-                    placeholder="Defaults to Top K"
-                    value={keywordTopK}
-                    onChange={(e) => setKeywordTopK(e.target.value)}
-                  />
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                    Number of keyword matches added to document search results. Leave blank to use Top K.
-                  </p>
-                </div>
               </div>
 
               <div>
@@ -648,27 +668,6 @@ const GraphRAGConfig = () => {
                 </div>
                 <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1 ml-6">
                   Fall back to vector search when structured-data retrieval fails.
-                </p>
-              </div>
-
-              <div>
-                <label htmlFor="agentMode" className="text-sm font-medium text-black dark:text-white">
-                  Answer engine
-                </label>
-                <select
-                  id="agentMode"
-                  value={agentMode}
-                  onChange={(e) => setAgentMode(e.target.value as "agentic" | "classic")}
-                  className="mt-1 block w-full h-10 px-3 rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA text-sm"
-                >
-                  <option value="agentic">Agentic (deep thinking)</option>
-                  <option value="classic">Classic</option>
-                </select>
-                <p className="text-xs text-gray-600 dark:text-[#D9D9D9] mt-1">
-                  Agentic plans multi-step retrieval and combines structured and
-                  document context to answer. Classic uses the original
-                  single-lane router. Falls back to Classic automatically if the
-                  chat model can't run the agentic engine.
                 </p>
               </div>
             </div>
