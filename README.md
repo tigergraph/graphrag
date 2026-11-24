@@ -375,6 +375,7 @@ Upgrading GraphRAG does not change graphs that already exist: their installed qu
 
 - **Schema compatibility** — whether the graph's schema supports the current release. Graphs created with GraphRAG 1.4 or later are compatible.
 - **Queries** — installed queries that are outdated or missing. **Repair** reinstalls them in place, without rebuilding the knowledge graph.
+- **Edge connections** — connections the schema lacks between documents, entities, domain vertex types and communities. **Repair** adds them before it repairs the queries, and installs again the queries that the schema change removes. Search on the graph is unavailable until this finishes.
 - **Prompt overrides** — saved custom prompts in a format the current release no longer uses.
 - **Data health** — vertices missing embeddings and communities missing summaries, each with its own regenerate action.
 - **Document versions** — whether the graph records a checksum of each document's source file and which documents a newer one replaces. **Set up** adds this to the graph; [Stored Files](#stored-files) needs it to compare files with the graph and to replace older versions.
