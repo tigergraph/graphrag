@@ -30,6 +30,10 @@ def asks_relation(question: str) -> bool:
 # frozenset({connector, connector}) -> {"planner"|"query"|"answer": text}
 PAIRS: dict[frozenset, dict[str, str]] = {}
 
+# connector -> record types of other connectors its questions may read,
+# because a stored cross-source edge reaches them.
+LINKED_TYPES: dict[str, set[str]] = {}
+
 _DEFAULT = {
     "planner": (
         "## Cross-source guidance\n"
@@ -59,15 +63,26 @@ _DEFAULT = {
 }
 
 
-def guidance_for(selected: set[str], question: str, step: str) -> str:
-    """Relation guidance for two or more selected connectors, or ''."""
-    if len(selected) < 2 or not asks_relation(question):
+def guidance_for(selected: set[str], question: str, step: str,
+                 installed: set[str] | None = None) -> str:
+    """Relation guidance for a question about links between sources, or ''.
+
+    With two or more selected connectors, the pairs between them apply. With
+    one, a question about links also gets every registered pair that
+    includes it, since another installed source may hold the linking record
+    (for example a page that links to a Jira issue).
+    """
+    if not selected or not asks_relation(question):
         return ""
-    parts = [_DEFAULT[step]] if step in _DEFAULT else []
-    names = sorted(selected)
-    for i, left in enumerate(names):
-        for right in names[i + 1:]:
-            text = PAIRS.get(frozenset((left, right)), {}).get(step)
-            if text:
-                parts.append(text)
+    if len(selected) >= 2:
+        pairs = [frozenset((a, b)) for a in selected for b in selected if a < b]
+    else:
+        only = next(iter(selected))
+        pairs = [pair for pair in PAIRS
+                 if only in pair and (installed is None or pair <= installed)]
+    texts = [PAIRS[pair][step] for pair in sorted(pairs, key=sorted)
+             if pair in PAIRS and step in PAIRS[pair]]
+    if len(selected) < 2 and not texts:
+        return ""
+    parts = ([_DEFAULT[step]] if step in _DEFAULT else []) + texts
     return "\n".join(parts)

@@ -351,3 +351,48 @@ class TestAnswerStepSeesEmptyGraphQueries(unittest.TestCase):
         results = {"S1": StepResult(step_id="S1", ok=False, summary="query failed check")}
         _, ctx = self._context(results, plan)
         self.assertNotIn("graph_queries_with_no_rows", ctx)
+
+
+class TestDependentStepsSeeEarlierRows(unittest.TestCase):
+    def test_a_dependent_structural_step_gets_the_earlier_rows(self):
+        import agent.agentic_executor as ex
+        step = PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL,
+                        args={"question": "List the child pages"}, depends_on=["S1"])
+        results = {"S1": StepResult(step_id="S1", ok=True, summary="1 row",
+                                    context={"result": [{"page_id": "123"}]})}
+        args = ex._with_earlier_rows(step, dict(step.args), results)
+        self.assertIn('"page_id": "123"', args["question"])
+        self.assertTrue(args["question"].startswith("List the child pages"))
+
+    def test_an_independent_or_unstructured_step_is_unchanged(self):
+        import agent.agentic_executor as ex
+        results = {"S1": StepResult(step_id="S1", ok=True, context={"result": [1]})}
+        free = PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL,
+                        args={"question": "q"})
+        self.assertEqual(ex._with_earlier_rows(free, {"question": "q"}, results)["question"], "q")
+        search = PlanStep(id="S3", kind="unstructured", tool="graphrag__hybrid_search",
+                          args={"question": "q"}, depends_on=["S1"])
+        self.assertEqual(ex._with_earlier_rows(search, {"question": "q"}, results)["question"], "q")
+
+
+class TestRowsBoundToAQuestionKeepTheQuestion(unittest.TestCase):
+    def test_rows_bound_to_question_are_appended_not_substituted(self):
+        import agent.agentic_executor as ex
+        plan = Plan(steps=[
+            PlanStep(id="S1", kind="structural", tool=g._STRUCTURAL_TOOL,
+                     args={"question": "Find the page"}),
+            PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL,
+                     args={"question": "List the child pages of that page"},
+                     arg_bindings={"question": "S1.context"}, depends_on=["S1"]),
+        ])
+        seen = []
+
+        def fake_run(step, args, ctx, results, traces):
+            seen.append(args)
+            results[step.id] = StepResult(step_id=step.id, ok=True, summary="1 row",
+                                          context={"T": [{"page_id": "123"}]})
+
+        with mock.patch.object(ex, "_run_step", fake_run):
+            ex.execute_plan(plan, types.SimpleNamespace(emit=lambda *a: None))
+        self.assertTrue(seen[1]["question"].startswith("List the child pages of that page"))
+        self.assertIn('"page_id": "123"', seen[1]["question"])

@@ -46,7 +46,10 @@ _SHARED = {
         "or 0); it is not a reason to search the documents instead.\n"
         "- When the answer needs several breakdowns of the same set of "
         "records, plan one structural step per breakdown, each a grouped "
-        "count over the same filter."
+        "count over the same filter.\n"
+        "- When a step needs an identifier that another step finds, such as "
+        "a record id, list that step in depends_on; the dependent step "
+        "receives the earlier step's rows and queries by that identifier."
     ),
     "query": (
         "## Record query guidance\n"
@@ -54,6 +57,9 @@ _SHARED = {
         "count(t) AS total, so the result is one row and 0 when nothing "
         "matches. Do not add other columns or literals to a count. A count per "
         "group returns the group value and its count.\n"
+        "- Match a topic, title, subject, or summary word by word: "
+        "toLower(x.summary) CONTAINS each distinctive word, combined with AND. "
+        "Stored text rarely contains the user's exact phrase.\n"
         "- Group and count in the query instead of returning every row. Match "
         "the identifier or filter first, then traverse typed edges in their "
         "schema direction (->); never use untyped patterns such as -[]-. "
@@ -61,6 +67,14 @@ _SHARED = {
         "- Do not use OPTIONAL MATCH: TigerGraph often rejects these queries "
         "or returns no rows for them. Fetch each related record in its own "
         "query with MATCH instead.\n"
+        "- A range comparison (>=, <) on a date string in the same MATCH as "
+        "an edge returns no rows in TigerGraph. Filter by date first, then "
+        "traverse: MATCH (x:Type) WHERE x.created >= \"<from>\" AND "
+        "x.created < \"<to>\" WITH x MATCH (x)-[:edge]->(y) RETURN ....\n"
+        "- Joining two records by a stored id (WITH ... MATCH ... WHERE "
+        "a.id_field = b.other_field) works only when the first record is "
+        "matched by equality, not CONTAINS. With a partial name, find the id "
+        "in an earlier step and query by its value.\n"
         "- Do not use CASE, coalesce, or alternative edge types such as "
         "[:requested|assigned]; TigerGraph does not run them here. To break "
         "counts down, group by the stored attribute itself. Records without "
@@ -105,7 +119,17 @@ def normalize_connector_question(text: str) -> str:
 
 def selected_connectors(question: str) -> set[str]:
     text = normalize_connector_question(question)
-    return {name for name, module in _CONNECTORS.items() if module.selects(text)}
+    selected = {name for name, module in _CONNECTORS.items() if module.selects(text)}
+    if selected:
+        # A question that names one source can also be about another
+        # connector's records, e.g. the Confluence page about a ticket.
+        for name, module in _CONNECTORS.items():
+            words = getattr(module, "ALSO_SELECTED_BY", ())
+            if name not in selected and any(
+                re.search(rf"\b{re.escape(w)}s?\b", text, re.IGNORECASE) for w in words
+            ):
+                selected.add(name)
+    return selected
 
 
 def bare_record_number(question: str) -> str | None:
@@ -170,18 +194,20 @@ def guidance_for(question: str, step: str) -> str:
             ]
             parts.append(_SHARED.get(step, ""))
             return "\n".join(part for part in parts if part)
-        if _RECORD_QUESTION.search(question or ""):
-            # No source named: every connector's rules apply, and the
-            # shared record rules always do.
-            parts = [_UNNAMED.get(step, "")]
-            parts += [
-                _CONNECTORS[name].GUIDANCE[step]
-                for name in sorted(_CONNECTORS)
-                if step in _CONNECTORS[name].GUIDANCE
-            ]
-            parts.append(_SHARED.get(step, ""))
-            return "\n".join(part for part in parts if part)
-        return ""
+        if not _RECORD_QUESTION.search(question or ""):
+            # The query rules hold for any structural query on this graph,
+            # whatever the question names.
+            return _SHARED["query"] if step == "query" else ""
+        # No source named: every connector's rules apply, and the shared
+        # record rules always do.
+        parts = [_UNNAMED.get(step, "")]
+        parts += [
+            _CONNECTORS[name].GUIDANCE[step]
+            for name in sorted(_CONNECTORS)
+            if step in _CONNECTORS[name].GUIDANCE
+        ]
+        parts.append(_SHARED.get(step, ""))
+        return "\n".join(part for part in parts if part)
     parts = [
         _CONNECTORS[name].GUIDANCE[step]
         for name in sorted(selected)
@@ -189,7 +215,9 @@ def guidance_for(question: str, step: str) -> str:
     ]
     if step in _SHARED:
         parts.append(_SHARED[step])
-    cross = cross_source_prompts.guidance_for(selected, question, step)
+    cross = cross_source_prompts.guidance_for(
+        selected, question, step, installed=set(_CONNECTORS)
+    )
     if cross:
         parts.append(cross)
     return "\n".join(parts)
@@ -203,5 +231,7 @@ def allows_type(type_name: str, selected: set[str]) -> bool:
     if name in {"Person", "Organization", "Attachment"}:
         return True
     if not selected:
+        return True
+    if any(name in cross_source_prompts.LINKED_TYPES.get(c, ()) for c in selected):
         return True
     return any(_CONNECTORS[c].owns_type(name) for c in selected if c in _CONNECTORS)

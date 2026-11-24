@@ -127,3 +127,20 @@ def test_jira_questions_keep_shared_and_jira_types_only():
     assert allows_type("DocumentChunk", {"jira"})
     assert not allows_type("ConfluencePage", {"jira"})
     assert allows_type("ConfluencePage", set())
+
+
+def test_query_rules_apply_to_every_structural_query():
+    query = guidance_for("What is our refund policy?", "query")
+    assert "Match a topic, title, subject, or summary word by word" in query
+    assert "Filter by date first, then traverse" in query
+    assert guidance_for("What is our refund policy?", "planner") == ""
+
+
+def test_jira_status_categories_are_the_stored_values():
+    query = guidance_for("Which jira issues are in progress?", "query")
+    assert "status_category is new, indeterminate (in progress), or done" in query
+
+
+def test_a_step_can_depend_on_an_identifier_found_earlier():
+    planner = guidance_for("Who reported ABC-102 and what did they comment?", "planner")
+    assert "list that step in depends_on" in planner

@@ -116,6 +116,8 @@ QUERY = (
     "- Project keys listed together, such as \"ABC DEF and XYZ\", are separate "
     "keys: filter with project_key IN the list and group by project_key, "
     "returning every listed key.\n"
+    "- status_category is new, indeterminate (in progress), or done; filter "
+    "on these stored values, not on words like \"in progress\".\n"
     "- created, updated, and due are DATETIME. For a calendar month, use "
     "created >= first day of the month and created < first day of the next "
     "month.\n"

@@ -99,6 +99,51 @@ def run_error_hints(error: str, cypher: str) -> list:
             if err_pattern.search(error) and query_pattern.search(query)]
 
 
+# Constructs TigerGraph's interpreted openCypher mishandles even when the
+# query passes its check: they return no rows or fail at run time. Each is
+# reported before the query runs so the next attempt writes it differently.
+_RANGE_ON_STRING = re.compile(r"\b\w+\.\w+\s*(>=|<=|>|<)\s*\"")
+_EDGE_PATTERN = re.compile(r"\)\s*<?-\s*\[|\]\s*->?\s*\(")
+_CASE_EXPR = re.compile(r"\bCASE\b(.*?)\bEND\b", re.I | re.S)
+_TEXT_EQUALITY = re.compile(
+    r"(?:toLower\(\s*)?\b\w+\.(title|subject|summary)\b\s*\)?\s*=\s*\"", re.I)
+_STEP_ID_VALUE = re.compile(r"[=,\[]\s*\"\$?S\d+[\w.]*\"|\$S\d+")
+_RESERVED_ATTRIBUTE = re.compile(r"\b\w+\.(tags)\b")
+
+
+def unsafe_constructs(cypher: str) -> list:
+    """Readable errors for constructs TigerGraph runs wrongly or rejects."""
+    errors = []
+    for part in re.split(r"\bWITH\b", cypher, flags=re.I):
+        if _EDGE_PATTERN.search(part) and _RANGE_ON_STRING.search(part):
+            errors.append(
+                "A range comparison (>=, <) on a string in the same MATCH as an "
+                "edge returns no rows in TigerGraph. Filter that record first, "
+                "then traverse: MATCH (x:Type) WHERE x.created >= \"...\" WITH x "
+                "MATCH (x)-[:edge]->(y) RETURN ...")
+            break
+    for case in _CASE_EXPR.finditer(cypher):
+        if not re.search(r"\bELSE\b", case.group(1), re.I):
+            errors.append("TigerGraph does not support CASE without ELSE. Add an "
+                          "ELSE branch, or group by the stored attribute instead.")
+            break
+    if re.search(r"\bcoalesce\s*\(", cypher, re.I):
+        errors.append("TigerGraph does not support coalesce() in interpreted queries. "
+                      "Count records without the related record in a separate query.")
+    if _TEXT_EQUALITY.search(cypher):
+        errors.append("Do not match a title, subject, or summary with =: users shorten "
+                      "and reword them. Use toLower(x.title) CONTAINS on each "
+                      "distinctive word, combined with AND.")
+    if _STEP_ID_VALUE.search(cypher):
+        errors.append("A plan step id (such as S1) is not a value. Use the identifier "
+                      "from the earlier step's rows, or leave the condition out.")
+    if _RESERVED_ATTRIBUTE.search(cypher):
+        errors.append("The attribute tags is a reserved word in TigerGraph openCypher "
+                      "and cannot be read in a query. Leave it out and use the other "
+                      "fields.")
+    return errors
+
+
 def check_cypher(conn, cypher: str):
     """Errors in ``cypher`` found without running it, as readable lines.
 
@@ -108,6 +153,9 @@ def check_cypher(conn, cypher: str):
     """
     if _WRITE_CLAUSE.search(_STRING_LITERAL.sub('""', cypher)):
         return ["The query changes data. Write a query that only reads (MATCH ... RETURN)."]
+    unsafe = unsafe_constructs(cypher)
+    if unsafe:
+        return unsafe
     try:
         result = conn.checkQuerySemantic(_interpreted(conn, cypher))
     except Exception as exc:
