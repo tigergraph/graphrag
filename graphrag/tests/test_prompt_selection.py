@@ -123,6 +123,9 @@ def test_a_data_question_naming_no_source_gets_every_connector_and_shared_rule()
     assert "## Jira guidance" in workload
     assert "one structural step per breakdown" in workload
     assert guidance_for("What is our refund policy?", "planner") == ""
+    # Query rules hold for any structural query, whatever the question names.
+    assert "Match a topic, title, subject, or summary word by word" in guidance_for(
+        "What is our refund policy?", "query")
     customer = guidance_for("Summarize the tickets of customer Acme.", "planner")
     assert "## Zendesk guidance" in customer
     assert "A customer's records are the tickets requested by members" in customer
