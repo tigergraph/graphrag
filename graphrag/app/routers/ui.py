@@ -3270,11 +3270,9 @@ async def run_agent(
                 # TODO: make num mesages in history configureable
                 a_question_for_agent(data, conversation_history[-4:])
             )
-            # sample Q and emit events
+            # sample Q and emit events (only a WebSocket caller gets progress)
             if ws:
                 tg.create_task(emit_progress(agent, ws))
-            else:
-                emit_progress(agent, ws)
         pmetrics.llm_success_response_total.labels(embedding_service.model_name).inc()
         resp = a_resp.result()
         if ws:
