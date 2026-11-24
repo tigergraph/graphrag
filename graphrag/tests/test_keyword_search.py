@@ -231,6 +231,31 @@ class TestSavedIndex(_CacheTest):
         self.assertEqual([c for c, _ in hits], ["c1"])
         self.assertEqual(conn.loads, 1)  # read from the file, not built again
 
+    def test_status_after_a_restart_shows_the_saved_index(self):
+        conn = _Conn({"c1": "state aid", "c2": "net sales"})
+        keyword_index.build_keyword_index(conn)
+        keyword_index._indexes.clear()  # a restart
+        self.assertFalse(keyword_index.keyword_index_status("G")["built"])
+        status = keyword_index.keyword_index_status("G", connect=lambda: conn)
+        self.assertTrue(status["built"])
+        self.assertEqual((status["chunks"], status["terms"]), (2, 4))
+        keyword_index.keyword_search(conn, "state aid", 5)
+        self.assertEqual(conn.loads, 1)  # the search uses the index the status read
+
+    def test_status_after_a_restart_with_another_chunk_count_is_not_built(self):
+        conn = _Conn({"c1": "state aid"})
+        keyword_index.build_keyword_index(conn)
+        keyword_index._indexes.clear()
+        conn.chunks["c2"] = "state aid note"
+        status = keyword_index.keyword_index_status("G", connect=lambda: conn)
+        self.assertFalse(status["built"])
+        self.assertEqual(conn.loads, 1)  # the status does not build the index
+
+    def test_status_without_a_saved_index_is_not_built(self):
+        conn = _Conn({"c1": "state aid"})
+        self.assertFalse(keyword_index.keyword_index_status("G", connect=lambda: conn)["built"])
+        self.assertEqual(conn.loads, 0)
+
     def test_saved_index_with_another_chunk_count_is_rebuilt(self):
         conn = _Conn({"c1": "state aid"})
         keyword_index.build_keyword_index(conn)

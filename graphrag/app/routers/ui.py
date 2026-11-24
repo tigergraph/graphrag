@@ -1689,7 +1689,10 @@ def keyword_index_status_endpoint(
 ):
     """Whether keyword search is on for the graph, and its index size."""
     from supportai.keyword_index import keyword_index_status
-    return keyword_index_status(graphname)
+    return keyword_index_status(
+        graphname,
+        connect=lambda: get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password),
+    )
 
 
 @router.post(route_prefix + "/{graphname}/keyword_index")

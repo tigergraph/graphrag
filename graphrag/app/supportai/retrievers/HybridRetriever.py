@@ -114,7 +114,8 @@ class HybridRetriever(BaseRetriever):
         if not expand and rerank_on(self, doc_only):
             # The ranking call judges keyword and vector candidates together,
             # so keyword matches join without the strength gate.
-            self._add_keyword_matches(question, res, top_k, strong_only=False)
+            if keyword_matches:
+                self._add_keyword_matches(question, res, top_k, strong_only=False)
             self._apply_rerank(question, res, keep)
         elif keyword_matches and not expand and not doc_only:
             self._add_keyword_matches(question, res, top_k)
