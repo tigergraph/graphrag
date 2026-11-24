@@ -1,4 +1,4 @@
-FROM node:23.7-slim
+FROM node:24.22.3-trixie-slim
 WORKDIR /app
 
 ENV PNPM_HOME="/pnpm"

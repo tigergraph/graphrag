@@ -1,9 +1,9 @@
-FROM python:3.11.9
+FROM python:3.13.18-trixie
 WORKDIR /code
 
 COPY common/requirements.txt requirements.txt
 
-RUN apt-get update && apt-get upgrade -y
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 RUN pip install -r requirements.txt
 
 COPY ecc/app /code
