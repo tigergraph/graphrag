@@ -1,4 +1,4 @@
-FROM golang:1.22.3 AS builder
+FROM golang:1.27.4 AS builder
 
 WORKDIR /app 
 COPY . .
@@ -9,7 +9,7 @@ RUN go build -v -o server
 # Use the official Debian slim image for a lean production container.
 # https://hub.docker.com/_/debian
 # https://docs.docker.com/develop/develop-images/multistage-build/#use-multi-stage-builds
-FROM debian:bookworm-slim
+FROM debian:trixie-20261104-slim
 WORKDIR app
 
 RUN set -x && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
