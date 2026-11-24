@@ -104,9 +104,15 @@ class TestCleanMarkdown(unittest.TestCase):
         out = self._clean([(1, "## Sales"), (1, "## 売上高は増加しました。"), (1, "Text.")])
         self.assertEqual(out, ["## Sales", "売上高は増加しました。", "Text."])
 
-    def test_a_heading_without_content_starts_no_section(self):
-        out = self._clean([(1, "## Empty"), (1, "## Sales"), (1, "Text."), (1, "### Last")])
+    def test_a_heading_at_the_end_is_left_out(self):
+        out = self._clean([(1, "## Sales"), (1, "Text."), (1, "### Last"), (1, "## Last too")])
         self.assertEqual(out, ["## Sales", "Text."])
+
+    def test_a_heading_followed_by_a_heading_is_kept(self):
+        # Docling can give a section a deeper level than its first subheading.
+        blocks = [(1, "###### Note 5 - Income Taxes"), (1, "Tax text."),
+                  (1, "###### Note 6 - Debt"), (1, "### Commercial Paper"), (1, "Paper text.")]
+        self.assertEqual(self._clean(blocks), [t for _, t in blocks])
 
     def test_a_parent_heading_keeps_its_children(self):
         out = self._clean([(1, "# Part I"), (1, "## Item 1"), (1, "Text.")])

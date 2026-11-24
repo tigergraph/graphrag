@@ -134,8 +134,8 @@ def _body_like(text: str) -> bool:
 
 
 def _clean_markdown(blocks: list) -> list:
-    """Drop running headers and footers and headings that start no section;
-    turn body-like headings into paragraphs. ``blocks`` holds
+    """Drop running headers and footers and headings at the end of the
+    document; turn body-like headings into paragraphs. ``blocks`` holds
     ``(page, text)`` pairs."""
     # Running text sits among the first or last two blocks of a page.
     edge = set()
@@ -167,18 +167,13 @@ def _clean_markdown(blocks: list) -> list:
             text = m.group(2)
         out.append((page, text))
 
-    # A heading followed by a heading of the same or a higher level, or by
-    # nothing, starts no section.
-    keep = []
-    for i, (page, text) in enumerate(out):
-        m = _HEAD_RE.match(text)
-        if m:
-            nxt = next((t for _, t in out[i + 1:]), None)
-            n = _HEAD_RE.match(nxt) if nxt else None
-            if nxt is None or (n and len(n.group(1)) <= len(m.group(1))):
-                continue
-        keep.append((page, text))
-    return keep
+    # Headings at the end of the document start no section. A heading
+    # followed by another heading stays: Docling can give a section heading a
+    # deeper level than its first subheading, such as "Note 6 - Debt" at
+    # level 6 before "Commercial Paper" at level 3.
+    while out and _HEAD_RE.match(out[-1][1]):
+        out.pop()
+    return out
 
 
 def document_to_markdown(doc, figures: dict, formulas: dict) -> str:
