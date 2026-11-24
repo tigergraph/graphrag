@@ -149,6 +149,13 @@ class TestDeepAgentRun(_Base):
         self.assertIn("Searching the documents", items)
         self.assertEqual(items[-1], "DONE")
 
+    def test_image_links_in_the_answer_are_rewritten(self):
+        agent = self.make_agent([answer("Sales rose. ![Sales chart](tg://report_pdf_image_1)")])
+        resp = agent.question_for_agent("Show the sales chart.")
+        self.assertIn("![Sales chart](/ui/image_vertex/TestGraph/report_pdf_image_1)",
+                      resp.natural_language_response)
+        self.assertNotIn("tg://", resp.natural_language_response)
+
     def test_tigergraph_tool_runs_on_user_connection(self):
         conn = FakeConn()
         agent = self.make_agent([

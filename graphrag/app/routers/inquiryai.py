@@ -137,7 +137,7 @@ def retrieve_answer(
     )
     try:
         resp = agent.question_for_agent(query.query)
-        # Note: tg:// protocol conversion happens in agent_graph.py
+        # Each engine turns tg:// image links into image endpoint URLs.
         pmetrics.llm_success_response_total.labels(get_embedding_service().model_name).inc()
     except MapQuestionToSchemaException:
         resp.natural_language_response = (
@@ -210,16 +210,7 @@ def retrieve_answer_with_chathistory(
         )
 
         resp = agent.question_for_agent(query.query, latest_history_query)
-        
-        # Convert tg:// protocol URLs to endpoint URLs for UI display
-        if resp.natural_language_response and "(tg://" in resp.natural_language_response:
-            import re
-            resp.natural_language_response = re.sub(
-                r'!\[([^\]]*)\]\(tg://([^\)]+)\)',
-                rf'![\1](/ui/image_vertex/{graphname}/\2)',
-                resp.natural_language_response
-            )
-        
+
         pmetrics.llm_success_response_total.labels(get_embedding_service().model_name).inc()
 
     except MapQuestionToSchemaException:
