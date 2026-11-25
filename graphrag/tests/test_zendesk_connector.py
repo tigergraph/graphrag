@@ -880,6 +880,7 @@ def test_open_zendesk_question_is_search_and_an_unknown_field_is_refused():
     bare = guidance_for("What is the status of #12345?", "planner")
     assert 'ticket_id equals "12345"' in bare
     assert 'issue_key ends with "-12345"' in bare
+    assert 'page_id equals "12345"' in bare
     guidance = guidance_for(
         "How is Zendesk ticket 59326 linked to TSE-1073?",
         "query",

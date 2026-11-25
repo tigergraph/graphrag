@@ -15,18 +15,25 @@ from __future__ import annotations
 import re
 
 from connectors import cross_source_prompts
+from connectors.confluence import prompts as confluence_prompts
 from connectors.jira import prompts as jira_prompts
 from connectors.zendesk import prompts as zendesk_prompts
 
 _CONNECTORS = {
-    module.NAME: module for module in (jira_prompts, zendesk_prompts)
+    module.NAME: module
+    for module in (confluence_prompts, jira_prompts, zendesk_prompts)
 }
 cross_source_prompts.PAIRS[frozenset({"jira", "zendesk"})] = zendesk_prompts.JIRA_PAIR
+cross_source_prompts.PAIRS[frozenset({"confluence", "jira"})] = confluence_prompts.JIRA_PAIR
+cross_source_prompts.PAIRS[frozenset({"confluence", "zendesk"})] = (
+    confluence_prompts.ZENDESK_PAIR
+)
 # A record type another connector links to stays visible to that connector's
 # questions, e.g. a Jira question can read the ZendeskTicket on links_issue.
 cross_source_prompts.LINKED_TYPES.update({
-    "jira": {"ZendeskTicket"},
-    "zendesk": {"JiraIssue"},
+    "jira": {"ZendeskTicket", "ConfluencePage"},
+    "zendesk": {"JiraIssue", "ConfluencePage"},
+    "confluence": {"JiraIssue", "ZendeskTicket"},
 })
 
 _SPACED_JIRA_KEY = re.compile(r"\b([A-Za-z][A-Za-z0-9]+)\s*-\s*(\d+)\b")

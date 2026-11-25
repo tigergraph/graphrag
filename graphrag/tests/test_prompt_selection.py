@@ -9,6 +9,8 @@ import pytest
 from connectors import cross_source_prompts
 from connectors.jira import prompts as jira_prompts
 from connectors.jira.schema import jira_schema_proposal
+from connectors.confluence import prompts as confluence_prompts
+from connectors.confluence.schema import confluence_schema_proposal
 from connectors.zendesk import prompts as zendesk_prompts
 from connectors.zendesk.schema import zendesk_schema_proposal
 from connectors.prompt_selection import (
@@ -52,6 +54,69 @@ def test_zendesk_guidance_names_only_the_installed_schema(step):
         for name in re.findall(r"\[:([A-Za-z_]+)\]", text):
             assert name in edges, f"{name} is not a Zendesk schema edge"
         assert "ZendeskUser" not in text and "ZendeskTicketRef" not in text
+
+
+@pytest.mark.parametrize("step", ["planner", "query", "answer"])
+def test_confluence_guidance_names_only_the_installed_schema(step):
+    texts = [
+        confluence_prompts.GUIDANCE[step],
+        confluence_prompts.JIRA_PAIR[step],
+        confluence_prompts.ZENDESK_PAIR[step],
+    ]
+    proposal = confluence_schema_proposal({"JiraIssue", "ZendeskTicket"})
+    vertices = {v.name for v in proposal.vertices} | {"JiraIssue", "ZendeskTicket"}
+    edges = {e.name for e in proposal.edges} | {"requested"}
+    for text in texts:
+        for name in re.findall(r"\b(Confluence[A-Z][A-Za-z]*)\b", text):
+            assert name in vertices, f"{name} is not a Confluence schema vertex"
+        for name in re.findall(r"\[:([A-Za-z_]+)\]", text):
+            assert name in edges, f"{name} is not a Confluence schema edge"
+
+
+def test_a_bare_number_is_also_looked_up_as_a_confluence_page():
+    planner = guidance_for("Summarize 67890.", "planner")
+    assert 'page_id equals "67890"' in planner
+    assert "## Confluence guidance" in planner
+
+
+def test_a_page_word_adds_confluence_to_a_question_about_another_source():
+    from connectors.prompt_selection import selected_connectors
+    assert selected_connectors("Is there a page about Zendesk ticket 24680?") == {
+        "confluence", "zendesk"
+    }
+    assert selected_connectors("Which page mentions ABC-102?") == {"confluence", "jira"}
+    assert selected_connectors("Summarize the page about backups") == set()
+
+
+def test_date_ranges_are_filtered_before_traversing():
+    query = guidance_for("How many Confluence pages did each author write in March 2025?", "query")
+    assert "Filter by date first, then traverse" in query
+    assert "WITH p MATCH (p)-[:authored]->(a:Person)" in query
+    planner = guidance_for("Who commented on the Confluence page about backups?", "planner")
+    assert "make the comment, child-page, or attachment step depend on it" in planner
+
+
+def test_a_link_question_naming_one_source_gets_the_pairs_that_include_it():
+    planner = guidance_for("Which issues does the release review for ABC-102 link to?", "planner")
+    assert "## Confluence and Jira relationship guidance" in planner
+    assert "## Jira and Zendesk relationship guidance" in planner
+    assert "Confluence and Zendesk" not in planner
+    assert "relationship guidance" not in guidance_for("Status of ABC-102?", "planner")
+
+
+def test_jira_status_categories_are_the_stored_values():
+    query = guidance_for("Which jira issues are in progress?", "query")
+    assert "status_category is new, indeterminate (in progress), or done" in query
+
+
+def test_confluence_relations_register_both_pairs():
+    jira = guidance_for("Which Confluence pages link to ABC-102?", "query")
+    assert "MATCH (p:ConfluencePage)-[:links_issue]->(i:JiraIssue)" in jira
+    zendesk = guidance_for("Which Confluence page links to Zendesk ticket 24680?", "query")
+    assert "MATCH (p:ConfluencePage)-[:links_ticket]->(t:ZendeskTicket)" in zendesk
+    assert allows_type("ConfluencePage", {"jira"})
+    assert allows_type("ZendeskTicket", {"confluence"})
+    assert not allows_type("ConfluenceComment", {"jira"})
 
 
 def test_zendesk_and_jira_relation_uses_links_issue():
@@ -162,7 +227,7 @@ def test_jira_questions_keep_shared_and_jira_types_only():
     assert allows_type("JiraIssue", {"jira"})
     assert allows_type("Person", {"jira"})
     assert allows_type("DocumentChunk", {"jira"})
-    assert not allows_type("ConfluencePage", {"jira"})
+    assert not allows_type("ConfluenceComment", {"jira"})
     assert allows_type("ZendeskTicket", {"jira"})
     assert allows_type("ZendeskComment", {"zendesk"})
     assert allows_type("ConfluencePage", set())
@@ -173,11 +238,6 @@ def test_query_rules_apply_to_every_structural_query():
     assert "Match a topic, title, subject, or summary word by word" in query
     assert "Filter by date first, then traverse" in query
     assert guidance_for("What is our refund policy?", "planner") == ""
-
-
-def test_jira_status_categories_are_the_stored_values():
-    query = guidance_for("Which jira issues are in progress?", "query")
-    assert "status_category is new, indeterminate (in progress), or done" in query
 
 
 def test_a_step_can_depend_on_an_identifier_found_earlier():
