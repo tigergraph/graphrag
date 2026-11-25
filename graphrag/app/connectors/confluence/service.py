@@ -100,8 +100,8 @@ def count_content(source: ConfluenceDataSource) -> int:
 def install_schema(conn, graphname: str) -> dict[str, Any]:
     existing = read_existing_schema(conn)
     proposal = confluence_schema_proposal(existing.vertex_types)
-    drop_reused_vertices(proposal, conn)
-    return apply_proposal(conn, graphname, proposal)
+    reused = drop_reused_vertices(proposal, conn)
+    return apply_proposal(conn, graphname, proposal, link_vertices=reused)
 
 
 def schema_status(conn) -> dict[str, Any]:
