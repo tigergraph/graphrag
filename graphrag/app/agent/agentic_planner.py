@@ -271,8 +271,15 @@ def plan_question(llm, question, conversation=None, schema_rep="", prior_results
         )
     # Use the customizable planner prompt (fixed DAG-planning rules + the
     # editable "Additional Instructions" portion); the default lives in base_llm.
+    # Connector guidance is added through prompt_for; an LLM object without
+    # it gets the plain planner prompt.
+    system_prompt = (
+        llm.prompt_for("agentic_planner.txt", question, "planner")
+        if hasattr(llm, "prompt_for")
+        else llm.agentic_planner_prompt
+    )
     messages = [
-        ("system", llm.prompt_for("agentic_planner.txt", question, "planner")),
+        ("system", system_prompt),
         ("user", "\n\n".join(user_parts)),
     ]
     try:
