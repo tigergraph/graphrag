@@ -67,7 +67,9 @@ PLANNER = (
     "- Each structural step asks for one kind of record, because each step "
     "runs one query: the issue fields, the assignee and reporter, the "
     "comments with their authors, or the changes with their authors. Plan "
-    "only the kinds the question needs.\n"
+    "only the kinds the question needs. The issue-fields step asks only for "
+    "JiraIssue attributes; the assignee, reporter, parent, and linked issues "
+    "are steps of their own.\n"
     "- An answer about the issue as a whole needs the issue fields, the "
     "assignee and reporter, the recent comments, and a hybrid search that "
     "includes the issue key. History needs the changes. When the answer is "
@@ -80,6 +82,9 @@ PLANNER = (
     "tg_<version> is only the target release, and a comment saying the fix "
     "was cancelled, not possible, or moved overrides any label. Always "
     "retrieve the comments when release information is needed.\n"
+    "- Work that is in progress is status_category indeterminate; work that "
+    "is not done is new or indeterminate. Ask a step for that stored value, "
+    "not for statuses whose names look open or in progress.\n"
     "- Counts, lists, filters, and distributions over issue attributes are "
     "structural only, unless the question also needs description or comment "
     "text."
@@ -101,7 +106,9 @@ QUERY = (
     "part_of or relates_to only when the step asks for them. Use the pattern "
     "for the kind of record the step asks for:\n"
     "  - issue fields: MATCH (i:JiraIssue) WHERE toLower(i.issue_key) = "
-    "\"<key>\" RETURN the fields\n"
+    "\"<key>\" RETURN the fields as i.<attribute> values only, with no other "
+    "MATCH, list comprehension, or properties(); the step for the assignee, "
+    "reporter, or parent fetches those\n"
     "  - assignee: MATCH (i:JiraIssue)-[:assigned_to]->(p:Person) WHERE "
     "toLower(i.issue_key) = \"<key>\" RETURN p.display_name (reported for the "
     "reporter)\n"
@@ -113,6 +120,10 @@ QUERY = (
     "ch.to_value, ch.created, p.display_name\n"
     "  There is no edge from a comment or change to its issue, so never MATCH "
     "the JiraIssue together with its comments or changes.\n"
+    "- Jira issues about a topic, such as a feature, a product, or another "
+    "tool named in the question, match that topic in the issue's summary, "
+    "description, components, or labels. Do not traverse to another "
+    "source's records unless the question asks for linked records.\n"
     "- Project keys listed together, such as \"ABC DEF and XYZ\", are separate "
     "keys: filter with project_key IN the list and group by project_key, "
     "returning every listed key.\n"
@@ -138,10 +149,39 @@ ANSWER = (
     "empty, a merged_<version> label means merged into that version; a "
     "tg_<version> label is only the target; a comment saying the fix was "
     "cancelled, not possible, or moved overrides the labels. If none of "
-    "these give a version, say no version is recorded; do not invent one.\n"
+    "these give a version, say no version is recorded; do not invent one. "
+    "Lead with the answer, then give the evidence found: the fix version, "
+    "the labels, and what each comment that confirms, cancels, or moves the "
+    "fix says, with its date and author. Leave out comments that do not "
+    "bear on the release.\n"
+    "- Give a status category only when it was retrieved, and call it To Do, "
+    "In Progress, or Done, not new, indeterminate, or done. Never infer a "
+    "category from the status name.\n"
     "- List changes in time order and end with the current status.\n"
     "- If a bare number matches several Jira keys, list those keys and ask "
     "which issue is meant without mixing their details."
 )
 
 GUIDANCE = {"planner": PLANNER, "query": QUERY, "answer": ANSWER}
+
+# What the stored values of these types mean, shown with the graph schema so
+# that any tool that filters on them uses the right attribute and value.
+FIELD_NOTES = {
+    "JiraIssue": (
+        "project_key is the project code, such as ABC, and the prefix of "
+        "issue_key; project_name is the project's display name, which "
+        "differs from the code. A row with an empty project_key is a "
+        "placeholder written for a link, not an ingested issue. "
+        "status_category is new, indeterminate (in progress), or done. In "
+        "labels, merged_<version> marks the version a fix was merged into, and "
+        "tg_<version> is only the target release."
+    ),
+    "JiraComment": (
+        "issue_key is the issue the comment belongs to; no edge links a "
+        "comment to its issue."
+    ),
+    "JiraChange": (
+        "issue_key is the issue that changed; field is status, assignee, "
+        "priority, or resolution."
+    ),
+}

@@ -66,6 +66,10 @@ class ToolEnv:
     progress: Optional[Callable[[str], None]] = None
     trace: List[dict] = field(default_factory=list)
     retrieved: Dict[str, str] = field(default_factory=dict)   # passage id -> text
+    # The user's question (with the recent turns it follows up on). Connector
+    # guidance is chosen from it, not only from the narrower question a tool
+    # call is given.
+    user_question: str = ""
 
     @property
     def conn(self):
@@ -197,7 +201,9 @@ def _graphrag_tools(env: ToolEnv) -> List[BaseTool]:
 
     def query_graph(question: str) -> str:
         def body():
-            out = gt.structural_retrieve(ctx, question)
+            from connectors.prompt_selection import user_question
+            with user_question(env.user_question):
+                out = gt.structural_retrieve(ctx, question)
             view = {"ok": bool(out.get("ok")), "summary": out.get("summary", "")}
             c = out.get("context")
             if isinstance(c, dict):
@@ -515,9 +521,12 @@ def _tigergraph_tools(env: ToolEnv) -> List[BaseTool]:
                 except Exception as exc:
                     return {"ok": False, "summary": f"the query failed: {str(exc)[:800]}",
                             "hints": run_error_hints(str(exc), q), "query": q}
-                from common.utils.query_results import is_empty_result
+                from common.utils.query_results import describe_rows, is_empty_result
+                # The row count goes with the rows, so an answer that lists
+                # them can state how many there are without counting.
                 return {"ok": not is_empty_result(rows),
-                        "summary": "no rows" if is_empty_result(rows) else "rows returned",
+                        "summary": "no rows" if is_empty_result(rows)
+                        else describe_rows("the query", rows),
                         "result": rows, "query": q}
             return _run_tool(env, "run_cypher_query", "Querying the knowledge graph",
                              {"cypher": cypher}, body)

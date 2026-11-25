@@ -203,6 +203,36 @@ def history_messages(conversation) -> list:
     return out
 
 
+# Earlier user questions read with the current one when choosing connector
+# guidance, so a follow-up such as "and its comments?" keeps the source and
+# record of the question it follows.
+GUIDANCE_TURNS = 2
+
+
+def guidance_question(question: str, conversation=None, prior=None) -> str:
+    """The text connector guidance is chosen from: the last few user
+    questions of the conversation (caller-supplied turns, or the stored
+    thread's messages) followed by the current question."""
+    earlier = [str(t.get("query")) for t in (conversation or []) if t.get("query")]
+    if not earlier:
+        earlier = [_text(m.content) for m in (prior or []) if isinstance(m, HumanMessage)]
+    earlier = [q for q in earlier[-GUIDANCE_TURNS:] if q.strip()]
+    return "\n".join(earlier + [question or ""])
+
+
+def connector_guidance(text: str) -> str:
+    """Connector guidance for the Deep Agent's prompts, or '' when none applies
+    or the connector registry cannot be loaded."""
+    if not text:
+        return ""
+    try:
+        from connectors.prompt_selection import agent_guidance
+        return agent_guidance(text)
+    except Exception as exc:
+        logger.warning(f"deep_agent: connector guidance skipped: {exc}")
+        return ""
+
+
 class DeepGraphRAGAgent:
     """Chat engine backed by a LangChain Deep Agent (see module docstring)."""
 
@@ -323,9 +353,11 @@ class DeepGraphRAGAgent:
 
         style, extra = self._instructions()
         ltm = bool(settings.long_term_memory and store is not None and self.user)
+        connector = connector_guidance(env.user_question)
         system_prompt = prompts.main_prompt(
             self.graphname, date.today().isoformat(), env.use_cypher, style, extra,
             long_term_memory=ltm, keyword_search="keyword_search" in tool_names,
+            connector_guidance=connector,
         )
 
         subagents = []
@@ -337,7 +369,8 @@ class DeepGraphRAGAgent:
                     "description": "Answers one focused question from the structured graph "
                                    "data (counts, lookups, relationships, aggregations, "
                                    "installed analytics queries).",
-                    "system_prompt": prompts.graph_analyst_prompt(self.graphname, env.use_cypher),
+                    "system_prompt": prompts.graph_analyst_prompt(
+                        self.graphname, env.use_cypher, connector_guidance=connector),
                     "tools": [by_name["get_graph_schema"], by_name["query_graph"]] + tg_tools,
                 },
                 {
@@ -415,6 +448,7 @@ class DeepGraphRAGAgent:
                 checkpointer = InMemorySaver(serde=mem.serializer())
                 prior = []
             seed = history_messages(convo) if not prior else []
+            env.user_question = guidance_question(question, convo, prior)
 
             agent = self.build(env, external, checkpointer, backends.store)
             config = {

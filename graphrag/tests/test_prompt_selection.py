@@ -14,10 +14,14 @@ from connectors.confluence.schema import confluence_schema_proposal
 from connectors.zendesk import prompts as zendesk_prompts
 from connectors.zendesk.schema import zendesk_schema_proposal
 from connectors.prompt_selection import (
+    agent_guidance,
     allows_type,
     bare_record_number,
     guidance_for,
+    schema_notes,
     selected_connectors,
+    selection_text,
+    user_question,
 )
 
 
@@ -165,7 +169,7 @@ def test_a_bare_number_is_looked_up_in_every_source_before_asking():
     assert 'issue_key ends with "-12345"' in planner
     assert "Plan one structural step for each source" in planner
     assert "## Jira guidance" in planner
-    assert "add for each source the steps for the related records" in planner
+    assert "add for every source, not only the first, the" in planner
     assert "ask which" in guidance_for(question, "answer")
     assert "graph_queries_with_no_rows" in guidance_for(question, "answer")
 
@@ -249,3 +253,120 @@ def test_zendesk_counts_filter_dates_before_traversing():
     query = guidance_for("How many Zendesk tickets did each assignee get in March 2025?", "query")
     assert "WITH t MATCH (p:Person)-[:assigned]->(t)" in query
     assert "tags is a reserved word" in query
+
+
+def test_an_agent_gets_the_planner_query_and_answer_rules_together():
+    text = agent_guidance("How many Jira issues were created in March 2025?")
+    assert text.startswith("## Connector guidance")
+    assert "A structural step is one structured lookup: query_graph" in text
+    for heading in ("## Jira guidance", "## Jira query guidance", "## Jira answer guidance",
+                    "## Record question guidance", "## Record query guidance"):
+        assert heading in text
+    assert agent_guidance("What is our refund policy?") == ""
+
+
+def test_field_notes_cover_only_the_connector_types_on_the_graph():
+    notes = schema_notes(["JiraIssue", "JiraComment", "Document"])
+    assert notes.startswith("Field notes from the data source connectors:")
+    assert "- JiraIssue: project_key is the project code" in notes
+    assert "merged_<version>" in notes
+    assert "- JiraComment:" in notes
+    assert "JiraChange" not in notes
+    assert schema_notes(["Document", "DocumentChunk"]) == ""
+
+
+def test_query_guidance_follows_the_users_question_inside_an_agent_call():
+    narrow = "Count JiraIssue vertices created in March 2025 per project"
+    assert "## Jira query guidance" not in guidance_for(selection_text(narrow), "query")
+    with user_question("How are ingested Jira issues distributed by status?"):
+        text = guidance_for(selection_text(narrow), "query")
+    assert "## Jira query guidance" in text
+    assert selection_text(narrow) == narrow
+
+
+def test_the_issue_fields_step_fetches_no_related_records():
+    planner = guidance_for("Summarize ABC-102.", "planner")
+    assert "The issue-fields step asks only for JiraIssue attributes" in planner
+    query = guidance_for("Summarize ABC-102.", "query")
+    assert "no other MATCH, list comprehension, or properties()" in query
+
+
+def test_answers_use_the_users_terms_and_name_the_release_evidence():
+    answer = guidance_for("When will ABC-101 be fixed?", "answer")
+    assert "not by attribute name such as status_category or project_key" in answer
+    assert "query column names such as i_created" in answer
+    assert "never show vertex or edge type names" in answer
+    assert "Lead with the answer, then give the evidence found" in answer
+    assert "Never infer a category from the status name" in answer
+    assert "Work that is in progress is status_category indeterminate" in guidance_for("Which ABC issues are in progress?", "planner")
+    agent = agent_guidance("Summarize ABC-102.")
+    assert "Answer only what the question asks" in agent
+    assert "not with an offer of more lookups" in agent
+
+
+def test_numbers_come_from_the_query_and_topics_match_issue_text():
+    answer = guidance_for("How many ABC issues are open?", "answer")
+    assert "Never count, group, or total listed rows yourself" in answer
+    assert "without explaining how they map" in answer
+    query = guidance_for("Which jira issues for the billing feature are open?", "query")
+    assert "Do not traverse to another source's records" in query
+    release = guidance_for("When will ABC-101 be fixed?", "answer")
+    assert "Leave out comments that do not bear on the release" in release
+
+
+def test_a_link_named_only_in_text_is_not_called_confirmed():
+    answer = guidance_for("Which ABC issues also show up in support tickets?", "answer")
+    assert "Only a stored edge confirms a link between records" in answer
+    assert "Do not call such a pair confirmed or verified" in answer
+    assert 'never close with a line such as "If you want' in agent_guidance("Summarize ABC-102.")
+
+
+def test_zendesk_field_notes_are_shown_with_the_schema():
+    notes = schema_notes(["ZendeskTicket", "ZendeskComment", "JiraIssue"])
+    assert "- ZendeskTicket: ticket_id is the ticket number" in notes
+    assert "A row with an empty status is a placeholder" in notes
+    assert "- ZendeskComment:" in notes
+    assert "- JiraIssue:" in notes
+    assert "ZendeskChange" not in notes
+
+
+def test_a_zendesk_question_gives_the_agent_the_zendesk_rules():
+    text = agent_guidance("Summarize zendesk #12345.")
+    assert "## Zendesk guidance" in text
+    assert "## Zendesk query guidance" in text
+    assert "## Zendesk answer guidance" in text
+
+
+def test_an_unnamed_number_plans_related_steps_for_every_source():
+    planner = guidance_for("What are the next steps for #12345?", "planner")
+    assert "add for every source, not only the first" in planner
+    assert "includes each source's comments step" in planner
+
+
+def test_zendesk_counts_cover_ingested_tickets_only():
+    planner = guidance_for("How are zendesk tickets distributed by status?", "planner")
+    assert "An ingested ticket is one whose status is set" in planner
+    query = guidance_for("How are zendesk tickets distributed by status?", "query")
+    assert 'WHERE t.status <> ""' in query
+
+
+def test_answers_state_conditions_in_words_and_stay_short():
+    answer = guidance_for("How many zendesk tickets are closed?", "answer")
+    assert "This holds for every sentence" in answer
+    assert "never quote a question that was put to the graph" in answer
+    assert "even when a comment is signed with another form of the name" in answer
+    assert "stays under about 300 words" in guidance_for("What went wrong for zendesk customer ACME?", "answer")
+    assert "never in the answer text" in agent_guidance("What went wrong for zendesk customer ACME?")
+    assert "a similar subject is not a link" in guidance_for("List the linked tickets for zendesk #12345.", "answer")
+
+
+def test_short_questions_get_short_answers_and_a_picture_is_a_summary():
+    answer = guidance_for("Are urgent zendesk tickets still open?", "answer")
+    assert "A yes-or-no, count, or existence question is answered with the answer" in answer
+    assert "asks for a summary of the data, not an image" in answer
+
+
+def test_action_items_come_with_context_and_empty_values_read_not_set():
+    answer = guidance_for("What is the action item for zendesk #12345?", "answer")
+    assert "read together with the comment it answers" in answer
+    assert 'Show an empty stored value as "not set"' in answer

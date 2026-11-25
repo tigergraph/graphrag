@@ -81,6 +81,9 @@ PLANNER = (
     "priority, status, created), and use a hybrid search that names the "
     "customer for what the tickets describe. Do not traverse links_issue "
     "unless Jira is asked about.\n"
+    "- An ingested ticket is one whose status is set. Other ZendeskTicket "
+    "rows are placeholders written for a link, so counts, lists, and "
+    "distributions of tickets filter on status not empty.\n"
     "- Counts, lists, and distributions over ticket attributes, customers, "
     "or assignees are structural only.\n"
     "- Use word search only when the question names no field."
@@ -122,6 +125,8 @@ QUERY = (
     "the next month), so the last day of the month is included.\n"
     "- The attribute tags is a reserved word in TigerGraph openCypher and "
     "cannot be read in a query; leave it out.\n"
+    "- An ingested ticket has a status: counts, lists, and distributions of "
+    "tickets add WHERE t.status <> \"\".\n"
     "- Stored status and priority values are lowercase: status is new, open, "
     "pending, hold, solved, closed, or deleted; priority is low, normal, "
     "high, urgent, or empty. Compare with toLower(). A ticket is still open "
@@ -145,12 +150,20 @@ ANSWER = (
     "- Anything the ticket does not store as a field is drafted from the "
     "stored description and comments; say so when the ticket is closed and "
     "nothing is pending.\n"
+    "- An action item or next step comes from the latest comment or note "
+    "that states one, read together with the comment it answers, so the "
+    "answer says who must do what and why. A comment that only names a "
+    "person is not an action item without that context.\n"
     "- A support-team response is a public comment whose author_role is "
     "agent or admin; give its date and author.\n"
     "- Linked tickets are problem_id, followup_ids, source_ticket_id, the "
     "incidents with this ticket as problem_id, and Jira issues on "
-    "links_issue. If none are set, say the ticket has no linked tickets.\n"
-    "- Use Person.display_name. Do not print internal vertex ids. If several "
+    "links_issue. If none are set, say the ticket has no linked tickets. "
+    "Call tickets linked, follow-ups, or duplicates only when these stored "
+    "fields say so; a similar subject is not a link.\n"
+    "- Name a person by their stored display_name, even when a comment is "
+    "signed with another form of the name. Do not print internal vertex "
+    "ids. If several "
     "tickets match, list ticket id, subject, and status and ask which one. "
     "If a field is not on the ticket, say so. If a linked Jira issue has "
     "empty attributes and a Jira MCP server is configured, fetch those "
@@ -158,6 +171,31 @@ ANSWER = (
 )
 
 GUIDANCE = {"planner": PLANNER, "query": QUERY, "answer": ANSWER}
+
+# What the stored values of these types mean, shown with the graph schema so
+# that any tool that filters on them uses the right attribute and value.
+FIELD_NOTES = {
+    "ZendeskTicket": (
+        "ticket_id is the ticket number, stored as text. status is lowercase: "
+        "new, open, pending, hold, solved, closed, or deleted; a ticket is "
+        "still open when it is new, open, pending, or hold. priority is low, "
+        "normal, high, urgent, or empty. created and updated are ISO-8601 "
+        "text such as 2025-03-31T23:10:05Z. A row with an empty status is a "
+        "placeholder written for a link, not an ingested ticket. The "
+        "requester and assignee are Person rows on requested and assigned, "
+        "and the customer is the Organization the requester is a member of. "
+        "tags cannot be read in a query."
+    ),
+    "ZendeskComment": (
+        "ticket_id is the ticket the comment belongs to; no edge links a "
+        "comment to its ticket. visibility is public or internal, and "
+        "author_role is end-user, agent, or admin."
+    ),
+    "ZendeskChange": (
+        "ticket_id is the ticket that changed; field is status, assignee, or "
+        "priority."
+    ),
+}
 
 # Jira and Zendesk: the link Zendesk writes from its Jira link inventory.
 JIRA_PAIR = {

@@ -1697,10 +1697,10 @@ Example output (illustrative — pick names that fit your documents):
 
     def query_guidance_for(self, question: str) -> str:
         """Existing query guidance plus the connector guidance for this question."""
-        from connectors.prompt_selection import guidance_for
+        from connectors.prompt_selection import guidance_for, selection_text
 
         base = self.query_guidance_block
-        extra = guidance_for(question, "query")
+        extra = guidance_for(selection_text(question), "query")
         if not extra:
             return base
         return f"{base}\n{extra}".strip()
