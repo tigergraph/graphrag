@@ -370,3 +370,16 @@ def test_action_items_come_with_context_and_empty_values_read_not_set():
     answer = guidance_for("What is the action item for zendesk #12345?", "answer")
     assert "read together with the comment it answers" in answer
     assert 'Show an empty stored value as "not set"' in answer
+
+
+def test_confluence_field_notes_are_shown_with_the_schema():
+    notes = schema_notes(["ConfluencePage", "ConfluenceComment", "ZendeskTicket"])
+    assert "- ConfluencePage: page_id is the page number" in notes
+    assert "- ConfluenceComment: page_id is the page the comment belongs to" in notes
+    assert "- ZendeskTicket:" in notes
+
+
+def test_a_confluence_question_gives_the_agent_the_confluence_rules():
+    text = agent_guidance("Which Confluence pages have unresolved comments?")
+    assert "## Confluence guidance" in text
+    assert "for footer and inline comments alike" in text

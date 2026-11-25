@@ -108,7 +108,7 @@ QUERY = (
     "  There is no edge from a comment, child page, or attachment to its page, "
     "so never MATCH the page together with them; first find the page_id.\n"
     "- Comment resolution values are open, reopened, resolved, and dangling, "
-    "or empty for a footer comment. An unresolved comment is open or "
+    "for footer and inline comments alike. An unresolved comment is open or "
     "reopened.\n"
     "- created and updated are ISO-8601 strings such as "
     "\"2025-03-31T23:10:05.000Z\". For a calendar month compare "
@@ -139,6 +139,26 @@ ANSWER = (
 )
 
 GUIDANCE = {"planner": PLANNER, "query": QUERY, "answer": ANSWER}
+
+# What the stored values of these types mean, shown with the graph schema so
+# that any tool that filters on them uses the right attribute and value.
+FIELD_NOTES = {
+    "ConfluencePage": (
+        "page_id is the page number, stored as text. title is the page name; "
+        "match it by its distinctive words. body holds the page content. "
+        "space_key is the short space code and space_name its full name. "
+        "parent_id is the page_id of the parent page. version_number counts "
+        "edits and is stored as text. created and updated are ISO-8601 text "
+        "such as 2025-03-31T23:10:05.000Z. The creator is on authored, the "
+        "last editor on edited, and the owner on owned."
+    ),
+    "ConfluenceComment": (
+        "page_id is the page the comment belongs to; no edge links a comment "
+        "to its page. comment_type is footer or inline. resolution is open, "
+        "reopened, resolved, or dangling; an unresolved comment is open or "
+        "reopened."
+    ),
+}
 
 # Confluence and Jira: links_issue from the page, written from page text.
 JIRA_PAIR = {
