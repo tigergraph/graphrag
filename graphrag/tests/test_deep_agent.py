@@ -13,10 +13,15 @@ from unittest import mock
 from types import SimpleNamespace
 
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deep_agent import memory as mem
-from deep_agent.agent import DeepGraphRAGAgent, history_messages
+from deep_agent.agent import (
+    DeepGraphRAGAgent,
+    connector_guidance,
+    guidance_question,
+    history_messages,
+)
 from deep_agent import prompts, settings
 from deep_agent.settings import memory_settings, use_deep_agent
 from deep_agent.tools import ToolEnv, build_tools, query_is_runnable
@@ -296,6 +301,64 @@ class TestRouter(_Base):
 
         r._access = lambda request, graphname: (FakeConn(), None)
         self.assertEqual(client.get("/TestGraph/agent/memories").status_code, 400)
+
+
+class TestConnectorGuidance(_Base):
+    def test_connector_rules_go_into_the_main_and_analyst_prompts(self):
+        rules = connector_guidance("How many Jira issues were created in March 2025?")
+        self.assertIn("## Connector guidance", rules)
+        self.assertIn("## Jira guidance", rules)
+        self.assertIn("## Jira query guidance", rules)
+        self.assertIn("## Jira answer guidance", rules)
+        main = prompts.main_prompt("g", "2026-01-01", False, connector_guidance=rules)
+        self.assertLess(main.index("## Connector guidance"), main.index("## Answer\n"))
+        self.assertIn("## Jira guidance", prompts.graph_analyst_prompt("g", False, rules))
+        self.assertNotIn("Connector guidance", prompts.main_prompt("g", "2026-01-01", False))
+
+    def test_a_general_question_gets_no_connector_rules(self):
+        self.assertEqual(connector_guidance("What is our refund policy?"), "")
+        self.assertEqual(connector_guidance(""), "")
+
+    def test_guidance_is_chosen_with_the_earlier_questions(self):
+        convo = [{"query": "Summarize ABC-101.", "response": "..."}]
+        text = guidance_question("And its comments?", convo)
+        self.assertEqual(text, "Summarize ABC-101.\nAnd its comments?")
+        prior = [HumanMessage(content="Summarize ABC-101."), AIMessage(content="...")]
+        self.assertEqual(guidance_question("And its comments?", None, prior), text)
+        self.assertEqual(guidance_question("Hi"), "Hi")
+
+    def test_query_graph_chooses_query_guidance_from_the_users_question(self):
+        from connectors.prompt_selection import selection_text
+
+        seen = {}
+
+        def retrieve(ctx, question):
+            seen["text"] = selection_text(question)
+            return {"ok": True, "summary": "graph query returned 1 row", "context": {"result": [1]}}
+
+        env = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn()),
+                      user_question="How many Jira issues were created in March 2025?")
+        tool = {t.name: t for t in build_tools(env)["graphrag"]}["query_graph"]
+        with mock.patch("tools.graphrag_tools.structural_retrieve", retrieve):
+            tool.invoke({"question": "Count JiraIssue vertices by project_key"})
+        self.assertEqual(
+            seen["text"],
+            "How many Jira issues were created in March 2025?\n"
+            "Count JiraIssue vertices by project_key",
+        )
+        # Outside the tool call only the given question is used.
+        self.assertEqual(selection_text("Count JiraIssue vertices"), "Count JiraIssue vertices")
+
+
+class TestCypherRowCount(_Base):
+    def test_run_cypher_query_reports_how_many_rows_it_returned(self):
+        env = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn()), use_cypher=True)
+        tool = {t.name: t for t in build_tools(env)["tigergraph"]}["run_cypher_query"]
+        rows = [{"T": [{"k": "ABC-1"}, {"k": "ABC-2"}, {"k": "ABC-3"}]}]
+        with mock.patch("tools.generate_cypher.check_cypher", return_value=[]), \
+                mock.patch("tools.generate_cypher.run_cypher", return_value=rows):
+            out = json.loads(tool.invoke({"cypher": "MATCH (i:Issue) RETURN i.k"}))
+        self.assertTrue(out["summary"].startswith("the query returned 3 rows"), out["summary"])
 
 
 class TestTools(_Base):
