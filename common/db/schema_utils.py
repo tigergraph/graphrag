@@ -960,6 +960,7 @@ def emit_add_statements(
 def emit_structural_link_alters(
     proposal: SchemaProposal,
     existing: Optional[ExistingSchema] = None,
+    link_vertices: Iterable[str] = (),
 ) -> List[str]:
     """For every domain vertex in *proposal*, emit ``ALTER EDGE … ADD
     PAIR`` statements that connect it to the GraphRAG core via the
@@ -993,21 +994,29 @@ def emit_structural_link_alters(
     has_chunk = existing.has_vertex("DocumentChunk")
     has_community = existing.has_vertex("Community")
 
+    # Domain vertex types already on the graph (reused instead of added,
+    # e.g. after an earlier install stopped part way) still need their
+    # structural links.
+    names: List[str] = [v.name for v in proposal.vertices]
+    for name in link_vertices or ():
+        if existing.has_vertex(name) and name not in names:
+            names.append(name)
+
     stmts: List[str] = []
-    for v in proposal.vertices:
+    for name in names:
         # CONTAINS_ENTITY: Document / DocumentChunk → <vt>
-        if has_doc and not existing.has_edge_pair("CONTAINS_ENTITY", "Document", v.name):
+        if has_doc and not existing.has_edge_pair("CONTAINS_ENTITY", "Document", name):
             stmts.append(
-                f"ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO {v.name})"
+                f"ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO {name})"
             )
-        if has_chunk and not existing.has_edge_pair("CONTAINS_ENTITY", "DocumentChunk", v.name):
+        if has_chunk and not existing.has_edge_pair("CONTAINS_ENTITY", "DocumentChunk", name):
             stmts.append(
-                f"ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO {v.name})"
+                f"ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO {name})"
             )
         # IN_COMMUNITY: <vt> → Community
-        if has_community and not existing.has_edge_pair("IN_COMMUNITY", v.name, "Community"):
+        if has_community and not existing.has_edge_pair("IN_COMMUNITY", name, "Community"):
             stmts.append(
-                f"ALTER EDGE IN_COMMUNITY ADD PAIR (FROM {v.name}, TO Community)"
+                f"ALTER EDGE IN_COMMUNITY ADD PAIR (FROM {name}, TO Community)"
             )
     return stmts
 
@@ -1646,9 +1655,14 @@ def apply_proposal(
     proposal: SchemaProposal,
     job_name: Optional[str] = None,
     progress: Optional[Callable[[str], None]] = None,
+    link_vertices: Iterable[str] = (),
 ) -> dict:
     """Diff *proposal* against the current schema on *conn* and apply the
     additive delta as a single atomic ``SCHEMA_CHANGE JOB``.
+
+    *link_vertices* names domain vertex types that are already on the graph
+    and were left out of *proposal* (reused); their structural links are
+    added too.
 
     Returns a result dict::
 
@@ -1687,7 +1701,7 @@ def apply_proposal(
         vertex_types=set(existing.vertex_types) | {v.name for v in proposal.vertices},
         edge_pairs=dict(existing.edge_pairs),
     )
-    structural_stmts = emit_structural_link_alters(proposal, augmented)
+    structural_stmts = emit_structural_link_alters(proposal, augmented, link_vertices)
     statements = domain_stmts + structural_stmts
     summary = summarize(proposal)
 
