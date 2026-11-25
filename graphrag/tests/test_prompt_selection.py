@@ -10,10 +10,14 @@ from connectors import cross_source_prompts
 from connectors.jira import prompts as jira_prompts
 from connectors.jira.schema import jira_schema_proposal
 from connectors.prompt_selection import (
+    agent_guidance,
     allows_type,
     bare_record_number,
     guidance_for,
+    schema_notes,
     selected_connectors,
+    selection_text,
+    user_question,
 )
 
 
@@ -144,3 +148,69 @@ def test_jira_status_categories_are_the_stored_values():
 def test_a_step_can_depend_on_an_identifier_found_earlier():
     planner = guidance_for("Who reported ABC-102 and what did they comment?", "planner")
     assert "list that step in depends_on" in planner
+
+
+def test_an_agent_gets_the_planner_query_and_answer_rules_together():
+    text = agent_guidance("How many Jira issues were created in March 2025?")
+    assert text.startswith("## Connector guidance")
+    assert "A structural step is one structured lookup: query_graph" in text
+    for heading in ("## Jira guidance", "## Jira query guidance", "## Jira answer guidance",
+                    "## Record question guidance", "## Record query guidance"):
+        assert heading in text
+    assert agent_guidance("What is our refund policy?") == ""
+
+
+def test_field_notes_cover_only_the_connector_types_on_the_graph():
+    notes = schema_notes(["JiraIssue", "JiraComment", "Document"])
+    assert notes.startswith("Field notes from the data source connectors:")
+    assert "- JiraIssue: project_key is the project code" in notes
+    assert "merged_<version>" in notes
+    assert "- JiraComment:" in notes
+    assert "JiraChange" not in notes
+    assert schema_notes(["Document", "DocumentChunk"]) == ""
+
+
+def test_query_guidance_follows_the_users_question_inside_an_agent_call():
+    narrow = "Count JiraIssue vertices created in March 2025 per project"
+    assert "## Jira query guidance" not in guidance_for(selection_text(narrow), "query")
+    with user_question("How are ingested Jira issues distributed by status?"):
+        text = guidance_for(selection_text(narrow), "query")
+    assert "## Jira query guidance" in text
+    assert selection_text(narrow) == narrow
+
+
+def test_the_issue_fields_step_fetches_no_related_records():
+    planner = guidance_for("Summarize ABC-102.", "planner")
+    assert "The issue-fields step asks only for JiraIssue attributes" in planner
+    query = guidance_for("Summarize ABC-102.", "query")
+    assert "no other MATCH, list comprehension, or properties()" in query
+
+
+def test_answers_use_the_users_terms_and_name_the_release_evidence():
+    answer = guidance_for("When will ABC-101 be fixed?", "answer")
+    assert "not by attribute name such as status_category or project_key" in answer
+    assert "query column names such as i_created" in answer
+    assert "never show vertex or edge type names" in answer
+    assert "Lead with the answer, then give the evidence found" in answer
+    assert "Never infer a category from the status name" in answer
+    assert "Work that is in progress is status_category indeterminate" in guidance_for("Which ABC issues are in progress?", "planner")
+    agent = agent_guidance("Summarize ABC-102.")
+    assert "Answer only what the question asks" in agent
+    assert "not with an offer of more lookups" in agent
+
+
+def test_numbers_come_from_the_query_and_topics_match_issue_text():
+    answer = guidance_for("How many ABC issues are open?", "answer")
+    assert "Never count, group, or total listed rows yourself" in answer
+    assert "without explaining how they map" in answer
+    query = guidance_for("Which jira issues for the billing feature are open?", "query")
+    assert "Do not traverse to another source's records" in query
+    release = guidance_for("When will ABC-101 be fixed?", "answer")
+    assert "Leave out comments that do not bear on the release" in release
+
+
+def test_a_link_named_only_in_text_is_not_called_confirmed():
+    answer = guidance_for("Which ABC issues also show up in support tickets?", "answer")
+    assert "Only a stored edge confirms a link between records" in answer
+    assert "Do not call such a pair confirmed or verified" in answer
+    assert 'never close with a line such as "If you want' in agent_guidance("Summarize ABC-102.")

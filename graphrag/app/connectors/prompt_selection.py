@@ -13,6 +13,8 @@ from ``cross_source_prompts.py``.
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from connectors import cross_source_prompts
 from connectors.jira import prompts as jira_prompts
@@ -88,7 +90,23 @@ _SHARED = {
         "- graph_queries_with_no_rows lists graph queries that ran and found "
         "nothing. For a count or existence question that is the answer: 0, or "
         "no matching records. For a record lookup it means that source has no "
-        "such record."
+        "such record.\n"
+        "- Write for the person who uses the source. Name fields the way they "
+        "do (status, project, created date), not by attribute name such as "
+        "status_category or project_key, and never show vertex or edge type "
+        "names such as links_issue, filters, query text, or query column "
+        "names such as i_created. Show stored values, such as "
+        "a status, label, or version, exactly as stored, without explaining "
+        "how they map to the words you use.\n"
+        "- A number in the answer comes from a count the query returned, or "
+        "is the number of rows it returned. Never count, group, or total "
+        "listed rows yourself, and do not add a breakdown the question did "
+        "not ask for.\n"
+        "- Only a stored edge confirms a link between records of two sources. "
+        "When the only evidence is text that names both records, such as a "
+        "page, a description, or a comment, give the records, say which text "
+        "names them together, and say that no link between them is stored. "
+        "Do not call such a pair confirmed or verified."
     ),
 }
 
@@ -107,6 +125,53 @@ _UNNAMED = {
         "one record that it does not identify."
     ),
 }
+
+
+_AGENT = (
+    "## Connector guidance\n"
+    "The rules below come from the data source connectors installed on this "
+    "graph and apply to this question. They name the parts of the work this "
+    "way:\n"
+    "- A structural step is one structured lookup: query_graph, get_vertices, "
+    "get_vertex_count, get_edges, or run_cypher_query. A hybrid search is "
+    "hybrid_search. A step that lists another in depends_on runs after it "
+    "and uses the values it found.\n"
+    "- The query guidance applies to every filter and query you write, and to "
+    "the question you pass to query_graph: name the stored attribute and value "
+    "to filter on, as the guidance gives them.\n"
+    "- Report the stored values you retrieved, never the value you filtered "
+    "on or expected.\n"
+    "- Answer only what the question asks. Leave out records you checked that "
+    "do not match, and do not describe how you searched. A summary of a "
+    "record gives what it is, its current state, the key findings, and the "
+    "latest discussion, in a few short paragraphs or bullets. End with the "
+    "answer, not with an offer of more lookups: never close with a line such "
+    "as \"If you want, I can...\"."
+)
+
+# The user's question while an agent works on it. Tools that generate a query
+# from a narrower question of their own, such as the Deep Agent's
+# query_graph, choose the connector query guidance from both questions.
+_USER_QUESTION: ContextVar[str] = ContextVar("connector_user_question", default="")
+
+
+@contextmanager
+def user_question(text: str):
+    """Make ``text`` the user's question for guidance chosen inside the block."""
+    token = _USER_QUESTION.set(text or "")
+    try:
+        yield
+    finally:
+        _USER_QUESTION.reset(token)
+
+
+def selection_text(question: str) -> str:
+    """The text connector guidance is chosen from: the user's question, when
+    one is set, plus ``question``."""
+    outer = _USER_QUESTION.get()
+    if not outer or outer == question:
+        return question or ""
+    return f"{outer}\n{question or ''}"
 
 
 def normalize_connector_question(text: str) -> str:
@@ -176,6 +241,33 @@ def _identifier_guidance(number: str, step: str) -> str:
             "number was not found in any source."
         )
     return ""
+
+
+def agent_guidance(question: str) -> str:
+    """Connector guidance for an agent that plans, queries, and answers in one
+    loop (the Deep Agent): the planner, query, and answer guidance of this
+    question under one heading, or '' when no connector rule applies."""
+    parts = [guidance_for(question, step) for step in ("planner", "query", "answer")]
+    if not parts[0]:
+        # Not a question about connector records: only the query rules that
+        # hold for every graph query apply, and query_graph adds those.
+        return ""
+    return "\n".join([_AGENT] + [part for part in parts if part])
+
+
+def schema_notes(vertex_types) -> str:
+    """Field notes of the installed connectors for the vertex types present,
+    one line per type, or ''."""
+    present = {str(v).split(" ", 1)[0] for v in vertex_types or ()}
+    lines = []
+    for name in sorted(_CONNECTORS):
+        notes = getattr(_CONNECTORS[name], "FIELD_NOTES", {})
+        for vertex, note in notes.items():
+            if vertex in present:
+                lines.append(f"- {vertex}: {note}")
+    if not lines:
+        return ""
+    return "Field notes from the data source connectors:\n" + "\n".join(lines)
 
 
 def guidance_for(question: str, step: str) -> str:

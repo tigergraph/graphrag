@@ -128,11 +128,20 @@ def get_schema(ctx: GraphRAGToolContext) -> dict:
     from common.db.schema_utils import render_schema_rep
     try:
         rep = render_schema_rep(ctx.conn)
+        schema_rep = rep.schema_rep
+        try:
+            from connectors.prompt_selection import schema_notes
+            notes = schema_notes(rep.vertex_types)
+        except Exception as exc:
+            logger.warning(f"get_schema: connector field notes skipped: {exc}")
+            notes = ""
+        if notes:
+            schema_rep = f"{schema_rep}\n\n{notes}"
         return _ok(
             f"schema v{rep.schema_version}: "
             f"{len(rep.vertex_types)} vertex / {len(rep.edge_types)} edge types",
             {
-                "schema_rep": rep.schema_rep,
+                "schema_rep": schema_rep,
                 "vertex_types": rep.vertex_types,
                 "edge_types": rep.edge_types,
                 "schema_version": rep.schema_version,
