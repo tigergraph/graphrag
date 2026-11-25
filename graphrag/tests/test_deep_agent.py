@@ -408,6 +408,31 @@ class TestTools(_Base):
         self.assertEqual(out["context"], {"temp": 21})
         self.assertEqual(env.trace[0]["tool"], "weather__get_forecast")
 
+    def test_registered_queries_are_their_own_group(self):
+        seen = {}
+
+        def fn(ctx, **kwargs):
+            seen.update(kwargs)
+            return {"ok": True, "summary": "q returned results",
+                    "context": {"query_name": "plan_month", "result": [{"month": 12}]}}
+
+        spec = SimpleNamespace(fn=fn, description="Returns the month the plan is decided.",
+                               args_schema_json={"type": "object", "properties": {}})
+        env = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn()))
+        groups = build_tools(env, registered_queries={"graphrag__gsql__plan_month": spec})
+        self.assertEqual(groups["mcp"], [])
+        tool = groups["registered"][0]
+        self.assertEqual(tool.name, "graphrag__gsql__plan_month")
+        out = json.loads(tool.invoke({}))
+        self.assertEqual(out["context"]["result"], [{"month": 12}])
+        self.assertEqual(env.trace[0]["tool"], "graphrag__gsql__plan_month")
+        self.assertEqual(build_tools(env)["registered"], [])
+
+    def test_registered_query_rule_only_with_registered_queries(self):
+        self.assertIn("graphrag__gsql__", prompts.main_prompt(
+            "g", "2026-01-01", False, registered_queries=True))
+        self.assertNotIn("Registered queries (tools named", prompts.main_prompt("g", "2026-01-01", False))
+
     def test_tool_output_is_capped(self):
         env = ToolEnv(graph_ctx=SimpleNamespace(conn=FakeConn()), max_output_chars=2000)
         mod = sys.modules["tools.graphrag_tools"]

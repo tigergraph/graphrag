@@ -294,6 +294,20 @@ class DeepGraphRAGAgent:
             logger.warning(f"deep_agent: mcp tool discovery skipped: {exc}")
         return {}
 
+    def _registered_queries(self) -> Dict[str, object]:
+        """Installed GSQL queries registered as tools for the graph in KG Admin
+        (empty when none)."""
+        try:
+            from tools.gsql_query_tools import discover_tagged_query_tools
+            tools = discover_tagged_query_tools(self.conn, self.graphname)
+            if tools:
+                logger.info(f"deep_agent: {len(tools)} registered GSQL tool(s) "
+                            f"for graph={self.graphname}")
+            return tools
+        except Exception as exc:
+            logger.warning(f"deep_agent: registered query discovery skipped: {exc}")
+            return {}
+
     def _instructions(self) -> tuple:
         """Operator-customized prompt text: the answer guidance of the chatbot
         response prompt and the Deep Agent's additional instructions."""
@@ -309,16 +323,18 @@ class DeepGraphRAGAgent:
                 extra = text
         return style, extra
 
-    def build(self, env: ToolEnv, external_tools: Dict[str, object], checkpointer, store):
+    def build(self, env: ToolEnv, external_tools: Dict[str, object], checkpointer, store,
+              registered_queries: Optional[Dict[str, object]] = None):
         """Assemble the Deep Agent graph for one request."""
         from deepagents import create_deep_agent
         from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
         from langchain.agents.structured_output import ToolStrategy
 
         settings = agent_settings(self.graphrag_cfg)
-        groups = build_tools(env, external_tools)
+        groups = build_tools(env, external_tools, registered_queries)
         graphrag_tools, tg_tools, mcp_tools = groups["graphrag"], groups["tigergraph"], groups["mcp"]
-        all_tools = graphrag_tools + tg_tools + mcp_tools
+        registered_tools = groups["registered"]
+        all_tools = graphrag_tools + tg_tools + registered_tools + mcp_tools
         tool_names = {t.name for t in graphrag_tools}
 
         style, extra = self._instructions()
@@ -326,6 +342,7 @@ class DeepGraphRAGAgent:
         system_prompt = prompts.main_prompt(
             self.graphname, date.today().isoformat(), env.use_cypher, style, extra,
             long_term_memory=ltm, keyword_search="keyword_search" in tool_names,
+            registered_queries=bool(registered_tools),
         )
 
         subagents = []
@@ -338,7 +355,8 @@ class DeepGraphRAGAgent:
                                    "data (counts, lookups, relationships, aggregations, "
                                    "installed analytics queries).",
                     "system_prompt": prompts.graph_analyst_prompt(self.graphname, env.use_cypher),
-                    "tools": [by_name["get_graph_schema"], by_name["query_graph"]] + tg_tools,
+                    "tools": [by_name["get_graph_schema"], by_name["query_graph"]]
+                             + tg_tools + registered_tools,
                 },
                 {
                     "name": "document-researcher",
@@ -401,6 +419,7 @@ class DeepGraphRAGAgent:
                 progress=self.emit_progress,
             )
             external = self._external_tools(graph_ctx)
+            registered = self._registered_queries()
 
             # STM: a conversation id maps to a persistent thread. A request
             # without one (REST /query, /query_with_history) runs on a private
@@ -416,7 +435,7 @@ class DeepGraphRAGAgent:
                 prior = []
             seed = history_messages(convo) if not prior else []
 
-            agent = self.build(env, external, checkpointer, backends.store)
+            agent = self.build(env, external, checkpointer, backends.store, registered)
             config = {
                 "configurable": {"thread_id": tid},
                 "recursion_limit": settings.recursion_limit,

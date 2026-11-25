@@ -44,7 +44,7 @@ top_k >= 10 for a value, row, total, ranking or year-over-year comparison, and \
 quote the exact label, column, year or unit); similarity_search for a single \
 passage; community_search for broad, thematic or "overall" questions\
 {keyword_hint}.
-- Structured data (counts, lookups by attribute or id, relationships, paths, \
+{registered_hint}- Structured data (counts, lookups by attribute or id, relationships, paths, \
 aggregations): read get_graph_schema first, then prefer exact TigerGraph tools \
 (get_vertex_count, get_edge_count, get_vertices, get_vertices_by_id, get_edges); \
 use query_graph for anything those cannot express\
@@ -92,8 +92,9 @@ GRAPH_ANALYST_PROMPT = """\
 You are a graph data analyst for the TigerGraph knowledge graph "{graphname}". \
 You answer one focused question from structured graph data. Read \
 get_graph_schema first, then use the exact TigerGraph tools (counts, vertex and \
-edge lookups) or query_graph{cypher_hint}. Check list_installed_queries for \
-analytics. Change approach when a result is empty. Never invent values. Reply \
+edge lookups) or query_graph{cypher_hint}. When a registered query (a tool named graphrag__gsql__*) \
+has a description that matches the question, call it. Check \
+list_installed_queries for analytics. Change approach when a result is empty. Never invent values. Reply \
 with the facts you found (values, names, ids) and the queries that produced \
 them, or state clearly that the data is not in the graph."""
 
@@ -148,15 +149,27 @@ KEYWORD_HINT = ("; keyword_search for a passage that must contain an exact name,
                 "number or label, such as a note or section another passage refers to")
 
 
+REGISTERED_QUERY_HINT = """\
+- Registered queries (tools named graphrag__gsql__*) are installed GSQL \
+queries the administrator registered for this graph. Each description says \
+what it returns and when to use it. Call one when its description matches a \
+part of the question; the match does not have to cover the whole question, so \
+use other tools for the remaining parts. Do not call one only because it is \
+listed. They do not need get_graph_schema first.
+"""
+
+
 def main_prompt(graphname: str, today: str, use_cypher: bool,
                 answer_style: str = "", additional: str = "",
-                long_term_memory: bool = True, keyword_search: bool = False) -> str:
+                long_term_memory: bool = True, keyword_search: bool = False,
+                registered_queries: bool = False) -> str:
     style = f"\n## Answer style\n{answer_style.strip()}\n" if answer_style.strip() else ""
     extra = f"\n## Additional instructions\n{additional.strip()}\n" if additional.strip() else ""
     return MAIN_PROMPT.format(
         graphname=graphname, today=today,
         cypher_hint=CYPHER_HINT if use_cypher else "",
         keyword_hint=KEYWORD_HINT if keyword_search else "",
+        registered_hint=REGISTERED_QUERY_HINT if registered_queries else "",
         exact_term_rule=EXACT_TERM_RULE if keyword_search else RESULT_TERM_RULE,
         answer_style=style, additional=extra,
         memory_section=MEMORY_SECTION if long_term_memory else NO_MEMORY_SECTION,
