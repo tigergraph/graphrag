@@ -561,6 +561,8 @@ Uploaded and downloaded files are pre-processed when they are added: multimodal 
 
 #### Stored Files
 
+On the **Upload** tab, **Add Files or Folders** adds files or a whole folder to the selection, and each choice adds to the files already selected. Files and folders can also be dropped together onto the tab. A folder keeps its subfolders in the stored file names. Hidden files and folders (such as `.DS_Store`) and Office lock files (`~$…`) are skipped.
+
 **Stored Files** lists the uploaded and downloaded files of the graph, with their size, the time they were added, and their state:
 
 | State | Meaning |
