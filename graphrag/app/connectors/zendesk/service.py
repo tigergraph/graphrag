@@ -74,8 +74,8 @@ def count_tickets(source: ZendeskDataSource) -> int:
 def install_schema(conn, graphname: str) -> dict[str, Any]:
     existing = read_existing_schema(conn)
     proposal = zendesk_schema_proposal(existing.vertex_types)
-    drop_reused_vertices(proposal, conn)
-    return apply_proposal(conn, graphname, proposal)
+    reused = drop_reused_vertices(proposal, conn)
+    return apply_proposal(conn, graphname, proposal, link_vertices=reused)
 
 
 def schema_status(conn) -> dict[str, Any]:

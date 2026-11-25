@@ -1117,6 +1117,23 @@ def test_emit_structural_links_for_new_domain_vertices():
     assert len(stmts) == 6
 
 
+def test_reused_vertices_get_their_missing_structural_links():
+    """A domain vertex already on the graph (left out of the proposal as
+    reused, e.g. after an install that stopped part way) still gets the
+    CONTAINS_ENTITY pairs it lacks; one that is not on the graph does not."""
+    proposal = SchemaProposal()
+    existing = ExistingSchema(
+        vertex_types={"Document", "DocumentChunk", "Page"},
+        edge_pairs={"CONTAINS_ENTITY": {("Document", "Entity")}},
+    )
+    stmts = emit_structural_link_alters(proposal, existing, ["Page", "Missing"])
+    assert stmts == [
+        "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO Page)",
+        "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO Page)",
+    ]
+    assert emit_structural_link_alters(proposal, existing) == []
+
+
 def test_emit_structural_links_skips_in_community_when_already_present():
     proposal = SchemaProposal()
     proposal.add_vertex("Company")
