@@ -190,6 +190,20 @@ def _resolve_path(results: dict, ref: str):
 _EARLIER_ROWS_CHARS = 1500
 
 
+def _with_step_question(step, args: dict) -> dict:
+    """A structural step needs question text. When the planner gave none (it
+    bound only earlier rows to ``question``), the step's rationale states
+    what to retrieve, so it becomes the question."""
+    if step.kind != "structural":
+        return args
+    question = args.get("question")
+    if isinstance(question, str) and question.strip():
+        return args
+    if step.rationale and step.rationale.strip():
+        return {**args, "question": step.rationale.strip()}
+    return args
+
+
 def _with_earlier_rows(step, args: dict, results: dict, bound_rows=None) -> dict:
     if step.kind != "structural" or not (step.depends_on or bound_rows):
         return args
@@ -290,6 +304,7 @@ def execute_plan(plan, ctx):
                     bound_rows.append(f"{ref}: {json.dumps(val, default=str)[:_EARLIER_ROWS_CHARS]}")
                     continue
                 args[arg_name] = val
+            args = _with_step_question(step, args)
             args = _with_earlier_rows(step, args, results, bound_rows)
             _run_step(step, args, ctx, results, traces)
             done.add(step.id)

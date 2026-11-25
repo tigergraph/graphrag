@@ -375,6 +375,30 @@ class TestDependentStepsSeeEarlierRows(unittest.TestCase):
         self.assertEqual(ex._with_earlier_rows(search, {"question": "q"}, results)["question"], "q")
 
 
+class TestAStepWithoutQuestionTextUsesItsRationale(unittest.TestCase):
+    def test_rows_bound_to_a_missing_question_join_the_rationale(self):
+        import agent.agentic_executor as ex
+        step = PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL, args={},
+                        arg_bindings={"question": "S1.context.result"}, depends_on=["S1"],
+                        rationale="List the pages whose parent_id is that page's page_id.")
+        args = ex._with_step_question(step, {})
+        self.assertEqual(args["question"], "List the pages whose parent_id is that page's page_id.")
+        results = {"S1": StepResult(step_id="S1", ok=True, summary="1 row",
+                                    context={"result": [{"page_id": "123"}]})}
+        args = ex._with_earlier_rows(step, args, results)
+        self.assertTrue(args["question"].startswith("List the pages whose parent_id"))
+        self.assertIn('"page_id": "123"', args["question"])
+
+    def test_a_given_question_and_other_kinds_are_left_alone(self):
+        import agent.agentic_executor as ex
+        step = PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL,
+                        args={"question": "q"}, rationale="r")
+        self.assertEqual(ex._with_step_question(step, {"question": "q"})["question"], "q")
+        search = PlanStep(id="S3", kind="unstructured", tool="graphrag__hybrid_search",
+                          args={}, rationale="r")
+        self.assertEqual(ex._with_step_question(search, {}), {})
+
+
 class TestRowsBoundToAQuestionKeepTheQuestion(unittest.TestCase):
     def test_rows_bound_to_question_are_appended_not_substituted(self):
         import agent.agentic_executor as ex

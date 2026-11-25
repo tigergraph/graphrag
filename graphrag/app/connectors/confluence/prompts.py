@@ -126,7 +126,7 @@ QUERY = (
 
 ANSWER = (
     "## Confluence answer guidance\n"
-    "- Name pages by title (and url), never by page_id alone.\n"
+    "- Name pages by title and url. Never show a page_id.\n"
     "- Quote the title, body, and comment bodies from the stored attributes. "
     "When the answer is what a page says, take it from body, not only the "
     "title. Give the page url when the page is the answer.\n"

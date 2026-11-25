@@ -127,6 +127,11 @@ _SHARED = {
         "- An answer about what many records show, such as recurring "
         "problems, groups them into at most five themes, each one or two "
         "lines with its record ids, and stays under about 300 words.\n"
+        "- Keep any answer under about 300 words unless the question asks "
+        "for a full list or step-by-step instructions; then give the list or "
+        "the steps without extra commentary.\n"
+        "- End with the answer, not with an offer of more lookups: never "
+        "close with a line such as \"If you want, I can...\".\n"
         "- A yes-or-no, count, or existence question is answered with the "
         "answer and its number. List records only when the question asks for "
         "them or the answer is yes and names a few.\n"
@@ -179,9 +184,7 @@ _AGENT = (
     "- Answer only what the question asks. Leave out records you checked that "
     "do not match, and do not describe how you searched. A summary of a "
     "record gives what it is, its current state, the key findings, and the "
-    "latest discussion, in a few short paragraphs or bullets. End with the "
-    "answer, not with an offer of more lookups: never close with a line such "
-    "as \"If you want, I can...\"."
+    "latest discussion, in a few short paragraphs or bullets."
 )
 
 # The user's question while an agent works on it. Tools that generate a query

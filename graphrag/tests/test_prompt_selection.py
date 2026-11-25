@@ -383,3 +383,11 @@ def test_a_confluence_question_gives_the_agent_the_confluence_rules():
     text = agent_guidance("Which Confluence pages have unresolved comments?")
     assert "## Confluence guidance" in text
     assert "for footer and inline comments alike" in text
+
+
+def test_both_engines_get_the_length_and_no_offer_rules():
+    answer = guidance_for("Summarize zendesk #12345.", "answer")
+    assert "Keep any answer under about 300 words" in answer
+    assert 'never close with a line such as "If you want' in answer
+    page = guidance_for("Which Confluence pages mention ABC-101?", "answer")
+    assert "Never show a page_id" in page
