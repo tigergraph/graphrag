@@ -981,7 +981,7 @@ const LLMConfig = () => {
 
           <div className="space-y-6">
             {/* Mode toggle */}
-            <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+            <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
               <div className="space-y-4">
                 <label className="block text-sm font-medium mb-2 text-black dark:text-white">
                   Configuration Mode
@@ -1018,7 +1018,7 @@ const LLMConfig = () => {
 
             {/* Custom provider config */}
             {useCustomChatbot && (
-              <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+              <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
                 <h3 className="text-lg font-semibold mb-4 text-black dark:text-white">Custom Chatbot Provider</h3>
                 <div className="space-y-4">
                   <div>
@@ -1088,7 +1088,7 @@ const LLMConfig = () => {
 
             {/* Test results */}
             {testResults && (
-              <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+              <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
                 <h3 className="text-lg font-semibold mb-4 text-black dark:text-white">Test Results</h3>
                 {Object.entries(testResults).map(([key, result]: [string, any]) => (
                   <div key={key} className={`p-3 rounded-lg text-sm mb-2 ${
@@ -1219,7 +1219,7 @@ const LLMConfig = () => {
           />
 
           {/* Multi-Provider Toggle */}
-          <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+          <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
             <div className="flex items-center space-x-3">
               <input
                 type="checkbox"
@@ -1249,7 +1249,7 @@ const LLMConfig = () => {
 
           {/* Single Provider Configuration */}
           {!useMultipleProviders && (
-            <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+            <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
               <div className="space-y-6">
                 <div>
                   <h2 className="text-lg font-semibold mb-4 text-black dark:text-white">
@@ -1457,7 +1457,7 @@ const LLMConfig = () => {
           {useMultipleProviders && (
             <>
               {/* Completion Provider */}
-              <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+              <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
                 <h2 className="text-lg font-semibold mb-4 text-black dark:text-white">
                   Completion Service
                 </h2>
@@ -1513,7 +1513,7 @@ const LLMConfig = () => {
               </div>
 
               {/* Chatbot Service */}
-              <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+              <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
                 <h2 className="text-lg font-semibold mb-4 text-black dark:text-white">
                   Chatbot Service
                 </h2>
@@ -1607,7 +1607,7 @@ const LLMConfig = () => {
               </div>
 
               {/* Multimodal Service Provider */}
-              <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+              <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
                 <h2 className="text-lg font-semibold mb-4 text-black dark:text-white">
                   Multimodal Service
                 </h2>
@@ -1685,7 +1685,7 @@ const LLMConfig = () => {
               </div>
 
               {/* Embedding Service Provider */}
-              <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+              <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
                 <h2 className="text-lg font-semibold mb-4 text-black dark:text-white">
                   Embedding Service
                 </h2>

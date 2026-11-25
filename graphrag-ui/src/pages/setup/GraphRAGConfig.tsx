@@ -478,7 +478,7 @@ const GraphRAGConfig = () => {
         <fieldset>
         <div className="space-y-6">
           {/* General Settings */}
-          <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+          <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
             <h2 className="text-lg font-semibold mb-4 text-black dark:text-white">
               General Settings
             </h2>
@@ -492,15 +492,15 @@ const GraphRAGConfig = () => {
                   <label htmlFor="agentMode" className="block text-sm font-medium mb-2 text-black dark:text-white">
                     Answer Engine
                   </label>
-                  <select
-                    id="agentMode"
-                    value={agentMode}
-                    onChange={(e) => setAgentMode(e.target.value as "agentic" | "classic")}
-                    className="block w-full h-10 px-3 rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA text-sm"
-                  >
-                    <option value="agentic">Agentic</option>
-                    <option value="classic">Classic</option>
-                  </select>
+                  <Select value={agentMode} onValueChange={(v) => setAgentMode(v as "agentic" | "classic")}>
+                    <SelectTrigger id="agentMode" className="dark:border-[#3D3D3D] dark:bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="agentic">Agentic</SelectItem>
+                      <SelectItem value="classic">Classic</SelectItem>
+                    </SelectContent>
+                  </Select>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     Engine that answers chat questions. Agentic plans its own searches across graph data and documents; Classic picks one retrieval method per question.
                   </p>
@@ -510,16 +510,19 @@ const GraphRAGConfig = () => {
                   <label htmlFor="agentEngine" className="block text-sm font-medium mb-2 text-black dark:text-white">
                     Agent
                   </label>
-                  <select
-                    id="agentEngine"
+                  <Select
                     value={agentEngine}
-                    onChange={(e) => setAgentEngine(e.target.value as "default" | "legacy")}
+                    onValueChange={(v) => setAgentEngine(v as "default" | "legacy")}
                     disabled={agentMode !== "agentic"}
-                    className="block w-full h-10 px-3 rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA text-sm disabled:opacity-50"
                   >
-                    <option value="default">Deep Agent</option>
-                    <option value="legacy">Legacy agents (Planned / Reactive)</option>
-                  </select>
+                    <SelectTrigger id="agentEngine" className="dark:border-[#3D3D3D] dark:bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">Deep Agent</SelectItem>
+                      <SelectItem value="legacy">Legacy agents (Planned / Reactive)</SelectItem>
+                    </SelectContent>
+                  </Select>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                     Agent that the Agentic engine runs. With the legacy agents, the chat menu chooses Planned or Reactive.
                   </p>
@@ -674,7 +677,7 @@ const GraphRAGConfig = () => {
           </div>
 
           {/* Ingestion Settings */}
-          <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+          <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
             <button
               type="button"
               onClick={() => setShowAdvanced(!showAdvanced)}
@@ -809,7 +812,7 @@ const GraphRAGConfig = () => {
           </div>
 
           {/* Chunker Settings */}
-          <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+          <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
             <button
               type="button"
               onClick={() => setShowChunker(!showChunker)}
@@ -977,7 +980,7 @@ const GraphRAGConfig = () => {
 
           {/* Schema extraction (sample-doc proposal path) + dynamic schema
               behavior (how domain types are enforced and retrieved). */}
-          <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+          <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
             <button
               type="button"
               onClick={() => setShowSchema(!showSchema)}
@@ -1112,7 +1115,7 @@ const GraphRAGConfig = () => {
 
           {/* Service Endpoints (global only) */}
           {configScope !== "graph" && (
-            <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+            <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
               <button
                 type="button"
                 onClick={() => setShowEndpoints(!showEndpoints)}

@@ -34,7 +34,7 @@ const ConfigScopeToggle: React.FC<ConfigScopeToggleProps> = ({
   if (availableGraphs.length === 0) return null;
 
   return (
-    <div className={`bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 ${className}`}>
+    <div className={`bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 ${className}`}>
       <label className="block text-sm font-medium mb-2 text-black dark:text-white">
         Configuration Scope
       </label>

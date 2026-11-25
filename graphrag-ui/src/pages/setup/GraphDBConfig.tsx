@@ -327,7 +327,7 @@ const GraphDBConfig = () => {
           </div>
         </div>
 
-        <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+        <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
           <fieldset>
             <div className="space-y-6">
             <div>

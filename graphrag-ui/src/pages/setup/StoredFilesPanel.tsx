@@ -686,7 +686,7 @@ const StoredFilesPanel: React.FC<StoredFilesPanelProps> = ({
                                   onChange={(e) => setRenaming({ ...renaming, base: e.target.value })}
                                   onKeyDown={(e) => e.key === "Escape" && setRenaming(null)}
                                   disabled={isBusy}
-                                  className="min-w-0 flex-1 rounded border border-gray-300 dark:border-[#3D3D3D] bg-white dark:bg-shadeA px-2 py-1 text-sm text-black dark:text-white"
+                                  className="min-w-0 flex-1 rounded border border-gray-300 dark:border-[#3D3D3D] bg-white dark:bg-background px-2 py-1 text-sm text-black dark:text-white"
                                 />
                                 {renaming.ext && (
                                   <span className="shrink-0 text-sm text-gray-500 dark:text-gray-400">{renaming.ext}</span>

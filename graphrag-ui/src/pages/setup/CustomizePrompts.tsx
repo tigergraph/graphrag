@@ -353,7 +353,7 @@ const CustomizePrompts = () => {
           graphSelectedHint="Only customized prompts are stored per graph. Others fall back to global defaults."
         />
 
-        <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+        <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
           <div className="space-y-6">
             {/* Save Message */}
             {saveMessage && (
@@ -413,7 +413,7 @@ const CustomizePrompts = () => {
                         <h4 className="font-medium text-black dark:text-white mb-1">
                           {prompt.name}
                           {!isUsed(prompt.id) && (
-                            <span className="ml-2 text-xs font-normal px-2 py-0.5 rounded bg-gray-100 dark:bg-[#2A2A2A] text-gray-600 dark:text-gray-400">
+                            <span className="ml-2 text-xs font-normal px-2 py-0.5 rounded bg-gray-200 dark:bg-[#2A2A2A] text-gray-600 dark:text-gray-400">
                               Not used with the current settings
                             </span>
                           )}

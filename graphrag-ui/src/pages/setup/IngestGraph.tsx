@@ -1012,7 +1012,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           </>
         )}
 
-        <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+        <div className={isModal ? "" : "bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6"}>
           {/* Graph Name Selection */}
           <div className="mb-4">
             <label className="block text-sm font-medium mb-2 text-black dark:text-white">
@@ -1028,7 +1028,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
               disabled={isIngesting}
             >
               <SelectTrigger
-                className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                className="dark:border-[#3D3D3D] dark:bg-background"
                 disabled={isIngesting}
               >
                 <SelectValue placeholder="Select a graph" />
@@ -1059,20 +1059,20 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             }}
             className="w-full"
           >
-            <TabsList className="grid w-full grid-cols-4">
-              <TabsTrigger value="upload" disabled={isIngesting}>
+            <TabsList className="grid w-full grid-cols-4 bg-gray-200 dark:bg-background">
+              <TabsTrigger className="dark:data-[state=active]:bg-shadeA dark:data-[state=active]:text-white" value="upload" disabled={isIngesting}>
                 <FolderUp className="h-4 w-4 mr-2" />
                 Upload
               </TabsTrigger>
-              <TabsTrigger value="cloudDownload" disabled={isIngesting}>
+              <TabsTrigger className="dark:data-[state=active]:bg-shadeA dark:data-[state=active]:text-white" value="cloudDownload" disabled={isIngesting}>
                 <CloudDownload className="h-4 w-4 mr-2" />
                 Download from Cloud
               </TabsTrigger>
-              <TabsTrigger value="AmazonBDA" disabled={isIngesting}>
+              <TabsTrigger className="dark:data-[state=active]:bg-shadeA dark:data-[state=active]:text-white" value="AmazonBDA" disabled={isIngesting}>
                 <CloudLightning className="h-4 w-4 mr-2" />
                 Amazon BDA
               </TabsTrigger>
-              <TabsTrigger value="stored" disabled={isIngesting}>
+              <TabsTrigger className="dark:data-[state=active]:bg-shadeA dark:data-[state=active]:text-white" value="stored" disabled={isIngesting}>
                 <Archive className="h-4 w-4 mr-2" />
                 Stored Files
               </TabsTrigger>
@@ -1295,7 +1295,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                       setCloudProvider(value)
                     }
                   >
-                    <SelectTrigger className="dark:border-[#3D3D3D] dark:bg-shadeA">
+                    <SelectTrigger className="dark:border-[#3D3D3D] dark:bg-background">
                       <SelectValue placeholder="Select cloud provider" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1318,7 +1318,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudAccessKey}
                         onChange={(e) => setCloudAccessKey(e.target.value)}
                         placeholder="Enter AWS access key"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1330,7 +1330,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudSecretKey}
                         onChange={(e) => setCloudSecretKey(e.target.value)}
                         placeholder="Enter AWS secret key"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1342,7 +1342,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudBucket}
                         onChange={(e) => setCloudBucket(e.target.value)}
                         placeholder="my-bucket-name"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1354,7 +1354,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudRegion}
                         onChange={(e) => setCloudRegion(e.target.value)}
                         placeholder="us-east-1"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1366,7 +1366,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudPrefix}
                         onChange={(e) => setCloudPrefix(e.target.value)}
                         placeholder="folder/subfolder/"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                   </>
@@ -1384,7 +1384,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={gcsProjectId}
                         onChange={(e) => setGcsProjectId(e.target.value)}
                         placeholder="my-project-id"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1396,7 +1396,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         onChange={(e) => setGcsCredentials(e.target.value)}
                         placeholder='{"type": "service_account", ...}'
                         rows={4}
-                        className="w-full p-2 rounded border dark:border-[#3D3D3D] dark:bg-shadeA text-sm"
+                        className="w-full p-2 rounded border dark:border-[#3D3D3D] dark:bg-background text-sm"
                       />
                     </div>
                     <div>
@@ -1408,7 +1408,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudBucket}
                         onChange={(e) => setCloudBucket(e.target.value)}
                         placeholder="my-gcs-bucket"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1420,7 +1420,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudPrefix}
                         onChange={(e) => setCloudPrefix(e.target.value)}
                         placeholder="folder/subfolder/"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                   </>
@@ -1438,7 +1438,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={azureAccountName}
                         onChange={(e) => setAzureAccountName(e.target.value)}
                         placeholder="mystorageaccount"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1450,7 +1450,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={azureAccountKey}
                         onChange={(e) => setAzureAccountKey(e.target.value)}
                         placeholder="Enter account key"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1462,7 +1462,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={azureContainer}
                         onChange={(e) => setAzureContainer(e.target.value)}
                         placeholder="my-container"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1474,7 +1474,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudPrefix}
                         onChange={(e) => setCloudPrefix(e.target.value)}
                         placeholder="folder/subfolder/"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                   </>
@@ -1575,7 +1575,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={awsAccessKey}
                     onChange={(e) => setAwsAccessKey(e.target.value)}
                     placeholder="Enter AWS access key"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting}
                   />
                 </div>
@@ -1589,7 +1589,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={awsSecretKey}
                     onChange={(e) => setAwsSecretKey(e.target.value)}
                     placeholder="Enter AWS secret key"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting}
                   />
                 </div>
@@ -1615,7 +1615,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={inputBucket}
                     onChange={(e) => setInputBucket(e.target.value)}
                     placeholder="Enter input bucket name"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting || skipBDAProcessing}
                   />
                 </div>
@@ -1629,7 +1629,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={outputBucket}
                     onChange={(e) => setOutputBucket(e.target.value)}
                     placeholder="Enter output bucket name"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting}
                   />
                 </div>
@@ -1643,7 +1643,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={regionName}
                     onChange={(e) => setRegionName(e.target.value)}
                     placeholder="e.g., us-east-1"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting}
                   />
                 </div>

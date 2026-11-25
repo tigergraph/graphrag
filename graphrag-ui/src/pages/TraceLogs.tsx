@@ -580,25 +580,49 @@ const ToolCallsPanel: FC<{ trace: TraceData }> = ({ trace }) => (
 );
 
 
-const CitationRow: FC<{ c: CitationEntry }> = ({ c }) => (
-  <div
-    className={`rounded-lg mb-2 ${
-      c.cited
-        ? "bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800"
-        : "bg-orange-50 dark:bg-orange-900/15 border border-orange-200 dark:border-orange-800"
-    }`}
-  >
-    <div className="flex items-center gap-3 px-4 py-3">
-      <LuBookOpen className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
-      <span className="text-sm font-semibold truncate">[{c.source}]</span>
-      {c.cited && (
-        <span className="bg-red-500 text-white text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0">
-          Cited
-        </span>
-      )}
+// A citation reads "<chunk id>: <chunk text>"; show the id and a short,
+// cleaned excerpt of the text.
+const splitCitation = (source: string): { id: string; excerpt: string } => {
+  const sep = source.indexOf(": ");
+  if (sep < 0) return { id: source, excerpt: "" };
+  const excerpt = source
+    .slice(sep + 2)
+    .replace(/^\[?['"]|['"]\]?$/g, "")
+    .replace(/\\[nrt]|\\u3000/g, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return { id: source.slice(0, sep), excerpt };
+};
+
+const CitationRow: FC<{ c: CitationEntry }> = ({ c }) => {
+  const { id, excerpt } = splitCitation(c.source);
+  return (
+    <div
+      className={`rounded-lg mb-2 ${
+        c.cited
+          ? "bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800"
+          : "bg-orange-50 dark:bg-orange-900/15 border border-orange-200 dark:border-orange-800"
+      }`}
+      title={c.source}
+    >
+      <div className="flex items-center gap-3 px-4 py-2.5 min-w-0">
+        <LuBookOpen className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold truncate">{id}</div>
+          {excerpt && (
+            <div className="text-xs text-muted-foreground truncate">{excerpt}</div>
+          )}
+        </div>
+        {c.cited && (
+          <span className="bg-red-500 text-white text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0">
+            Cited
+          </span>
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const CitationsPanel: FC<{ trace: TraceData }> = ({ trace }) => (
   <div className="space-y-2">
@@ -936,7 +960,7 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
         </div>
       )}
 
-      <div className={isDialog ? "px-6 pt-16 pb-6 space-y-6" : "max-w-5xl mx-auto px-6 py-6 space-y-6"}>
+      <div className={isDialog ? "min-w-0 px-6 pt-16 pb-6 space-y-6" : "max-w-5xl mx-auto px-6 py-6 space-y-6"}>
         {/* Original Query */}
         <div className="bg-card border border-border rounded-lg p-5">
           <h2 className="text-sm font-semibold mb-2">Original Query</h2>
