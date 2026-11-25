@@ -168,7 +168,7 @@ GUIDANCE = {"planner": PLANNER, "query": QUERY, "answer": ANSWER}
 # that any tool that filters on them uses the right attribute and value.
 FIELD_NOTES = {
     "JiraIssue": (
-        "project_key is the project code, such as GLE, and the prefix of "
+        "project_key is the project code, such as ABC, and the prefix of "
         "issue_key; project_name is the project's display name, which "
         "differs from the code. A row with an empty project_key is a "
         "placeholder written for a link, not an ingested issue. "

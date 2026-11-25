@@ -255,8 +255,8 @@ class JiraIssueMapper:
 
     def _issue_id(self, issue_key: str) -> str:
         # Use the human-readable ticket key so GenerateFunction can construct
-        # the vertex ID directly from what the user says (e.g. "GML-2191"
-        # → "jira:gml-2191:issue").  cloud_id is NOT included — ticket keys
+        # the vertex ID directly from what the user says (e.g. "ABC-123"
+        # → "jira:abc-123:issue").  cloud_id is NOT included — ticket keys
         # are unique within a graph's connected Jira project scope.
         return f"jira:{issue_key}:issue".lower()
 
