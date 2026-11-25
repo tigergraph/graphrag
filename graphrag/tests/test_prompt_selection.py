@@ -285,3 +285,13 @@ def test_zendesk_counts_cover_ingested_tickets_only():
     assert "An ingested ticket is one whose status is set" in planner
     query = guidance_for("How are zendesk tickets distributed by status?", "query")
     assert 'WHERE t.status <> ""' in query
+
+
+def test_answers_state_conditions_in_words_and_stay_short():
+    answer = guidance_for("How many zendesk tickets are closed?", "answer")
+    assert "This holds for every sentence" in answer
+    assert "never quote a question that was put to the graph" in answer
+    assert "even when a comment is signed with another form of the name" in answer
+    assert "stays under about 300 words" in guidance_for("What went wrong for zendesk customer ACME?", "answer")
+    assert "never in the answer text" in agent_guidance("What went wrong for zendesk customer ACME?")
+    assert "a similar subject is not a link" in guidance_for("List the linked tickets for zendesk #12345.", "answer")
