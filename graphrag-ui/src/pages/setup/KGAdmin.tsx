@@ -239,6 +239,7 @@ const KGAdmin = () => {
       ) {
         setMigrationMessage("✅ Graph is up to date — no repairs needed.");
       } else {
+        const parts: string[] = [];
         const out = data.queries?.outdated?.length || 0;
         const miss = data.queries?.not_installed?.length || 0;
         if (out || miss)
@@ -326,6 +327,49 @@ const KGAdmin = () => {
       setMigrationMessage(`Apply failed: ${err.message || err}`);
     } finally {
       setMigrationApplying(false);
+    }
+  };
+
+  // Targeted data-integrity regeneration (not a full rebuild). action is
+  // "regenerate_embeddings" or "regenerate_summaries".
+  const runRegenerate = async (
+    action: "regenerate_embeddings" | "regenerate_summaries"
+  ) => {
+    const auth = sessionStorage.getItem("auth");
+    if (!auth) {
+      setMigrationMessage("Not authenticated.");
+      return;
+    }
+    const isEmb = action === "regenerate_embeddings";
+    setMigrationRegenerating(action);
+    setMigrationMessage(
+      isEmb ? "Regenerating embeddings…" : "Regenerating community summaries…"
+    );
+    try {
+      const resp = await fetch(`/ui/${migrationGraph}/migration/${action}`, {
+        method: "POST",
+        headers: { Authorization: auth },
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setMigrationMessage(
+          `Regenerate failed: ${data.detail || resp.statusText}`
+        );
+        return;
+      }
+      const done = isEmb ? data.regenerated ?? 0 : data.resummarized ?? 0;
+      const skipped = data.skipped ?? 0;
+      const verb = isEmb ? "Re-embedded" : "Re-summarized";
+      setMigrationMessage(
+        `✅ ${verb} ${done}` +
+          (skipped ? `; ${skipped} skipped (need a rebuild).` : ".")
+      );
+      // Refresh so the counts reflect the regenerated state.
+      await runMigrationCheck(migrationGraph);
+    } catch (err: any) {
+      setMigrationMessage(`Regenerate failed: ${err.message || err}`);
+    } finally {
+      setMigrationRegenerating("");
     }
   };
 
