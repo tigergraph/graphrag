@@ -19,6 +19,28 @@ import { useLocation } from "react-router-dom";
 // additional instructions and examples appended to fixed, non-editable system
 // rules. The system rules (and runtime placeholders) live server-side and are
 // never shown or editable here.
+type EngineSettings = { agentMode: "agentic" | "classic"; agentEngine: "default" | "legacy" };
+
+// Each prompt belongs to a group and may apply only to some engine settings.
+const PROMPT_GROUPS = [
+  { id: "ingestion", name: "Ingestion", description: "Prompts for schema drafts, entity extraction and community summaries." },
+  { id: "answers", name: "Answers", description: "Prompts for composing answers and graph queries." },
+  { id: "agents", name: "Agents", description: "Prompts for the agent that the Agentic engine runs." },
+] as const;
+
+const PROMPT_USE: Record<string, { group: string; usedWith?: (s: EngineSettings) => boolean }> = {
+  schema_extraction: { group: "ingestion" },
+  entity_relationship: { group: "ingestion" },
+  community_summarization: { group: "ingestion" },
+  chatbot_response: { group: "answers" },
+  query_guidance: { group: "answers" },
+  route_response: { group: "answers", usedWith: (s) => s.agentMode === "classic" },
+  deep_agent: { group: "agents", usedWith: (s) => s.agentMode === "agentic" && s.agentEngine === "default" },
+  agentic_triage: { group: "agents", usedWith: (s) => s.agentMode === "agentic" && s.agentEngine === "legacy" },
+  agentic_planner: { group: "agents", usedWith: (s) => s.agentMode === "agentic" && s.agentEngine === "legacy" },
+  agentic_agent: { group: "agents", usedWith: (s) => s.agentMode === "agentic" && s.agentEngine === "legacy" },
+};
+
 const ALL_PROMPT_TYPES = [
   { id: "schema_extraction", name: "Schema Extraction", description: "Extra instructions/examples for proposing a domain schema from sample documents (Initialize Graph dialog). Appended to fixed system rules." },
   { id: "entity_relationship", name: "Entity Relationships", description: "Extra instructions/examples for extracting entities and relationships during ingest. Appended to fixed system rules." },
@@ -28,7 +50,7 @@ const ALL_PROMPT_TYPES = [
   { id: "route_response", name: "Question Routing", description: "Classic chat routing policy — whether a question goes to structured functions, document vectorstore, or conversation history. Pre-filled with the default and fully editable. The allowed datasources and output format stay fixed." },
   { id: "agentic_planner", name: "Agentic Planner", description: "The planner's retrieval strategy — which methods to use, how many, and in what order — pre-filled with the default and fully editable. The role, plan model, and output format stay fixed." },
   { id: "deep_agent", name: "Deep Agent", description: "Additional instructions for the Deep Agent, such as what the knowledge graph contains and how to search and answer for it. Empty by default." },
-  { id: "agentic_agent", name: "React Agent", description: "Legacy agent engine only. The React agent's retrieval strategy — which methods to prioritize and when, step by step — pre-filled with the default and fully editable. The role and reason-act-observe model stay fixed." },
+  { id: "agentic_agent", name: "React Agent", description: "The React agent's retrieval strategy — which methods to prioritize and when, step by step — pre-filled with the default and fully editable. The role and reason-act-observe model stay fixed." },
   { id: "agentic_triage", name: "Agent Routing", description: "The routing policy that decides whether a question is answered directly (greetings, about the assistant) or sent to the agent to retrieve/use a tool — pre-filled with the default and fully editable. The output contract stays fixed." },
 ];
 
@@ -73,6 +95,15 @@ const CustomizePrompts = () => {
 
   // Only render prompt types the backend returned for this user
   const promptTypes = ALL_PROMPT_TYPES.filter(p => availablePromptIds.includes(p.id));
+  // Engine settings of the selected scope; null when they could not be read,
+  // in which case every prompt is shown.
+  const [engineSettings, setEngineSettings] = useState<EngineSettings | null>(null);
+  const [showAllPrompts, setShowAllPrompts] = useState(false);
+  const isUsed = (id: string) => {
+    const use = PROMPT_USE[id];
+    return !use?.usedWith || !engineSettings || use.usedWith(engineSettings);
+  };
+  const hiddenCount = showAllPrompts ? 0 : promptTypes.filter((p) => !isUsed(p.id)).length;
 
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState("");
@@ -126,9 +157,33 @@ const CustomizePrompts = () => {
     setPrompts(prev => ({ ...prev, [promptId]: value }));
   };
 
+  const fetchEngineSettings = async (graphname: string) => {
+    try {
+      const creds = sessionStorage.getItem("auth");
+      const params = new URLSearchParams();
+      if (graphname) {
+        params.set("graphname", graphname);
+        params.set("scope", "graph");
+      }
+      const response = await fetch(`/ui/config${params.toString() ? `?${params}` : ""}`, {
+        headers: { Authorization: creds! },
+      });
+      if (!response.ok) throw new Error("config unavailable");
+      const data = await response.json();
+      const cfg = { ...(data.graphrag_config || {}), ...(data.graphrag_overrides || {}) };
+      setEngineSettings({
+        agentMode: cfg.agent_mode === "classic" ? "classic" : "agentic",
+        agentEngine: cfg.agent_engine === "legacy" ? "legacy" : "default",
+      });
+    } catch {
+      setEngineSettings(null);
+    }
+  };
+
   const fetchPrompts = async (graphname?: string) => {
     setIsLoading(true);
     const effectiveGraph = graphname ?? selectedGraph;
+    fetchEngineSettings(effectiveGraph);
     try {
       const creds = sessionStorage.getItem("auth");
       const query = effectiveGraph ? `?graphname=${encodeURIComponent(effectiveGraph)}` : "";
@@ -313,14 +368,42 @@ const CustomizePrompts = () => {
               </div>
             )}
 
-            {/* Prompt Templates */}
-            <div className="mt-6 space-y-4">
-              <h3 className="text-lg font-semibold text-black dark:text-white">
-                Prompt Templates
-              </h3>
-              
+            {/* Prompt Templates, by group */}
+            <div className="mt-6 space-y-8">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-black dark:text-white">
+                  Prompt Templates
+                </h3>
+                {engineSettings && (
+                  <label className="flex items-center gap-2 text-sm text-gray-600 dark:text-[#D9D9D9]">
+                    <input
+                      type="checkbox"
+                      checked={showAllPrompts}
+                      onChange={(e) => setShowAllPrompts(e.target.checked)}
+                      className="rounded border-gray-300 dark:border-[#3D3D3D]"
+                    />
+                    Show all prompts
+                  </label>
+                )}
+              </div>
+              {hiddenCount > 0 && (
+                <p className="text-sm text-gray-600 dark:text-[#D9D9D9]">
+                  {hiddenCount} prompt{hiddenCount === 1 ? " is" : "s are"} hidden because the current Answer Engine and Agent settings do not use {hiddenCount === 1 ? "it" : "them"}.
+                </p>
+              )}
+              {PROMPT_GROUPS.map((group) => {
+                const groupPrompts = promptTypes.filter(
+                  (p) => PROMPT_USE[p.id]?.group === group.id && (showAllPrompts || isUsed(p.id))
+                );
+                if (groupPrompts.length === 0) return null;
+                return (
+              <div key={group.id} className="space-y-4">
+                <div>
+                  <h4 className="text-base font-semibold text-black dark:text-white">{group.name}</h4>
+                  <p className="text-sm text-gray-600 dark:text-[#D9D9D9]">{group.description}</p>
+                </div>
               <div className="space-y-4">
-                {promptTypes.map((prompt) => (
+                {groupPrompts.map((prompt) => (
                   <div
                     key={prompt.id}
                     className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-4"
@@ -329,6 +412,11 @@ const CustomizePrompts = () => {
                       <div>
                         <h4 className="font-medium text-black dark:text-white mb-1">
                           {prompt.name}
+                          {!isUsed(prompt.id) && (
+                            <span className="ml-2 text-xs font-normal px-2 py-0.5 rounded bg-gray-100 dark:bg-[#2A2A2A] text-gray-600 dark:text-gray-400">
+                              Not used with the current settings
+                            </span>
+                          )}
                         </h4>
                         <p className="text-sm text-gray-600 dark:text-gray-400">
                           {prompt.description}
@@ -390,6 +478,9 @@ const CustomizePrompts = () => {
                   </div>
                 ))}
               </div>
+              </div>
+                );
+              })}
             </div>
 
           </div>

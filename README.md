@@ -1224,15 +1224,26 @@ Each tweak should be made **alone** — moving `top_k` and `num_hops` together m
 
 ### 5. Prompts — last resort, biggest leverage when the rest is right
 
-Customize prompts via the UI: *Settings → Customize Prompts*. Customization is **additive** — you edit an instructions-and-examples layer that is appended to fixed, non-editable rules, so a customization extends behavior without dropping the rules that keep the prompt working. The customizable prompt groups (UI labels and underlying ids):
+Customize prompts via the UI: *Settings → Customize Prompts*. Customization is **additive** — you edit an instructions-and-examples layer that is appended to fixed, non-editable rules, so a customization extends behavior without dropping the rules that keep the prompt working.
 
-- **Entity Relationships** (`entity_relationship`) — combined entity- and relationship-extraction prompt; controls what becomes a vertex / edge. Tune for noise suppression, domain specificity, and verb-form edge names (e.g. `PUBLISHES`, `OWNS`, `MANAGES` instead of nominal phrases). See §3.
-- **Schema Instructions** (`query_generation`) — instructions used when generating GSQL / Cypher and when filtering the schema for a structured query. Tune if your domain has unusual type names that aren't matching user phrasing, or if generated queries miss obvious joins.
+The page groups the prompts by where they are used, and shows only the prompts that the current **Answer Engine** and **Agent** settings use. **Show all prompts** shows the others too, marked *Not used with the current settings*; a conversation can still use them when the chat menu selects another engine.
+
+*Ingestion*
+
+- **Schema Extraction** (`schema_extraction`) — how a domain schema is proposed from sample documents in the *Initialize Knowledge Graph* dialog.
+- **Entity Relationships** (`entity_relationship`) — combined entity- and relationship-extraction prompt; controls what becomes a vertex / edge. Tune for noise suppression, domain specificity, and verb-form edge names.
 - **Community Summarization** (`community_summarization`) — how community summaries are produced during knowledge-graph build. Tune for length / tone and to bias summaries toward domain-specific framing.
-- **Chatbot Responses** (`chatbot_response`) — the final answer template. Keep it short; the LLM responds best to clear constraints (*"answer in ≤3 sentences, cite the doc id"*).
+
+*Answers*
+
+- **Query Guidance** (`query_guidance`) — domain hints and example mappings for the graph queries GraphRAG writes. Tune if your domain has type names that don't match user phrasing.
+- **Chatbot Responses** (`chatbot_response`) — how the final answer is composed, for every engine. Keep it short; the LLM responds best to clear constraints (*"answer in ≤3 sentences, cite the doc id"*).
+- **Question Routing** (`route_response`) — Classic engine only: whether a question goes to structured functions, documents or the conversation history.
+
+*Agents*
+
 - **Deep Agent** (`deep_agent`) — additional instructions for the Deep Agent, appended to its fixed rules. Empty by default; use it to describe what the graph contains and how to search and answer for it.
-- **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — the retrieval strategy of each legacy agent style: which methods to use, when, and in what order. The role and act model stay fixed. Used only when `agent_engine` is `"legacy"`.
-- **Agent Routing** (`agentic_triage`) — the policy that decides whether a message is answered directly (greetings, questions about the assistant) or sent to the agent to retrieve / use a tool.
+- **Agent Routing** (`agentic_triage`), **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — legacy agents only: whether a message is answered directly or sent to the agent, and the retrieval strategy of the Planned and Reactive styles. The role and act model stay fixed.
 
 When customizing:
 
