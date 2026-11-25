@@ -194,10 +194,11 @@ const ConnectorPromptGuide: React.FC<{ connectorType: string }> = ({
             Multiple sources
           </h4>
           <p className="mt-1 text-xs leading-5 text-gray-600 dark:text-gray-400">
-            A question that relates two sources, such as a Zendesk ticket and
-            its Jira issue, also receives cross-source rules: follow the stored
-            link edge and say so when no link is stored. A record number with
-            no source is looked up in every installed source.
+            A Zendesk ticket links to a Jira issue only through links_issue, and
+            only when Zendesk's Jira integration lists that pair. A matching
+            number or URL in the text is not a link. A question that relates
+            the two sources receives cross-source rules, and a record number
+            with no source is looked up in every installed source.
           </p>
         </div>
       </div>

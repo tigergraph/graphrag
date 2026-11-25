@@ -9,6 +9,8 @@ import pytest
 from connectors import cross_source_prompts
 from connectors.jira import prompts as jira_prompts
 from connectors.jira.schema import jira_schema_proposal
+from connectors.zendesk import prompts as zendesk_prompts
+from connectors.zendesk.schema import zendesk_schema_proposal
 from connectors.prompt_selection import (
     allows_type,
     bare_record_number,
@@ -36,6 +38,29 @@ def test_jira_guidance_names_only_the_installed_schema(step):
         assert name in edges, f"{name} is not a Jira schema edge"
     assert "JIRA_" not in text
     assert "JiraUser" not in text and "JiraProject" not in text
+
+
+@pytest.mark.parametrize("step", ["planner", "query", "answer"])
+def test_zendesk_guidance_names_only_the_installed_schema(step):
+    texts = [zendesk_prompts.GUIDANCE[step], zendesk_prompts.JIRA_PAIR[step]]
+    proposal = zendesk_schema_proposal({"JiraIssue"})
+    vertices = {v.name for v in proposal.vertices} | {"JiraIssue"}
+    edges = {e.name for e in proposal.edges}
+    for text in texts:
+        for name in re.findall(r"\b(Zendesk[A-Z][A-Za-z]*)\b", text):
+            assert name in vertices, f"{name} is not a Zendesk schema vertex"
+        for name in re.findall(r"\[:([A-Za-z_]+)\]", text):
+            assert name in edges, f"{name} is not a Zendesk schema edge"
+        assert "ZendeskUser" not in text and "ZendeskTicketRef" not in text
+
+
+def test_zendesk_and_jira_relation_uses_links_issue():
+    query = guidance_for("Does Zendesk ticket 24680 exist in Jira?", "query")
+    assert "## Zendesk query guidance" in query
+    assert "MATCH (t:ZendeskTicket)-[:links_issue]->(i:JiraIssue)" in query
+    month = guidance_for("How many Zendesk tickets were created in March 2025?", "query")
+    assert "(first day of the next month)" in month
+    assert "deleted" in month
 
 
 def test_jira_guidance_is_added_to_each_step_with_the_shared_rules():
@@ -135,6 +160,8 @@ def test_jira_questions_keep_shared_and_jira_types_only():
     assert allows_type("Person", {"jira"})
     assert allows_type("DocumentChunk", {"jira"})
     assert not allows_type("ConfluencePage", {"jira"})
+    assert allows_type("ZendeskTicket", {"jira"})
+    assert allows_type("ZendeskComment", {"zendesk"})
     assert allows_type("ConfluencePage", set())
 
 

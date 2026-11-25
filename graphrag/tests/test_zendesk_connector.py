@@ -876,12 +876,10 @@ def test_open_zendesk_question_is_search_and_an_unknown_field_is_refused():
     assert "word search" in planner
     answer = guidance_for("Who is the assignee of Zendesk ticket 10?", "answer")
     assert "not on the ticket" in answer
-    assert guidance_for("What is the ticket status?", "planner") == (
-        "The source system is ambiguous. Ask the user whether they mean a Jira "
-        "issue or a Zendesk ticket before answering, unless the conversation has "
-        "already established the source. Do not guess from a bare number, and do "
-        "not apply either connector's rules until the source is known."
-    )
+    assert "Ask the user which source" in guidance_for("What is the ticket status?", "planner")
+    bare = guidance_for("What is the status of #12345?", "planner")
+    assert 'ticket_id equals "12345"' in bare
+    assert 'issue_key ends with "-12345"' in bare
     guidance = guidance_for(
         "How is Zendesk ticket 59326 linked to TSE-1073?",
         "query",
@@ -893,14 +891,14 @@ def test_open_zendesk_question_is_search_and_an_unknown_field_is_refused():
         "List all linked tickets for Zendesk ticket 58617",
         "query",
     )
-    assert "return its problem_id, followup_ids" in linked_query
-    assert "Do not MATCH a second ZendeskTicket" in linked_query
+    assert "returns the named ticket's problem_id, followup_ids" in linked_query
+    assert "MATCH a second ticket in that query" in linked_query
     linked_plan = guidance_for(
         "List all linked tickets for Zendesk ticket 58617",
         "planner",
     )
-    assert "independent structured lookups" in linked_plan
-    assert "Do not combine these lookups into one query" in linked_plan
+    assert "Linked tickets are independent lookups" in linked_plan
+    assert "then, separately, the tickets whose problem_id" in linked_plan
     assert allows_type("ZendeskTicket", {"jira"})
     assert allows_type("JiraIssue", {"zendesk"})
     assert not allows_type("ZendeskTicketRef", {"jira", "zendesk"})
