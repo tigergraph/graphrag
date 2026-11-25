@@ -295,3 +295,15 @@ def test_answers_state_conditions_in_words_and_stay_short():
     assert "stays under about 300 words" in guidance_for("What went wrong for zendesk customer ACME?", "answer")
     assert "never in the answer text" in agent_guidance("What went wrong for zendesk customer ACME?")
     assert "a similar subject is not a link" in guidance_for("List the linked tickets for zendesk #12345.", "answer")
+
+
+def test_short_questions_get_short_answers_and_a_picture_is_a_summary():
+    answer = guidance_for("Are urgent zendesk tickets still open?", "answer")
+    assert "A yes-or-no, count, or existence question is answered with the answer" in answer
+    assert "asks for a summary of the data, not an image" in answer
+
+
+def test_action_items_come_with_context_and_empty_values_read_not_set():
+    answer = guidance_for("What is the action item for zendesk #12345?", "answer")
+    assert "read together with the comment it answers" in answer
+    assert 'Show an empty stored value as "not set"' in answer
