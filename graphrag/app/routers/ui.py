@@ -523,6 +523,27 @@ def _chat_history_auth_header(creds: HTTPBasicCredentials) -> str:
     return f"Basic {encoded}"
 
 
+CHAT_HISTORY_LOCKED = "Chat history is locked. An admin must provide the encryption key."
+
+
+def _encrypted_message(message: Message) -> dict:
+    """The message as sent to chat-history, with its text encrypted."""
+    import data_encryption
+    from data_encryption.chat_crypto import encrypt_message
+    return encrypt_message(data_encryption.manager(), message.model_dump())
+
+
+def _decrypted(data):
+    """A chat-history response with its message text decrypted (423 if the
+    chat history is locked)."""
+    import data_encryption
+    from data_encryption.chat_crypto import decrypt_messages
+    try:
+        return decrypt_messages(data_encryption.manager(), data)
+    except data_encryption.Locked:
+        raise HTTPException(status_code=423, detail=CHAT_HISTORY_LOCKED)
+
+
 def _ecc_auth_header(creds: HTTPBasicCredentials) -> str:
     """Build the Authorization header used when forwarding to ECC.
 
@@ -827,10 +848,15 @@ def add_feedback(
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
     creds = creds[1]
+    import data_encryption
+    try:
+        payload = _encrypted_message(message)
+    except data_encryption.Locked:
+        raise HTTPException(status_code=423, detail=CHAT_HISTORY_LOCKED)
     try:
         res = httpx.post(
             f"{graphrag_config['chat_history_api']}/conversation",
-            json=message.model_dump(),
+            json=payload,
             headers={"Authorization": _chat_history_auth_header(creds)},
         )
         res.raise_for_status()
@@ -3236,7 +3262,7 @@ async def get_conversation_contents(
         )
         raise e
 
-    return res.json()
+    return _decrypted(res.json())
 
 @router.get(route_prefix + "/get_feedback")
 async def get_conversation_feedback(
@@ -3260,7 +3286,7 @@ async def get_conversation_feedback(
         )
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    return res.json()
+    return _decrypted(res.json())
 
 
 @router.delete(route_prefix + "/conversation/{conversation_id}")
@@ -3339,6 +3365,10 @@ def _trace_error_text(e: BaseException) -> str:
 
 def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
     e = _root_error(e)
+    from data_encryption import Locked
+    if isinstance(e, Locked):
+        return ("The agent memory of this graph is locked. "
+                "An admin must provide the encryption key.")
     error_msg = str(e)
     if "does not exist" in error_msg or "not found" in error_msg.lower():
         return f"Error: {error_msg}. Please check the knowledge graph name and try again."
@@ -3447,7 +3477,7 @@ async def load_conversation_history(
                 headers=headers,
             )
             res.raise_for_status()
-            conversation_data = res.json()
+            conversation_data = _decrypted(res.json())
             # Convert conversation messages to the format expected by the agent
             history = []
             for msg in conversation_data:
@@ -3479,11 +3509,18 @@ async def write_message_to_history(
 ):
     ch = graphrag_config.get("chat_history_api")
     if ch is not None:
+        import data_encryption
+        try:
+            payload = _encrypted_message(message)
+        except data_encryption.Locked:
+            LogWriter.warning("chat history is locked (encryption key missing); "
+                              "the message is not saved")
+            return
         headers = {"Authorization": _chat_history_auth_header(usr_creds)}
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.post(
-                    f"{ch}/conversation", headers=headers, json=message.model_dump()
+                    f"{ch}/conversation", headers=headers, json=payload
                 )
                 res.raise_for_status()
         except Exception:  # catch all exceptions to log them, but don't raise

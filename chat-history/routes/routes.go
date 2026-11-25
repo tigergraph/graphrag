@@ -183,48 +183,45 @@ func auth(userId string, r *http.Request) (string, int, []byte, bool) {
 	return usr, 0, nil, true
 }
 
-// executeGSQL sends a GSQL query to TigerGraph with basic authentication and returns the response
+// executeGSQL sends a GSQL query to TigerGraph with basic authentication and returns the response.
+// TigerGraph 4 serves GSQL at /gsql/v1/statements; TigerGraph 3 at /gsqlserver/gsql/file.
 func executeGSQL(hostname, username, password, query, gsPort string) (string, error) {
-	var requestURL string
-	tgcloud := strings.Contains(hostname, "tgcloud")
-	// Construct the URL for the GSQL query endpoint
-	if tgcloud {
-		requestURL = fmt.Sprintf("%s:443/gsqlserver/gsql/file", hostname)
-	} else {
-		requestURL = fmt.Sprintf("%s:%s/gsqlserver/gsql/file", hostname, gsPort)
+	base := fmt.Sprintf("%s:%s", hostname, gsPort)
+	if strings.Contains(hostname, "tgcloud") {
+		base = fmt.Sprintf("%s:443", hostname)
 	}
-	// Prepare the query data
-	data := url.QueryEscape(query) // Encode query using URL encoding
-	reqBody := strings.NewReader(data)
-
-	// Create the HTTP request
-	req, err := http.NewRequest("POST", requestURL, reqBody)
+	body, status, err := postGSQL(base+"/gsql/v1/statements", "text/plain", query, username, password)
+	if err == nil && status == http.StatusNotFound {
+		body, status, err = postGSQL(base+"/gsqlserver/gsql/file", "application/x-www-form-urlencoded",
+			url.QueryEscape(query), username, password)
+	}
 	if err != nil {
 		return "", err
 	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("GSQL request failed with status %d", status)
+	}
+	return body, nil
+}
 
-	// Set the required headers
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	// Set up basic authentication
+func postGSQL(requestURL, contentType, data, username, password string) (string, int, error) {
+	req, err := http.NewRequest("POST", requestURL, strings.NewReader(data))
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Content-Type", contentType)
 	auth := fmt.Sprintf("%s:%s", username, password)
 	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(auth)))
-
-	// Execute the request
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer resp.Body.Close()
-
-	// Read and return the response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return "", resp.StatusCode, err
 	}
-
-	return string(body), nil
+	return string(body), resp.StatusCode, nil
 }
 
 // hasAdminAccess checks if the user's roles include any of the admin roles
@@ -330,5 +327,109 @@ func GetFeedback(hostname, gsPort string, conversationAccessRoles []string) http
 			return
 		}
 		w.Write(response)
+	}
+}
+
+// requireAdmin checks that the caller has one of the conversation access
+// roles. It writes the error response and returns false otherwise.
+func requireAdmin(w http.ResponseWriter, r *http.Request, hostname, gsPort string, adminRoles []string) bool {
+	usr, pass, ok := r.BasicAuth()
+	if !ok {
+		writeReason(w, http.StatusUnauthorized, "missing Authorization header")
+		return false
+	}
+	userInfo, err := executeGSQL(hostname, usr, pass, "SHOW USER", gsPort)
+	if err != nil {
+		writeReason(w, http.StatusUnauthorized, "failed to verify the user")
+		return false
+	}
+	if !hasAdminAccess(parseUserRoles(userInfo, usr), adminRoles) {
+		writeReason(w, http.StatusForbidden, "insufficient permissions")
+		return false
+	}
+	return true
+}
+
+func writeReason(w http.ResponseWriter, code int, reason string) {
+	body, _ := json.Marshal(map[string]string{"reason": reason})
+	w.Header().Add("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(body)
+}
+
+// ListMessages returns the stored text of messages, for the GraphRAG
+// encryption job.
+// "GET /messages?after=<id>&limit=<n>"
+func ListMessages(hostname, gsPort string, adminRoles []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(w, r, hostname, gsPort, adminRoles) {
+			return
+		}
+		var after uint64
+		limit := 500
+		if v := r.URL.Query().Get("after"); v != "" {
+			if _, err := fmt.Sscan(v, &after); err != nil {
+				writeReason(w, http.StatusBadRequest, "after must be a number")
+				return
+			}
+		}
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if _, err := fmt.Sscan(v, &limit); err != nil || limit < 1 || limit > 5000 {
+				writeReason(w, http.StatusBadRequest, "limit must be 1 to 5000")
+				return
+			}
+		}
+		messages, err := db.ListMessageText(uint(after), limit)
+		if err != nil {
+			writeReason(w, http.StatusInternalServerError, "failed to read messages")
+			return
+		}
+		body, _ := json.Marshal(messages)
+		w.Header().Add("Content-Type", "application/json")
+		w.Write(body)
+	}
+}
+
+// SetMessages replaces the content and comment of messages.
+// "POST /messages"
+func SetMessages(hostname, gsPort string, adminRoles []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(w, r, hostname, gsPort, adminRoles) {
+			return
+		}
+		var updates []db.MessageText
+		if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+			writeReason(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		if err := db.SetMessageText(updates); err != nil {
+			writeReason(w, http.StatusInternalServerError, "failed to update messages")
+			return
+		}
+		w.Header().Add("Content-Type", "application/json")
+		w.Write([]byte(fmt.Sprintf(`{"updated":%d}`, len(updates))))
+	}
+}
+
+// DeleteMessageList deletes messages by message id.
+// "POST /messages/delete"
+func DeleteMessageList(hostname, gsPort string, adminRoles []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireAdmin(w, r, hostname, gsPort, adminRoles) {
+			return
+		}
+		var body struct {
+			MessageIds []string `json:"message_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeReason(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		if err := db.DeleteMessages(body.MessageIds); err != nil {
+			writeReason(w, http.StatusInternalServerError, "failed to delete messages")
+			return
+		}
+		w.Header().Add("Content-Type", "application/json")
+		w.Write([]byte(fmt.Sprintf(`{"deleted":%d}`, len(body.MessageIds))))
 	}
 }

@@ -19,6 +19,7 @@ import uuid
 from base64 import b64decode
 from datetime import datetime
 
+import data_encryption
 import routers
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -64,6 +65,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logging.getLogger(__name__).warning(f"agentic capability check skipped: {e}")
 
+    # Encryption of agent memory and chat history: generate the key when
+    # allowed, resume interrupted rotations and encrypt rows written before
+    # encryption, in the background.
+    try:
+        import threading
+        threading.Thread(target=data_encryption.manager().startup, name="encryption-startup",
+                         daemon=True).start()
+    except Exception as e:
+        logging.getLogger(__name__).error(f"encryption startup failed: {e}")
+
     yield
 
     # --- shutdown ---
@@ -105,6 +116,13 @@ app.include_router(routers.queryai_router, prefix=PATH_PREFIX)
 app.include_router(routers.ui_router, prefix=PATH_PREFIX)
 app.include_router(routers.mcp_servers_router, prefix=PATH_PREFIX)
 app.include_router(routers.deep_agent_router, prefix=PATH_PREFIX)
+app.include_router(routers.encryption_router, prefix=PATH_PREFIX)
+
+
+@app.exception_handler(data_encryption.Locked)
+async def _locked_handler(request: Request, exc: data_encryption.Locked):
+    return JSONResponse(status_code=423, content={
+        "detail": "The stored data is locked. An admin must provide the encryption key."})
 
 
 excluded_metrics_paths = ("/docs", "/openapi.json", "/metrics")

@@ -48,6 +48,7 @@ const SetupLayout = () => {
       subItems: [
         ...(isSuperuser ? [{ title: "Graph Database Config", path: "/setup/server-config/graphdb" }] : []),
         ...(isSuperuser || isGlobalDesigner ? [{ title: "GraphRAG Config", path: "/setup/server-config/graphrag" }] : []),
+        ...(isSuperuser || isGlobalDesigner ? [{ title: "Memory Encryption", path: "/setup/server-config/memory-encryption" }] : []),
         ...(canAccessLlmConfig ? [{ title: "LLM Config", path: "/setup/server-config/llm" }] : []),
         ...(isSuperuser ? [{ title: "MCP Servers", path: "/setup/server-config/mcp-servers" }] : []),
       ],
@@ -106,6 +107,14 @@ const SetupLayout = () => {
       !isSuperuser &&
       !isGlobalDesigner &&
       location.pathname.startsWith("/setup/server-config/graphrag")
+    ) {
+      navigate("/setup/server-config/llm", { replace: true });
+    }
+    if (
+      rolesLoaded &&
+      !isSuperuser &&
+      !isGlobalDesigner &&
+      location.pathname.startsWith("/setup/server-config/memory-encryption")
     ) {
       navigate("/setup/server-config/llm", { replace: true });
     }

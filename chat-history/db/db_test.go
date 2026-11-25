@@ -251,3 +251,35 @@ func setupTest(t *testing.T, pop bool) {
 		db = nil
 	})
 }
+
+func TestMessageTextListSetDelete(t *testing.T) {
+	setupTest(t, true)
+
+	all, err := ListMessageText(0, 1000)
+	if err != nil || len(all) == 0 {
+		t.Fatalf("expected messages, got %d (%v)", len(all), err)
+	}
+	// Pages follow the id order.
+	first, _ := ListMessageText(0, 1)
+	rest, _ := ListMessageText(first[0].ID, 1000)
+	if len(first)+len(rest) != len(all) {
+		t.Fatalf("pages cover %d messages, want %d", len(first)+len(rest), len(all))
+	}
+
+	target := all[0]
+	if err := SetMessageText([]MessageText{{MessageId: target.MessageId, Content: "enc:v1:x", Comment: "enc:v1:y"}}); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := ListMessageText(0, 1000)
+	if again[0].Content != "enc:v1:x" || again[0].Comment != "enc:v1:y" {
+		t.Fatalf("text not replaced: %+v", again[0])
+	}
+
+	if err := DeleteMessages([]string{target.MessageId}); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := ListMessageText(0, 1000)
+	if len(after) != len(all)-1 {
+		t.Fatalf("expected %d messages after delete, got %d", len(all)-1, len(after))
+	}
+}

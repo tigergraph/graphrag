@@ -143,15 +143,23 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
   const query = userQuery || message?.originalQuery || message?.query || "N/A";
   const qs = message?.query_sources || {};
   const totalResponseTime = message?.response_time || 0;
-  const ts = now.toLocaleTimeString();
+  // The trace records when the answer finished; the run started
+  // response_time seconds before that.
+  const endTime = new Date(
+    typeof message?.timestamp === "number" ? message.timestamp * 1000 : now.getTime()
+  );
+  const startTime = new Date(endTime.getTime() - totalResponseTime * 1000);
+  const ts = startTime.toLocaleTimeString();
 
   // ── Tool Calls ──────────────────────────────────────────────────────────
   const toolCalls: ToolCallEntry[] = [];
   const agentSteps: {
     node: string;
+    kind?: string;
+    tool?: string;
     duration_s: number;
     input?: string;
-    output?: string;
+    output?: any;
     usage?: TokenUsage & { calls?: LlmCall[] };
   }[] = qs.agent_steps || [];
 
@@ -217,12 +225,26 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
     durationMs: tc.durationMs,
   }));
 
-  const totalToolSec = agentSteps.reduce(
-    (sum: number, s: { duration_s: number }) => sum + s.duration_s,
+  // Tool time per step: a tool step, a planned step that runs a tool, or
+  // the tool calls inside a reasoning turn. The Deep Agent's answer step
+  // spans the whole run, so it is not tool time. Steps without a kind
+  // (Classic) count in full.
+  const stepToolSec = (s: (typeof agentSteps)[number]): number => {
+    if (s.kind === "tool" || (typeof s.tool === "string" && s.tool)) return s.duration_s || 0;
+    if (s.kind === "react") {
+      const calls = s.output && Array.isArray(s.output.tool_calls) ? s.output.tool_calls : [];
+      return calls.reduce((sum: number, c: any) => sum + (Number(c?.duration_s) || 0), 0);
+    }
+    return 0;
+  };
+  const hasKinds = agentSteps.some((s) => s.kind);
+  const toolSum = agentSteps.reduce(
+    (sum: number, s) => sum + (hasKinds ? stepToolSec(s) : s.duration_s || 0),
     0
   );
+  // Tools can run in parallel, so their summed time can exceed the run time.
+  const totalToolSec = totalResponseTime > 0 ? Math.min(toolSum, totalResponseTime) : toolSum;
   const llmThinking = Math.max(0, totalResponseTime - totalToolSec);
-  const endTime = new Date(now.getTime() + totalResponseTime * 1000);
 
   // ── Token usage totals ─────────────────────────────────────────────────
   const serverTotal = qs.token_usage as TokenUsage | undefined;
@@ -249,7 +271,7 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
       totalDuration: totalResponseTime,
       toolExecution: totalToolSec,
       llmThinking,
-      startTime: now.toLocaleTimeString(),
+      startTime: startTime.toLocaleTimeString(),
       endTime: endTime.toLocaleTimeString(),
     },
     logs,
@@ -852,6 +874,7 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
   const message = apiData ? {
     content: apiData.natural_language_response,
     response_time: apiData.response_time,
+    timestamp: apiData.timestamp,
     response_type: apiData.response_type,
     query_sources: apiData.query_sources,
   } : stateMessage;

@@ -439,6 +439,41 @@ Memory is private to each TigerGraph user and needs a username and password logi
 
 Memory is kept per graph. Each graph has its own SQLite file, `configs/graph_data/<graph>/agent_memory.sqlite`. The `configs` folder is already mounted, so memory survives container recreation, and a backup of `configs` includes users' conversations. Use one GraphRAG replica per `configs` folder.
 
+### Memory encryption
+
+The agent memory (conversations and long-term memories) and the chat history that GraphRAG stores on disk are always encrypted. Existing memory is encrypted in the background after an upgrade. Documents, their chunks and the keyword search index are not covered: they are stored in TigerGraph and in `configs/graph_docs/` and `configs/graph_data/`, so protect them with TigerGraph's encryption at rest and disk encryption.
+
+There are three kinds of key:
+
+- **Data key** — encrypts the stored memory. Each graph and the chat history has its own data key.
+- **Global key** — protects the data keys of the chat history and of every graph that has no graph key.
+- **Graph key** — protects the data key of one graph instead of the global key. Optional.
+
+All keys are kept in `configs/graph_configs/`, apart from the data in `configs/graph_data/`:
+
+- `master.key` — the global key. GraphRAG creates it on first start.
+- `<graph>/master.key` — the graph key of a graph that has one.
+- `<graph>/data_key.json`, `chat_history.data_key.json` — the data keys, encrypted with the global key or the graph key.
+
+Back up `configs/graph_configs/` and keep the backup apart from the data. Without the keys, the stored memory cannot be read.
+
+**Mounted global key.** To keep the global key in a secret manager instead, mount it as a file and set `GRAPHRAG_ENCRYPTION_KEY_FILE` to its path. The file holds one 256-bit key in base64, or several, one per line with the current key first, or a key file downloaded from GraphRAG. GraphRAG only reads a mounted global key. In Kubernetes, mount the secret as a folder, not with `subPath`, so a changed secret reaches the container.
+
+**Managing the keys.** The **Memory Encryption** page under Setup → Server Configuration (superuser or globaldesigner; downloading a key needs superuser), for all graphs or for one graph:
+
+- **Rotate global key** / **Rotate graph key** — a GraphRAG-managed global key or graph key gets a new version, generated or your own. For a mounted global key, put the new key into the secret first, then click **Rotate global key**. If GraphRAG restarted after the secret changed, it asks for the previous global key once, and does not store it.
+- **Rotate data keys** — encrypts the stored memory again with new data keys, in the background: for all graphs and the chat history, or for one of them with the rotate icon on its row.
+- **Protected by: Global key / Graph key** (graph scope) — selects which key protects the data key of the graph. A new graph key is generated or your own; going back to the global key deletes the graph key.
+- **Upload global key** / **Upload graph key** — shown when data is locked. If a global key or graph key is missing or does not match, for example after an upgrade without `configs/graph_configs/`, the data it protects is locked: Agent mode reports that the memory is locked, and nothing is read or written until the right key is uploaded. A wrong key is rejected.
+- **Delete** (on a graph) — deletes the stored conversations and memories of the graph for all users, after the admin types the graph name. The graph and its documents do not change. Graphs that no longer exist in TigerGraph are listed apart under **Removed graphs**, where **Delete all** deletes their memory and keys together.
+- **Reset** — deletes chat messages whose keys are lost, and starts the chat history again with a new data key.
+
+The chat history is encrypted with every chat engine. Agent memory exists only on graphs that run Agent mode on the Deep Agent, so the graph key, the data key rotation and the Upload key of a graph are available only for those graphs. Memory left from an earlier use of the Deep Agent stays encrypted and can be deleted.
+
+Every key action, also a refused one, is written to the audit log (`log.AUDIT-GRAPHRAG`) with the user, without the key.
+
+Encryption of the chat history needs the chat-history service of this release.
+
 ### Agent API
 
 The Deep Agent has its own REST API. All routes authenticate like the other graph routes and act on the caller's own conversations and memories. They are served on port 8000 and, through the bundled nginx, on port 80.

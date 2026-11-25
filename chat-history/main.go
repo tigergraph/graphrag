@@ -35,6 +35,10 @@ func main() {
 	router.HandleFunc("DELETE /conversation/{conversationId}", routes.DeleteConversation)
 	router.HandleFunc("POST /conversation", routes.UpdateConversation)
 	router.HandleFunc("GET /get_feedback", routes.GetFeedback(cfg.TgDbConfig.Hostname, cfg.TgDbConfig.GsPort, cfg.ChatDbConfig.ConversationAccessRoles))
+	// Admin endpoints for the GraphRAG encryption job.
+	router.HandleFunc("GET /messages", routes.ListMessages(cfg.TgDbConfig.Hostname, cfg.TgDbConfig.GsPort, cfg.ChatDbConfig.ConversationAccessRoles))
+	router.HandleFunc("POST /messages", routes.SetMessages(cfg.TgDbConfig.Hostname, cfg.TgDbConfig.GsPort, cfg.ChatDbConfig.ConversationAccessRoles))
+	router.HandleFunc("POST /messages/delete", routes.DeleteMessageList(cfg.TgDbConfig.Hostname, cfg.TgDbConfig.GsPort, cfg.ChatDbConfig.ConversationAccessRoles))
 
 	// create server with middleware
 	dev := strings.ToLower(os.Getenv("DEV")) == "true"
