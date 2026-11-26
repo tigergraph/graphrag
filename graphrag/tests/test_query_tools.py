@@ -52,11 +52,16 @@ class FakeConn:
         self.calls.append(("getQueryMetadata", name))
         return {"input": self.queries.get(name, {}).get("typed", [])}
 
+    run_error = None
+    run_result = None
+
     def runInstalledQuery(self, name, params=None):
         self.calls.append(("runInstalledQuery", name, params))
         if name not in self.installed:
             raise Exception(f"The query '{name}' does not exist on graph G.")
-        return [{"rows": 3}]
+        if self.run_error:
+            raise Exception(self.run_error)
+        return self.run_result if self.run_result is not None else [{"rows": 3}]
 
 
 ORDERS = {
@@ -216,6 +221,14 @@ class TestStoredList(_StoreTest):
         result = qt.discover(conn, "G", qt.load_registered("G"))
         self.assertEqual(result["missing"], [{"name": "orders", "reason": "the query is not installed"}])
 
+    def test_descriptions_are_read_in_batches(self):
+        names = [f"q{i}" for i in range(qt.DESCRIPTION_BATCH * 2 + 3)]
+        conn = FakeConn({n: {"description": "x"} for n in names})
+        rows = qt.read_descriptions(conn, "G", names)
+        self.assertEqual(len(rows), len(names))
+        sizes = [len(c[1]) for c in conn.calls if c[0] == "getQueryDescription"]
+        self.assertEqual(sizes, [qt.DESCRIPTION_BATCH, qt.DESCRIPTION_BATCH, 3])
+
     def test_running_a_dropped_query_returns_a_clear_error(self):
         conn = FakeConn({"orders": ORDERS})
         qt.register(conn, "G", ["orders"], "alice")
@@ -225,6 +238,32 @@ class TestStoredList(_StoreTest):
         out = tool.fn(ctx, since="2024-01-01", vec=[0.1], v={"id": "1", "type": "P"}, doc="d")
         self.assertFalse(out["ok"])
         self.assertIn("no longer installed", out["summary"])
+
+    def _run(self, conn):
+        tool = qt.registered_query_tools("G")["graphrag__gsql__orders"]
+        return tool.fn(SimpleNamespace(conn=conn, emit=lambda m: None),
+                       since="2024-01-01", vec=[0.1], v={"id": "1", "type": "P"}, doc="d")
+
+    def test_an_installed_query_that_fails_is_not_reported_as_dropped(self):
+        conn = FakeConn({"orders": ORDERS})
+        qt.register(conn, "G", ["orders"], "alice")
+        conn.run_error = "Vertex 'd' not found (404)"
+        out = self._run(conn)
+        self.assertFalse(out["ok"])
+        self.assertNotIn("no longer installed", out["summary"])
+        self.assertIn("Check the arguments", out["summary"])
+
+    def test_a_large_result_is_cut_and_the_agent_is_told(self):
+        conn = FakeConn({"orders": ORDERS})
+        qt.register(conn, "G", ["orders"], "alice")
+        conn.run_result = [{"row": "x" * 100}] * 1000
+        out = self._run(conn)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["context"]["truncated"])
+        self.assertEqual(len(out["context"]["result"]), qt.MAX_RESULT_CHARS)
+        self.assertIn("cut", out["summary"])
+        conn.run_result = [{"rows": 3}]
+        self.assertFalse(self._run(conn)["context"]["truncated"])
 
     def test_tool_runs_with_the_callers_connection(self):
         qt.register(FakeConn({"orders": ORDERS}), "G", ["orders"], "alice")
@@ -273,10 +312,25 @@ class TestAdminOnly(unittest.TestCase):
             (self.ui.ui_discover_query_tools, {}),
             (self.ui.ui_save_query_description, {"payload": {"name": "q", "returns": "x", "use_for": "y"}}),
             (self.ui.ui_remove_query_description, {"payload": {"name": "q"}}),
+            (self.ui.ui_list_installed_queries, {}),
         ]:
             exc = self._call(fn, **kw)
             self.assertEqual(exc.status_code, 403, fn.__name__)
             self.assertIn("manage its query tools", exc.detail)
+
+    def test_gsql_is_refused_for_an_existing_query(self):
+        conn = FakeConn({"orders": ORDERS})
+        with mock.patch.object(self.ui, "_require_query_tool_admin"), \
+                mock.patch.object(self.ui, "_query_tool_conn", return_value=conn), \
+                mock.patch.object(self.ui, "_create_user_query") as create:
+            with self.assertRaises(HTTPException) as cm:
+                self.ui.ui_save_query_description(
+                    graphname="G", creds=self.creds,
+                    payload={"name": "orders", "returns": "x", "use_for": "y",
+                             "gsql": "PRINT 1;"})
+        self.assertEqual(cm.exception.status_code, 400)
+        self.assertIn("already exists", cm.exception.detail)
+        create.assert_not_called()
 
     def test_graph_admin_passes_the_role_check(self):
         with mock.patch.object(self.ui, "_get_user_role_details",

@@ -47,6 +47,10 @@ TOOL_PREFIX = "graphrag__gsql__"
 BLOCK_START = "[GRAPHRAG_TOOL]"
 BLOCK_END = "[/GRAPHRAG_TOOL]"
 TOOLS_FILE = "query_tools.json"
+# Query names per getQueryDescription call; pyTigerGraph puts them in the URL.
+DESCRIPTION_BATCH = 50
+# Longest query result, in characters of JSON, handed to an agent.
+MAX_RESULT_CHARS = 30000
 
 # Labels of the tool block, in the order they are written.
 FIELDS = (
@@ -296,20 +300,21 @@ def agent_description(fields: dict) -> str:
 # --------------------------------------------------------------------------
 
 def read_descriptions(conn, graphname: str, names: list[str]) -> dict[str, dict]:
-    """Query descriptions and parameter descriptions in one call."""
-    if not names:
-        return {}
-    conn.graphname = graphname
-    rows = conn.getQueryDescription(list(names)) or []
-    if isinstance(rows, dict):
-        rows = [rows]
+    """Query descriptions and parameter descriptions, in one call per
+    ``DESCRIPTION_BATCH`` names."""
+    names = list(names or [])
     out = {}
-    for row in rows:
-        if isinstance(row, dict) and row.get("queryName"):
-            out[str(row["queryName"])] = {
-                "description": _clean(row.get("description")),
-                "parameters": row.get("parameters") or [],
-            }
+    conn.graphname = graphname
+    for i in range(0, len(names), DESCRIPTION_BATCH):
+        rows = conn.getQueryDescription(names[i:i + DESCRIPTION_BATCH]) or []
+        if isinstance(rows, dict):
+            rows = [rows]
+        for row in rows:
+            if isinstance(row, dict) and row.get("queryName"):
+                out[str(row["queryName"])] = {
+                    "description": _clean(row.get("description")),
+                    "parameters": row.get("parameters") or [],
+                }
     return out
 
 
@@ -488,10 +493,23 @@ def _to_query_args(params: list[dict], kwargs: dict) -> dict:
     return out
 
 
-def _is_missing_query_error(text: str) -> bool:
-    t = text.lower()
-    return any(s in t for s in ("does not exist", "not found", "404", "no such query",
-                                "endpoint is not found"))
+def _query_is_installed(conn, graphname: str, name: str) -> Optional[bool]:
+    """Whether the query is installed; None when that cannot be checked.
+    Called only after a tool failed."""
+    from common.db.migrate import get_installed_query_names
+    try:
+        return name in get_installed_query_names(conn, graphname)
+    except Exception as exc:
+        logger.warning("Could not check whether %s is installed: %s", name, exc)
+        return None
+
+
+def _capped(result: Any) -> tuple[Any, bool]:
+    """The result, or its JSON cut to ``MAX_RESULT_CHARS``, and whether it was cut."""
+    text = json.dumps(result, ensure_ascii=False, default=str)
+    if len(text) <= MAX_RESULT_CHARS:
+        return result, False
+    return text[:MAX_RESULT_CHARS], True
 
 
 def _make_runner(graphname: str, tool: dict):
@@ -504,20 +522,26 @@ def _make_runner(graphname: str, tool: dict):
             result = ctx.conn.runInstalledQuery(name, params=_to_query_args(params, kwargs))
         except Exception as exc:
             text = str(exc)
-            if _is_missing_query_error(text):
+            if _query_is_installed(ctx.conn, graphname, name) is False:
                 summary = (f"Registered query {name} is no longer installed on graph "
                            f"{graphname}. An admin needs to register it again or unregister it.")
             else:
-                summary = (f"Registered query {name} failed: {text}. If the query changed in "
-                           "TigerGraph since it was registered, an admin needs to register it again.")
+                summary = (f"Registered query {name} failed: {text}. Check the arguments; if the "
+                           "query changed in TigerGraph since it was registered, an admin needs "
+                           "to register it again.")
             logger.warning("registered query %s failed: %s", name, text)
             return {"ok": False, "summary": summary, "context": None, "citations": []}
         if result is None or (isinstance(result, (list, dict, str)) and len(result) == 0):
             return {"ok": False, "summary": f"{name} returned no rows", "context": None, "citations": []}
+        result, cut = _capped(result)
+        summary = f"{name} returned results"
+        if cut:
+            summary += (f"; the result was cut to its first {MAX_RESULT_CHARS} characters. "
+                        "Use parameters that return fewer rows for the rest")
         return {
             "ok": True,
-            "summary": f"{name} returned results",
-            "context": {"query_name": name, "result": result},
+            "summary": summary,
+            "context": {"query_name": name, "result": result, "truncated": cut},
             "citations": [],
         }
 

@@ -108,6 +108,8 @@ const QueryToolsDialog: React.FC<Props> = ({ open, onOpenChange, graphs }) => {
   const [otherText, setOtherText] = useState("");
   const [params, setParams] = useState<Param[]>([]);
   const [paramText, setParamText] = useState<Record<string, string>>({});
+  const [installedNames, setInstalledNames] = useState<string[] | null>(null);
+  const [newMode, setNewMode] = useState(false);
 
   // Register
   const [registered, setRegistered] = useState<ToolRow[]>([]);
@@ -118,6 +120,7 @@ const QueryToolsDialog: React.FC<Props> = ({ open, onOpenChange, graphs }) => {
   const [showSkipped, setShowSkipped] = useState(false);
 
   const resetDescribe = () => {
+    setNewMode(false);
     setQueryName("");
     setLoadedName("");
     setIsNewQuery(false);
@@ -155,6 +158,7 @@ const QueryToolsDialog: React.FC<Props> = ({ open, onOpenChange, graphs }) => {
 
   const changeGraph = (g: string) => {
     setGraph(g);
+    setInstalledNames(null);
     setMessage("");
     setMatching(null);
     setSkipped([]);
@@ -165,6 +169,41 @@ const QueryToolsDialog: React.FC<Props> = ({ open, onOpenChange, graphs }) => {
   };
 
   // ------------------------------------------------------------- describe
+
+  const loadInstalled = async (g: string) => {
+    try {
+      const data = await call(`/ui/${g}/query_descriptions`);
+      setInstalledNames(data.queries || []);
+    } catch (err: any) {
+      setInstalledNames([]);
+      setMessage(err.message);
+    }
+  };
+
+  useEffect(() => {
+    if (open && tab === "describe" && graph && installedNames === null) loadInstalled(graph);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, tab, graph, installedNames]);
+
+  const startNewQuery = () => {
+    const n = queryName.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n)) {
+      setMessage("Use letters, digits and underscores for the name; start with a letter or underscore.");
+      return;
+    }
+    if (installedNames?.includes(n)) {
+      setMessage(`"${n}" already exists on this graph. Pick it from the installed queries.`);
+      return;
+    }
+    setLoadedName(n);
+    setIsNewQuery(true);
+    setGsql("");
+    setFields(EMPTY_FIELDS);
+    setOtherText("");
+    setParams([]);
+    setParamText({});
+    setMessage("");
+  };
 
   const loadQuery = async (name?: string) => {
     const n = (name ?? queryName).trim();
@@ -228,6 +267,10 @@ const QueryToolsDialog: React.FC<Props> = ({ open, onOpenChange, graphs }) => {
           param_descriptions: changedParams,
         }),
       });
+      if (data.created) {
+        setNewMode(false);
+        setInstalledNames(null);
+      }
       await loadQuery(n);
       const needParams = isNewQuery ? " Describe its parameters below and save again if it has any." : "";
       setMessage(
@@ -267,6 +310,7 @@ const QueryToolsDialog: React.FC<Props> = ({ open, onOpenChange, graphs }) => {
 
   const describeQuery = (name: string) => {
     setTab("describe");
+    setNewMode(false);
     loadQuery(name);
   };
 
@@ -593,29 +637,74 @@ const QueryToolsDialog: React.FC<Props> = ({ open, onOpenChange, graphs }) => {
                 Register tab.
               </p>
 
-              <div className="flex gap-2 items-end">
-                <div className="flex-1 space-y-1">
-                  <label className="text-sm font-medium text-black dark:text-white">Query name</label>
-                  <Input
-                    value={queryName}
-                    onChange={(e) => setQueryName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") loadQuery();
+              {!newMode ? (
+                <div className="flex gap-2 items-end">
+                  <div className="flex-1 space-y-1">
+                    <label className="text-sm font-medium text-black dark:text-white">
+                      Installed query
+                    </label>
+                    <Select
+                      value={!isNewQuery && loadedName ? loadedName : ""}
+                      onValueChange={(v) => loadQuery(v)}
+                      disabled={disabled || installedNames === null}
+                    >
+                      <SelectTrigger className={fieldInput}>
+                        <SelectValue
+                          placeholder={installedNames === null ? "Loading…" : "Pick a query to describe"}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(installedNames || []).map((n) => (
+                          <SelectItem key={n} value={n}>
+                            {n}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button
+                    variant="outline"
+                    disabled={disabled || !graph}
+                    onClick={() => {
+                      resetDescribe();
+                      setNewMode(true);
+                      setMessage("");
                     }}
-                    placeholder="e.g. orders_per_month"
-                    className={fieldInput}
-                    style={INPUT_CLIP_FIX}
-                    disabled={disabled}
-                  />
+                  >
+                    <PlusCircle className="h-4 w-4 mr-2" />
+                    New query
+                  </Button>
                 </div>
-                <Button
-                  variant="outline"
-                  onClick={() => loadQuery()}
-                  disabled={disabled || !graph || !queryName.trim()}
-                >
-                  {busy === "load" ? <Loader2 className="h-4 w-4 animate-spin" /> : "Load"}
-                </Button>
-              </div>
+              ) : (
+                <div className="flex gap-2 items-end">
+                  <div className="flex-1 space-y-1">
+                    <label className="text-sm font-medium text-black dark:text-white">
+                      New query name
+                    </label>
+                    <Input
+                      value={queryName}
+                      onChange={(e) => setQueryName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") startNewQuery();
+                      }}
+                      placeholder="e.g. orders_per_month"
+                      className={fieldInput}
+                      style={INPUT_CLIP_FIX}
+                      disabled={disabled}
+                    />
+                  </div>
+                  <Button
+                    variant="outline"
+                    onClick={startNewQuery}
+                    disabled={disabled || !queryName.trim()}
+                  >
+                    Continue
+                  </Button>
+                  <Button variant="outline" onClick={resetDescribe} disabled={disabled}>
+                    Cancel
+                  </Button>
+                </div>
+              )}
 
               {loadedName && (
                 <div className="space-y-4">

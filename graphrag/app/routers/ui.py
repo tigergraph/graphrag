@@ -2172,6 +2172,22 @@ def _query_name_or_400(name) -> str:
     return name
 
 
+@router.get(route_prefix + "/{graphname}/query_descriptions")
+def ui_list_installed_queries(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Stage 1: the names of the installed queries, to pick one to describe."""
+    from common.db.migrate import get_installed_query_names
+
+    _require_query_tool_admin(creds[1], graphname)
+    try:
+        names = get_installed_query_names(_query_tool_conn(creds, graphname), graphname)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not list queries: {exc}") from exc
+    return {"queries": sorted(names)}
+
+
 @router.get(route_prefix + "/{graphname}/query_descriptions/{query_name}")
 def ui_get_query_description(
     graphname: ValidGraphName,
@@ -2231,6 +2247,12 @@ def ui_save_query_description(
     gsql = str(body.get("gsql") or "").strip()
     conn = _query_tool_conn(creds, graphname)
     created = False
+    if gsql and name in get_installed_query_names(conn, graphname):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Query '{name}' already exists on graph '{graphname}'. GSQL is only for "
+            "a new query; change an existing query in TigerGraph.",
+        )
     if gsql:
         _create_user_query(conn, graphname, name, _user_query_gsql(name, gsql, graphname))
         try:

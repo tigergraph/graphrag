@@ -517,7 +517,7 @@ The Describe tab writes the same description, can create and install a new query
 
 **Step 2: registration.** On the **Register** tab, a graph admin clicks **Discover queries**. GraphRAG reads the installed queries once and lists those with a valid block, and the others with the reason they were skipped. The admin selects queries and clicks **Register selected**. GraphRAG saves each tool, with its description and its parameters (types, descriptions and defaults), in `configs/graph_configs/<graph>/query_tools.json`. The agents build their tools from this file when they answer, so they make no TigerGraph call to find the tools.
 
-A registered tool stays as it was saved until an admin registers it again. Discover marks a registered tool whose description or parameters changed in TigerGraph, and one whose query is no longer installed. A tool whose query was dropped returns an error that says so when it runs.
+A tool's result is cut to its first 30,000 characters of JSON, and the agent is told so. A registered tool stays as it was saved until an admin registers it again. Discover marks a registered tool whose description or parameters changed in TigerGraph, and one whose query is no longer installed. A tool whose query was dropped returns an error that says so when it runs.
 
 **Roles.** Discover, Register, Unregister and the Describe tab need a superuser, a globaldesigner, or a user with the admin role on the graph. Any user can list the registered tools. A tool runs with the signed-in user's connection, so TigerGraph permissions apply to every call.
 
@@ -525,8 +525,9 @@ A registered tool stays as it was saved until an admin registers it again. Disco
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/ui/{graph}/query_descriptions` | The names of the installed queries. Admin. |
 | GET | `/ui/{graph}/query_descriptions/{query}` | A query's tool block, other description text and parameters. Admin. |
-| POST | `/ui/{graph}/query_descriptions` | Write the tool block and parameter descriptions; with `gsql`, create and install the query first. Admin. |
+| POST | `/ui/{graph}/query_descriptions` | Write the tool block and parameter descriptions; with `gsql`, create and install a new query first (refused for a query that already exists). Admin. |
 | POST | `/ui/{graph}/query_descriptions/remove` | Remove only the tool block. Admin. |
 | POST | `/ui/{graph}/query_tools/discover` | List the installed queries with a valid block and the skipped ones. Admin. |
 | GET | `/ui/{graph}/query_tools` | The registered tools. |
