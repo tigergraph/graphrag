@@ -297,7 +297,23 @@ def schema_notes(vertex_types) -> str:
                 lines.append(f"- {vertex}: {note}")
     if not lines:
         return ""
-    return "Field notes from the data source connectors:\n" + "\n".join(lines)
+    notes = "Field notes from the data source connectors:\n" + "\n".join(lines)
+    sources = [
+        module.RECORDS for name, module in sorted(_CONNECTORS.items())
+        if getattr(module, "RECORDS", "")
+        and any(v in present for v in getattr(module, "FIELD_NOTES", {}))
+    ]
+    if not sources:
+        return notes
+    return (
+        notes
+        + "\n\nWhere records live:\n"
+        + "\n".join(f"- {text}" for text in sources)
+        + "\n- A record named by its title or by words of it, with no source "
+        "named, is looked up by title in each source above before any text "
+        "search, and its stored fields and links are then read with structural "
+        "queries."
+    )
 
 
 def guidance_for(question: str, step: str) -> str:

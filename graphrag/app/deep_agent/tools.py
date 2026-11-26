@@ -70,6 +70,8 @@ class ToolEnv:
     # guidance is chosen from it, not only from the narrower question a tool
     # call is given.
     user_question: str = ""
+    # The user's current question alone, as asked.
+    question: str = ""
 
     @property
     def conn(self):
@@ -203,7 +205,7 @@ def _graphrag_tools(env: ToolEnv) -> List[BaseTool]:
         def body():
             from connectors.prompt_selection import user_question
             with user_question(env.user_question):
-                out = gt.structural_retrieve(ctx, question)
+                out = gt.structural_retrieve(ctx, with_user_question(question, env.question))
             view = {"ok": bool(out.get("ok")), "summary": out.get("summary", "")}
             c = out.get("context")
             if isinstance(c, dict):
@@ -574,6 +576,20 @@ def _mcp_tools(env: ToolEnv, external: Dict[str, Any]) -> List[BaseTool]:
 
 GRAPHRAG_TOOL_NAMES = ("get_graph_schema", "query_graph", "hybrid_search", "similarity_search",
                        "contextual_search", "keyword_search", "community_search")
+
+
+def with_user_question(step_question: str, user_question: str) -> str:
+    """The question query_graph generates its query from: the agent's own
+    wording of the step plus the user's question it serves, so a condition
+    the agent's wording dropped still reaches the query."""
+    step_question = (step_question or "").strip()
+    user_question = (user_question or "").strip()
+    if not user_question or user_question.lower() in step_question.lower():
+        return step_question
+    return (f"{step_question}\n\nThis step is part of answering the user's question: "
+            f"\"{user_question}\". Keep every condition of the user's question that "
+            "applies to the records this step asks for, such as a record type, project, "
+            "status, or date range. Do not add conditions about other records.")
 
 
 def build_tools(env: ToolEnv, external_tools: Optional[Dict[str, Any]] = None) -> Dict[str, List[BaseTool]]:

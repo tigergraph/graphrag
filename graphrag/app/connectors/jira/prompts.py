@@ -31,6 +31,14 @@ RECORD_WORDS = (
 )
 
 
+# What this source's records are and how a question names them, shown with
+# the graph schema so an agent can find a record whose source is not named.
+RECORDS = (
+    "Jira issues are engineering work items. An issue is named by its "
+    "key, a project code and a number such as ABC-123, or by words of its "
+    "summary. The assignee is assigned_to and the reporter is reported."
+)
+
 # How a bare number is looked up in Jira when the question names no source.
 IDENTIFIER = (
     "Jira: JiraIssue rows whose issue_key ends with \"-<number>\" "
