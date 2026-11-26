@@ -420,3 +420,10 @@ def test_a_jira_issue_naming_a_ticket_is_a_mention_not_a_link():
     text = cross_source_prompts.PAIRS[frozenset({"jira", "zendesk"})]["planner"]
     assert "names the ticket, not as a stored link" in text
     assert "check each ticket in the set" in text
+
+
+def test_confluence_topics_match_the_page_body():
+    planner = guidance_for("Which Confluence pages are about segment corruption?", "planner")
+    query = guidance_for("Which Confluence pages are about segment corruption?", "query")
+    assert "title or the body, not the title alone" in planner
+    assert "OR toLower(p.body) CONTAINS" in query
