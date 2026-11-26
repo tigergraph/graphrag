@@ -214,3 +214,11 @@ def test_a_link_named_only_in_text_is_not_called_confirmed():
     assert "Only a stored edge confirms a link between records" in answer
     assert "Do not call such a pair confirmed or verified" in answer
     assert 'never close with a line such as "If you want' in agent_guidance("Summarize ABC-102.")
+
+
+def test_a_project_code_filters_the_project_and_work_is_assignment():
+    planner = guidance_for("Which components have the most GLE bugs in Jira?", "planner")
+    query = guidance_for("Which components have the most GLE bugs in Jira?", "query")
+    assert "filters project_key; it is not a topic" in planner
+    assert "never a CONTAINS match" in query
+    assert "What a person works on, owns, or handles is the issues assigned" in planner
