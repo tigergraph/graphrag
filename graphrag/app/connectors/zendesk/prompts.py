@@ -14,9 +14,15 @@ LABEL = "Zendesk ticket"
 
 _SOURCE = re.compile(r"zendesk\.com/\S*?/tickets/\d+|\bzendesk\b", re.IGNORECASE)
 
+# A number given as a ticket, such as "ticket #12345" or "tickets 12345 and
+# 12346", is a Zendesk ticket: Jira names its records by key, not by number.
+_TICKET_NUMBER = re.compile(
+    r"(?<!jira )\btickets?\s*(?:no\.?|number|id)?\s*#?\d{4,}\b", re.IGNORECASE
+)
+
 
 def selects(question: str) -> bool:
-    return bool(_SOURCE.search(question))
+    return bool(_SOURCE.search(question) or _TICKET_NUMBER.search(question))
 
 
 _TYPES = {"ZendeskTicket", "ZendeskComment", "ZendeskChange"}
@@ -71,6 +77,10 @@ PLANNER = (
     "comments.\n"
     "- A support-team response is a public comment whose author_role is "
     "agent or admin; order them by created.\n"
+    "- When a ticket was solved or closed, and how long it was open, come "
+    "from its status changes: the ZendeskChange rows whose field is status, "
+    "with to_value solved or closed and their created dates. The ticket's "
+    "updated date is not when it was solved.\n"
     "- Linked tickets are independent lookups: first the named ticket's "
     "problem_id, followup_ids, and source_ticket_id; then, separately, the "
     "tickets whose problem_id or source_ticket_id equals the named ticket_id. "
@@ -204,7 +214,13 @@ JIRA_PAIR = {
         "- Zendesk writes links_issue from the ticket to the Jira issue, from "
         "Zendesk's Jira link inventory. Find the named record by its own "
         "identifier, follow links_issue, and retrieve the other record's "
-        "current fields in a separate step."
+        "current fields in a separate step.\n"
+        "- A Jira issue whose summary names the ticket number, such as an RCA "
+        "request for the ticket, is found by a separate structural step "
+        "matching the number in the issue summary. Report it as an issue "
+        "that names the ticket, not as a stored link.\n"
+        "- For a set of tickets, such as a customer's tickets in a month, "
+        "check each ticket in the set, not only the first one found."
     ),
     "query": (
         "## Jira and Zendesk relationship query guidance\n"
