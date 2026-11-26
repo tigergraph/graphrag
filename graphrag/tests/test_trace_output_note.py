@@ -64,7 +64,7 @@ class TestFitForTrace(unittest.TestCase):
         self.assertEqual(value["result"]["final_retrieval"]["short_chunk_0"], ["brief"])
 
     def test_query_text_is_not_cut_with_the_rows(self):
-        cypher = ("MATCH (i:JiraIssue)-[:JIRA_BELONGS_TO]-(p:JiraProject)\n"
+        cypher = ("MATCH (i:JiraIssue)-[:assigned_to]-(p:Person)\n"
                   'WHERE toLower(p.project_key) = "gml"\n'
                   "RETURN i.issue_key AS issue_key, i.summary AS issue_summary\n"
                   "ORDER BY issue_key ASC")

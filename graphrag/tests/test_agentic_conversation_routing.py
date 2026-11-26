@@ -314,3 +314,109 @@ class TestPrompts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnswerStepSeesEmptyGraphQueries(unittest.TestCase):
+    def _context(self, results, plan):
+        seen = {}
+
+        class Gen:
+            def __init__(self, llm):
+                pass
+
+            def generate_answer(self, question, context):
+                seen["context"] = context
+                return types.SimpleNamespace(generated_answer="0", citation=[])
+
+        with mock.patch.object(syn, "TigerGraphAgentGenerator", Gen):
+            resp = syn.synthesize(object(), "q", results, plan=plan)
+        return resp, seen["context"]
+
+    def test_a_structural_step_with_no_rows_is_named_for_the_answer(self):
+        plan = Plan(steps=[
+            PlanStep(id="S1", kind="structural", tool=g._STRUCTURAL_TOOL,
+                     args={"question": "Count tickets created in October 2026"}),
+            PlanStep(id="A", kind="answer", tool="", depends_on=["S1"]),
+        ])
+        results = {"S1": StepResult(step_id="S1", ok=False,
+                                    summary="structural query returned no rows")}
+        resp, ctx = self._context(results, plan)
+        self.assertEqual(ctx["graph_queries_with_no_rows"],
+                         ["Count tickets created in October 2026"])
+        self.assertTrue(resp.answered_question)
+
+    def test_a_failed_query_is_not_reported_as_no_rows(self):
+        plan = Plan(steps=[PlanStep(id="S1", kind="structural", tool=g._STRUCTURAL_TOOL,
+                                    args={"question": "q"})])
+        results = {"S1": StepResult(step_id="S1", ok=False, summary="query failed check")}
+        _, ctx = self._context(results, plan)
+        self.assertNotIn("graph_queries_with_no_rows", ctx)
+
+
+class TestDependentStepsSeeEarlierRows(unittest.TestCase):
+    def test_a_dependent_structural_step_gets_the_earlier_rows(self):
+        import agent.agentic_executor as ex
+        step = PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL,
+                        args={"question": "List the child pages"}, depends_on=["S1"])
+        results = {"S1": StepResult(step_id="S1", ok=True, summary="1 row",
+                                    context={"result": [{"page_id": "123"}]})}
+        args = ex._with_earlier_rows(step, dict(step.args), results)
+        self.assertIn('"page_id": "123"', args["question"])
+        self.assertTrue(args["question"].startswith("List the child pages"))
+
+    def test_an_independent_or_unstructured_step_is_unchanged(self):
+        import agent.agentic_executor as ex
+        results = {"S1": StepResult(step_id="S1", ok=True, context={"result": [1]})}
+        free = PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL,
+                        args={"question": "q"})
+        self.assertEqual(ex._with_earlier_rows(free, {"question": "q"}, results)["question"], "q")
+        search = PlanStep(id="S3", kind="unstructured", tool="graphrag__hybrid_search",
+                          args={"question": "q"}, depends_on=["S1"])
+        self.assertEqual(ex._with_earlier_rows(search, {"question": "q"}, results)["question"], "q")
+
+
+class TestAStepWithoutQuestionTextUsesItsRationale(unittest.TestCase):
+    def test_rows_bound_to_a_missing_question_join_the_rationale(self):
+        import agent.agentic_executor as ex
+        step = PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL, args={},
+                        arg_bindings={"question": "S1.context.result"}, depends_on=["S1"],
+                        rationale="List the pages whose parent_id is that page's page_id.")
+        args = ex._with_step_question(step, {})
+        self.assertEqual(args["question"], "List the pages whose parent_id is that page's page_id.")
+        results = {"S1": StepResult(step_id="S1", ok=True, summary="1 row",
+                                    context={"result": [{"page_id": "123"}]})}
+        args = ex._with_earlier_rows(step, args, results)
+        self.assertTrue(args["question"].startswith("List the pages whose parent_id"))
+        self.assertIn('"page_id": "123"', args["question"])
+
+    def test_a_given_question_and_other_kinds_are_left_alone(self):
+        import agent.agentic_executor as ex
+        step = PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL,
+                        args={"question": "q"}, rationale="r")
+        self.assertEqual(ex._with_step_question(step, {"question": "q"})["question"], "q")
+        search = PlanStep(id="S3", kind="unstructured", tool="graphrag__hybrid_search",
+                          args={}, rationale="r")
+        self.assertEqual(ex._with_step_question(search, {}), {})
+
+
+class TestRowsBoundToAQuestionKeepTheQuestion(unittest.TestCase):
+    def test_rows_bound_to_question_are_appended_not_substituted(self):
+        import agent.agentic_executor as ex
+        plan = Plan(steps=[
+            PlanStep(id="S1", kind="structural", tool=g._STRUCTURAL_TOOL,
+                     args={"question": "Find the page"}),
+            PlanStep(id="S2", kind="structural", tool=g._STRUCTURAL_TOOL,
+                     args={"question": "List the child pages of that page"},
+                     arg_bindings={"question": "S1.context"}, depends_on=["S1"]),
+        ])
+        seen = []
+
+        def fake_run(step, args, ctx, results, traces):
+            seen.append(args)
+            results[step.id] = StepResult(step_id=step.id, ok=True, summary="1 row",
+                                          context={"T": [{"page_id": "123"}]})
+
+        with mock.patch.object(ex, "_run_step", fake_run):
+            ex.execute_plan(plan, types.SimpleNamespace(emit=lambda *a: None))
+        self.assertTrue(seen[1]["question"].startswith("List the child pages of that page"))
+        self.assertIn('"page_id": "123"', seen[1]["question"])

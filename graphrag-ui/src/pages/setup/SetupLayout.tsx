@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Database, Settings, FileText, ChevronRight } from "lucide-react";
+import { ArrowLeft, Database, DatabaseZap, Settings, FileText, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useRoles } from "@/hooks/useRoles";
 
@@ -39,6 +39,12 @@ const SetupLayout = () => {
       title: "Knowledge Graph Setup",
       icon: Database,
       path: "/setup/kg-admin",
+      subItems: [],
+    },
+    {
+      title: "Data Sources",
+      icon: DatabaseZap,
+      path: "/setup/kg-admin/data-sources",
       subItems: [],
     },
     {
@@ -168,7 +174,9 @@ const SetupLayout = () => {
               const Icon = item.icon;
               const hasSubItems = item.subItems.length > 0;
               const isExpanded = expandedSection === item.path;
-              const isItemActive = isParentActive(item.path);
+              const isItemActive = hasSubItems
+                ? isParentActive(item.path)
+                : isActive(item.path);
 
               return (
                 <div key={item.path}>

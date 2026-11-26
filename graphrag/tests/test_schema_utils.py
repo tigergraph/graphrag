@@ -426,6 +426,22 @@ def test_emit_skips_pair_already_on_edge():
     assert stmts == []  # everything already exists
 
 
+def test_emit_adds_attributes_that_are_missing_on_an_existing_vertex():
+    proposal = SchemaProposal()
+    proposal.add_vertex(
+        "ZendeskTicket",
+        attributes=[("priority", "STRING"), ("subject", "STRING")],
+    )
+    existing = ExistingSchema(
+        vertex_types={"ZendeskTicket"},
+        vertex_attributes={"ZendeskTicket": {"subject": "STRING"}},
+    )
+    stmts = emit_add_statements(proposal, existing=existing)
+    assert stmts == [
+        "ALTER VERTEX ZendeskTicket ADD ATTRIBUTE (priority STRING)"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Preview rendering
 # ---------------------------------------------------------------------------
@@ -1099,6 +1115,23 @@ def test_emit_structural_links_for_new_domain_vertices():
     assert not any("IS_HEAD_OF" in s for s in stmts)
     assert not any("HAS_TAIL" in s for s in stmts)
     assert len(stmts) == 6
+
+
+def test_reused_vertices_get_their_missing_structural_links():
+    """A domain vertex already on the graph (left out of the proposal as
+    reused, e.g. after an install that stopped part way) still gets the
+    CONTAINS_ENTITY pairs it lacks; one that is not on the graph does not."""
+    proposal = SchemaProposal()
+    existing = ExistingSchema(
+        vertex_types={"Document", "DocumentChunk", "Page"},
+        edge_pairs={"CONTAINS_ENTITY": {("Document", "Entity")}},
+    )
+    stmts = emit_structural_link_alters(proposal, existing, ["Page", "Missing"])
+    assert stmts == [
+        "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO Page)",
+        "ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO Page)",
+    ]
+    assert emit_structural_link_alters(proposal, existing) == []
 
 
 def test_emit_structural_links_skips_in_community_when_already_present():

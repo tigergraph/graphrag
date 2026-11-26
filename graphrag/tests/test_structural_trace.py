@@ -242,7 +242,7 @@ class TestCheckBeforeRun(unittest.TestCase):
     def test_optional_match_run_error_gets_a_hint(self):
         from tools.generate_cypher import run_error_hints
         err = "Query [null] cannot be executed in both instruction mode and legacy mode at the same time."
-        q = ('MATCH (i:JiraIssue) WITH i OPTIONAL MATCH (i)-[:JIRA_BELONGS_TO]-(p:JiraProject) '
+        q = ('MATCH (i:JiraIssue) WITH i OPTIONAL MATCH (i)-[:assigned_to]-(p:Person) '
              'WHERE toLower(i.issue_key) STARTS WITH "gpe" RETURN count(DISTINCT i) AS n')
         hints = run_error_hints(err, q)
         self.assertTrue(any("Use MATCH" in h for h in hints))

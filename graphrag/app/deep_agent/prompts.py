@@ -67,7 +67,7 @@ Stop when every part of the question is covered.
 - External tools (names other than the ones above) come from MCP servers the \
 administrator configured; use them when the question is about what they cover.
 
-{memory_section}## Answer
+{connector_guidance}{memory_section}## Answer
 - When you have gathered enough, finish by returning the structured answer: the \
 complete answer in Markdown, the ids of the passages and records you used as \
 citations, and whether the question was answered.
@@ -148,9 +148,15 @@ KEYWORD_HINT = ("; keyword_search for a passage that must contain an exact name,
                 "number or label, such as a note or section another passage refers to")
 
 
+def _section(text: str) -> str:
+    """A prompt section that ends with a blank line, or '' for no text."""
+    return f"{text.strip()}\n\n" if text and text.strip() else ""
+
+
 def main_prompt(graphname: str, today: str, use_cypher: bool,
                 answer_style: str = "", additional: str = "",
-                long_term_memory: bool = True, keyword_search: bool = False) -> str:
+                long_term_memory: bool = True, keyword_search: bool = False,
+                connector_guidance: str = "") -> str:
     style = f"\n## Answer style\n{answer_style.strip()}\n" if answer_style.strip() else ""
     extra = f"\n## Additional instructions\n{additional.strip()}\n" if additional.strip() else ""
     return MAIN_PROMPT.format(
@@ -160,12 +166,15 @@ def main_prompt(graphname: str, today: str, use_cypher: bool,
         exact_term_rule=EXACT_TERM_RULE if keyword_search else RESULT_TERM_RULE,
         answer_style=style, additional=extra,
         memory_section=MEMORY_SECTION if long_term_memory else NO_MEMORY_SECTION,
+        connector_guidance=_section(connector_guidance),
     )
 
 
-def graph_analyst_prompt(graphname: str, use_cypher: bool) -> str:
-    return GRAPH_ANALYST_PROMPT.format(graphname=graphname,
+def graph_analyst_prompt(graphname: str, use_cypher: bool, connector_guidance: str = "") -> str:
+    text = GRAPH_ANALYST_PROMPT.format(graphname=graphname,
                                        cypher_hint=CYPHER_HINT if use_cypher else "")
+    guidance = _section(connector_guidance)
+    return f"{text}\n\n{guidance}".rstrip() if guidance else text
 
 
 def document_researcher_prompt(graphname: str, keyword_search: bool = False) -> str:

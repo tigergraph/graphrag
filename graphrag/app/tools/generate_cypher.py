@@ -99,6 +99,51 @@ def run_error_hints(error: str, cypher: str) -> list:
             if err_pattern.search(error) and query_pattern.search(query)]
 
 
+# Constructs TigerGraph's interpreted openCypher mishandles even when the
+# query passes its check: they return no rows or fail at run time. Each is
+# reported before the query runs so the next attempt writes it differently.
+_RANGE_ON_STRING = re.compile(r"\b\w+\.\w+\s*(>=|<=|>|<)\s*\"")
+_EDGE_PATTERN = re.compile(r"\)\s*<?-\s*\[|\]\s*->?\s*\(")
+_CASE_EXPR = re.compile(r"\bCASE\b(.*?)\bEND\b", re.I | re.S)
+_TEXT_EQUALITY = re.compile(
+    r"(?:toLower\(\s*)?\b\w+\.(title|subject|summary)\b\s*\)?\s*=\s*\"", re.I)
+_STEP_ID_VALUE = re.compile(r"[=,\[]\s*\"\$?S\d+[\w.]*\"|\$S\d+")
+_RESERVED_ATTRIBUTE = re.compile(r"\b\w+\.(tags)\b")
+
+
+def unsafe_constructs(cypher: str) -> list:
+    """Readable errors for constructs TigerGraph runs wrongly or rejects."""
+    errors = []
+    for part in re.split(r"\bWITH\b", cypher, flags=re.I):
+        if _EDGE_PATTERN.search(part) and _RANGE_ON_STRING.search(part):
+            errors.append(
+                "A range comparison (>=, <) on a string in the same MATCH as an "
+                "edge returns no rows in TigerGraph. Filter that record first, "
+                "then traverse: MATCH (x:Type) WHERE x.created >= \"...\" WITH x "
+                "MATCH (x)-[:edge]->(y) RETURN ...")
+            break
+    for case in _CASE_EXPR.finditer(cypher):
+        if not re.search(r"\bELSE\b", case.group(1), re.I):
+            errors.append("TigerGraph does not support CASE without ELSE. Add an "
+                          "ELSE branch, or group by the stored attribute instead.")
+            break
+    if re.search(r"\bcoalesce\s*\(", cypher, re.I):
+        errors.append("TigerGraph does not support coalesce() in interpreted queries. "
+                      "Count records without the related record in a separate query.")
+    if _TEXT_EQUALITY.search(cypher):
+        errors.append("Do not match a title, subject, or summary with =: users shorten "
+                      "and reword them. Use toLower(x.title) CONTAINS on each "
+                      "distinctive word, combined with AND.")
+    if _STEP_ID_VALUE.search(cypher):
+        errors.append("A plan step id (such as S1) is not a value. Use the identifier "
+                      "from the earlier step's rows, or leave the condition out.")
+    if _RESERVED_ATTRIBUTE.search(cypher):
+        errors.append("The attribute tags is a reserved word in TigerGraph openCypher "
+                      "and cannot be read in a query. Leave it out and use the other "
+                      "fields.")
+    return errors
+
+
 def check_cypher(conn, cypher: str):
     """Errors in ``cypher`` found without running it, as readable lines.
 
@@ -108,6 +153,9 @@ def check_cypher(conn, cypher: str):
     """
     if _WRITE_CLAUSE.search(_STRING_LITERAL.sub('""', cypher)):
         return ["The query changes data. Write a query that only reads (MATCH ... RETURN)."]
+    unsafe = unsafe_constructs(cypher)
+    if unsafe:
+        return unsafe
     try:
         result = conn.checkQuerySemantic(_interpreted(conn, cypher))
     except Exception as exc:
@@ -189,6 +237,51 @@ def generate_and_run_cypher(cypher_gen, conn, question: str, max_attempts: int =
     return None, None
 
 
+def validate_tigergraph_cypher(query: str, schema: str) -> None:
+    """Reject the OpenCypher shape TigerGraph cannot compile."""
+    directed_self_edges: set[str] = set()
+    edge_name = from_type = to_type = None
+    for line in schema.partition("Edge Types:")[2].splitlines() + ["END"]:
+        if line and not line[0].isspace():
+            edge_name = line.strip()
+            from_type = to_type = None
+        elif edge_name and line.strip().startswith("From Vertex:"):
+            from_type = line.split(":", 1)[1].strip()
+        elif edge_name and line.strip().startswith("To Vertex:"):
+            to_type = line.split(":", 1)[1].strip()
+        elif (
+            edge_name
+            and from_type == to_type
+            and line.strip() == "Edge direction: Directed"
+        ):
+            directed_self_edges.add(edge_name)
+
+    returned = re.search(r"\bRETURN\b(.*)", query, re.I | re.S)
+    if not returned:
+        return
+    return_items = returned.group(1).split(",")
+    for edge_var, edge_type in re.findall(
+        r"OPTIONAL\s+MATCH\s*\([^)]*\)\s*-\s*"
+        r"\[\s*(\w+)\s*:\s*(\w+)[^]]*]\s*-\s*\([^)]*\)",
+        query,
+        re.I,
+    ):
+        returns_edge = any(
+            re.fullmatch(
+                rf"`?{re.escape(edge_var)}`?(?:\s+AS\s+\w+)?",
+                item.strip(),
+                re.I,
+            )
+            for item in return_items
+        )
+        if edge_type in directed_self_edges and returns_edge:
+            raise ValueError(
+                f"TigerGraph cannot return {edge_var} from an undirected "
+                f"OPTIONAL MATCH on directed self-edge {edge_type}. Use MATCH "
+                "or return only the related vertex and requested edge attributes."
+            )
+
+
 class GenerateCypher(BaseTool):
     """GenerateCypher Tool.
     Tool to generate and execute the appropriate Cypher query for the question.
@@ -243,7 +336,7 @@ class GenerateCypher(BaseTool):
             partial_variables={
                 # Pre-bind the Query Guidance partial; empty when no
                 # override is configured.
-                "query_guidance": self.llm.query_guidance_block,
+                "query_guidance": self.llm.query_guidance_for(question),
             },
         )
 
@@ -263,6 +356,7 @@ class GenerateCypher(BaseTool):
         if not any(kw in out_upper for kw in ("MATCH", "RETURN", "WITH", "UNWIND", "CALL")):
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_cypher - LLM did not produce a valid Cypher query")
             raise ValueError(f"LLM did not produce a valid Cypher query: {out[:200]}")
+        validate_tigergraph_cypher(out, schema)
 
         LogWriter.info(f"request_id={req_id_cv.get()} EXIT generate_cypher with:\n{out}")
         return out
