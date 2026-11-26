@@ -191,6 +191,48 @@ def final_answer(messages: list) -> tuple:
     return "", [], False
 
 
+# Characters of tool output the step-limit answer reads, newest first.
+EVIDENCE_CHARS = 60000
+
+
+def gathered_evidence(messages: list, limit: int = EVIDENCE_CHARS) -> str:
+    """The tool results of the latest turn as text, newest kept first when
+    they do not all fit in ``limit`` characters, in the order they ran."""
+    from langchain_core.messages import ToolMessage
+
+    turn = []
+    for m in reversed(messages or []):
+        if isinstance(m, HumanMessage):
+            break
+        if isinstance(m, ToolMessage):
+            turn.append(m)
+    parts, used = [], 0
+    for m in turn:
+        text = _text(m.content).strip()
+        if not text:
+            continue
+        piece = f"[{getattr(m, 'name', None) or 'tool'}]\n{text}"
+        if used + len(piece) > limit:
+            piece = piece[: max(0, limit - used)]
+        if piece:
+            parts.append(piece)
+            used += len(piece)
+        if used >= limit:
+            break
+    return "\n\n".join(reversed(parts))
+
+
+STEP_LIMIT_ANSWER = (
+    "You ran out of steps while researching the question below. Do not look "
+    "anything up. Answer it now from the tool results that follow, which are "
+    "everything you retrieved. State only what these results support. Where "
+    "the question asks for something the results do not cover, say so in one "
+    "sentence. Follow the answer rules below.\n\n"
+    "{guidance}"
+    "## Question\n{question}\n\n## Tool results\n{evidence}"
+)
+
+
 def history_messages(conversation) -> list:
     """Caller-supplied turns ``[{query, response}]`` as chat messages."""
     out = []
@@ -449,6 +491,7 @@ class DeepGraphRAGAgent:
                 prior = []
             seed = history_messages(convo) if not prior else []
             env.user_question = guidance_question(question, convo, prior)
+            env.question = question or ""
 
             agent = self.build(env, external, checkpointer, backends.store)
             config = {
@@ -532,11 +575,35 @@ class DeepGraphRAGAgent:
             })
         return steps
 
+    def _answer_from_evidence(self, values: dict, env: ToolEnv, usage: _UsageCallback) -> str:
+        """One model call that answers from the tool results already gathered,
+        for a turn that hit the step limit. '' when nothing was gathered or the
+        call fails."""
+        evidence = gathered_evidence(values.get("messages") or [])
+        if not evidence:
+            return ""
+        question = env.question or env.user_question or ""
+        guidance = connector_guidance(env.user_question or question)
+        prompt = STEP_LIMIT_ANSWER.format(
+            guidance=f"{guidance}\n\n" if guidance else "",
+            question=question, evidence=evidence)
+        self.emit_progress("Writing the answer from what was found")
+        try:
+            msg = self.llm.llm.invoke([HumanMessage(content=prompt)],
+                                      config={"callbacks": [usage]})
+            return _text(getattr(msg, "content", "")).strip()
+        except Exception as exc:
+            logger.warning(f"deep_agent: answer after the step limit failed: {exc}")
+            return ""
+
     def _response(self, values: dict, env: ToolEnv, usage: _UsageCallback, tid: str,
                   hit_limit: bool, elapsed: float):
         from common.py_schemas import GraphRAGResponse
 
         answer, citations, answered = final_answer(values.get("messages") or [])
+        if hit_limit and not answer:
+            answer = self._answer_from_evidence(values, env, usage)
+            answered = bool(answer)
         if hit_limit and not answer:
             answer = ("I gathered some information but could not finish the answer within the "
                       "step budget. Please narrow the question or ask about one part at a time.")
