@@ -34,6 +34,15 @@ RECORD_WORDS = (
 )
 
 
+# What this source's records are and how a question names them, shown with
+# the graph schema so an agent can find a record whose source is not named.
+RECORDS = (
+    "Zendesk tickets are customer support cases. A ticket is named by its "
+    "number or by words of its subject. The requester is requested, the "
+    "assignee is assigned, and the customer is the Organization of the "
+    "requester."
+)
+
 # How a bare number is looked up in Zendesk when the question names no source.
 IDENTIFIER = (
     "Zendesk: the ZendeskTicket whose ticket_id equals \"<number>\". Return "
