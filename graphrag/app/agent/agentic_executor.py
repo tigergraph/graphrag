@@ -184,6 +184,34 @@ def _resolve_path(results: dict, ref: str):
     return cur
 
 
+# A structural step that depends on earlier structural steps gets their rows
+# in its question, so its query can use the identifiers they found (a page_id,
+# an issue key) instead of matching the record again.
+_EARLIER_ROWS_CHARS = 1500
+
+
+def _with_earlier_rows(step, args: dict, results: dict, bound_rows=None) -> dict:
+    if step.kind != "structural" or not (step.depends_on or bound_rows):
+        return args
+    question = args.get("question")
+    if not isinstance(question, str) or not question:
+        return args
+    found = list(bound_rows or [])
+    for dep in step.depends_on or []:
+        sr = results.get(dep)
+        if sr is None or not sr.ok or sr.context is None:
+            continue
+        rows = json.dumps(sr.context, default=str)
+        if len(rows) > _EARLIER_ROWS_CHARS:
+            rows = rows[:_EARLIER_ROWS_CHARS] + " ..."
+        found.append(f"{dep}: {rows}")
+    if not found:
+        return args
+    return {**args, "question": question
+            + "\n\nRows found by earlier steps; use their identifiers:\n"
+            + "\n".join(found)}
+
+
 def _ready(step, done: set) -> bool:
     return all(dep in done for dep in (step.depends_on or []))
 
@@ -251,10 +279,18 @@ def execute_plan(plan, ctx):
             if not _ready(step, done):
                 continue
             args = dict(step.args or {})
+            bound_rows = []
             for arg_name, ref in (step.arg_bindings or {}).items():
                 val = _resolve_path(results, ref)
-                if val is not None:
-                    args[arg_name] = val
+                if val is None:
+                    continue
+                if arg_name == "question" and not isinstance(val, str):
+                    # A question stays text: rows bound to it are added to
+                    # the step's own question instead of replacing it.
+                    bound_rows.append(f"{ref}: {json.dumps(val, default=str)[:_EARLIER_ROWS_CHARS]}")
+                    continue
+                args[arg_name] = val
+            args = _with_earlier_rows(step, args, results, bound_rows)
             _run_step(step, args, ctx, results, traces)
             done.add(step.id)
             remaining.remove(step)

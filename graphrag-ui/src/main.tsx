@@ -12,6 +12,7 @@ import LLMConfig from "./pages/setup/LLMConfig.tsx";
 import GraphDBConfig from "./pages/setup/GraphDBConfig.tsx";
 import GraphRAGConfig from "./pages/setup/GraphRAGConfig.tsx";
 import McpServersConfig from "./pages/setup/McpServersConfig.tsx";
+import DataSourcesConfig from "./pages/setup/DataSourcesConfig.tsx";
 import CustomizePrompts from "./pages/setup/CustomizePrompts.tsx";
 import { ThemeProvider } from "./components/ThemeProvider.tsx";
 import { ModeToggle } from "@/components/ModeToggle.tsx";
@@ -78,6 +79,10 @@ const router = createBrowserRouter([
           {
             path: "kg-admin/ingest",
             element: <IngestGraph />,
+          },
+          {
+            path: "kg-admin/data-sources",
+            element: <DataSourcesConfig />,
           },
           {
             path: "server-config",
