@@ -307,3 +307,11 @@ def test_action_items_come_with_context_and_empty_values_read_not_set():
     answer = guidance_for("What is the action item for zendesk #12345?", "answer")
     assert "read together with the comment it answers" in answer
     assert 'Show an empty stored value as "not set"' in answer
+
+
+def test_a_project_code_filters_the_project_and_work_is_assignment():
+    planner = guidance_for("Which components have the most GLE bugs in Jira?", "planner")
+    query = guidance_for("Which components have the most GLE bugs in Jira?", "query")
+    assert "filters project_key; it is not a topic" in planner
+    assert "never a CONTAINS match" in query
+    assert "What a person works on, owns, or handles is the issues assigned" in planner
