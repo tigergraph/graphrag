@@ -35,6 +35,17 @@ RECORD_WORDS = (
 # e.g. a page about a Zendesk ticket or a Jira issue.
 ALSO_SELECTED_BY = ("page", "wiki")
 
+# What this source's records are and how a question names them, shown with
+# the graph schema so an agent can find a record whose source is not named.
+RECORDS = (
+    "Confluence pages hold written documents: RCAs, design documents, "
+    "test plans, runbooks, checklists, and meeting notes. A page is named "
+    "by its title; match the distinctive words of a title with "
+    "case-insensitive CONTAINS on ConfluencePage.title. The creator is "
+    "authored, the last editor is edited, and the Jira issues and Zendesk "
+    "tickets a page cites are links_issue and links_ticket."
+)
+
 # How a bare number is looked up in Confluence when the question names no
 # source.
 IDENTIFIER = (
