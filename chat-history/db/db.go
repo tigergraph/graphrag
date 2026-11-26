@@ -218,3 +218,52 @@ func populateDB() {
 	}
 	db.Create(&m3)
 }
+
+// MessageText is the stored text of one message.
+type MessageText struct {
+	ID        uint   `json:"id"`
+	MessageId string `json:"message_id"`
+	Content   string `json:"content"`
+	Comment   string `json:"comment"`
+}
+
+// ListMessageText returns the text of up to limit messages with an id
+// greater than after, in id order.
+func ListMessageText(after uint, limit int) ([]MessageText, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+	var messages []structs.Message
+	if err := db.Where("id > ?", after).Order("id").Limit(limit).Find(&messages).Error; err != nil {
+		return nil, err
+	}
+	out := make([]MessageText, 0, len(messages))
+	for _, m := range messages {
+		out = append(out, MessageText{ID: m.ID, MessageId: m.MessageId.String(), Content: m.Content, Comment: m.Comment})
+	}
+	return out, nil
+}
+
+// SetMessageText replaces the content and the comment of messages.
+func SetMessageText(updates []MessageText) error {
+	mu.Lock()
+	defer mu.Unlock()
+	return db.Transaction(func(tx *gorm.DB) error {
+		for _, u := range updates {
+			if err := tx.Model(&structs.Message{}).Where("message_id = ?", u.MessageId).
+				Updates(map[string]interface{}{"content": u.Content, "comment": u.Comment}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// DeleteMessages deletes messages by message id.
+func DeleteMessages(messageIds []string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	if len(messageIds) == 0 {
+		return nil
+	}
+	return db.Where("message_id IN ?", messageIds).Delete(&structs.Message{}).Error
+}

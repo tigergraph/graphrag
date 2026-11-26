@@ -11,6 +11,7 @@ from pyTigerGraph import TigerGraphConnection
 from common.config import embedding_dimension
 from common.db.retriever_render import TEMPLATED_RETRIEVERS, render_retriever_body
 from common.db.schema_utils import gsql_output_error
+from common.utils.step_log import log_step
 from common.utils.chunk_context import schema_change_gsql as chunk_context_schema_gsql
 from common.py_schemas.schemas import (
     # GraphRAGResponse,
@@ -29,18 +30,125 @@ from common.utils.text_extractors import (
 )
 logger = logging.getLogger(__name__)
 
-def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, dict]:
+_VECTOR_QUERY_FILES = [
+    "common/gsql/supportai/retrievers/Content_Similarity_Vector_Search.gsql",
+    "common/gsql/supportai/retrievers/Chunk_Sibling_Vector_Search.gsql",
+    "common/gsql/supportai/retrievers/GraphRAG_Community_Vector_Search.gsql",
+    "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Vector_Search.gsql",
+]
+
+
+def supportai_query_files(vector: bool) -> list[str]:
+    """The GraphRAG query files a graph needs; ``vector`` adds the vector
+    search retrievers."""
+    from common.db.query_sets import SUPPORTAI_INIT_QUERIES, with_gsql
+    files = with_gsql(SUPPORTAI_INIT_QUERIES + [
+        "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display",
+        "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display",
+    ])
+    return files + (list(_VECTOR_QUERY_FILES) if vector else [])
+
+
+def create_and_install_queries(conn, graphname: str, files: list[str], domain_vts=(),
+                               domain_edges=(), include_entity: bool = True,
+                               chunk_context: bool = False) -> dict:
+    """Create each query, then install all of them in one batch.
+
+    The templated retrievers are rendered for the given domain types. Each
+    query is created separately, so the log names a query that does not
+    compile; one install then compiles the set together, which is much
+    faster than installing one query at a time. Returns ``{"created",
+    "errors", "installed"}``.
+    """
+    from common.db.query_install import install_query_set
+
+    created, errors = [], []
+    with log_step(logger, graphname, f"query create ({len(files)} queries)"):
+        for filename in files:
+            q_name = os.path.splitext(os.path.basename(filename))[0]
+            with open(filename, "r") as f:
+                q_body = f.read()
+            if q_name in TEMPLATED_RETRIEVERS:
+                q_body = render_retriever_body(
+                    q_body, domain_vts=list(domain_vts), domain_edges=list(domain_edges),
+                    include_entity=include_entity, chunk_context=chunk_context,
+                )
+            try:
+                out = conn.gsql(f"USE GRAPH {graphname}\nBEGIN\n{q_body}\nEND\n")
+                err = gsql_output_error(out) if isinstance(out, str) else None
+            except Exception as e:
+                err = str(e)
+            if err:
+                logger.error(f"Query {q_name} did not compile on {graphname}: {err[:400]}")
+                errors.append({"query": q_name, "phase": "create", "error": err[:400]})
+            else:
+                created.append(q_name)
+    installed = []
+    if created:
+        with log_step(logger, graphname, f"query install ({len(created)} queries, one batch)"):
+            try:
+                install_query_set(conn, created)
+                installed = created
+            except Exception as e:
+                logger.error(f"Query install failed on {graphname}: {e}")
+                errors.append({"query": None, "phase": "install", "error": str(e)[:400]})
+    return {"created": created, "errors": errors, "installed": installed}
+
+
+def _install_vector_utility_queries(graphname: str) -> None:
+    # Pre-install the per-graph utility vector queries (get_topk_similar,
+    # get_topk_closest, etc.) so the first chat request doesn't pay the
+    # install cost. ``TigerGraphEmbeddingStore.__init__`` runs the install
+    # when bound to a graph whose schema has ``Dimension=``; it is a no-op
+    # when the queries already exist.
+    try:
+        from common.config import get_embedding_store
+        get_embedding_store(graphname)
+        logger.info(f"Per-graph vector utility queries ready for {graphname}")
+    except Exception as exc:
+        # Non-fatal — the chat path installs them on first use.
+        logger.warning(f"Could not pre-install vector utility queries for {graphname}: {exc}")
+
+
+def install_graph_queries(conn, graphname: str, domain_vts=(), domain_edges=(),
+                          include_entity: bool = True) -> dict:
+    """Create and install every GraphRAG query for the graph's final schema,
+    in one batch. Graph setup calls it after the GraphRAG schema, the
+    domain types and the edge pairs exist."""
+    schema_text = conn.gsql(f"USE GRAPH {graphname}\n ls")
+    vector = "- embedding(Dimension=" in schema_text
+    chunk_context = bool(re.search(r"- VERTEX DocumentChunk\([^)]*\bheading_path STRING", schema_text))
+    files = supportai_query_files(vector)
+    if domain_vts or domain_edges:
+        # A graph with a domain schema also gets every templated retriever
+        # rendered for it, including the non-vector ones.
+        from common.db.retriever_render import TEMPLATED_RETRIEVERS, _RETRIEVER_DIR
+        names = {os.path.splitext(os.path.basename(f))[0] for f in files}
+        files += [os.path.join(str(_RETRIEVER_DIR), f"{q}.gsql")
+                  for q in TEMPLATED_RETRIEVERS if q not in names]
+    result = create_and_install_queries(
+        conn, graphname, files, domain_vts, domain_edges, include_entity, chunk_context,
+    )
+    _install_vector_utility_queries(graphname)
+    return result
+
+
+def init_supportai(conn: TigerGraphConnection, graphname: str,
+                   install_queries: bool = True) -> tuple[dict, dict]:
+    """Create the GraphRAG schema, indexes and loading jobs on the graph.
+
+    With ``install_queries`` (the default) it then creates and installs the
+    GraphRAG queries. Setup with a domain schema passes False and calls
+    :func:`install_graph_queries` after the domain schema exists, so the
+    queries are installed once, against the final schema.
+    """
     # need to open the file using the absolute path
     ver = conn.getVer().split(".")
     logger.info(f"TigerGraph version: {ver}")
 
     current_schema = conn.gsql("""USE GRAPH {}\n ls""".format(graphname))
-
-    from common.db.query_sets import SUPPORTAI_INIT_QUERIES, with_gsql
-    supportai_queries = with_gsql(SUPPORTAI_INIT_QUERIES + [
-        "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Search_Display",
-        "common/gsql/supportai/retrievers/GraphRAG_Community_Search_Display",
-    ])
+    schema_started = time.time()
+    logger.info(f"setup step start: GraphRAG schema (graph={graphname})")
 
     logger.info(f"Checking if schema needs to be created")
     if "- VERTEX EntityType" in current_schema:
@@ -115,12 +223,6 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
             )
             logger.info(f"Done installing GDS library with status {q_res}")
 
-            supportai_queries.extend([
-                "common/gsql/supportai/retrievers/Content_Similarity_Vector_Search.gsql",
-                "common/gsql/supportai/retrievers/Chunk_Sibling_Vector_Search.gsql",
-                "common/gsql/supportai/retrievers/GraphRAG_Community_Vector_Search.gsql",
-                "common/gsql/supportai/retrievers/GraphRAG_Hybrid_Vector_Search.gsql",
-            ])
         else:
             raise Exception(f"Vector feature is not supported by the current TigerGraph version: {ver}")
 
@@ -141,52 +243,13 @@ def init_supportai(conn: TigerGraphConnection, graphname: str) -> tuple[dict, di
     for load_job_id in _LOADING_JOB_GSQL_FILES:
         _ensure_loading_jobs(conn, graphname, load_job_id)
 
-    logger.info(f"Creating supportai queries")
-    for filename in supportai_queries:
-        logger.info(f"Creating supportai query {filename}")
-        with open(f"{filename}", "r") as f:
-            q_body = f.read()
-        q_name, extension = os.path.splitext(os.path.basename(filename))
-        if q_name in TEMPLATED_RETRIEVERS:
-            q_body = render_retriever_body(
-                q_body, domain_vts=[], domain_edges=[], include_entity=True,
-                chunk_context=chunk_context,
-            )
-        q_res = conn.gsql(
-            """USE GRAPH {}\nBEGIN\n{}\nEND\n""".format(
-                conn.graphname, q_body
-            )
-        )
-        logger.info(f"Done creating supportai query {q_name} with status {q_res}")
+    logger.info(f"setup step done: GraphRAG schema (graph={graphname}) in {time.time() - schema_started:.1f}s")
 
-    logger.info(f"Installing supportai queries all together")
-    query_res = conn.gsql(
-        """USE GRAPH {}\nINSTALL QUERY ALL\n""".format(
-            conn.graphname
-        )
-    )
-    logger.info(f"Done installing supportai query all with status {query_res}")
-
-    # Pre-install the per-graph utility vector queries (get_topk_similar,
-    # get_topk_closest, etc.) so the first chat request doesn't pay the
-    # install cost. ``TigerGraphEmbeddingStore.__init__`` runs the
-    # install when bound to a graph whose schema has ``Dimension=``;
-    # the embedding-store wrapper itself is idempotent and the install
-    # is a no-op when the queries already exist.
-    try:
-        from common.config import get_embedding_store
-        get_embedding_store(graphname)
-        logger.info(
-            f"Per-graph vector utility queries ready for {graphname}"
-        )
-    except Exception as exc:
-        # Non-fatal — the chat path will install them on first use as
-        # before; just log so the operator sees the slip.
-        logger.warning(
-            f"Could not pre-install vector utility queries for "
-            f"{graphname}: {exc}"
-        )
-
+    if not install_queries:
+        return schema_res, index_res, "deferred"
+    result = install_graph_queries(conn, graphname)
+    query_res = (f"created {len(result['created'])}, installed {len(result['installed'])}"
+                 + (f", errors: {result['errors']}" if result["errors"] else ""))
     return schema_res, index_res, query_res
 
 

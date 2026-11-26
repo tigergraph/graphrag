@@ -10,7 +10,16 @@ import {
   Database,
   Archive,
   Trash2,
+  ChevronDown,
+  File as FileIcon,
+  Folder,
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
@@ -40,14 +49,39 @@ const MAX_UPLOAD_SIZE_MB =
     : DEFAULT_MAX_UPLOAD_SIZE_MB;
 const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
 
-// Name a file is stored under: its path inside a chosen folder (which keeps
-// the folder's subfolders), else its file name.
-const uploadPath = (file: File): string =>
-  (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+// Path of each file that came from a dropped folder. The browser sets
+// webkitRelativePath only for a folder chosen with the folder picker.
+const droppedPaths = new WeakMap<File, string>();
 
-// Hidden files and folders (for example .DS_Store) are not uploaded.
+// Name a file is stored under: its path inside a chosen or dropped folder
+// (which keeps the folder's subfolders), else its file name.
+const uploadPath = (file: File): string =>
+  droppedPaths.get(file) ||
+  (file as File & { webkitRelativePath?: string }).webkitRelativePath ||
+  file.name;
+
+// Files of a dropped entry; a folder is read with all its subfolders.
+const readDropEntry = async (entry: FileSystemEntry, prefix: string, out: File[]): Promise<void> => {
+  if (entry.isFile) {
+    const file = await new Promise<File>((ok, fail) => (entry as FileSystemFileEntry).file(ok, fail));
+    if (prefix) droppedPaths.set(file, prefix + file.name);
+    out.push(file);
+  } else if (entry.isDirectory) {
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    const path = `${prefix}${entry.name}/`;
+    // readEntries returns the entries in batches until an empty batch.
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((ok, fail) => reader.readEntries(ok, fail));
+      if (batch.length === 0) break;
+      for (const child of batch) await readDropEntry(child, path, out);
+    }
+  }
+};
+
+// Hidden files and folders (for example .DS_Store) and editor or Office
+// lock files (~$report.docx) are not uploaded; the server skips the same.
 const isHiddenUpload = (file: File): boolean =>
-  uploadPath(file).split("/").some((part) => part.startsWith("."));
+  uploadPath(file).split("/").some((part) => /^[.~$]/.test(part));
 
 const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   const [confirm, confirmDialog] = useConfirm();
@@ -57,7 +91,36 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
   const [ingestGraphName, setIngestGraphName] = useState(
     sessionStorage.getItem("selectedGraph") || ""
   );
-  const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [skippedCount, setSkippedCount] = useState(0);
+  // Files and folders add to the selection; a file with the same path
+  // replaces the earlier one.
+  const addFiles = (added: File[]) => {
+    const files = added.filter((f) => !isHiddenUpload(f));
+    if (added.length > files.length) setSkippedCount((n) => n + added.length - files.length);
+    if (files.length === 0) return;
+    setSelectedFiles((prev) => {
+      const byPath = new Map(prev.map((f) => [uploadPath(f), f] as const));
+      for (const f of files) byPath.set(uploadPath(f), f);
+      return Array.from(byPath.values());
+    });
+  };
+  const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (isUploading) return;
+    const entries = Array.from(e.dataTransfer.items || [])
+      .map((item) => item.webkitGetAsEntry())
+      .filter((entry): entry is FileSystemEntry => entry !== null);
+    const files: File[] = [];
+    if (entries.length > 0) {
+      for (const entry of entries) await readDropEntry(entry, "", files);
+    } else {
+      files.push(...Array.from(e.dataTransfer.files));
+    }
+    addFiles(files);
+  };
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
@@ -443,7 +506,8 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
         plan.query,
         creds
       );
-      setSelectedFiles(null);
+      setSelectedFiles([]);
+      setSkippedCount(0);
       if (fileInputRef.current) fileInputRef.current.value = "";
       if (folderInputRef.current) folderInputRef.current.value = "";
 
@@ -948,7 +1012,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
           </>
         )}
 
-        <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+        <div className={isModal ? "" : "bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6"}>
           {/* Graph Name Selection */}
           <div className="mb-4">
             <label className="block text-sm font-medium mb-2 text-black dark:text-white">
@@ -964,7 +1028,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
               disabled={isIngesting}
             >
               <SelectTrigger
-                className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                className="dark:border-[#3D3D3D] dark:bg-background"
                 disabled={isIngesting}
               >
                 <SelectValue placeholder="Select a graph" />
@@ -995,20 +1059,20 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
             }}
             className="w-full"
           >
-            <TabsList className="grid w-full grid-cols-4">
-              <TabsTrigger value="upload" disabled={isIngesting}>
+            <TabsList className="grid w-full grid-cols-4 bg-gray-200 dark:bg-background">
+              <TabsTrigger className="dark:data-[state=active]:bg-shadeA dark:data-[state=active]:text-white" value="upload" disabled={isIngesting}>
                 <FolderUp className="h-4 w-4 mr-2" />
                 Upload
               </TabsTrigger>
-              <TabsTrigger value="cloudDownload" disabled={isIngesting}>
+              <TabsTrigger className="dark:data-[state=active]:bg-shadeA dark:data-[state=active]:text-white" value="cloudDownload" disabled={isIngesting}>
                 <CloudDownload className="h-4 w-4 mr-2" />
                 Download from Cloud
               </TabsTrigger>
-              <TabsTrigger value="AmazonBDA" disabled={isIngesting}>
+              <TabsTrigger className="dark:data-[state=active]:bg-shadeA dark:data-[state=active]:text-white" value="AmazonBDA" disabled={isIngesting}>
                 <CloudLightning className="h-4 w-4 mr-2" />
                 Amazon BDA
               </TabsTrigger>
-              <TabsTrigger value="stored" disabled={isIngesting}>
+              <TabsTrigger className="dark:data-[state=active]:bg-shadeA dark:data-[state=active]:text-white" value="stored" disabled={isIngesting}>
                 <Archive className="h-4 w-4 mr-2" />
                 Stored Files
               </TabsTrigger>
@@ -1023,13 +1087,16 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                 </p>
                 <div>
                   <label className="block text-sm font-medium mb-2 text-black dark:text-white">
-                    Select Files or a Folder
+                    Select Files and Folders
                   </label>
                   <input
                     ref={fileInputRef}
                     type="file"
                     multiple
-                    onChange={(e) => setSelectedFiles(e.target.files)}
+                    onChange={(e) => {
+                      addFiles(Array.from(e.target.files || []));
+                      e.target.value = "";
+                    }}
                     disabled={isUploading}
                     className="hidden"
                   />
@@ -1039,41 +1106,76 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     type="file"
                     multiple
                     {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
-                    onChange={(e) => setSelectedFiles(e.target.files)}
+                    onChange={(e) => {
+                      addFiles(Array.from(e.target.files || []));
+                      e.target.value = "";
+                    }}
                     disabled={isUploading}
                     className="hidden"
                   />
-                  <div className="flex items-center gap-3">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={isUploading}
-                      className="border-blue-500 text-blue-600 hover:bg-blue-50 dark:border-blue-400 dark:text-blue-400 dark:hover:bg-blue-900/20"
-                    >
-                      <FolderUp className="h-4 w-4 mr-2" />
-                      Choose Files
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => folderInputRef.current?.click()}
-                      disabled={isUploading}
-                      className="border-blue-500 text-blue-600 hover:bg-blue-50 dark:border-blue-400 dark:text-blue-400 dark:hover:bg-blue-900/20"
-                    >
-                      <FolderUp className="h-4 w-4 mr-2" />
-                      Choose Folder
-                    </Button>
-                    <span className="text-sm italic text-gray-400 dark:text-gray-500">
-                      {selectedFiles && selectedFiles.length > 0
-                        ? `${selectedFiles.length} file${selectedFiles.length > 1 ? "s" : ""} selected`
-                        : "No files selected"}
-                    </span>
+                  <div
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      if (!isUploading) setDragOver(true);
+                    }}
+                    onDragLeave={() => setDragOver(false)}
+                    onDrop={handleDrop}
+                    className={`rounded-md border border-dashed p-4 transition-colors ${
+                      dragOver
+                        ? "border-tigerOrange bg-tigerOrange/5"
+                        : "border-gray-300 dark:border-[#3D3D3D]"
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center gap-3">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button type="button" variant="outline" disabled={isUploading} className="dark:border-[#3D3D3D]">
+                            <FolderUp className="h-4 w-4 mr-2" />
+                            Add Files or Folders
+                            <ChevronDown className="h-4 w-4 ml-2" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start">
+                          <DropdownMenuItem onSelect={() => fileInputRef.current?.click()}>
+                            <FileIcon className="h-4 w-4 mr-2" />
+                            Files…
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => folderInputRef.current?.click()}>
+                            <Folder className="h-4 w-4 mr-2" />
+                            Folder…
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                      <span className="text-sm italic text-gray-400 dark:text-gray-500">
+                        {selectedFiles.length > 0
+                          ? `${selectedFiles.length} file${selectedFiles.length > 1 ? "s" : ""} selected`
+                          : "No files selected"}
+                        {skippedCount > 0 &&
+                          ` (${skippedCount} hidden file${skippedCount > 1 ? "s" : ""} skipped)`}
+                      </span>
+                      {selectedFiles.length > 0 && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setSelectedFiles([]);
+                            setSkippedCount(0);
+                          }}
+                          disabled={isUploading}
+                        >
+                          Clear
+                        </Button>
+                      )}
+                    </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                      Or drop files and folders here.
+                    </p>
                   </div>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
                     Maximum upload per request: {MAX_UPLOAD_SIZE_MB} MB.
                   </p>
-                  {selectedFiles && (() => {
+                  {selectedFiles.length > 0 && (() => {
                     const SUPPORTED_EXTENSIONS = new Set([".txt", ".md", ".pdf", ".docx", ".pptx", ".html", ".htm", ".json", ".csv", ".xlsx", ".xls", ".xml", ".jpeg", ".jpg", ".png", ".gif", ".jsonl"]);
                     const files = Array.from(selectedFiles);
                     const unsupported = files.filter((f) => !SUPPORTED_EXTENSIONS.has(f.name.slice(f.name.lastIndexOf(".")).toLowerCase()));
@@ -1104,7 +1206,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                 <div className="flex gap-2">
                   <Button
                     onClick={handleUploadFiles}
-                    disabled={isUploading || isProcessingFiles || !selectedFiles}
+                    disabled={isUploading || isProcessingFiles || selectedFiles.length === 0}
                     className="gradient text-white"
                   >
                     {isUploading ? (
@@ -1193,7 +1295,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                       setCloudProvider(value)
                     }
                   >
-                    <SelectTrigger className="dark:border-[#3D3D3D] dark:bg-shadeA">
+                    <SelectTrigger className="dark:border-[#3D3D3D] dark:bg-background">
                       <SelectValue placeholder="Select cloud provider" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1216,7 +1318,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudAccessKey}
                         onChange={(e) => setCloudAccessKey(e.target.value)}
                         placeholder="Enter AWS access key"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1228,7 +1330,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudSecretKey}
                         onChange={(e) => setCloudSecretKey(e.target.value)}
                         placeholder="Enter AWS secret key"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1240,7 +1342,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudBucket}
                         onChange={(e) => setCloudBucket(e.target.value)}
                         placeholder="my-bucket-name"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1252,7 +1354,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudRegion}
                         onChange={(e) => setCloudRegion(e.target.value)}
                         placeholder="us-east-1"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1264,7 +1366,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudPrefix}
                         onChange={(e) => setCloudPrefix(e.target.value)}
                         placeholder="folder/subfolder/"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                   </>
@@ -1282,7 +1384,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={gcsProjectId}
                         onChange={(e) => setGcsProjectId(e.target.value)}
                         placeholder="my-project-id"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1294,7 +1396,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         onChange={(e) => setGcsCredentials(e.target.value)}
                         placeholder='{"type": "service_account", ...}'
                         rows={4}
-                        className="w-full p-2 rounded border dark:border-[#3D3D3D] dark:bg-shadeA text-sm"
+                        className="w-full p-2 rounded border dark:border-[#3D3D3D] dark:bg-background text-sm"
                       />
                     </div>
                     <div>
@@ -1306,7 +1408,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudBucket}
                         onChange={(e) => setCloudBucket(e.target.value)}
                         placeholder="my-gcs-bucket"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1318,7 +1420,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudPrefix}
                         onChange={(e) => setCloudPrefix(e.target.value)}
                         placeholder="folder/subfolder/"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                   </>
@@ -1336,7 +1438,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={azureAccountName}
                         onChange={(e) => setAzureAccountName(e.target.value)}
                         placeholder="mystorageaccount"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1348,7 +1450,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={azureAccountKey}
                         onChange={(e) => setAzureAccountKey(e.target.value)}
                         placeholder="Enter account key"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1360,7 +1462,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={azureContainer}
                         onChange={(e) => setAzureContainer(e.target.value)}
                         placeholder="my-container"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                     <div>
@@ -1372,7 +1474,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                         value={cloudPrefix}
                         onChange={(e) => setCloudPrefix(e.target.value)}
                         placeholder="folder/subfolder/"
-                        className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                        className="dark:border-[#3D3D3D] dark:bg-background"
                       />
                     </div>
                   </>
@@ -1473,7 +1575,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={awsAccessKey}
                     onChange={(e) => setAwsAccessKey(e.target.value)}
                     placeholder="Enter AWS access key"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting}
                   />
                 </div>
@@ -1487,7 +1589,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={awsSecretKey}
                     onChange={(e) => setAwsSecretKey(e.target.value)}
                     placeholder="Enter AWS secret key"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting}
                   />
                 </div>
@@ -1513,7 +1615,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={inputBucket}
                     onChange={(e) => setInputBucket(e.target.value)}
                     placeholder="Enter input bucket name"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting || skipBDAProcessing}
                   />
                 </div>
@@ -1527,7 +1629,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={outputBucket}
                     onChange={(e) => setOutputBucket(e.target.value)}
                     placeholder="Enter output bucket name"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting}
                   />
                 </div>
@@ -1541,7 +1643,7 @@ const IngestGraph: React.FC<IngestGraphProps> = ({ isModal = false }) => {
                     value={regionName}
                     onChange={(e) => setRegionName(e.target.value)}
                     placeholder="e.g., us-east-1"
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isIngesting}
                   />
                 </div>

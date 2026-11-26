@@ -224,7 +224,7 @@ const EditForm: React.FC<EditFormProps> = ({ server: s, onPatch, onSave, onCance
   };
 
   return (
-    <div className="mt-4 p-4 bg-white dark:bg-shadeA rounded-md border border-gray-300 dark:border-[#3D3D3D] space-y-4">
+    <div className="mt-4 p-4 bg-gray-100 dark:bg-shadeA rounded-md border border-gray-300 dark:border-[#3D3D3D] space-y-4">
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className={labelClass}>Name</label>
@@ -721,7 +721,7 @@ const McpServersConfig: React.FC = () => {
       )}
 
       {(configScope === "global" || selectedGraph) && (
-        <div className="bg-white dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
+        <div className="bg-gray-100 dark:bg-shadeA border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6">
           <div className="flex items-center justify-between mb-4">
             <div className="text-sm text-gray-600 dark:text-[#D9D9D9]">
               {isLoading

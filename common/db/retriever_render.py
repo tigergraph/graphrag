@@ -20,6 +20,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from common.db.query_install import install_query_set, install_query_set_async
 from common.db.schema_utils import gsql_output_error
 
 logger = logging.getLogger(__name__)
@@ -180,18 +181,30 @@ def render_retrievers(
     return rendered
 
 
-def _install_block(graphname: str, query_name: str, body: str) -> str:
-    return (
-        f"USE GRAPH {graphname}\n"
-        f"{body}\n"
-        f"INSTALL QUERY {query_name}\n"
-    )
+def _create_block(graphname: str, body: str) -> str:
+    return f"USE GRAPH {graphname}\n{body}\n"
 
 
 def _summarize(out) -> str:
     s = str(out)
     s = s.replace("\n", " | ")
     return s[:200]
+
+
+def _create_one(gsql, graphname: str, query_name: str, body: str):
+    """Create (not install) one rendered query; the GSQL output, or
+    ``"ERROR: ..."`` when it does not compile."""
+    try:
+        out = gsql(_create_block(graphname, body))
+    except Exception as e:
+        logger.error(f"install_retrievers: {query_name} create raised: {e}")
+        return f"ERROR: {e}"
+    err = gsql_output_error(out) if isinstance(out, str) else None
+    if err:
+        logger.warning(f"install_retrievers: {query_name} did not compile: {_summarize(out)}")
+        return f"ERROR: {err}"
+    logger.info(f"install_retrievers: {query_name} created: {_summarize(out)}")
+    return out
 
 
 def install_retrievers(
@@ -233,6 +246,7 @@ def install_retrievers(
 
     results: dict = {}
     emitted_groups: set = set()
+    created: list = []
     for query_name, body in rendered.items():
         if progress is not None:
             group_key, group_msg = _GROUP_MESSAGE.get(
@@ -244,23 +258,17 @@ def install_retrievers(
                 except Exception:
                     pass
                 emitted_groups.add(group_key)
-        block = _install_block(graphname, query_name, body)
-        try:
-            out = conn.gsql(block)
-            results[query_name] = out
-            err = gsql_output_error(out) if isinstance(out, str) else None
-            if err:
-                logger.warning(
-                    f"install_retrievers: {query_name} install reported "
-                    f"errors: {_summarize(out)}"
-                )
-            else:
-                logger.info(
-                    f"install_retrievers: {query_name} OK: {_summarize(out)}"
-                )
-        except Exception as e:
-            logger.error(f"install_retrievers: {query_name} install raised: {e}")
-            results[query_name] = f"ERROR: {e}"
+        out = _create_one(conn.gsql, graphname, query_name, body)
+        results[query_name] = out
+        if not str(out).startswith("ERROR"):
+            created.append(query_name)
+    # One install for the set: each install has a fixed start-up cost.
+    try:
+        install_query_set(conn, created)
+    except Exception as e:
+        logger.error(f"install_retrievers: install of {created} failed: {e}")
+        for q in created:
+            results[q] = f"ERROR: install: {e}"
     return results
 
 
@@ -279,24 +287,28 @@ async def install_retrievers_async(
         domain_vts, domain_edges, include_entity, retriever_dir, chunk_context
     )
     results: dict = {}
+    created: list = []
     for query_name, body in rendered.items():
-        block = _install_block(graphname, query_name, body)
         try:
             if sem is not None:
                 async with sem:
-                    out = await conn.gsql(block)
+                    out = await conn.gsql(_create_block(graphname, body))
             else:
-                out = await conn.gsql(block)
-            results[query_name] = out
+                out = await conn.gsql(_create_block(graphname, body))
             err = gsql_output_error(out) if isinstance(out, str) else None
             if err:
-                logger.warning(
-                    f"install_retrievers_async: {query_name} install "
-                    f"reported errors: {str(out)[:300]}"
-                )
+                logger.warning(f"install_retrievers_async: {query_name} did not compile: {str(out)[:300]}")
+                out = f"ERROR: {err}"
         except Exception as e:
-            logger.error(
-                f"install_retrievers_async: {query_name} install raised: {e}"
-            )
-            results[query_name] = f"ERROR: {e}"
+            logger.error(f"install_retrievers_async: {query_name} create raised: {e}")
+            out = f"ERROR: {e}"
+        results[query_name] = out
+        if not str(out).startswith("ERROR"):
+            created.append(query_name)
+    try:
+        await install_query_set_async(conn, created)
+    except Exception as e:
+        logger.error(f"install_retrievers_async: install of {created} failed: {e}")
+        for q in created:
+            results[q] = f"ERROR: install: {e}"
     return results

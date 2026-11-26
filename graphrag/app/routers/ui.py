@@ -523,6 +523,27 @@ def _chat_history_auth_header(creds: HTTPBasicCredentials) -> str:
     return f"Basic {encoded}"
 
 
+CHAT_HISTORY_LOCKED = "Chat history is locked. An admin must provide the encryption key."
+
+
+def _encrypted_message(message: Message) -> dict:
+    """The message as sent to chat-history, with its text encrypted."""
+    import data_encryption
+    from data_encryption.chat_crypto import encrypt_message
+    return encrypt_message(data_encryption.manager(), message.model_dump())
+
+
+def _decrypted(data):
+    """A chat-history response with its message text decrypted (423 if the
+    chat history is locked)."""
+    import data_encryption
+    from data_encryption.chat_crypto import decrypt_messages
+    try:
+        return decrypt_messages(data_encryption.manager(), data)
+    except data_encryption.Locked:
+        raise HTTPException(status_code=423, detail=CHAT_HISTORY_LOCKED)
+
+
 def _ecc_auth_header(creds: HTTPBasicCredentials) -> str:
     """Build the Authorization header used when forwarding to ECC.
 
@@ -827,10 +848,15 @@ def add_feedback(
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
 ):
     creds = creds[1]
+    import data_encryption
+    try:
+        payload = _encrypted_message(message)
+    except data_encryption.Locked:
+        raise HTTPException(status_code=423, detail=CHAT_HISTORY_LOCKED)
     try:
         res = httpx.post(
             f"{graphrag_config['chat_history_api']}/conversation",
-            json=message.model_dump(),
+            json=payload,
             headers={"Authorization": _chat_history_auth_header(creds)},
         )
         res.raise_for_status()
@@ -1349,7 +1375,7 @@ def migration_status(
     cred_obj = creds[1]
     conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
 
-    schema_compatible, schema_check_failed = _schema_compatibility(conn, graphname)
+    schema_compatible, schema_check_failed, missing_pairs = _schema_compatibility(conn, graphname)
 
     # Read live domain schema once for templated-retriever rendering.
     domain_vts, domain_edges, include_entity, chunk_context = _get_domain_schema_for_render(conn, graphname)
@@ -1471,6 +1497,7 @@ def migration_status(
         "schema": {
             "compatible": schema_compatible,
             "check_failed": schema_check_failed,
+            "missing_pairs": [f"{e}: {f} -> {t}" for e, f, t in missing_pairs],
         },
         "prompts": prompt_issues,
         "embeddings": {
@@ -1485,28 +1512,34 @@ def migration_status(
         "document_versions_missing": _document_versions_missing(conn),
         "chunk_context": chunk_context,
         "chunk_context_missing": bool(chunk_context) and not chunk_context.get("schema_ready"),
-        "needs_repair": bool(outdated) or bool(not_installed) or bool(prompt_issues),
+        "needs_repair": bool(outdated) or bool(not_installed) or bool(prompt_issues) or bool(missing_pairs),
         "repairable": schema_compatible,
     }
 
 
-def _schema_compatibility(conn, graphname) -> tuple[bool, bool]:
-    """``(compatible, check_failed)`` for the graph's schema; differences are
-    logged, not returned, since they are only useful to an administrator
-    reading the server log."""
+def _schema_compatibility(conn, graphname) -> tuple[bool, bool, list]:
+    """``(compatible, check_failed, missing_pairs)`` for the graph's schema.
+    ``missing_pairs`` lists the structural (edge, from, to) pairs that Repair
+    adds. Differences are logged, not returned, since they are only useful to
+    an administrator reading the logs."""
     from common.db.migrate import check_schema_compatibility
 
     try:
         result = check_schema_compatibility(conn)
     except Exception as e:
         logger.warning(f"migration: schema check for {graphname} failed: {e}")
-        return False, True
+        return False, True, []
     if not result.compatible:
         logger.warning(
             f"migration: graph {graphname} does not match the current base schema "
             f"and cannot be repaired in place: {'; '.join(result.differences)}"
         )
-    return result.compatible, False
+    if result.missing_pairs:
+        logger.warning(
+            f"migration: graph {graphname} lacks edge pairs: "
+            + ", ".join(f"{e} {f}->{t}" for e, f, t in result.missing_pairs)
+        )
+    return result.compatible, False, result.missing_pairs
 
 
 async def _proxy_regen(graphname, creds, action):
@@ -1573,11 +1606,13 @@ def _add_chunk_context_schema(graphname, creds) -> dict:
     conn = get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password)
     if _graph_has_chunk_context(conn):
         return {}
-    compatible, check_failed = _schema_compatibility(conn, graphname)
+    compatible, check_failed, missing_pairs = _schema_compatibility(conn, graphname)
     if check_failed:
         raise HTTPException(status_code=503, detail="The graph's schema could not be checked. Try again shortly.")
     if not compatible:
         raise HTTPException(status_code=409, detail=_INCOMPATIBLE_SCHEMA_MESSAGE)
+    if missing_pairs:
+        raise HTTPException(status_code=409, detail=_MISSING_PAIRS_MESSAGE)
     if not acquire_graph_lock(graphname, "migration"):
         current = get_current_operation(graphname) or "another operation"
         raise HTTPException(
@@ -1726,6 +1761,48 @@ async def keyword_index_update(
     return keyword_index_status(graphname)
 
 
+def _add_edge_pairs(conn, graphname: str, pairs: list) -> list[str]:
+    """Add the structural edge ``pairs`` in one schema change job, wait until
+    the graph has them, and install again the queries outside the shipped
+    set that the schema change uninstalled. Returns those query names; the
+    caller repairs the shipped queries. Runs under the graph lock."""
+    from common.db.migrate import (
+        EDGE_PAIRS_JOB, add_edge_pairs_gsql, check_schema_compatibility, get_installed_query_names,
+    )
+
+    started = time.time()
+    installed = get_installed_query_names(conn, graphname)
+    if EDGE_PAIRS_JOB in conn.gsql(f"USE GRAPH {graphname}\nls"):
+        # Left by an earlier attempt that did not finish.
+        conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {EDGE_PAIRS_JOB}")
+    logger.info(f"migration: adding {len(pairs)} edge pair(s) to {graphname} (job {EDGE_PAIRS_JOB})")
+    try:
+        err = gsql_output_error(conn.gsql(add_edge_pairs_gsql(graphname, pairs)))
+    except Exception as e:
+        # TigerGraph can close a long schema-change request while the change
+        # goes on; wait for the pairs below.
+        logger.warning(f"edge pair schema change on {graphname}: {e}")
+        err = None
+    if err:
+        logger.error(f"edge pair schema change failed on {graphname}: {err}")
+        raise HTTPException(status_code=500, detail="Could not add the missing edge pairs to the graph schema.")
+    deadline = time.time() + _SCHEMA_CHANGE_WAIT_SECONDS
+    while check_schema_compatibility(conn).missing_pairs:
+        if time.time() > deadline:
+            raise HTTPException(status_code=504, detail="Adding the edge pairs did not finish. Check again later.")
+        time.sleep(15)
+    if EDGE_PAIRS_JOB in conn.gsql(f"USE GRAPH {graphname}\nls"):
+        conn.gsql(f"USE GRAPH {graphname}\nDROP JOB {EDGE_PAIRS_JOB}")
+    logger.info(f"migration: edge pairs added to {graphname} in {time.time() - started:.0f}s")
+
+    managed = {os.path.splitext(os.path.basename(p))[0] for p in _MIGRATION_QUERY_PATHS}
+    others = sorted((installed - get_installed_query_names(conn, graphname)) - managed)
+    if others:
+        logger.info(f"Reinstalling {len(others)} other queries on {graphname} after the schema change")
+        conn.installQueries(others)
+    return others
+
+
 @router.post(route_prefix + "/{graphname}/migration/apply")
 def migration_apply(
     graphname: ValidGraphName,
@@ -1797,7 +1874,7 @@ def migration_apply(
     try:
         cred_obj = creds[1]
         conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
-        compatible, check_failed = _schema_compatibility(conn, graphname)
+        compatible, check_failed, missing_pairs = _schema_compatibility(conn, graphname)
         if check_failed:
             raise HTTPException(
                 status_code=503,
@@ -1805,15 +1882,32 @@ def migration_apply(
             )
         if not compatible:
             raise HTTPException(status_code=409, detail=_INCOMPATIBLE_SCHEMA_MESSAGE)
-        return _migration_apply_inner(
+        others_reinstalled: list[str] = []
+        if missing_pairs:
+            others_reinstalled = _add_edge_pairs(conn, graphname, missing_pairs)
+            # The schema change uninstalled queries and changes how the
+            # templated retrievers render, so the lists from the status check
+            # are out of date: detect the repair set again.
+            queries_outdated = queries_not_installed = None
+        result = _migration_apply_inner(
             graphname, conn,
             queries_outdated=queries_outdated,
             queries_not_installed=queries_not_installed,
             apply_schema=apply_schema,
         )
+        if missing_pairs:
+            result["edge_pairs_added"] = [f"{e}: {f} -> {t}" for e, f, t in missing_pairs]
+        if others_reinstalled:
+            result["queries_reinstalled"] = list(result.get("queries_reinstalled") or []) + others_reinstalled
+        return result
     finally:
         release_graph_lock(graphname, "migration")
 
+
+_MISSING_PAIRS_MESSAGE = (
+    "The graph's schema is missing connections between some vertex types. "
+    "Run Repair in the Migration Assistant first, then try again."
+)
 
 _INCOMPATIBLE_SCHEMA_MESSAGE = (
     "This graph was created with an older version of GraphRAG and can't be "
@@ -1851,11 +1945,13 @@ def _add_document_versions_schema(graphname: str, creds) -> dict:
     conn = get_db_connection_pwd_manual(graphname, creds[1].username, creds[1].password)
     if supportai.graph_has_document_versions(conn):
         return {}
-    compatible, check_failed = _schema_compatibility(conn, graphname)
+    compatible, check_failed, missing_pairs = _schema_compatibility(conn, graphname)
     if check_failed:
         raise HTTPException(status_code=503, detail="The graph's schema could not be checked. Try again shortly.")
     if not compatible:
         raise HTTPException(status_code=409, detail=_INCOMPATIBLE_SCHEMA_MESSAGE)
+    if missing_pairs:
+        raise HTTPException(status_code=409, detail=_MISSING_PAIRS_MESSAGE)
     if not acquire_graph_lock(graphname, "migration"):
         current = get_current_operation(graphname) or "another operation"
         raise HTTPException(
@@ -2208,27 +2304,43 @@ def init_graph(
         )
 
     def _run_init():
+        setup_started = time.time()
         try:
+            # Check a pasted schema before the graph changes, so a bad
+            # schema fails the setup with the graph untouched.
+            proposal = None
+            if isinstance(schema_gsql, str) and schema_gsql.strip():
+                proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
+                problems = schema_utils_mod.check_pasted_schema(schema_gsql, proposal)
+                if problems:
+                    LogWriter.error(f"Pasted schema for {graphname} rejected: {'; '.join(problems)}")
+                    _set_init_state(
+                        graphname, state="error",
+                        message="The pasted schema has errors",
+                        error=" ".join(problems),
+                        completed_at=time.time(),
+                    )
+                    return
+                proposal.drop_dangling_pairs()
+            # With a domain schema, the queries are created and installed
+            # once, after the final schema (GraphRAG schema, domain types and
+            # edge pairs) exists.
+            defer_queries = proposal is not None or bool(use_existing_schema)
+
             _set_init_state(
                 graphname, state="running",
                 message="Initializing structural schema",
             )
             _, conn = ws_basic_auth(auth_header, graphname)
             LogWriter.info(f"Initializing graph: {graphname}")
-            resp = supportai.init_supportai(conn, graphname)
+            resp = supportai.init_supportai(conn, graphname, install_queries=not defer_queries)
             schema_res, index_res, query_res = resp[0], resp[1], resp[2]
 
-            domain_schema_status: dict | None = None
-            proposal = None
-            if isinstance(schema_gsql, str) and schema_gsql.strip():
-                proposal = schema_utils_mod.parse_gsql_schema(schema_gsql)
-                proposal.drop_dangling_pairs()
-            elif use_existing_schema:
+            if proposal is None and use_existing_schema:
                 # Build a proposal from the live user-defined types so
-                # apply_proposal registers them as the domain schema and
-                # installs retrievers. The diff is a no-op because the
-                # types already exist; this run only writes type
-                # metadata (descriptions) and re-creates retriever queries.
+                # apply_proposal registers them as the domain schema. The
+                # diff is a no-op because the types already exist; this run
+                # only writes type metadata (descriptions).
                 proposal = _build_proposal_from_live_schema(
                     conn,
                     vertex_descriptions=existing_vertex_descs,
@@ -2240,41 +2352,63 @@ def init_graph(
                     f"{len(proposal.edges)} edge types"
                 )
 
+            domain_schema_status: dict | None = None
+            domain_failed = False
             if proposal is not None:
                 _set_init_state(graphname, message="Applying domain schema")
                 LogWriter.info(
                     f"Applying domain schema proposal for graph: {graphname}"
                 )
-                # Surface apply_proposal's sub-phases (schema-change,
-                # metadata, retriever installs) in the init-dialog
-                # poll instead of a static "Applying domain schema".
                 domain_schema_status = schema_utils_mod.apply_proposal(
                     conn, graphname, proposal,
                     progress=lambda msg: _set_init_state(
                         graphname, message=msg
                     ),
+                    install_retrievers=False,
                 )
                 LogWriter.info(
                     f"Domain schema status for {graphname}: "
                     f"{domain_schema_status['status']} "
                     f"({len(domain_schema_status['statements'])} stmts)"
                 )
-                if domain_schema_status.get("status") == "error":
+                domain_failed = domain_schema_status.get("status") == "error"
+                if domain_failed:
                     LogWriter.error(
                         f"Domain schema apply failed for {graphname}: "
                         f"{domain_schema_status.get('error')}"
                     )
-                    _set_init_state(
-                        graphname,
-                        state="error",
-                        message="Domain schema apply failed",
-                        error=domain_schema_status.get("error"),
-                        completed_at=time.time(),
-                        result={"domain_schema_status": domain_schema_status},
-                    )
-                    return
 
-            LogWriter.info(f"Graph initialization completed for: {graphname}")
+            query_errors: list = []
+            if defer_queries:
+                _set_init_state(graphname, message="Installing queries")
+                render = {"domain_vts": [], "domain_edges": [], "include_entity": True}
+                if not domain_failed:
+                    render = schema_utils_mod.retriever_render_args(conn, graphname, proposal)
+                # After a failed domain apply, the GraphRAG queries are still
+                # installed for the GraphRAG schema, so the graph is usable.
+                qres = supportai.install_graph_queries(
+                    conn, graphname, render["domain_vts"], render["domain_edges"],
+                    render["include_entity"],
+                )
+                query_errors = qres["errors"]
+                query_res = (f"created {len(qres['created'])}, installed {len(qres['installed'])}"
+                             + (f", errors: {query_errors}" if query_errors else ""))
+
+            if domain_failed:
+                _set_init_state(
+                    graphname,
+                    state="error",
+                    message="Domain schema apply failed",
+                    error=domain_schema_status.get("error"),
+                    completed_at=time.time(),
+                    result={"domain_schema_status": domain_schema_status},
+                )
+                return
+
+            LogWriter.info(
+                f"Graph initialization completed for: {graphname} "
+                f"in {time.time() - setup_started:.1f}s"
+            )
 
             result = {
                 "status": "success",
@@ -2285,6 +2419,8 @@ def init_graph(
                 "index_creation_status": json.dumps(index_res),
                 "query_creation_status": json.dumps(query_res),
             }
+            if query_errors:
+                result["query_errors"] = query_errors
             if domain_schema_status is not None:
                 result["domain_schema_status"] = domain_schema_status
 
@@ -3126,7 +3262,7 @@ async def get_conversation_contents(
         )
         raise e
 
-    return res.json()
+    return _decrypted(res.json())
 
 @router.get(route_prefix + "/get_feedback")
 async def get_conversation_feedback(
@@ -3150,7 +3286,7 @@ async def get_conversation_feedback(
         )
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    return res.json()
+    return _decrypted(res.json())
 
 
 @router.delete(route_prefix + "/conversation/{conversation_id}")
@@ -3229,6 +3365,10 @@ def _trace_error_text(e: BaseException) -> str:
 
 def _agent_error_text(e: Exception, is_superadmin: bool = False) -> str:
     e = _root_error(e)
+    from data_encryption import Locked
+    if isinstance(e, Locked):
+        return ("The agent memory of this graph is locked. "
+                "An admin must provide the encryption key.")
     error_msg = str(e)
     if "does not exist" in error_msg or "not found" in error_msg.lower():
         return f"Error: {error_msg}. Please check the knowledge graph name and try again."
@@ -3270,11 +3410,9 @@ async def run_agent(
                 # TODO: make num mesages in history configureable
                 a_question_for_agent(data, conversation_history[-4:])
             )
-            # sample Q and emit events
+            # sample Q and emit events (only a WebSocket caller gets progress)
             if ws:
                 tg.create_task(emit_progress(agent, ws))
-            else:
-                emit_progress(agent, ws)
         pmetrics.llm_success_response_total.labels(embedding_service.model_name).inc()
         resp = a_resp.result()
         if ws:
@@ -3339,7 +3477,7 @@ async def load_conversation_history(
                 headers=headers,
             )
             res.raise_for_status()
-            conversation_data = res.json()
+            conversation_data = _decrypted(res.json())
             # Convert conversation messages to the format expected by the agent
             history = []
             for msg in conversation_data:
@@ -3371,11 +3509,18 @@ async def write_message_to_history(
 ):
     ch = graphrag_config.get("chat_history_api")
     if ch is not None:
+        import data_encryption
+        try:
+            payload = _encrypted_message(message)
+        except data_encryption.Locked:
+            LogWriter.warning("chat history is locked (encryption key missing); "
+                              "the message is not saved")
+            return
         headers = {"Authorization": _chat_history_auth_header(usr_creds)}
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.post(
-                    f"{ch}/conversation", headers=headers, json=message.model_dump()
+                    f"{ch}/conversation", headers=headers, json=payload
                 )
                 res.raise_for_status()
         except Exception:  # catch all exceptions to log them, but don't raise

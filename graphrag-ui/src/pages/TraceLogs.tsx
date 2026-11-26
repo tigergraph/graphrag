@@ -143,15 +143,23 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
   const query = userQuery || message?.originalQuery || message?.query || "N/A";
   const qs = message?.query_sources || {};
   const totalResponseTime = message?.response_time || 0;
-  const ts = now.toLocaleTimeString();
+  // The trace records when the answer finished; the run started
+  // response_time seconds before that.
+  const endTime = new Date(
+    typeof message?.timestamp === "number" ? message.timestamp * 1000 : now.getTime()
+  );
+  const startTime = new Date(endTime.getTime() - totalResponseTime * 1000);
+  const ts = startTime.toLocaleTimeString();
 
   // ── Tool Calls ──────────────────────────────────────────────────────────
   const toolCalls: ToolCallEntry[] = [];
   const agentSteps: {
     node: string;
+    kind?: string;
+    tool?: string;
     duration_s: number;
     input?: string;
-    output?: string;
+    output?: any;
     usage?: TokenUsage & { calls?: LlmCall[] };
   }[] = qs.agent_steps || [];
 
@@ -217,12 +225,26 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
     durationMs: tc.durationMs,
   }));
 
-  const totalToolSec = agentSteps.reduce(
-    (sum: number, s: { duration_s: number }) => sum + s.duration_s,
+  // Tool time per step: a tool step, a planned step that runs a tool, or
+  // the tool calls inside a reasoning turn. The Deep Agent's answer step
+  // spans the whole run, so it is not tool time. Steps without a kind
+  // (Classic) count in full.
+  const stepToolSec = (s: (typeof agentSteps)[number]): number => {
+    if (s.kind === "tool" || (typeof s.tool === "string" && s.tool)) return s.duration_s || 0;
+    if (s.kind === "react") {
+      const calls = s.output && Array.isArray(s.output.tool_calls) ? s.output.tool_calls : [];
+      return calls.reduce((sum: number, c: any) => sum + (Number(c?.duration_s) || 0), 0);
+    }
+    return 0;
+  };
+  const hasKinds = agentSteps.some((s) => s.kind);
+  const toolSum = agentSteps.reduce(
+    (sum: number, s) => sum + (hasKinds ? stepToolSec(s) : s.duration_s || 0),
     0
   );
+  // Tools can run in parallel, so their summed time can exceed the run time.
+  const totalToolSec = totalResponseTime > 0 ? Math.min(toolSum, totalResponseTime) : toolSum;
   const llmThinking = Math.max(0, totalResponseTime - totalToolSec);
-  const endTime = new Date(now.getTime() + totalResponseTime * 1000);
 
   // ── Token usage totals ─────────────────────────────────────────────────
   const serverTotal = qs.token_usage as TokenUsage | undefined;
@@ -249,7 +271,7 @@ function buildTraceFromMessage(message: any, userQuery?: string): TraceData {
       totalDuration: totalResponseTime,
       toolExecution: totalToolSec,
       llmThinking,
-      startTime: now.toLocaleTimeString(),
+      startTime: startTime.toLocaleTimeString(),
       endTime: endTime.toLocaleTimeString(),
     },
     logs,
@@ -580,25 +602,49 @@ const ToolCallsPanel: FC<{ trace: TraceData }> = ({ trace }) => (
 );
 
 
-const CitationRow: FC<{ c: CitationEntry }> = ({ c }) => (
-  <div
-    className={`rounded-lg mb-2 ${
-      c.cited
-        ? "bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800"
-        : "bg-orange-50 dark:bg-orange-900/15 border border-orange-200 dark:border-orange-800"
-    }`}
-  >
-    <div className="flex items-center gap-3 px-4 py-3">
-      <LuBookOpen className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
-      <span className="text-sm font-semibold truncate">[{c.source}]</span>
-      {c.cited && (
-        <span className="bg-red-500 text-white text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0">
-          Cited
-        </span>
-      )}
+// A citation reads "<chunk id>: <chunk text>"; show the id and a short,
+// cleaned excerpt of the text.
+const splitCitation = (source: string): { id: string; excerpt: string } => {
+  const sep = source.indexOf(": ");
+  if (sep < 0) return { id: source, excerpt: "" };
+  const excerpt = source
+    .slice(sep + 2)
+    .replace(/^\[?['"]|['"]\]?$/g, "")
+    .replace(/\\[nrt]|\\u3000/g, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return { id: source.slice(0, sep), excerpt };
+};
+
+const CitationRow: FC<{ c: CitationEntry }> = ({ c }) => {
+  const { id, excerpt } = splitCitation(c.source);
+  return (
+    <div
+      className={`rounded-lg mb-2 ${
+        c.cited
+          ? "bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800"
+          : "bg-orange-50 dark:bg-orange-900/15 border border-orange-200 dark:border-orange-800"
+      }`}
+      title={c.source}
+    >
+      <div className="flex items-center gap-3 px-4 py-2.5 min-w-0">
+        <LuBookOpen className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold truncate">{id}</div>
+          {excerpt && (
+            <div className="text-xs text-muted-foreground truncate">{excerpt}</div>
+          )}
+        </div>
+        {c.cited && (
+          <span className="bg-red-500 text-white text-xs font-medium px-2.5 py-0.5 rounded-full shrink-0">
+            Cited
+          </span>
+        )}
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 const CitationsPanel: FC<{ trace: TraceData }> = ({ trace }) => (
   <div className="space-y-2">
@@ -828,6 +874,7 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
   const message = apiData ? {
     content: apiData.natural_language_response,
     response_time: apiData.response_time,
+    timestamp: apiData.timestamp,
     response_type: apiData.response_type,
     query_sources: apiData.query_sources,
   } : stateMessage;
@@ -936,7 +983,7 @@ const TraceLogs: FC<TraceLogsProps> = ({ messageIdProp, onClose }) => {
         </div>
       )}
 
-      <div className={isDialog ? "px-6 pt-16 pb-6 space-y-6" : "max-w-5xl mx-auto px-6 py-6 space-y-6"}>
+      <div className={isDialog ? "min-w-0 px-6 pt-16 pb-6 space-y-6" : "max-w-5xl mx-auto px-6 py-6 space-y-6"}>
         {/* Original Query */}
         <div className="bg-card border border-border rounded-lg p-5">
           <h2 className="text-sm font-semibold mb-2">Original Query</h2>

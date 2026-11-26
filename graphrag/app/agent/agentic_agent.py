@@ -42,6 +42,7 @@ from common.logs.log import req_id_cv
 from common.logs.logwriter import LogWriter
 from common.metrics.prometheus_metrics import metrics
 from common.py_schemas import GraphRAGResponse
+from common.utils.image_links import resolve_image_links
 
 logger = logging.getLogger(__name__)
 
@@ -282,6 +283,9 @@ class AgenticAgent:
                 for s in answer.query_sources.get("steps", [])
             ])
 
+            answer.natural_language_response = resolve_image_links(
+                answer.natural_language_response, self.conn.graphname, self.llm
+            )
             LogWriter.info(f"request_id={req_id_cv.get()} EXIT agentic question_for_agent")
             return answer
         except Exception as e:

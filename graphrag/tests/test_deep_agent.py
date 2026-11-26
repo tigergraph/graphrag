@@ -6,6 +6,7 @@ fake TigerGraph / GraphRAG tool layers, so no LLM, database or server config
 is needed.
 """
 import json
+import os
 import sys
 import types
 import unittest
@@ -97,6 +98,14 @@ class _Base(unittest.TestCase):
         sys.modules.update(fake_graphrag_tools_module())
         mem.reset_backends_for_tests(mem._memory_backends())
         ScriptedModel.seen = []
+        # Encryption keys of SQLite memory go to a temporary folder.
+        import tempfile
+        import data_encryption
+        self._enc_dir = tempfile.TemporaryDirectory()
+        enc = data_encryption.register(data_encryption.EncryptionManager(
+            os.path.join(self._enc_dir.name, "configs")))
+        enc.schedule = enc.run_sweep
+        data_encryption.set_manager_for_tests(enc)
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -104,7 +113,11 @@ class _Base(unittest.TestCase):
                 sys.modules.pop(k, None)
             else:
                 sys.modules[k] = v
+        mem.close_backends()
         mem.reset_backends_for_tests(None)
+        import data_encryption
+        data_encryption.set_manager_for_tests(None)
+        self._enc_dir.cleanup()
 
     def make_agent(self, script, conversation_id="c1", user="alice", conn=None, cfg=None):
         conn = conn or FakeConn()
@@ -148,6 +161,13 @@ class TestDeepAgentRun(_Base):
             items.append(i)
         self.assertIn("Searching the documents", items)
         self.assertEqual(items[-1], "DONE")
+
+    def test_image_links_in_the_answer_are_rewritten(self):
+        agent = self.make_agent([answer("Sales rose. ![Sales chart](tg://report_pdf_image_1)")])
+        resp = agent.question_for_agent("Show the sales chart.")
+        self.assertIn("![Sales chart](/ui/image_vertex/TestGraph/report_pdf_image_1)",
+                      resp.natural_language_response)
+        self.assertNotIn("tg://", resp.natural_language_response)
 
     def test_tigergraph_tool_runs_on_user_connection(self):
         conn = FakeConn()
@@ -443,6 +463,37 @@ class TestMemoryStore(_Base):
     def test_thread_ids_cannot_collide_across_users(self):
         self.assertNotEqual(mem.thread_id("G", "a:b", "c"), mem.thread_id("G", "a", "b:c"))
         self.assertTrue(mem.thread_id("G", "u", "c").startswith(mem.thread_prefix("G", "u")))
+
+    def _threads_of_two_users(self, checkpointer):
+        from langgraph.checkpoint.base import empty_checkpoint
+        # Two checkpoints per thread; users "u", "u_1" (a LIKE wildcard) and
+        # "u2" share the "G:u" start.
+        for tid in ["G:u:c1", "G:u2:x", "G:u_1:y", "G:u:c2", "G:u:c1", "H:u:z"]:
+            cfg = {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
+            cfg = checkpointer.put(cfg, empty_checkpoint(), {}, {})
+
+    def _assert_threads_listed(self):
+        got = mem.list_threads("G", "u")
+        self.assertEqual([t["conversation_id"] for t in got], ["c1", "c2"])
+        self.assertTrue(all(t["updated_at"] for t in got))
+        self.assertEqual([t["conversation_id"] for t in mem.list_threads("G", "u", limit=1)], ["c1"])
+        self.assertEqual([t["conversation_id"] for t in mem.list_threads("G", "u_1")], ["y"])
+
+    def test_list_threads_reads_only_the_users_threads_memory(self):
+        self._threads_of_two_users(mem.get_backends("G").checkpointer)
+        self._assert_threads_listed()
+
+    def test_list_threads_reads_only_the_users_threads_sqlite(self):
+        import os
+        import tempfile
+        from deep_agent.settings import MemorySettings
+        with tempfile.TemporaryDirectory() as d:
+            mem.reset_backends_for_tests(None)
+            b = mem.init_backends(MemorySettings(backend="sqlite", path=os.path.join(d, "m.sqlite")), "G")
+            self.assertEqual(b.kind, "sqlite")
+            self._threads_of_two_users(b.checkpointer)
+            self._assert_threads_listed()
+            mem.close_backends()
 
     def test_sqlite_backend_persists(self):
         import os

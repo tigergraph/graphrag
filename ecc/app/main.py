@@ -471,10 +471,15 @@ def _regen_build_conn(graphname, credentials):
     return conn
 
 
-def _run_regen(graphname, credentials, task_suffix, run_func):
-    """Run a targeted regenerate action synchronously, returning its counts.
-    Refuses while a rebuild or the same action is already in flight (they both
-    write embeddings)."""
+async def _run_regen(graphname, credentials, task_suffix, run_func):
+    """Run a targeted regenerate action and return its counts. Refuses while
+    a rebuild or the same action is already in flight (they both write
+    embeddings).
+
+    The action runs on the service's event loop, as the rebuild does. The
+    LLM and embedding clients are shared, and a client must not be used from
+    more than one event loop: a new loop per request (asyncio.run) let a
+    connection opened in one request be used or closed in the next."""
     rebuild_key = f"{graphname}:graphrag"
     if rebuild_key in running_tasks and running_tasks[rebuild_key].get("status") == "running":
         raise HTTPException(
@@ -484,11 +489,14 @@ def _run_regen(graphname, credentials, task_suffix, run_func):
     task_key = f"{graphname}:{task_suffix}"
     if task_key in running_tasks and running_tasks[task_key].get("status") == "running":
         raise HTTPException(status_code=409, detail=f"{task_suffix} already running for {graphname}")
-    conn = _regen_build_conn(graphname, credentials)
+    # Building the connection runs its own short-lived loop (asyncio.run),
+    # so it runs in a worker thread; the connection opens its session on
+    # this loop at first use.
+    conn = await asyncio.to_thread(_regen_build_conn, graphname, credentials)
     running_tasks[task_key] = {"status": "running", "started_at": time.time()}
     try:
         with run_usage.track_run(task_suffix, graphname) as usage:
-            result = asyncio.run(run_func(graphname, conn))
+            result = await run_func(graphname, conn)
         LogWriter.info(f"Completed ECC task: {task_key} -> {result}")
         return {"status": "completed", **result, "usage": usage.summary()}
     finally:
@@ -496,32 +504,32 @@ def _run_regen(graphname, credentials, task_suffix, run_func):
 
 
 @app.get("/{graphname}/graphrag/regenerate_embeddings")
-def regenerate_embeddings_endpoint(graphname: str, credentials=Depends(auth_credentials)):
+async def regenerate_embeddings_endpoint(graphname: str, credentials=Depends(auth_credentials)):
     """Re-embed vertices missing an embedding (GML-2175). Targeted, not a full
     rebuild. Runs synchronously and returns {regenerated, skipped}."""
     from graphrag.regenerate import regenerate_embeddings
-    return _run_regen(graphname, credentials, "regenerate_embeddings", regenerate_embeddings)
+    return await _run_regen(graphname, credentials, "regenerate_embeddings", regenerate_embeddings)
 
 
 @app.get("/{graphname}/graphrag/regenerate_summaries")
-def regenerate_summaries_endpoint(graphname: str, credentials=Depends(auth_credentials)):
+async def regenerate_summaries_endpoint(graphname: str, credentials=Depends(auth_credentials)):
     """Re-summarize communities with placeholder/empty descriptions and re-embed
     (GML-2176). Targeted, not a full rebuild. Returns {resummarized, skipped}."""
     from graphrag.regenerate import regenerate_summaries
-    return _run_regen(graphname, credentials, "regenerate_summaries", regenerate_summaries)
+    return await _run_regen(graphname, credentials, "regenerate_summaries", regenerate_summaries)
 
 
 @app.get("/{graphname}/graphrag/move_heading_paths")
-def move_heading_paths_endpoint(graphname: str, credentials=Depends(auth_credentials)):
+async def move_heading_paths_endpoint(graphname: str, credentials=Depends(auth_credentials)):
     """Move chunk breadcrumbs from the chunk text to heading_path (GML-2369).
     Returns {moved, unchanged, not_matched}."""
     from graphrag.regenerate import move_heading_paths
-    return _run_regen(graphname, credentials, "move_heading_paths", move_heading_paths)
+    return await _run_regen(graphname, credentials, "move_heading_paths", move_heading_paths)
 
 
 @app.get("/{graphname}/graphrag/regenerate_chunk_summaries")
-def regenerate_chunk_summaries_endpoint(graphname: str, credentials=Depends(auth_credentials)):
+async def regenerate_chunk_summaries_endpoint(graphname: str, credentials=Depends(auth_credentials)):
     """Generate summaries for chunks without one and re-embed them (GML-2369).
     Returns {summarized, skipped}."""
     from graphrag.regenerate import regenerate_chunk_summaries
-    return _run_regen(graphname, credentials, "regenerate_chunk_summaries", regenerate_chunk_summaries)
+    return await _run_regen(graphname, credentials, "regenerate_chunk_summaries", regenerate_chunk_summaries)

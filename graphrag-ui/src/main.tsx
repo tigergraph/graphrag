@@ -13,6 +13,7 @@ import GraphDBConfig from "./pages/setup/GraphDBConfig.tsx";
 import GraphRAGConfig from "./pages/setup/GraphRAGConfig.tsx";
 import McpServersConfig from "./pages/setup/McpServersConfig.tsx";
 import CustomizePrompts from "./pages/setup/CustomizePrompts.tsx";
+import MemoryEncryptionPage from "./pages/setup/MemoryEncryptionPage";
 import { ThemeProvider } from "./components/ThemeProvider.tsx";
 import { ModeToggle } from "@/components/ModeToggle.tsx";
 import { useIdleTimeout } from "./hooks/useIdleTimeout.ts";
@@ -102,6 +103,10 @@ const router = createBrowserRouter([
           {
             path: "prompts",
             element: <CustomizePrompts />,
+          },
+          {
+            path: "server-config/memory-encryption",
+            element: <MemoryEncryptionPage />,
           },
         ],
       },

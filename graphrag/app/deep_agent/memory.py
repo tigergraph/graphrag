@@ -23,8 +23,9 @@
   across conversations and restarts and is private to that user.
 
 Both are kept per graph, in one SQLite file per graph
-(``langgraph-checkpoint-sqlite``) in the graph's config folder. ``memory``
-keeps everything in-process, for tests.
+(``langgraph-checkpoint-sqlite``) in the graph's data folder, encrypted with
+the graph's data key (``data_encryption``). ``memory`` keeps everything
+in-process, for tests.
 """
 
 from __future__ import annotations
@@ -107,10 +108,16 @@ def _memory_backends() -> _Backends:
     return _Backends(InMemorySaver(serde=serializer()), InMemoryStore(), "memory")
 
 
-def _sqlite_backends(path: str) -> _Backends:
+def _sqlite_backends(path: str, graphname: str) -> _Backends:
     import sqlite3
     from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.store.sqlite import SqliteStore
+
+    import data_encryption
+    from data_encryption.memory_crypto import EncryptedStore, checkpoint_serializer
+
+    enc = data_encryption.manager()
+    enc.keys(graphname)                 # raises Locked before the file is opened
 
     # SQLite cannot open a path through a symlink whose target climbs above the
     # root directory, such as the image's /code/configs -> ../../configs link to
@@ -121,18 +128,19 @@ def _sqlite_backends(path: str) -> _Backends:
     # serialize access with their own lock.
     cp_conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
     cp_conn.execute("PRAGMA journal_mode=WAL")
-    checkpointer = SqliteSaver(cp_conn, serde=serializer())
+    checkpointer = SqliteSaver(cp_conn, serde=checkpoint_serializer(enc, graphname, serializer()))
     checkpointer.setup()
     st_conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
-    store = SqliteStore(st_conn)
-    store.setup()
+    inner = SqliteStore(st_conn)
+    inner.setup()
+    store = EncryptedStore(inner, enc, graphname)
     return _Backends(checkpointer, store, "sqlite", (cp_conn.close, st_conn.close))
 
 
-def _open(settings: MemorySettings) -> _Backends:
+def _open(settings: MemorySettings, graphname: str) -> _Backends:
     if settings.backend == "memory":
         return _memory_backends()
-    return _sqlite_backends(settings.path)
+    return _sqlite_backends(settings.path, graphname)
 
 
 def init_backends(settings: MemorySettings, graphname: str) -> _Backends:
@@ -141,7 +149,10 @@ def init_backends(settings: MemorySettings, graphname: str) -> _Backends:
     A persistence backend that fails to start (missing package, read-only
     volume) falls back to in-process memory with a
     warning, so chat keeps working; memories then last until restart.
+    A graph whose encryption key cannot be loaded raises ``Locked`` and is
+    not cached, so it opens as soon as an admin provides the key.
     """
+    from data_encryption import Locked
     if _test_backends is not None:
         return _test_backends
     backends = _backends.get(graphname)
@@ -152,8 +163,10 @@ def init_backends(settings: MemorySettings, graphname: str) -> _Backends:
         if backends is not None:
             return backends
         try:
-            backends = _open(settings)
+            backends = _open(settings, graphname)
             logger.info(f"deep_agent: memory backend={backends.kind} for {graphname}")
+        except Locked:
+            raise
         except Exception as exc:
             logger.warning(
                 f"deep_agent: memory backend {settings.backend!r} unavailable for "
@@ -187,6 +200,19 @@ def close_backends() -> None:
                 except Exception as exc:
                     logger.warning(f"deep_agent: closing memory backend failed: {exc}")
         _backends.clear()
+
+
+def close_graph_backends(graphname: str) -> None:
+    """Close the memory of one graph (before its file is deleted)."""
+    with _lock:
+        backends = _backends.pop(graphname, None)
+        if backends is not None:
+            _readers.pop(id(backends.checkpointer), None)
+            for close in backends.closers:
+                try:
+                    close()
+                except Exception as exc:
+                    logger.warning(f"deep_agent: closing memory of {graphname} failed: {exc}")
 
 
 def reset_backends_for_tests(backends: Optional[_Backends] = None) -> None:
@@ -235,23 +261,60 @@ def thread_messages(graphname: str, tid: str) -> list:
     return list((state.values or {}).get("messages") or [])
 
 
-def list_threads(graphname: str, user: str, limit: int = 100) -> list:
-    """Thread ids (latest checkpoint per thread) of a user on a graph."""
-    prefix = thread_prefix(graphname, user)
-    seen, out = set(), []
-    for tup in get_backends(graphname).checkpointer.list(None):
+def _latest_checkpoints(checkpointer, prefix: str, limit: int) -> list:
+    """``(thread_id, checkpoint)`` of the newest checkpoint of each thread
+    whose id starts with ``prefix``, newest thread first.
+
+    Thread ids are the first column of the checkpoint key, so SQLite reads
+    only the user's rows; a full ``list()`` would read and decode every
+    checkpoint of every user on the graph while holding the saver's lock.
+    """
+    if hasattr(checkpointer, "cursor") and hasattr(checkpointer, "conn"):  # SqliteSaver
+        # ``prefix`` ends with ":"; ";" is the next character, so the range
+        # holds exactly the ids that start with ``prefix``.
+        hi = prefix[:-1] + ";"
+        with checkpointer.cursor(transaction=False) as cur:
+            cur.execute(
+                "SELECT c.thread_id, c.type, c.checkpoint FROM checkpoints c "
+                "JOIN (SELECT thread_id, MAX(checkpoint_id) AS cid FROM checkpoints "
+                "      WHERE thread_id >= ? AND thread_id < ? AND checkpoint_ns = '' "
+                "      GROUP BY thread_id) m "
+                "ON c.thread_id = m.thread_id AND c.checkpoint_ns = '' AND c.checkpoint_id = m.cid "
+                "ORDER BY c.checkpoint_id DESC LIMIT ?",
+                (prefix, hi, limit),
+            )
+            rows = cur.fetchall()
+        return [(tid, checkpointer.serde.loads_typed((typ, blob))) for tid, typ, blob in rows]
+    storage = getattr(checkpointer, "storage", None)
+    if isinstance(storage, dict):  # InMemorySaver
+        latest = []
+        for tid in [t for t in list(storage) if t.startswith(prefix)]:
+            tup = checkpointer.get_tuple(_config(tid))
+            if tup is not None:
+                latest.append((tid, tup.checkpoint or {}))
+        latest.sort(key=lambda x: x[1].get("id", ""), reverse=True)
+        return latest[:limit]
+    # Other savers: scan.
+    seen, latest = set(), []
+    for tup in checkpointer.list(None):
         tid = (tup.config or {}).get("configurable", {}).get("thread_id", "")
-        if not tid.startswith(prefix) or tid in seen:
-            continue
-        seen.add(tid)
-        out.append({
-            "thread_id": tid,
-            "conversation_id": tid[len(prefix):],
-            "updated_at": (tup.checkpoint or {}).get("ts"),
-        })
-        if len(out) >= limit:
-            break
-    return out
+        if tid.startswith(prefix) and tid not in seen:
+            seen.add(tid)
+            latest.append((tid, tup.checkpoint or {}))
+            if len(latest) >= limit:
+                break
+    return latest
+
+
+def list_threads(graphname: str, user: str, limit: int = 100) -> list:
+    """Thread ids (latest checkpoint per thread) of a user on a graph,
+    most recently updated first."""
+    prefix = thread_prefix(graphname, user)
+    return [{
+        "thread_id": tid,
+        "conversation_id": tid[len(prefix):],
+        "updated_at": (cp or {}).get("ts"),
+    } for tid, cp in _latest_checkpoints(get_backends(graphname).checkpointer, prefix, limit)]
 
 
 def delete_thread(graphname: str, tid: str) -> None:

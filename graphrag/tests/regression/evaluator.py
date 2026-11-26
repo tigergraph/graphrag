@@ -294,7 +294,6 @@ def answer_correctness(
         return None, None, "no ground truth provided"
 
     try:
-        import asyncio
         from deepeval.metrics import GEval
         from deepeval.test_case import LLMTestCase, LLMTestCaseParams
     except ImportError as e:
@@ -305,9 +304,12 @@ def answer_correctness(
     except Exception as e:
         return None, None, f"judge init failed: {e}"
 
+    # Synchronous judging: the questions run in a thread pool, and the judge's
+    # chat client must not be used from a new event loop per check.
     metric = GEval(
         name="Answer Correctness",
         model=judge,
+        async_mode=False,
         evaluation_steps=_EVALUATION_STEPS,
         evaluation_params=[
             LLMTestCaseParams.INPUT,
@@ -326,9 +328,9 @@ def answer_correctness(
         try:
             # _show_indicator=False suppresses DeepEval's "✨ You're running…" line
             try:
-                asyncio.run(metric.a_measure(test_case, _show_indicator=False))
+                metric.measure(test_case, _show_indicator=False)
             except TypeError:
-                asyncio.run(metric.a_measure(test_case))
+                metric.measure(test_case)
             last_err = None
             break
         except Exception as e:

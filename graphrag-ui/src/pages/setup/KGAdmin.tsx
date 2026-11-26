@@ -95,7 +95,7 @@ const KGAdmin = () => {
     };
     needs_repair?: boolean;
     repairable?: boolean;
-    schema?: { compatible: boolean; check_failed: boolean };
+    schema?: { compatible: boolean; check_failed: boolean; missing_pairs?: string[] };
     embeddings?: {
       by_type: Record<string, { total: number; missing: number }>;
       total_missing: number;
@@ -194,6 +194,9 @@ const KGAdmin = () => {
         setMigrationMessage("✅ Graph is up to date — no repairs needed.");
       } else {
         const parts: string[] = [];
+        const pairs = data.schema?.missing_pairs?.length || 0;
+        if (pairs)
+          parts.push(`${pairs} missing edge connection(s) in the schema`);
         const out = data.queries?.outdated?.length || 0;
         const miss = data.queries?.not_installed?.length || 0;
         if (out || miss)
@@ -272,8 +275,10 @@ const KGAdmin = () => {
         );
         return;
       }
+      const pairsAdded = data.edge_pairs_added?.length || 0;
       setMigrationMessage(
-        `✅ Repaired ${reinst} outdated; installed ${newInst} new query(s).`
+        (pairsAdded ? `✅ Added ${pairsAdded} edge connection(s); ` : "✅ ") +
+        `Repaired ${reinst} outdated; installed ${newInst} new query(s).`
       );
       // Re-run the check so the user sees the now-clean state.
       await runMigrationCheck(migrationGraph);
@@ -1587,7 +1592,7 @@ const KGAdmin = () => {
         {/* Card Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {/* Initialize Card */}
-          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-gray-100 dark:bg-shadeA flex flex-col h-full">
             <div className="mb-4">
               <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
                 <Database className="h-6 w-6 text-tigerOrange" />
@@ -1611,7 +1616,7 @@ const KGAdmin = () => {
           </div>
 
           {/* Ingest Card */}
-          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-gray-100 dark:bg-shadeA flex flex-col h-full">
             <div className="mb-4">
               <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
                 <Upload className="h-6 w-6 text-tigerOrange" />
@@ -1635,7 +1640,7 @@ const KGAdmin = () => {
           </div>
 
           {/* Rebuild Card */}
-          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-gray-100 dark:bg-shadeA flex flex-col h-full">
             <div className="mb-4">
               <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
                 <RefreshCw className="h-6 w-6 text-tigerOrange" />
@@ -1659,7 +1664,7 @@ const KGAdmin = () => {
           </div>
 
           {/* Migration Assistant Card */}
-          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-gray-100 dark:bg-shadeA flex flex-col h-full">
             <div className="mb-4">
               <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
                 <Wrench className="h-6 w-6 text-tigerOrange" />
@@ -1687,7 +1692,7 @@ const KGAdmin = () => {
           </div>
 
           {/* Keyword Search Card */}
-          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-gray-100 dark:bg-shadeA flex flex-col h-full">
             <div className="mb-4">
               <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
                 <Search className="h-6 w-6 text-tigerOrange" />
@@ -1720,7 +1725,7 @@ const KGAdmin = () => {
         {/* Initialize Dialog */}
         <Dialog open={initializeDialogOpen} onOpenChange={handleInitializeDialogChange}>
           <DialogContent
-            className="sm:max-w-[760px] max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+            className="sm:max-w-[760px] max-h-[90vh] overflow-y-auto bg-gray-100 dark:bg-shadeA border-gray-300 dark:border-[#3D3D3D]"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>
@@ -1744,7 +1749,7 @@ const KGAdmin = () => {
                   <div
                     className={
                       "flex h-11 w-full items-center rounded-md border border-input " +
-                      "bg-background dark:border-[#3D3D3D] dark:bg-shadeA " +
+                      "bg-background dark:border-[#3D3D3D] dark:bg-background " +
                       "px-3 text-sm focus-within:ring-2 focus-within:ring-ring " +
                       "focus-within:ring-offset-2 ring-offset-background"
                     }
@@ -1802,7 +1807,7 @@ const KGAdmin = () => {
                       : availableGraphs;
                     if (filtered.length === 0) return null;
                     return (
-                      <div className="absolute top-full left-0 right-0 mt-1 max-h-60 overflow-y-auto rounded-md border border-gray-300 dark:border-[#3D3D3D] bg-white dark:bg-shadeA shadow-md z-50">
+                      <div className="absolute top-full left-0 right-0 mt-1 max-h-60 overflow-y-auto rounded-md border border-gray-300 dark:border-[#3D3D3D] bg-popover text-popover-foreground shadow-md z-50">
                         {filtered.map((g) => (
                           <button
                             key={g}
@@ -1811,7 +1816,7 @@ const KGAdmin = () => {
                               setGraphName(g);
                               setGraphNameDropdownOpen(false);
                             }}
-                            className="w-full text-left px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 text-black dark:text-white"
+                            className="w-full text-left px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground text-black dark:text-white"
                           >
                             {g}
                           </button>
@@ -2075,7 +2080,7 @@ const KGAdmin = () => {
                                   >
                                     {collapsedVertices.has(vIdx) ? "▶" : "▼"}
                                   </button>
-                                  <div className="flex-1 flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                  <div className="flex-1 flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-background px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
                                     <input
                                       type="text"
                                       placeholder="VertexName"
@@ -2121,7 +2126,7 @@ const KGAdmin = () => {
                                   </button>
                                 </div>
                                 {!collapsedVertices.has(vIdx) && (<>
-                                <div className="flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                <div className="flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-background px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
                                   <input
                                     type="text"
                                     placeholder="Description (1 sentence)"
@@ -2193,7 +2198,7 @@ const KGAdmin = () => {
                                         )
                                       }
                                       disabled={isInitializing || isExtractingSchema}
-                                      className="flex-1 h-7 text-xs font-mono dark:border-[#3D3D3D] dark:bg-shadeA"
+                                      className="flex-1 h-7 text-xs font-mono dark:border-[#3D3D3D] dark:bg-background"
                                     />
                                     <select
                                       value={a.type}
@@ -2220,7 +2225,7 @@ const KGAdmin = () => {
                                         )
                                       }
                                       disabled={isInitializing || isExtractingSchema}
-                                      className="h-7 text-xs border rounded px-1 dark:border-[#3D3D3D] dark:bg-shadeA"
+                                      className="h-7 text-xs border rounded px-1 dark:border-[#3D3D3D] dark:bg-background"
                                     >
                                       {PRIMITIVE_TYPES.map((t) => (
                                         <option key={t} value={t}>
@@ -2359,7 +2364,7 @@ const KGAdmin = () => {
                                   >
                                     {collapsedEdges.has(eIdx) ? "▶" : "▼"}
                                   </button>
-                                  <div className="flex-1 flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                  <div className="flex-1 flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-background px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
                                     <input
                                       type="text"
                                       placeholder="EDGE_NAME"
@@ -2408,7 +2413,7 @@ const KGAdmin = () => {
                                   </button>
                                 </div>
                                 {!collapsedEdges.has(eIdx) && (<>
-                                <div className="flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
+                                <div className="flex h-7 items-center rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-background px-3 focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ring-offset-background">
                                   <input
                                     type="text"
                                     placeholder="Description (1 sentence)"
@@ -2462,7 +2467,7 @@ const KGAdmin = () => {
                                         )
                                       }
                                       disabled={isInitializing || isExtractingSchema}
-                                      className="flex-1 h-7 text-xs dark:border-[#3D3D3D] dark:bg-shadeA"
+                                      className="flex-1 h-7 text-xs dark:border-[#3D3D3D] dark:bg-background"
                                     />
                                     <span className="text-xs text-gray-500">→</span>
                                     <Input
@@ -2490,7 +2495,7 @@ const KGAdmin = () => {
                                         )
                                       }
                                       disabled={isInitializing || isExtractingSchema}
-                                      className="flex-1 h-7 text-xs dark:border-[#3D3D3D] dark:bg-shadeA"
+                                      className="flex-1 h-7 text-xs dark:border-[#3D3D3D] dark:bg-background"
                                     />
                                     <button
                                       type="button"
@@ -2592,7 +2597,7 @@ const KGAdmin = () => {
                                         )
                                       }
                                       disabled={isInitializing || isExtractingSchema}
-                                      className="flex-1 h-7 text-xs font-mono dark:border-[#3D3D3D] dark:bg-shadeA"
+                                      className="flex-1 h-7 text-xs font-mono dark:border-[#3D3D3D] dark:bg-background"
                                     />
                                     <select
                                       value={a.type}
@@ -2619,7 +2624,7 @@ const KGAdmin = () => {
                                         )
                                       }
                                       disabled={isInitializing || isExtractingSchema}
-                                      className="h-7 text-xs border rounded px-1 dark:border-[#3D3D3D] dark:bg-shadeA"
+                                      className="h-7 text-xs border rounded px-1 dark:border-[#3D3D3D] dark:bg-background"
                                     >
                                       {PRIMITIVE_TYPES.map((t) => (
                                         <option key={t} value={t}>
@@ -2717,7 +2722,7 @@ const KGAdmin = () => {
                       onChange={(e) => setPasteGsql(e.target.value)}
                       disabled={isInitializing || isExtractingSchema}
                       rows={20}
-                      className="w-full text-xs font-mono p-3 border rounded dark:border-[#3D3D3D] dark:bg-shadeA leading-snug"
+                      className="w-full text-xs font-mono p-3 border rounded dark:border-[#3D3D3D] dark:bg-background leading-snug"
                       spellCheck={false}
                       style={{ tabSize: 2 }}
                     />
@@ -2812,7 +2817,7 @@ const KGAdmin = () => {
           }}
         >
           <DialogContent
-            className="sm:max-w-[760px] max-h-[90vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+            className="sm:max-w-[760px] max-h-[90vh] overflow-y-auto bg-gray-100 dark:bg-shadeA border-gray-300 dark:border-[#3D3D3D]"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>
@@ -2852,7 +2857,7 @@ const KGAdmin = () => {
                             }))
                           }
                           placeholder="One-sentence description"
-                          className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                          className="dark:border-[#3D3D3D] dark:bg-background"
                         />
                       </div>
                     ))}
@@ -2887,7 +2892,7 @@ const KGAdmin = () => {
                             }))
                           }
                           placeholder="One-sentence description"
-                          className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                          className="dark:border-[#3D3D3D] dark:bg-background"
                         />
                       </div>
                     ))}
@@ -2925,7 +2930,7 @@ const KGAdmin = () => {
           }}
         >
           <DialogContent
-            className="w-[95vw] sm:max-w-[min(95vw,72rem)] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D] max-h-[85vh] overflow-y-auto"
+            className="w-[95vw] sm:max-w-[min(95vw,72rem)] bg-gray-100 dark:bg-shadeA border-gray-300 dark:border-[#3D3D3D] max-h-[85vh] overflow-y-auto"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>
@@ -2950,7 +2955,7 @@ const KGAdmin = () => {
         {/* Rebuild Dialog */}
         <Dialog open={refreshDialogOpen} onOpenChange={handleRefreshDialogChange}>
           <DialogContent
-            className="sm:max-w-[500px] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+            className="sm:max-w-[500px] bg-gray-100 dark:bg-shadeA border-gray-300 dark:border-[#3D3D3D]"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>
@@ -2975,7 +2980,7 @@ const KGAdmin = () => {
                   disabled={isRefreshing || isRebuildRunning || isCheckingStatus}
                 >
                   <SelectTrigger
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={isRefreshing || isRebuildRunning || isCheckingStatus}
                   >
                     <SelectValue placeholder="Select a graph" />
@@ -3086,7 +3091,7 @@ const KGAdmin = () => {
         {/* Keyword Search Dialog */}
         <Dialog open={keywordDialogOpen} onOpenChange={setKeywordDialogOpen}>
           <DialogContent
-            className="sm:max-w-[560px] bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+            className="sm:max-w-[560px] bg-gray-100 dark:bg-shadeA border-gray-300 dark:border-[#3D3D3D]"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>
@@ -3114,7 +3119,7 @@ const KGAdmin = () => {
                   }}
                   disabled={keywordBusy}
                 >
-                  <SelectTrigger className="dark:border-[#3D3D3D] dark:bg-shadeA" disabled={keywordBusy}>
+                  <SelectTrigger className="dark:border-[#3D3D3D] dark:bg-background" disabled={keywordBusy}>
                     <SelectValue placeholder="Pick a graph" />
                   </SelectTrigger>
                   <SelectContent>
@@ -3211,7 +3216,7 @@ const KGAdmin = () => {
           }}
         >
           <DialogContent
-            className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto bg-white dark:bg-background border-gray-300 dark:border-[#3D3D3D]"
+            className="sm:max-w-[640px] max-h-[85vh] overflow-y-auto bg-gray-100 dark:bg-shadeA border-gray-300 dark:border-[#3D3D3D]"
             onInteractOutside={(e) => e.preventDefault()}
           >
             <DialogHeader>
@@ -3239,7 +3244,7 @@ const KGAdmin = () => {
                   disabled={migrationChecking || migrationApplying || migrationSettingUpVersions || isRebuildRunning}
                 >
                   <SelectTrigger
-                    className="dark:border-[#3D3D3D] dark:bg-shadeA"
+                    className="dark:border-[#3D3D3D] dark:bg-background"
                     disabled={migrationChecking || migrationApplying || migrationSettingUpVersions || isRebuildRunning}
                   >
                     <SelectValue placeholder="Pick a graph" />
@@ -3288,6 +3293,16 @@ const KGAdmin = () => {
 
               {migrationStatus && (
                 <div className="space-y-2 text-sm">
+                  {(migrationStatus.schema?.missing_pairs?.length ?? 0) > 0 && (
+                    <div className="p-3 rounded bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+                      <div className="font-medium text-yellow-800 dark:text-yellow-200">
+                        Missing edge connections ({migrationStatus.schema!.missing_pairs!.length}) — Repair adds them:
+                      </div>
+                      <div className="text-yellow-700 dark:text-yellow-300 mt-1 font-mono text-xs">
+                        {migrationStatus.schema!.missing_pairs!.join(", ")}
+                      </div>
+                    </div>
+                  )}
                   {(migrationStatus.queries?.outdated?.length ?? 0) > 0 && (
                     <div className="p-3 rounded bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
                       <div className="font-medium text-yellow-800 dark:text-yellow-200">
@@ -3525,7 +3540,7 @@ const KGAdmin = () => {
                 onClick={() => setMigrationDialogOpen(false)}
                 variant="outline"
                 disabled={migrationApplying || migrationSettingUpVersions}
-                className="dark:border-[#3D3D3D] dark:bg-shadeA dark:text-white"
+                className="dark:border-[#3D3D3D]"
               >
                 Close
               </Button>

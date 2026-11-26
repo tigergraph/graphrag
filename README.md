@@ -375,6 +375,7 @@ Upgrading GraphRAG does not change graphs that already exist: their installed qu
 
 - **Schema compatibility** — whether the graph's schema supports the current release. Graphs created with GraphRAG 1.4 or later are compatible.
 - **Queries** — installed queries that are outdated or missing. **Repair** reinstalls them in place, without rebuilding the knowledge graph.
+- **Edge connections** — connections the schema lacks between documents, entities, domain vertex types and communities. **Repair** adds them before it repairs the queries, and installs again the queries that the schema change removes. Search on the graph is unavailable until this finishes.
 - **Prompt overrides** — saved custom prompts in a format the current release no longer uses.
 - **Data health** — vertices missing embeddings and communities missing summaries, each with its own regenerate action.
 - **Document versions** — whether the graph records a checksum of each document's source file and which documents a newer one replaces. **Set up** adds this to the graph; [Stored Files](#stored-files) needs it to compare files with the graph and to replace older versions.
@@ -394,7 +395,7 @@ GraphRAG offers two chat engines, chosen from the chat menu (or set as a per-gra
 
 ### Agentic
 
-The Agentic engine runs one of two agents, chosen with `agent_engine` in the [GraphRAG configuration](#graphrag-configuration):
+The Agentic engine runs one of two agents, chosen with **Agent** in *General Settings* on the *GraphRAG Configuration* page, or with `agent_engine` in the [GraphRAG configuration](#graphrag-configuration):
 
 | `agent_engine` | Agent |
 |---|---|
@@ -437,6 +438,41 @@ The Deep Agent keeps two kinds of memory, both stored on your own server:
 Memory is private to each TigerGraph user and needs a username and password login. API calls with a token keep no memory. `POST /{graph}/query` and `/{graph}/query_with_history` stay stateless: they use only the history sent with the request.
 
 Memory is kept per graph. Each graph has its own SQLite file, `configs/graph_data/<graph>/agent_memory.sqlite`. The `configs` folder is already mounted, so memory survives container recreation, and a backup of `configs` includes users' conversations. Use one GraphRAG replica per `configs` folder.
+
+### Memory encryption
+
+The agent memory (conversations and long-term memories) and the chat history that GraphRAG stores on disk are always encrypted. Existing memory is encrypted in the background after an upgrade. Documents, their chunks and the keyword search index are not covered: they are stored in TigerGraph and in `configs/graph_docs/` and `configs/graph_data/`, so protect them with TigerGraph's encryption at rest and disk encryption.
+
+There are three kinds of key:
+
+- **Data key** — encrypts the stored memory. Each graph and the chat history has its own data key.
+- **Global key** — protects the data keys of the chat history and of every graph that has no graph key.
+- **Graph key** — protects the data key of one graph instead of the global key. Optional.
+
+All keys are kept in `configs/graph_configs/`, apart from the data in `configs/graph_data/`:
+
+- `master.key` — the global key. GraphRAG creates it on first start.
+- `<graph>/master.key` — the graph key of a graph that has one.
+- `<graph>/data_key.json`, `chat_history.data_key.json` — the data keys, encrypted with the global key or the graph key.
+
+Back up `configs/graph_configs/` and keep the backup apart from the data. Without the keys, the stored memory cannot be read.
+
+**Mounted global key.** To keep the global key in a secret manager instead, mount it as a file and set `GRAPHRAG_ENCRYPTION_KEY_FILE` to its path. The file holds one 256-bit key in base64, or several, one per line with the current key first, or a key file downloaded from GraphRAG. GraphRAG only reads a mounted global key. In Kubernetes, mount the secret as a folder, not with `subPath`, so a changed secret reaches the container.
+
+**Managing the keys.** The **Memory Encryption** page under Setup → Server Configuration (superuser or globaldesigner; downloading a key needs superuser), for all graphs or for one graph:
+
+- **Rotate global key** / **Rotate graph key** — a GraphRAG-managed global key or graph key gets a new version, generated or your own. For a mounted global key, put the new key into the secret first, then click **Rotate global key**. If GraphRAG restarted after the secret changed, it asks for the previous global key once, and does not store it.
+- **Rotate data keys** — encrypts the stored memory again with new data keys, in the background: for all graphs and the chat history, or for one of them with the rotate icon on its row.
+- **Protected by: Global key / Graph key** (graph scope) — selects which key protects the data key of the graph. A new graph key is generated or your own; going back to the global key deletes the graph key.
+- **Upload global key** / **Upload graph key** — shown when data is locked. If a global key or graph key is missing or does not match, for example after an upgrade without `configs/graph_configs/`, the data it protects is locked: Agent mode reports that the memory is locked, and nothing is read or written until the right key is uploaded. A wrong key is rejected.
+- **Delete** (on a graph) — deletes the stored conversations and memories of the graph for all users, after the admin types the graph name. The graph and its documents do not change. Graphs that no longer exist in TigerGraph are listed apart under **Removed graphs**, where **Delete all** deletes their memory and keys together.
+- **Reset** — deletes chat messages whose keys are lost, and starts the chat history again with a new data key.
+
+The chat history is encrypted with every chat engine. Agent memory exists only on graphs that run Agent mode on the Deep Agent, so the graph key, the data key rotation and the Upload key of a graph are available only for those graphs. Memory left from an earlier use of the Deep Agent stays encrypted and can be deleted.
+
+Every key action, also a refused one, is written to the audit log (`log.AUDIT-GRAPHRAG`) with the user, without the key.
+
+Encryption of the chat history needs the chat-history service of this release.
 
 ### Agent API
 
@@ -560,6 +596,8 @@ Uploaded and downloaded files are pre-processed when they are added: multimodal 
 
 #### Stored Files
 
+On the **Upload** tab, **Add Files or Folders** adds files or a whole folder to the selection, and each choice adds to the files already selected. Files and folders can also be dropped together onto the tab. A folder keeps its subfolders in the stored file names. Hidden files and folders (such as `.DS_Store`) and Office lock files (`~$…`) are skipped.
+
 **Stored Files** lists the uploaded and downloaded files of the graph, with their size, the time they were added, and their state:
 
 | State | Meaning |
@@ -671,7 +709,6 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | `num_seen_min` | int | `2` | Minimum occurrence count for a node to be included during hybrid search traversal. Higher values filter out loosely connected nodes, reducing context size. |
 | `max_results` | int | `2 × top_k` | Caps the number of result chunks hybrid and community search return, ranked by relevance to the question, instead of every chunk the expansion (or community membership) reaches. When unset it is twice `top_k`, which is also the minimum; set higher to return more context. Lowering it reduces the context sent to the LLM. |
 | `keyword_search` | bool | `false` | If true, hybrid search also returns the chunks whose section path and text hold most of the question's distinctive words (BM25 keyword search), such as names, codes, numbers and table labels that vector search can miss, and the agentic engines can run a keyword search. Turn it on per graph with the **Keyword Search** card on the Knowledge Graph Setup page, which also builds the graph's keyword index. The index is saved in `configs/graph_data/<graph>/` and reused after a restart. |
-| `keyword_top_k` | int | `top_k` | How many keyword matches hybrid search considers adding to its results. |
 | `rerank` | bool | same as `keyword_search` | If true, hybrid search gathers about three times as many candidate passages, including keyword matches when keyword search is on, and the chat model orders them by how directly each answers the question. The usual number of results is kept. Adds one model call per hybrid search. |
 | `community_level` | int | `2` | Community hierarchy level for community search. Higher levels retrieve broader, higher-order community summaries. |
 | `agent_engine` | string | `"default"` | Agent that the Agentic engine runs: `"default"` (the default agent, the Deep Agent), `"deepagent"` (the Deep Agent) or `"legacy"` (the Planned / Reactive agent). See [Agentic](#agentic). |
@@ -1224,15 +1261,26 @@ Each tweak should be made **alone** — moving `top_k` and `num_hops` together m
 
 ### 5. Prompts — last resort, biggest leverage when the rest is right
 
-Customize prompts via the UI: *Settings → Customize Prompts*. Customization is **additive** — you edit an instructions-and-examples layer that is appended to fixed, non-editable rules, so a customization extends behavior without dropping the rules that keep the prompt working. The customizable prompt groups (UI labels and underlying ids):
+Customize prompts via the UI: *Settings → Customize Prompts*. Customization is **additive** — you edit an instructions-and-examples layer that is appended to fixed, non-editable rules, so a customization extends behavior without dropping the rules that keep the prompt working.
 
-- **Entity Relationships** (`entity_relationship`) — combined entity- and relationship-extraction prompt; controls what becomes a vertex / edge. Tune for noise suppression, domain specificity, and verb-form edge names (e.g. `PUBLISHES`, `OWNS`, `MANAGES` instead of nominal phrases). See §3.
-- **Schema Instructions** (`query_generation`) — instructions used when generating GSQL / Cypher and when filtering the schema for a structured query. Tune if your domain has unusual type names that aren't matching user phrasing, or if generated queries miss obvious joins.
+The page groups the prompts by where they are used, and shows only the prompts that the current **Answer Engine** and **Agent** settings use. **Show all prompts** shows the others too, marked *Not used with the current settings*; a conversation can still use them when the chat menu selects another engine.
+
+*Ingestion*
+
+- **Schema Extraction** (`schema_extraction`) — how a domain schema is proposed from sample documents in the *Initialize Knowledge Graph* dialog.
+- **Entity Relationships** (`entity_relationship`) — combined entity- and relationship-extraction prompt; controls what becomes a vertex / edge. Tune for noise suppression, domain specificity, and verb-form edge names.
 - **Community Summarization** (`community_summarization`) — how community summaries are produced during knowledge-graph build. Tune for length / tone and to bias summaries toward domain-specific framing.
-- **Chatbot Responses** (`chatbot_response`) — the final answer template. Keep it short; the LLM responds best to clear constraints (*"answer in ≤3 sentences, cite the doc id"*).
+
+*Answers*
+
+- **Query Guidance** (`query_guidance`) — domain hints and example mappings for the graph queries GraphRAG writes. Tune if your domain has type names that don't match user phrasing.
+- **Chatbot Responses** (`chatbot_response`) — how the final answer is composed, for every engine. Keep it short; the LLM responds best to clear constraints (*"answer in ≤3 sentences, cite the doc id"*).
+- **Question Routing** (`route_response`) — Classic engine only: whether a question goes to structured functions, documents or the conversation history.
+
+*Agents*
+
 - **Deep Agent** (`deep_agent`) — additional instructions for the Deep Agent, appended to its fixed rules. Empty by default; use it to describe what the graph contains and how to search and answer for it.
-- **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — the retrieval strategy of each legacy agent style: which methods to use, when, and in what order. The role and act model stay fixed. Used only when `agent_engine` is `"legacy"`.
-- **Agent Routing** (`agentic_triage`) — the policy that decides whether a message is answered directly (greetings, questions about the assistant) or sent to the agent to retrieve / use a tool.
+- **Agent Routing** (`agentic_triage`), **Agentic Planner** (`agentic_planner`) and **React Agent** (`agentic_agent`) — legacy agents only: whether a message is answered directly or sent to the agent, and the retrieval strategy of the Planned and Reactive styles. The role and act model stay fixed.
 
 When customizing:
 

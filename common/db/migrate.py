@@ -265,6 +265,36 @@ _EDGE_PAIR_RE = re.compile(r"FROM\s+(\w+)\s*,\s*TO\s+(\w+)", re.IGNORECASE)
 class SchemaCompatibility:
     compatible: bool
     differences: list = field(default_factory=list)
+    # (edge, from, to) structural pairs the graph lacks. They are repairable
+    # in place, so they do not make the graph incompatible.
+    missing_pairs: list = field(default_factory=list)
+
+
+# Edge types that link GraphRAG's structure to entity and domain vertex types.
+STRUCTURAL_LINK_EDGES = ("CONTAINS_ENTITY", "IN_COMMUNITY")
+EDGE_PAIRS_JOB = "graphrag_add_edge_pairs"
+
+
+def domain_structural_pairs(domain_vts) -> list:
+    """The structural pairs each domain vertex type needs: documents and
+    chunks contain it, and it belongs to communities."""
+    pairs = []
+    for vt in sorted(domain_vts):
+        pairs += [("CONTAINS_ENTITY", "Document", vt),
+                  ("CONTAINS_ENTITY", "DocumentChunk", vt),
+                  ("IN_COMMUNITY", vt, "Community")]
+    return pairs
+
+
+def add_edge_pairs_gsql(graphname: str, pairs) -> str:
+    """GSQL that adds ``pairs`` ((edge, from, to)) in one schema change job;
+    the job is dropped after it runs."""
+    alters = "\n".join(f"  ALTER EDGE {e} ADD PAIR (FROM {f}, TO {t});" for e, f, t in pairs)
+    return (
+        f"USE GRAPH {graphname}\n"
+        f"CREATE SCHEMA_CHANGE JOB {EDGE_PAIRS_JOB} FOR GRAPH {graphname} {{\n{alters}\n}}\n"
+        f"RUN SCHEMA_CHANGE JOB {EDGE_PAIRS_JOB}\nDROP JOB {EDGE_PAIRS_JOB}"
+    )
 
 
 def _attr_names(segment: str) -> set:
@@ -302,30 +332,39 @@ def _live_attr_names(meta: dict) -> set:
 def _edge_connects(meta: dict, from_vt: str, to_vt: str) -> bool:
     """Whether the live edge accepts ``from_vt -> to_vt``.
 
-    Multi-pair edges list their pairs under ``EdgePairs``. An edge whose
-    endpoints are reported as ``*`` with no pair list accepts any type at
-    that end; TigerGraph reports ``IN_COMMUNITY`` this way once domain types
-    have been added to it.
+    Multi-pair edges list their pairs under ``EdgePairs``. An edge reported
+    with ``*`` endpoints and no pair list has no pairs at all (the GSQL
+    catalog shows it as ``EDGE()``): it connects nothing, and queries that
+    traverse it do not compile.
     """
     pairs = [(ep.get("From"), ep.get("To")) for ep in meta.get("EdgePairs", []) or []]
     if pairs:
         return (from_vt, to_vt) in pairs
-    f, t = meta.get("FromVertexTypeName"), meta.get("ToVertexTypeName")
-    return f in ("*", from_vt) and t in ("*", to_vt)
+    return meta.get("FromVertexTypeName") == from_vt and meta.get("ToVertexTypeName") == to_vt
 
 
 def check_schema_compatibility(conn, base_schema_path: str = BASE_SCHEMA_PATH) -> SchemaCompatibility:
-    """Whether the graph has every element of the shipped base schema.
+    """Whether the graph has every element of the shipped base schema, and
+    which structural edge pairs it lacks.
 
-    Raises when the live schema cannot be read, so callers can tell "not
-    compatible" from "could not check".
+    Missing pairs of ``CONTAINS_ENTITY`` and ``IN_COMMUNITY`` between vertex
+    types the graph has are returned in ``missing_pairs`` and do not make the
+    graph incompatible: a schema change can add them. This includes the
+    pairs of each domain vertex type. Raises when the live schema cannot be
+    read, so callers can tell "not compatible" from "could not check".
     """
+    from common.db.schema_utils import is_structural_type
+    # pyTigerGraph caches the schema; read it again so a check after a
+    # schema change sees the change.
+    if hasattr(conn, "getSchema"):
+        conn.getSchema(force=True)
     with open(base_schema_path, encoding="utf-8") as f:
         exp_vertices, exp_edges = parse_base_schema(f.read())
 
     live_vertices = set(conn.getVertexTypes() or [])
     live_edges = set(conn.getEdgeTypes() or [])
     differences = []
+    missing_pairs = []
 
     for vt, attrs in exp_vertices.items():
         if vt not in live_vertices:
@@ -340,15 +379,28 @@ def check_schema_compatibility(conn, base_schema_path: str = BASE_SCHEMA_PATH) -
             differences.append(f"missing edge type {et}")
             continue
         meta = conn.getEdgeType(et) or {}
-        missing_pairs = {(f, t) for f, t in spec["pairs"] if not _edge_connects(meta, f, t)}
-        if missing_pairs:
-            pairs = ", ".join(f"{a}->{b}" for a, b in sorted(missing_pairs))
+        unconnected = {(f, t) for f, t in spec["pairs"] if not _edge_connects(meta, f, t)}
+        if et in STRUCTURAL_LINK_EDGES:
+            repairable = {(f, t) for f, t in unconnected
+                          if f in live_vertices and t in live_vertices}
+            missing_pairs += [(et, f, t) for f, t in sorted(repairable)]
+            unconnected -= repairable
+        if unconnected:
+            pairs = ", ".join(f"{a}->{b}" for a, b in sorted(unconnected))
             differences.append(f"edge type {et} does not connect {pairs}")
         missing = spec["attrs"] - _live_attr_names(meta)
         if missing:
             differences.append(f"edge type {et} is missing attribute(s) {', '.join(sorted(missing))}")
 
-    return SchemaCompatibility(compatible=not differences, differences=differences)
+    domain_vts = [v for v in live_vertices if not is_structural_type(v)]
+    if domain_vts and all(e in live_edges for e in STRUCTURAL_LINK_EDGES):
+        metas = {e: conn.getEdgeType(e) or {} for e in STRUCTURAL_LINK_EDGES}
+        for e, f, t in domain_structural_pairs(domain_vts):
+            if f in live_vertices and t in live_vertices and not _edge_connects(metas[e], f, t):
+                missing_pairs.append((e, f, t))
+
+    return SchemaCompatibility(compatible=not differences, differences=differences,
+                               missing_pairs=missing_pairs)
 
 
 # ---------------------------------------------------------------------------

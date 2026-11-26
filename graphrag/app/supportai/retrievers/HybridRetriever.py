@@ -156,7 +156,7 @@ class HybridRetriever(BaseRetriever):
             return
         retrieved = res[0].setdefault("final_retrieval", {})
         try:
-            match = keyword_match(self.conn, question, cfg.get("keyword_top_k", top_k))
+            match = keyword_match(self.conn, question, top_k)
             if match is None or (strong_only and match.strength != "strong"):
                 return
             matches = match.chunks

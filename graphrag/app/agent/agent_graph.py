@@ -12,7 +12,6 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-import boto3
 import os
 import re
 import json
@@ -46,7 +45,7 @@ from tools.generate_cypher import CYPHER_MAX_ATTEMPTS, generate_and_run_cypher
 from common.logs.log import req_id_cv
 from common.metrics.prometheus_metrics import metrics as pmetrics
 from common.py_schemas import GraphRAGResponse, MapQuestionToSchemaResponse
-from common.llm_services.aws_bedrock_service import AWSBedrock
+from common.utils.image_links import resolve_image_links
 from common.config import get_graphrag_config
 
 logger = logging.getLogger(__name__)
@@ -763,14 +762,10 @@ class TigerGraphAgentGraph:
         )
 
         try:
-            # Replace S3 URLs with presigned URLs (for AWS Bedrock BDA processing)
-            if isinstance(self.llm_provider, AWSBedrock):
-                answer.generated_answer = self.replace_s3_urls_with_presigned(answer.generated_answer)
-            
-            # Convert [IMAGE_REF:image_id] to markdown images for React UI
-            # This converts internal image references to URLs that the UI can display
-            answer.generated_answer = self.convert_image_refs_to_markdown(answer.generated_answer)
-            
+            answer.generated_answer = resolve_image_links(
+                answer.generated_answer, self.db_connection.graphname, self.llm_provider
+            )
+
             resp = GraphRAGResponse(
                 natural_language_response=answer.generated_answer,
                 answered_question=True,
@@ -787,90 +782,6 @@ class TigerGraphAgentGraph:
         state["answer"] = resp
 
         return state
-
-    def replace_s3_urls_with_presigned(self, content, expires_in=3600):
-        """
-        Recursively detects S3 URLs in content (string, list, or dict) 
-        and replaces them with presigned URLs.
-
-        Args:
-            content (Any): String, dict, or list containing potential S3 URLs.
-            expires_in (int): Expiration time for the presigned URL in seconds.
-
-        Returns:
-            Any: Content with S3 URLs replaced by presigned URLs (same type as input).
-        """
-
-        s3_url_pattern = r'\(s3://([^/]+)/([^\)]+)\)'
-        s3 = boto3.client('s3')
-
-        def presign(match):
-            bucket, key = match.group(1), match.group(2)
-            try:
-                url = s3.generate_presigned_url(
-                    'get_object',
-                    Params={'Bucket': bucket, 'Key': key},
-                    ExpiresIn=expires_in
-                )
-                return f"({url})"
-            except Exception as e:
-                logger.error(f"Failed to presign S3 url for s3://{bucket}/{key}: {e}")
-                return f"({match.group(0)})"
-
-        def process(value):
-            if isinstance(value, str):
-                return re.sub(s3_url_pattern, presign, value)
-            elif isinstance(value, list):
-                return [process(v) for v in value]
-            elif isinstance(value, dict):
-                return {k: process(v) for k, v in value.items()}
-            else:
-                return value
-
-        return process(content)
-
-    def convert_image_refs_to_markdown(self, text):
-        """
-        Convert tg:// protocol URLs to actual API endpoint URLs for images stored in TigerGraph.
-        
-        Creates relative URLs pointing to the /ui/image_vertex/ endpoint which serves images 
-        from TigerGraph. The endpoint uses standard HTTP Basic Authentication (same pattern as 
-        other endpoints), so credentials are handled via HTTP headers, not URL parameters.
-        
-        PATH_PREFIX is automatically handled by FastAPI router configuration.
-        
-        Format: ![description](tg://image_id) → ![description](/ui/image_vertex/{graphname}/{image_id})
-        
-        Args:
-            text (str): The text containing markdown images with tg:// protocol.
-            
-        Returns:
-            str: The text with tg:// URLs converted to endpoint URLs.
-        """
-        if not isinstance(text, str):
-            return text
-            
-        if "(tg://" not in text:
-            return text
-        
-        # Get graphname from connection
-        graphname = self.db_connection.graphname
-        
-        # Replace tg://image_id with actual endpoint URL and count
-        # Preserves the image description from markdown
-        # Note: Authentication is handled via HTTP Basic Auth headers (standard FastAPI pattern)
-        # PATH_PREFIX is already applied at router level in main.py, so use relative URL
-        converted, count = re.subn(
-            r'!\[([^\]]*)\]\(tg://([^\)]+)\)',
-            rf'![\1](/ui/image_vertex/{graphname}/\2)',
-            text
-        )
-        
-        if count > 0:
-            logger.info(f"Converted {count} tg:// image reference(s) to endpoint URLs")
-            return converted
-        else:
-            return text
 
     def rewrite_question(self, state):
         """

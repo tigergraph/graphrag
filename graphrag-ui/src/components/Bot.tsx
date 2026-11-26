@@ -20,6 +20,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
+// Header menus open over the page background, so they use the raised surface.
+const HEADER_MENU = "bg-gray-100 dark:bg-shadeA border-gray-300 dark:border-[#3D3D3D] [&_[role=menuitem]:focus]:bg-gray-200 dark:[&_[role=menuitem]:focus]:bg-[#3D3D3D] [&_[role=separator]]:bg-gray-300 dark:[&_[role=separator]]:bg-[#3D3D3D]";
+
 const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getConversationId?:any }) => {
   const [store, setStore] = useState<any>();
   const [currentDate, setCurrentDate] = useState('');
@@ -187,14 +190,14 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="outline"
-                  className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-white dark:bg-background z-50 rounded-tr-lg"
+                  className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-gray-100 dark:bg-shadeA dark:border-[#3D3D3D] hover:bg-gray-200 dark:hover:bg-[#3D3D3D] z-50 rounded-tr-lg"
                 >
                   <img src="/graph-icon.svg" alt="" className="mr-2" />
                   {triggerLabel} <MdKeyboardArrowDown className="text-2xl" />
                 </Button>
               </DropdownMenuTrigger>
 
-              <DropdownMenuContent className="w-72">
+              <DropdownMenuContent className={`${HEADER_MENU} w-72`}>
                 <DropdownMenuLabel className="flex items-center gap-2 px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">
                   <span className="text-sm">🤖</span> Agent
                   {!agenticAvailable && (
@@ -260,14 +263,14 @@ const Bot = ({ layout, getConversationId }: { layout?: string | undefined, getCo
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="outline"
-                  className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-white dark:bg-background z-50 rounded-tr-lg"
+                  className="!h-[48px] !outline-b !outline-gray-300 dark:!outline-[#3D3D3D] h-[70px] flex justify-end items-center bg-gray-100 dark:bg-shadeA dark:border-[#3D3D3D] hover:bg-gray-200 dark:hover:bg-[#3D3D3D] z-50 rounded-tr-lg"
                 >
                   <img src="/graph-icon.svg" alt="" className="mr-2" />
                   {selectedGraph || <span className="text-gray-400 italic">No Knowledge Graph</span>} <MdKeyboardArrowDown className="text-2xl" />
                 </Button>
               </DropdownMenuTrigger>
 
-            <DropdownMenuContent className="min-w-[14rem] max-w-[32rem]">
+            <DropdownMenuContent className={`${HEADER_MENU} min-w-[14rem] max-w-[32rem]`}>
               <DropdownMenuLabel>Select a KnowledgeGraph</DropdownMenuLabel>
               <DropdownMenuSeparator />
               <DropdownMenuGroup>

@@ -25,7 +25,7 @@ const INPUT_CLIP_FIX: React.CSSProperties = {
   lineHeight: "1.5",
 };
 
-const INPUT_STYLE = "dark:border-[#3D3D3D] h-14 py-3 dark:bg-shadeA";
+const INPUT_STYLE = "dark:border-[#3D3D3D] h-14 py-3 bg-gray-100 dark:bg-shadeA";
 
 export function Login() {
   const { i18n, t } = useTranslation();
@@ -136,7 +136,7 @@ export function Login() {
               <select
                 value={tokenType}
                 onChange={(e) => setTokenType(e.target.value as TokenType)}
-                className="block w-full h-14 px-3 rounded-md border border-input bg-background dark:border-[#3D3D3D] dark:bg-shadeA text-sm"
+                className="block w-full h-14 px-3 rounded-md border border-input bg-gray-100 dark:border-[#3D3D3D] dark:bg-shadeA text-sm"
               >
                 <option value="apiToken">API Token</option>
                 <option value="secret">Secret</option>
@@ -221,7 +221,7 @@ export function Login() {
       <select
         defaultValue={i18n.language}
         onChange={onChangeLang}
-        className="rounded-lg border border-shadeA dark:bg-background dark:text-white absolute bottom-10 p-3 left-10"
+        className="rounded-lg border border-gray-300 dark:border-[#3D3D3D] bg-gray-100 dark:bg-shadeA dark:text-white absolute bottom-10 p-3 left-10"
       >
         {LANGUAGES.map(({ code, label }) => (
           <option key={code} value={code}>

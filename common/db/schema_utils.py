@@ -51,11 +51,16 @@ only) so it's unit-testable without spinning up TigerGraph or the LLM.
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, List, Optional, Sequence, Set, Tuple
+
+from common.utils.step_log import log_step
+
+logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------------------------
@@ -650,6 +655,33 @@ def _extract_description_for(text: str, decl_start: int) -> str:
             break
 
     return " ".join(s.strip() for s in comment_lines if s.strip())
+
+
+def check_pasted_schema(text: str, proposal: SchemaProposal) -> List[str]:
+    """Problems in a pasted domain schema that would fail or silently change
+    the setup, found before any schema change. Empty when the schema can be
+    applied. ``proposal`` is ``parse_gsql_schema(text)``, which drops edge
+    pairs to undefined vertex types, so those are read from ``text``."""
+    problems: List[str] = []
+    if text and text.strip() and not proposal.vertices:
+        problems.append("No vertex types were found in the pasted schema.")
+        return problems
+    vertex_names = {v.name.casefold() for v in proposal.vertices}
+    for m in _EDGE_LINE_RE.finditer(text or ""):
+        name = m.group("name")
+        if is_structural_type(name) or name.lower().startswith("reverse_"):
+            continue
+        if name.casefold() in vertex_names:
+            problems.append(f"{name} is used for both a vertex type and an edge type.")
+        for pm in _EDGE_PAIR_RE.finditer(m.group("body") or ""):
+            for end in (pm.group("from"), pm.group("to")):
+                # Pairs to GraphRAG's own types are dropped by design.
+                if not is_structural_type(end) and end.casefold() not in vertex_names:
+                    problems.append(
+                        f"Edge type {name} refers to vertex type {end}, "
+                        "which the pasted schema does not define."
+                    )
+    return list(dict.fromkeys(problems))
 
 
 def parse_gsql_schema(text: str) -> SchemaProposal:
@@ -1582,9 +1614,14 @@ def apply_proposal(
     proposal: SchemaProposal,
     job_name: Optional[str] = None,
     progress: Optional[Callable[[str], None]] = None,
+    install_retrievers: bool = True,
 ) -> dict:
     """Diff *proposal* against the current schema on *conn* and apply the
     additive delta as a single atomic ``SCHEMA_CHANGE JOB``.
+
+    With ``install_retrievers=False`` the templated retrievers are left to
+    the caller, which graph setup uses to create and install every query
+    once, after the final schema exists.
 
     Returns a result dict::
 
@@ -1632,12 +1669,13 @@ def apply_proposal(
         # review panel land on EntityType / RelationshipType vertices.
         # The upsert is fast (<5s) so we don't surface it as its own
         # status — the previous phase's message lingers through it.
-        metadata = upsert_type_metadata(conn, proposal)
-        retrievers = _install_retrievers_after_apply(
+        with log_step(logger, graphname, "type descriptions"):
+            metadata = upsert_type_metadata(conn, proposal)
+        retrievers = (_install_retrievers_after_apply(
             conn, graphname,
             proposal=proposal, pre_apply_existing=existing,
             progress=progress,
-        )
+        ) if install_retrievers else {"status": "deferred"})
         return {
             "status": "no-op",
             "statements": [],
@@ -1678,14 +1716,18 @@ def apply_proposal(
     phase_outputs: List[str] = []
     phase_jobs: List[str] = []
     first_job_name: Optional[str] = None
-    for phase_stmts in (add_stmts, alter_stmts):
+    for phase_label, phase_stmts in (("domain types", add_stmts), ("edge pairs", alter_stmts)):
         if not phase_stmts:
             continue
         # Only honor the caller-supplied job_name on the first phase that
         # actually runs; subsequent phases get auto-generated names so
         # they don't collide.
         phase_job = job_name if first_job_name is None else None
+        started = time.time()
+        logger.info(f"setup step start: {phase_label} (graph={graphname}, {len(phase_stmts)} statements)")
         output, ran_name = _run_phase(phase_stmts, phase_job)
+        logger.info(f"setup step done: {phase_label} (graph={graphname} job={ran_name}) "
+                    f"in {time.time() - started:.1f}s")
         phase_outputs.append(output)
         phase_jobs.append(ran_name)
         if first_job_name is None:
@@ -1709,12 +1751,13 @@ def apply_proposal(
             }
 
     # Metadata upsert is fast (<5s); no separate status message.
-    metadata = upsert_type_metadata(conn, proposal)
-    retrievers = _install_retrievers_after_apply(
+    with log_step(logger, graphname, "type descriptions"):
+        metadata = upsert_type_metadata(conn, proposal)
+    retrievers = (_install_retrievers_after_apply(
         conn, graphname,
         proposal=proposal, pre_apply_existing=existing,
         progress=progress,
-    )
+    ) if install_retrievers else {"status": "deferred"})
     return {
         "status": "applied",
         "statements": statements,
@@ -1772,23 +1815,18 @@ def _graph_has_chunk_context(conn) -> bool:
         return False
 
 
-def _install_retrievers_after_apply(
+def retriever_render_args(
     conn,
     graphname: str,
     proposal: Optional[SchemaProposal] = None,
     pre_apply_existing: Optional[ExistingSchema] = None,
-    progress: Optional[Callable[[str], None]] = None,
 ) -> dict:
-    """Re-render and install the templated retrievers against the live
-    domain schema. No-op when no domain types are on the graph.
-    """
-    try:
-        snapshot = read_existing_schema(conn)
-    except Exception as exc:
-        return {"status": "error", "error": f"read live schema: {exc}"}
-
-    # Union the live-schema view with the proposal so a stale cache
-    # right after SCHEMA_CHANGE JOB doesn't miss new types.
+    """How the templated retrievers render for the graph's live domain
+    schema: ``{"domain_vts", "domain_edges", "include_entity",
+    "transitional"}``. The proposal's types are added to the live ones, so a
+    stale schema cache right after a SCHEMA_CHANGE JOB does not miss them.
+    Raises when the live schema cannot be read."""
+    snapshot = read_existing_schema(conn)
     domain_vt_set: Set[str] = {
         v for v in snapshot.vertex_types if not is_structural_type(v)
     }
@@ -1805,59 +1843,63 @@ def _install_retrievers_after_apply(
                 domain_edge_set.add(e.name)
     domain_vts = sorted(domain_vt_set)
     domain_edges = sorted(domain_edge_set)
-
-    import logging as _logging
-    _logger = _logging.getLogger(__name__)
-    _logger.info(
-        f"_install_retrievers_after_apply: graph={graphname} "
+    logger.info(
+        f"retriever_render_args: graph={graphname} "
         f"domain_vts={len(domain_vts)} directed_domain_edges={len(domain_edges)} "
         f"snapshot_edge_pairs={len(snapshot.edge_pairs)}"
     )
-
-    if not domain_vts and not domain_edges:
-        return {"status": "skipped", "reason": "no domain types on graph"}
-
     transitional: Optional[dict] = None
     if proposal is not None and pre_apply_existing is not None:
-        transitional = _detect_transitional_state(
-            conn, proposal, pre_apply_existing
-        )
-
+        transitional = _detect_transitional_state(conn, proposal, pre_apply_existing)
     try:
-        from common.db.retriever_render import (
-            install_retrievers,
-            resolve_include_entity,
-        )
-    except Exception as exc:
-        return {"status": "error", "error": f"import renderer: {exc}"}
-
-    try:
+        from common.db.retriever_render import resolve_include_entity
         from common.config import graphrag_config
         include_entity = resolve_include_entity(
-            graphrag_config.get,
-            has_domain_schema=bool(domain_vts),
+            graphrag_config.get, has_domain_schema=bool(domain_vts),
         )
     except Exception:
         include_entity = False if domain_vts else True
-
     if transitional:
         include_entity = True
+    return {"domain_vts": domain_vts, "domain_edges": domain_edges,
+            "include_entity": include_entity, "transitional": transitional}
 
+
+def _install_retrievers_after_apply(
+    conn,
+    graphname: str,
+    proposal: Optional[SchemaProposal] = None,
+    pre_apply_existing: Optional[ExistingSchema] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """Re-render and install the templated retrievers against the live
+    domain schema. No-op when no domain types are on the graph.
+    """
+    try:
+        args = retriever_render_args(conn, graphname, proposal, pre_apply_existing)
+    except Exception as exc:
+        return {"status": "error", "error": f"read live schema: {exc}"}
+    if not args["domain_vts"] and not args["domain_edges"]:
+        return {"status": "skipped", "reason": "no domain types on graph"}
+    try:
+        from common.db.retriever_render import install_retrievers
+    except Exception as exc:
+        return {"status": "error", "error": f"import renderer: {exc}"}
     result: dict = {
         "status": "installed",
-        "include_entity": include_entity,
+        "include_entity": args["include_entity"],
         "results": install_retrievers(
             conn,
             graphname,
-            domain_vts=domain_vts,
-            domain_edges=domain_edges,
-            include_entity=include_entity,
+            domain_vts=args["domain_vts"],
+            domain_edges=args["domain_edges"],
+            include_entity=args["include_entity"],
             progress=progress,
             chunk_context=_graph_has_chunk_context(conn),
         ),
     }
-    if transitional:
-        result["transitional"] = transitional
+    if args["transitional"]:
+        result["transitional"] = args["transitional"]
     return result
 
 

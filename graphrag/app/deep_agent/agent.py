@@ -501,6 +501,7 @@ class DeepGraphRAGAgent:
     def _response(self, values: dict, env: ToolEnv, usage: _UsageCallback, tid: str,
                   hit_limit: bool, elapsed: float):
         from common.py_schemas import GraphRAGResponse
+        from common.utils.image_links import resolve_image_links
 
         answer, citations, answered = final_answer(values.get("messages") or [])
         if hit_limit and not answer:
@@ -540,7 +541,7 @@ class DeepGraphRAGAgent:
             query_sources["structured_source"] = {"tool": structured_rows["tool"],
                                                   "query": structured_rows.get("query", "")}
         return GraphRAGResponse(
-            natural_language_response=answer,
+            natural_language_response=resolve_image_links(answer, self.conn.graphname, self.llm),
             answered_question=answered,
             response_type="deep_agent",
             query_sources=query_sources,
