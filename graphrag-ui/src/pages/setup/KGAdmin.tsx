@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TagInput, TypeHint } from "@/components/ui/tag-input";
-import { Database, Loader2, RefreshCw, Search, Upload, Wrench } from "lucide-react";
+import { Database, FileCode, Loader2, RefreshCw, Search, Upload, Wrench } from "lucide-react";
 import { pauseIdleTimer, resumeIdleTimer, pingIdleTimer } from "@/hooks/useIdleTimeout";
 import {
   Dialog,
@@ -25,6 +25,7 @@ import { resolveUploadConflicts } from "@/utils/uploadConflicts";
 import { describeRunUsage } from "@/utils/runUsage";
 import { useNavigate } from "react-router-dom";
 import IngestGraph from "./IngestGraph";
+import QueryToolsDialog from "./QueryToolsDialog";
 
 // Same trick used in Login.tsx — Chrome / Safari on macOS clip the
 // underscore descender inside ``<input>`` even when CSS says there is
@@ -69,6 +70,7 @@ const KGAdmin = () => {
   const [refreshDialogOpen, setRefreshDialogOpen] = useState(false);
   const [ingestDialogOpen, setIngestDialogOpen] = useState(false);
   const [migrationDialogOpen, setMigrationDialogOpen] = useState(false);
+  const [registerDialogOpen, setRegisterDialogOpen] = useState(false);
 
   // Keyword search state
   const [keywordDialogOpen, setKeywordDialogOpen] = useState(false);
@@ -114,6 +116,7 @@ const KGAdmin = () => {
   const [migrationRegenerating, setMigrationRegenerating] = useState("");
   const [migrationSettingUpVersions, setMigrationSettingUpVersions] = useState(false);
   const [migrationMessage, setMigrationMessage] = useState("");
+
   // Reset states when dialogs close
   const handleInitializeDialogChange = (open: boolean) => {
     if (!open && isConfirmDialogOpen) {
@@ -1711,6 +1714,30 @@ const KGAdmin = () => {
               >
                 <Search className="h-4 w-4 mr-2" />
                 Manage Keyword Search
+              </Button>
+            </div>
+          </div>
+
+          {/* Query Tools Card */}
+          <div className="border border-gray-300 dark:border-[#3D3D3D] rounded-lg p-6 bg-white dark:bg-shadeA flex flex-col h-full">
+            <div className="mb-4">
+              <div className="w-12 h-12 rounded-full bg-tigerOrange/10 flex items-center justify-center mb-4">
+                <FileCode className="h-6 w-6 text-tigerOrange" />
+              </div>
+              <h2 className="text-lg font-semibold mb-2 text-black dark:text-white">
+                Query Tools
+              </h2>
+              <p className="text-sm text-gray-600 dark:text-[#D9D9D9] mb-4">
+                Describe installed queries, then choose which ones the chat agent can use as tools.
+              </p>
+            </div>
+            <div className="mt-auto pt-4 border-t border-gray-300 dark:border-[#3D3D3D]">
+              <Button
+                onClick={() => setRegisterDialogOpen(true)}
+                className="gradient w-full text-white"
+              >
+                <FileCode className="h-4 w-4 mr-2" />
+                Manage Query Tools
               </Button>
             </div>
           </div>
@@ -3551,6 +3578,13 @@ const KGAdmin = () => {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        <QueryToolsDialog
+          open={registerDialogOpen}
+          onOpenChange={setRegisterDialogOpen}
+          graphs={availableGraphs}
+        />
+
       </div>
       {confirmDialog}
       {alertDialog}

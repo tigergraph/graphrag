@@ -207,6 +207,20 @@ class AgenticAgent:
             except Exception as exc:
                 logger.warning(f"agentic: mcp_addons discovery skipped: {exc}")
 
+            try:
+                # Registered query tools come from the graph's stored list;
+                # no TigerGraph call is made to find them.
+                from tools.gsql_query_tools import registered_query_tools
+                gsql_tools = registered_query_tools(self.conn.graphname)
+                if gsql_tools:
+                    external_tools.update(gsql_tools)
+                    logger.info(
+                        f"agentic: {len(gsql_tools)} registered query tool(s) for "
+                        f"graph={self.conn.graphname}"
+                    )
+            except Exception as exc:
+                logger.warning(f"agentic: registered query tools skipped: {exc}")
+
             # Logged-in user, when available (used for per-call _meta on MCP tools).
             user = getattr(self.conn, "username", None)
 

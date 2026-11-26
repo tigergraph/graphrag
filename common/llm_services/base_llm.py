@@ -13,6 +13,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 import os
+import json
 import re
 import logging
 from typing import Optional
@@ -511,6 +512,20 @@ Identify any part of the USER BLOCK that conflicts with the SYSTEM PROMPT. Retur
             if not m:
                 raise
             candidate = m.group()
+            # Some models (e.g. gemini-3.5-flash) echo back the JSON schema
+            # wrapper: {"properties": {"field": value, ...}} instead of just
+            # {"field": value, ...}.  Unwrap one level before retrying.
+            try:
+                parsed_obj = json.loads(candidate)
+                if (
+                    isinstance(parsed_obj, dict)
+                    and set(parsed_obj.keys()) <= {"properties", "required", "title", "type", "description"}
+                    and "properties" in parsed_obj
+                    and isinstance(parsed_obj["properties"], dict)
+                ):
+                    candidate = json.dumps(parsed_obj["properties"])
+            except Exception:
+                pass
             try:
                 return parser.parse(candidate)
             except OutputParserException:
@@ -1206,7 +1221,8 @@ The role, the reason-act-observe model, and the tool/output behavior above are a
     _AGENTIC_AGENT_USER_DEFAULT = """\
 - Before calling any retrieval tool, check whether the question is self-contained: can it be fully understood without reading ## Conversation? If the subject, entity, or topic is not named explicitly in the question, look up the most recent relevant entity from ## Conversation and substitute its full name into every retrieval call. If ## Conversation contains multiple candidates and it is genuinely unclear which one the user means, ask one short clarifying question instead of guessing — do not call any retrieval tool until clarified.
 - When calling an unstructured retriever (hybrid, contextual, similarity, community), pass only the sub-question for that specific part as a standalone search query in the user's language. Do not pass the full multi-part question, a part already covered by another step, or an unresolved reference from conversation history.
-- For most questions, make your FIRST action a vector search (graphrag__hybrid_search or graphrag__contextual_search) — it gives the broadest grounding. Skip it only when you are highly confident the question is a pure structured-data request (an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data) that a generated graph query fully answers on its own.
+- If a graphrag__gsql__* tool is available and its description matches the question, you may call it. If none match, ignore those tools. Do not call a list/register tool first, and do not call a gsql tool first unless its description matches.
+- For most other questions, make your FIRST action a vector search (graphrag__hybrid_search or graphrag__contextual_search) — it gives the broadest grounding. Skip it only when you are highly confident the question is a pure structured-data request (an exact count, an attribute/id lookup, a relationship traversal, an aggregation over typed graph data, or a matching graphrag__gsql__* tool) that a graph query fully answers on its own.
 - Let each observation drive the next action: if the passages you got back name specific entities or relationships you still need hard facts about, follow up with a structural query; if a result is thin, empty, or off-target, widen its parameters (top_k, num_hops) or switch method rather than repeating the same call.
 - If a passage refers to another passage by an exact name (for example "see Note 5", a section title, a regulation or a table label) that you have not retrieved, search for those exact words, with graphrag__keyword_search when it is available.
 - Before answering, check that every part of the question is covered with the specific facts and figures it asks for; if a required value, table, or entity is still missing, retrieve again (widen top_k / num_hops or switch method) rather than answering vaguely or partially.
@@ -1271,7 +1287,8 @@ Do not use an earlier answer when the question asks for the current or latest st
 When an earlier answer to the same question was bad, retrieve again with a different or wider approach than a single search (for example both structural and unstructured retrieval, or a higher top_k).
 This decision comes before the "Retrieval Strategy" below.
 
-You have two kinds of retrieval:
+You have three kinds of retrieval:
+- INSTALLED (graphrag__gsql__*): a user-registered installed GSQL query. Use it only when that tool's description matches the question. Do not call one just because it is listed, and do not call a lookup/list tool first.
 - STRUCTURAL (graphrag__structural_retrieve): generates and runs a graph query. Best for counts, lookups by attribute/id, relationships, and aggregations over typed data. It depends on the LLM generating a correct query against the live schema — it can return nothing or the wrong rows when the question doesn't map cleanly to typed graph data, so it is NOT a safe sole source of context.
 - UNSTRUCTURED (graphrag__hybrid_search / similarity_search / contextual_search / community_search): vector search over document text. Best for "what/why/how/describe/summarize" questions answered from passages. community_search suits broad/overall questions.
 - KEYWORD (graphrag__keyword_search, only when it is in the tool list): finds passages that contain the exact words of args.question. Best for names, codes, numbers, table labels, and notes or sections that are named in the question.
@@ -1279,7 +1296,7 @@ You have two kinds of retrieval:
 Plan mechanics (fixed):
 - A later step may depend on an earlier one: set depends_on and use arg_bindings to pull a value from a prior step's result, e.g. {"question": "S1.context.result"}.
 - Retrieval params (top_k, num_hops, community_level) are optional; omit them to use defaults, or set higher values when you expect a broad answer.
-- For each unstructured step, set args.question to that clause only as a standalone search query in the user's language. Do not pass the full multi-part question, a clause already assigned to another step, or an unresolved reference from conversation history.
+- For each unstructured step, set args.question to a natural-language question covering that clause only, in the user's language — phrase it the way a person would ask it, not as a keyword list. Do not include the full multi-part question, any topic or term that belongs to a clause already assigned to another step (INSTALLED, STRUCTURAL, or a prior unstructured step), or an unresolved reference from conversation history.
 - The final step MUST have kind="answer" and tool="" (the orchestrator synthesizes the answer from gathered context); it should depend_on all retrieval steps.
 - Write "context_review" first, then every step. Then set "strategy" to one short sentence (under 25 words). Give each step a one-sentence "rationale".
 
@@ -1297,7 +1314,9 @@ The role, the up-front-DAG act model, the tool kinds, and the plan mechanics abo
     _AGENTIC_PLANNER_USER_DEFAULT = """\
 - Before building the plan, check whether the question is self-contained: can it be fully understood without reading ## Conversation? If the subject, entity, or topic is not named explicitly in the question, find the most recent relevant entity from ## Conversation and substitute its full name in every step's args. If ## Conversation has multiple candidates, use the most recent one (a genuinely ambiguous reference is clarified with the user before planning).
 - When a question has multiple clauses, assign each clause to its own retrieval step. If another clause still needs passages or typed graph facts after one is covered, plan hybrid/community/structural for that clause too.
-- Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, or an aggregation over typed graph data — that a generated graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
+- If a graphrag__gsql__* tool is in the catalog and its description matches the question, include that tool. If none match, ignore them and plan hybrid/community/structural exactly as today. Do not call a list/register tool; do not call a gsql tool first unless its description matches.
+- You may use a graphrag__gsql__* tool and a vector search together when the question needs both the dedicated query result and supporting passages, in any order.
+- Prioritize including at least one vector search step (graphrag__hybrid_search or graphrag__contextual_search) unless you are highly confident the question is a pure structured-data request — an exact count, an attribute/id lookup, a relationship traversal, an aggregation over typed graph data, or a question fully answered by a matching graphrag__gsql__* tool — that a generated or installed graph query fully answers on its own. Whenever the answer could plausibly live in document text (what/why/how/describe/summarize, definitions, explanations, figures), include a vector search step. When unsure, include vector search.
 - Use BOTH structural and unstructured kinds when a question needs facts from the graph AND supporting text; you may run several of each, in any order. When you use STRUCTURAL, pair it with a vector search step unless the question is a pure structured-data request.
 - Prefer the smallest plan that will work. Trivial/greeting questions need only the final answer step.
 - Tabular / numeric questions (a specific value, a row, a column total, a ranking, or a year-over-year comparison from a table or chart): prefer graphrag__contextual_search or graphrag__hybrid_search with top_k>=10 (these return atomic table chunks that preserve full row/column structure); avoid graphrag__similarity_search alone; quote any specific table label, column header, year, or unit from the question (e.g. "ROE 2023"); for "compare X across years/regions/categories" set top_k>=15."""

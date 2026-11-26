@@ -538,7 +538,8 @@ def _safe_name(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "__", name)[:64]
 
 
-def _mcp_tools(env: ToolEnv, external: Dict[str, Any]) -> List[BaseTool]:
+def _mcp_tools(env: ToolEnv, external: Dict[str, Any],
+               label: str = "Calling an external tool") -> List[BaseTool]:
     out = []
     for qualified, spec in (external or {}).items():
         if spec.fn is None:
@@ -546,7 +547,7 @@ def _mcp_tools(env: ToolEnv, external: Dict[str, Any]) -> List[BaseTool]:
         name = _safe_name(qualified)
 
         def _call(_spec=spec, _name=name, **kwargs) -> str:
-            return _run_tool(env, _name, "Calling an external tool", kwargs,
+            return _run_tool(env, _name, label, kwargs,
                              lambda: _spec.fn(env.graph_ctx, **kwargs))
 
         schema = dict(spec.args_schema_json or {"type": "object", "properties": {}})
@@ -567,10 +568,13 @@ GRAPHRAG_TOOL_NAMES = ("get_graph_schema", "query_graph", "hybrid_search", "simi
                        "contextual_search", "keyword_search", "community_search")
 
 
-def build_tools(env: ToolEnv, external_tools: Optional[Dict[str, Any]] = None) -> Dict[str, List[BaseTool]]:
-    """All tools of one request, grouped: ``graphrag``, ``tigergraph``, ``mcp``."""
+def build_tools(env: ToolEnv, external_tools: Optional[Dict[str, Any]] = None,
+                registered_queries: Optional[Dict[str, Any]] = None) -> Dict[str, List[BaseTool]]:
+    """All tools of one request, grouped: ``graphrag``, ``tigergraph``,
+    ``registered`` (installed GSQL queries registered as tools) and ``mcp``."""
     return {
         "graphrag": _graphrag_tools(env),
         "tigergraph": _tigergraph_tools(env),
+        "registered": _mcp_tools(env, registered_queries or {}, "Running a registered query"),
         "mcp": _mcp_tools(env, external_tools or {}),
     }
