@@ -191,6 +191,48 @@ def final_answer(messages: list) -> tuple:
     return "", [], False
 
 
+# Characters of tool output the step-limit answer reads, newest first.
+EVIDENCE_CHARS = 60000
+
+
+def gathered_evidence(messages: list, limit: int = EVIDENCE_CHARS) -> str:
+    """The tool results of the latest turn as text, newest kept first when
+    they do not all fit in ``limit`` characters, in the order they ran."""
+    from langchain_core.messages import ToolMessage
+
+    turn = []
+    for m in reversed(messages or []):
+        if isinstance(m, HumanMessage):
+            break
+        if isinstance(m, ToolMessage):
+            turn.append(m)
+    parts, used = [], 0
+    for m in turn:
+        text = _text(m.content).strip()
+        if not text:
+            continue
+        piece = f"[{getattr(m, 'name', None) or 'tool'}]\n{text}"
+        if used + len(piece) > limit:
+            piece = piece[: max(0, limit - used)]
+        if piece:
+            parts.append(piece)
+            used += len(piece)
+        if used >= limit:
+            break
+    return "\n\n".join(reversed(parts))
+
+
+STEP_LIMIT_ANSWER = (
+    "You ran out of steps while researching the question below. Do not look "
+    "anything up. Answer it now from the tool results that follow, which are "
+    "everything you retrieved. State only what these results support. Where "
+    "the question asks for something the results do not cover, say so in one "
+    "sentence. Follow the answer rules below.\n\n"
+    "{guidance}"
+    "## Question\n{question}\n\n## Tool results\n{evidence}"
+)
+
+
 def history_messages(conversation) -> list:
     """Caller-supplied turns ``[{query, response}]`` as chat messages."""
     out = []
@@ -201,6 +243,36 @@ def history_messages(conversation) -> list:
         if r:
             out.append(AIMessage(content=str(r)))
     return out
+
+
+# Earlier user questions read with the current one when choosing connector
+# guidance, so a follow-up such as "and its comments?" keeps the source and
+# record of the question it follows.
+GUIDANCE_TURNS = 2
+
+
+def guidance_question(question: str, conversation=None, prior=None) -> str:
+    """The text connector guidance is chosen from: the last few user
+    questions of the conversation (caller-supplied turns, or the stored
+    thread's messages) followed by the current question."""
+    earlier = [str(t.get("query")) for t in (conversation or []) if t.get("query")]
+    if not earlier:
+        earlier = [_text(m.content) for m in (prior or []) if isinstance(m, HumanMessage)]
+    earlier = [q for q in earlier[-GUIDANCE_TURNS:] if q.strip()]
+    return "\n".join(earlier + [question or ""])
+
+
+def connector_guidance(text: str) -> str:
+    """Connector guidance for the Deep Agent's prompts, or '' when none applies
+    or the connector registry cannot be loaded."""
+    if not text:
+        return ""
+    try:
+        from connectors.prompt_selection import agent_guidance
+        return agent_guidance(text)
+    except Exception as exc:
+        logger.warning(f"deep_agent: connector guidance skipped: {exc}")
+        return ""
 
 
 class DeepGraphRAGAgent:
@@ -323,9 +395,11 @@ class DeepGraphRAGAgent:
 
         style, extra = self._instructions()
         ltm = bool(settings.long_term_memory and store is not None and self.user)
+        connector = connector_guidance(env.user_question)
         system_prompt = prompts.main_prompt(
             self.graphname, date.today().isoformat(), env.use_cypher, style, extra,
             long_term_memory=ltm, keyword_search="keyword_search" in tool_names,
+            connector_guidance=connector,
         )
 
         subagents = []
@@ -337,7 +411,8 @@ class DeepGraphRAGAgent:
                     "description": "Answers one focused question from the structured graph "
                                    "data (counts, lookups, relationships, aggregations, "
                                    "installed analytics queries).",
-                    "system_prompt": prompts.graph_analyst_prompt(self.graphname, env.use_cypher),
+                    "system_prompt": prompts.graph_analyst_prompt(
+                        self.graphname, env.use_cypher, connector_guidance=connector),
                     "tools": [by_name["get_graph_schema"], by_name["query_graph"]] + tg_tools,
                 },
                 {
@@ -415,6 +490,8 @@ class DeepGraphRAGAgent:
                 checkpointer = InMemorySaver(serde=mem.serializer())
                 prior = []
             seed = history_messages(convo) if not prior else []
+            env.user_question = guidance_question(question, convo, prior)
+            env.question = question or ""
 
             agent = self.build(env, external, checkpointer, backends.store)
             config = {
@@ -498,11 +575,35 @@ class DeepGraphRAGAgent:
             })
         return steps
 
+    def _answer_from_evidence(self, values: dict, env: ToolEnv, usage: _UsageCallback) -> str:
+        """One model call that answers from the tool results already gathered,
+        for a turn that hit the step limit. '' when nothing was gathered or the
+        call fails."""
+        evidence = gathered_evidence(values.get("messages") or [])
+        if not evidence:
+            return ""
+        question = env.question or env.user_question or ""
+        guidance = connector_guidance(env.user_question or question)
+        prompt = STEP_LIMIT_ANSWER.format(
+            guidance=f"{guidance}\n\n" if guidance else "",
+            question=question, evidence=evidence)
+        self.emit_progress("Writing the answer from what was found")
+        try:
+            msg = self.llm.llm.invoke([HumanMessage(content=prompt)],
+                                      config={"callbacks": [usage]})
+            return _text(getattr(msg, "content", "")).strip()
+        except Exception as exc:
+            logger.warning(f"deep_agent: answer after the step limit failed: {exc}")
+            return ""
+
     def _response(self, values: dict, env: ToolEnv, usage: _UsageCallback, tid: str,
                   hit_limit: bool, elapsed: float):
         from common.py_schemas import GraphRAGResponse
 
         answer, citations, answered = final_answer(values.get("messages") or [])
+        if hit_limit and not answer:
+            answer = self._answer_from_evidence(values, env, usage)
+            answered = bool(answer)
         if hit_limit and not answer:
             answer = ("I gathered some information but could not finish the answer within the "
                       "step budget. Please narrow the question or ask about one part at a time.")

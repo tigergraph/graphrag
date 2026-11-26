@@ -735,6 +735,9 @@ class ExistingSchema:
     vertex_types: Set[str] = field(default_factory=set)
     edge_pairs: dict = field(default_factory=dict)
     directed_edges: Set[str] = field(default_factory=set)
+    # type name → {attribute name: TG type}. Absent key means the snapshot
+    # did not read attributes, so the diff must not invent ALTER statements.
+    vertex_attributes: dict = field(default_factory=dict)
 
     def has_vertex(self, name: str) -> bool:
         folded = name.casefold()
@@ -817,6 +820,43 @@ def _default_literal(tg_type: str) -> str:
     return '""'
 
 
+def _stored_attribute_types(metadata: dict) -> dict[str, str]:
+    """Map installed attribute names to their types, excluding the primary id."""
+    primary_id = (metadata.get("PrimaryId") or {}).get("AttributeName")
+    found: dict[str, str] = {}
+    for attribute in metadata.get("Attributes") or []:
+        name = attribute.get("AttributeName")
+        if not name or name == primary_id:
+            continue
+        attribute_type = (
+            (attribute.get("AttributeType") or {}).get("Name") or "STRING"
+        )
+        found[str(name).casefold()] = str(attribute_type).upper()
+    return found
+
+
+def _attributes_for(existing: ExistingSchema, vertex_name: str) -> dict[str, str] | None:
+    """Return installed attributes, or None when this snapshot did not read them."""
+    for name, attributes in existing.vertex_attributes.items():
+        if name.casefold() == vertex_name.casefold():
+            return attributes
+    return None
+
+
+def _read_vertex_attributes(conn, vertex_types) -> dict:
+    getter = getattr(conn, "getVertexType", None)
+    if not callable(getter):
+        return {}
+    found = {}
+    for name in vertex_types:
+        try:
+            metadata = getter(name) or {}
+        except Exception:
+            continue
+        found[name] = _stored_attribute_types(metadata)
+    return found
+
+
 def emit_add_statements(
     proposal: SchemaProposal,
     existing: Optional[ExistingSchema] = None,
@@ -842,9 +882,24 @@ def emit_add_statements(
 
     stmts: List[str] = []
 
-    # 1. New vertex types
+    # 1. New vertex types, or new attributes on a vertex that already exists.
     for v in proposal.vertices:
         if existing.has_vertex(v.name):
+            known = _attributes_for(existing, v.name)
+            if known is None:
+                continue
+            missing = [
+                attribute
+                for attribute in v.attributes
+                if attribute.name.casefold() not in known
+            ]
+            if missing:
+                columns = ", ".join(
+                    f"{attribute.name} {attribute.type}" for attribute in missing
+                )
+                stmts.append(
+                    f"ALTER VERTEX {v.name} ADD ATTRIBUTE ({columns})"
+                )
             continue
         attrs_part = ""
         if v.attributes:
@@ -905,6 +960,7 @@ def emit_add_statements(
 def emit_structural_link_alters(
     proposal: SchemaProposal,
     existing: Optional[ExistingSchema] = None,
+    link_vertices: Iterable[str] = (),
 ) -> List[str]:
     """For every domain vertex in *proposal*, emit ``ALTER EDGE … ADD
     PAIR`` statements that connect it to the GraphRAG core via the
@@ -938,21 +994,29 @@ def emit_structural_link_alters(
     has_chunk = existing.has_vertex("DocumentChunk")
     has_community = existing.has_vertex("Community")
 
+    # Domain vertex types already on the graph (reused instead of added,
+    # e.g. after an earlier install stopped part way) still need their
+    # structural links.
+    names: List[str] = [v.name for v in proposal.vertices]
+    for name in link_vertices or ():
+        if existing.has_vertex(name) and name not in names:
+            names.append(name)
+
     stmts: List[str] = []
-    for v in proposal.vertices:
+    for name in names:
         # CONTAINS_ENTITY: Document / DocumentChunk → <vt>
-        if has_doc and not existing.has_edge_pair("CONTAINS_ENTITY", "Document", v.name):
+        if has_doc and not existing.has_edge_pair("CONTAINS_ENTITY", "Document", name):
             stmts.append(
-                f"ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO {v.name})"
+                f"ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM Document, TO {name})"
             )
-        if has_chunk and not existing.has_edge_pair("CONTAINS_ENTITY", "DocumentChunk", v.name):
+        if has_chunk and not existing.has_edge_pair("CONTAINS_ENTITY", "DocumentChunk", name):
             stmts.append(
-                f"ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO {v.name})"
+                f"ALTER EDGE CONTAINS_ENTITY ADD PAIR (FROM DocumentChunk, TO {name})"
             )
         # IN_COMMUNITY: <vt> → Community
-        if has_community and not existing.has_edge_pair("IN_COMMUNITY", v.name, "Community"):
+        if has_community and not existing.has_edge_pair("IN_COMMUNITY", name, "Community"):
             stmts.append(
-                f"ALTER EDGE IN_COMMUNITY ADD PAIR (FROM {v.name}, TO Community)"
+                f"ALTER EDGE IN_COMMUNITY ADD PAIR (FROM {name}, TO Community)"
             )
     return stmts
 
@@ -1037,6 +1101,7 @@ def read_existing_schema(conn) -> ExistingSchema:
 
     vertex_types = conn.getVertexTypes() or []
     snapshot.vertex_types = set(vertex_types)
+    snapshot.vertex_attributes = _read_vertex_attributes(conn, vertex_types)
 
     for et_name in conn.getEdgeTypes() or []:
         meta = conn.getEdgeType(et_name) or {}
@@ -1161,6 +1226,14 @@ async def read_existing_schema_async(conn) -> "ExistingSchema":
     """
     snapshot = ExistingSchema()
     snapshot.vertex_types = set(await conn.getVertexTypes() or [])
+    getter = getattr(conn, "getVertexType", None)
+    if callable(getter):
+        for name in snapshot.vertex_types:
+            try:
+                metadata = await getter(name) or {}
+            except Exception:
+                continue
+            snapshot.vertex_attributes[name] = _stored_attribute_types(metadata)
     for et_name in await conn.getEdgeTypes() or []:
         meta = await conn.getEdgeType(et_name) or {}
         pairs: Set[Tuple[str, str]] = set()
@@ -1582,9 +1655,14 @@ def apply_proposal(
     proposal: SchemaProposal,
     job_name: Optional[str] = None,
     progress: Optional[Callable[[str], None]] = None,
+    link_vertices: Iterable[str] = (),
 ) -> dict:
     """Diff *proposal* against the current schema on *conn* and apply the
     additive delta as a single atomic ``SCHEMA_CHANGE JOB``.
+
+    *link_vertices* names domain vertex types that are already on the graph
+    and were left out of *proposal* (reused); their structural links are
+    added too.
 
     Returns a result dict::
 
@@ -1623,7 +1701,7 @@ def apply_proposal(
         vertex_types=set(existing.vertex_types) | {v.name for v in proposal.vertices},
         edge_pairs=dict(existing.edge_pairs),
     )
-    structural_stmts = emit_structural_link_alters(proposal, augmented)
+    structural_stmts = emit_structural_link_alters(proposal, augmented, link_vertices)
     statements = domain_stmts + structural_stmts
     summary = summarize(proposal)
 

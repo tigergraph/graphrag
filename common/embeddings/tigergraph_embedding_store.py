@@ -328,6 +328,34 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
         LogWriter.error(f"Failed to embed {v_id} after truncation: {last_err}")
         return None
 
+    async def _embed_many(self, items: list[tuple[str, str]]) -> list:
+        """Embed a page of chunks in one request.
+
+        A failed batch falls back to one chunk at a time so a single
+        oversized text does not drop the rest of the page.
+        """
+        if not items:
+            return []
+        try:
+            vectors = await self.embedding_service.aembed_documents(
+                [text for text, _v_id in items]
+            )
+            if len(vectors) == len(items):
+                return vectors
+            LogWriter.warning(
+                "Embedding batch returned "
+                f"{len(vectors)} vectors for {len(items)} texts; "
+                "embedding one by one"
+            )
+        except Exception as exc:
+            LogWriter.warning(
+                f"Embedding batch failed ({exc}); embedding one by one"
+            )
+        return [
+            await self._embed_with_truncation_retry(text, v_id)
+            for text, v_id in items
+        ]
+
     def add_embeddings(
         self,
         embeddings: Iterable[Tuple[Tuple[str, str], List[float]]],
@@ -427,6 +455,7 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
 
             skipped = []
             vec_attrs_used = set()
+            pending = []
             for i, (text, _) in enumerate(embeddings):
                 (v_id, v_type) = metadatas[i].get("vertex_id")
                 vec_attr = metadatas[i].get(
@@ -441,7 +470,11 @@ class TigerGraphEmbeddingStore(EmbeddingStore):
                         skipped.append((v_type, vec_attr))
                     continue
                 vec_attrs_used.add(vec_attr)
-                embedding = await self._embed_with_truncation_retry(text, v_id)
+                pending.append((text, v_id, v_type, vec_attr))
+            vectors = await self._embed_many(
+                [(text, v_id) for text, v_id, _v_type, _vec_attr in pending]
+            )
+            for (_text, v_id, v_type, vec_attr), embedding in zip(pending, vectors):
                 if embedding is None:
                     # No truncation level worked. Leave this vertex without an
                     # embedding so similarity_search can skip it (the GSQL
