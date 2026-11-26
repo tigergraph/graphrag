@@ -14,15 +14,9 @@ LABEL = "Zendesk ticket"
 
 _SOURCE = re.compile(r"zendesk\.com/\S*?/tickets/\d+|\bzendesk\b", re.IGNORECASE)
 
-# A number given as a ticket, such as "ticket #12345" or "tickets 12345 and
-# 12346", is a Zendesk ticket: Jira names its records by key, not by number.
-_TICKET_NUMBER = re.compile(
-    r"(?<!jira )\btickets?\s*(?:no\.?|number|id)?\s*#?\d{4,}\b", re.IGNORECASE
-)
-
 
 def selects(question: str) -> bool:
-    return bool(_SOURCE.search(question) or _TICKET_NUMBER.search(question))
+    return bool(_SOURCE.search(question))
 
 
 _TYPES = {"ZendeskTicket", "ZendeskComment", "ZendeskChange"}
