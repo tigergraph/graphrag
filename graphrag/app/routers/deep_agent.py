@@ -163,10 +163,10 @@ def agent_tools(graphname: str, request: Request,
         logger.info(f"deep_agent tools: mcp discovery skipped: {exc}")
     registered = {}
     try:
-        from tools.gsql_query_tools import discover_tagged_query_tools
-        registered = discover_tagged_query_tools(conn, graphname)
+        from tools.gsql_query_tools import registered_query_tools
+        registered = registered_query_tools(graphname)
     except Exception as exc:
-        logger.info(f"deep_agent tools: registered query discovery skipped: {exc}")
+        logger.info(f"deep_agent tools: registered query tools skipped: {exc}")
     env = ToolEnv(graph_ctx=SimpleNamespace(conn=conn, graphrag_cfg=graphrag_cfg),
                   allow_installed_queries=settings.allow_installed_queries,
                   use_cypher=use_cypher)

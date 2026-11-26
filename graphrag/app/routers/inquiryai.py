@@ -24,6 +24,23 @@ logger = logging.getLogger(__name__)
 
 use_cypher = os.getenv("USE_CYPHER", "false").lower() == "true"
 router = APIRouter(tags=["InquiryAI"])
+
+# Deprecated: list_registered_queries, register_docs, upsert_from_gsql,
+# delete_from_gsql, upsert_docs, delete_docs and retrieve_docs belong to an
+# earlier design that stored query descriptions in the embedding store. They
+# will be removed in a later release. Installed queries become agent tools in
+# KG Admin (see routers/ui.py, query_descriptions and query_tools).
+_DEPRECATED_ROUTES = (
+    "list_registered_queries", "register_docs", "upsert_from_gsql",
+    "delete_from_gsql", "upsert_docs", "delete_docs", "retrieve_docs",
+)
+
+
+def _warn_deprecated(route: str) -> None:
+    logger.warning(
+        f"/{route} is deprecated and will be removed in a later release; "
+        "register installed queries as agent tools in KG Admin instead."
+    )
 security = HTTPBase(scheme="basic", auto_error=False)
 
 
@@ -253,10 +270,11 @@ def retrieve_answer_with_chathistory(
     return _apply_field_selection(resp, query.include_fields)
 
 
-@router.get("/{graphname}/list_registered_queries")
+@router.get("/{graphname}/list_registered_queries", deprecated=True)
 def list_registered_queries(
     graphname, conn: Request, credentials: Annotated[HTTPBase, Depends(security)]
 ):
+    _warn_deprecated("list_registered_queries")
     check_embedding_store_status()
     conn = conn.state.conn
     if conn.getVer().split(".")[0] <= "3":
@@ -285,13 +303,14 @@ def get_query_embedding(graphname, query: NaturalLanguageQuery):
     return get_embedding_service().embed_query(query.query)
 
 
-@router.post("/{graphname}/register_docs")
+@router.post("/{graphname}/register_docs", deprecated=True)
 def register_docs(
     graphname,
     query_list: Union[GSQLQueryInfo, List[GSQLQueryInfo]],
     conn: Request,
     credentials: Annotated[HTTPBase, Depends(security)],
 ):
+    _warn_deprecated("register_docs")
     check_embedding_store_status()
     conn = conn.state.conn
     # auth check
@@ -338,13 +357,14 @@ def register_docs(
     return results
 
 
-@router.post("/{graphname}/upsert_from_gsql")
+@router.post("/{graphname}/upsert_from_gsql", deprecated=True)
 def upsert_from_gsql(
     graphname,
     query_list: GSQLQueryList,
     conn: Request,
     credentials: Annotated[HTTPBase, Depends(security)],
 ):
+    _warn_deprecated("upsert_from_gsql")
     req = conn
     conn = conn.state.conn
 
@@ -385,13 +405,14 @@ def upsert_from_gsql(
     return upsert_docs(graphname, query_info_list, req, credentials)
 
 
-@router.post("/{graphname}/delete_from_gsql")
+@router.post("/{graphname}/delete_from_gsql", deprecated=True)
 def delete_from_gsql(
     graphname,
     query_list: GSQLQueryList,
     conn: Request,
     credentials: Annotated[HTTPBase, Depends(security)],
 ):
+    _warn_deprecated("delete_from_gsql")
     req = conn
     conn = conn.state.conn
 
@@ -415,13 +436,14 @@ def delete_from_gsql(
     return {"deleted_functions": query_descs, "deleted_count": func_counter}
 
 
-@router.post("/{graphname}/upsert_docs")
+@router.post("/{graphname}/upsert_docs", deprecated=True)
 def upsert_docs(
     graphname,
     request_data: Union[QueryUpsertRequest, List[QueryUpsertRequest]],
     conn: Request,
     credentials: Annotated[HTTPBase, Depends(security)],
 ):
+    _warn_deprecated("upsert_docs")
     check_embedding_store_status()
     conn = conn.state.conn
     # auth check
@@ -501,13 +523,14 @@ def upsert_docs(
         )
 
 
-@router.post("/{graphname}/delete_docs")
+@router.post("/{graphname}/delete_docs", deprecated=True)
 def delete_docs(
     graphname,
     request_data: QueryDeleteRequest,
     conn: Request,
     credentials: Annotated[HTTPBase, Depends(security)],
 ):
+    _warn_deprecated("delete_docs")
     conn = conn.state.conn
     # auth check
     try:
@@ -545,7 +568,7 @@ def delete_docs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{graphname}/retrieve_docs")
+@router.post("/{graphname}/retrieve_docs", deprecated=True)
 def retrieve_docs(
     graphname,
     query: NaturalLanguageQuery,
@@ -553,6 +576,7 @@ def retrieve_docs(
     credentials: Annotated[HTTPBase, Depends(security)],
     top_k: int = 3,
 ):
+    _warn_deprecated("retrieve_docs")
     logger.debug_pii(
         f"/{graphname}/retrieve_docs request_id={req_id_cv.get()} top_k={top_k} question={query.query}"
     )

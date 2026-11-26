@@ -27,6 +27,7 @@
   - [Agentic](#agentic)
   - [Agent memory](#agent-memory)
   - [Agent API](#agent-api)
+  - [Installed queries as agent tools](#installed-queries-as-agent-tools)
   - [Classic](#classic)
 - [Document Ingestion for Knowledge Graph](#document-ingestion-for-knowledge-graph)
   - [Ingest Documents from the UI](#ingest-documents-from-the-ui)
@@ -483,6 +484,57 @@ Another agent can use GraphRAG as a tool. Give it a tool definition and the inst
 }
 ```
 
+### Installed queries as agent tools
+
+An installed GSQL query can become a tool that the agents call by name, for questions a fixed query answers better than a generated one. This takes two steps: a query gets a tool description, and a graph admin registers it as a tool. A query is never a tool only because of its description.
+
+**Step 1: the tool description.** Write it in TigerGraph, or on the **Describe** tab of **Query Tools** on the Knowledge Graph Setup page. The query description holds a block in this format; text outside the block is kept:
+
+```text
+[GRAPHRAG_TOOL]
+Returns: the number of orders placed in each month
+Use for: questions about order volume over time
+Do not use for: revenue or refund amounts
+Output: month (YYYY-MM), orders (count)
+[/GRAPHRAG_TOOL]
+```
+
+| Line | Required | What to write |
+|---|---|---|
+| `Returns:` | yes | The fact the query answers, not how it is written. |
+| `Use for:` | yes | The questions the agent should use it for. |
+| `Do not use for:` | no | Questions it must not be used for. |
+| `Output:` | no | The output fields and their units or formats. |
+
+A value can continue on the next lines. Describe each parameter in TigerGraph's parameter description: its meaning, its format and an example value, such as `First day of the period, YYYY-MM-DD, such as 2024-01-31`. A parameter without a default needs a description. In GSQL:
+
+```gsql
+UPDATE DESCRIPTION OF QUERY orders_per_month "[GRAPHRAG_TOOL]\nReturns: ...\nUse for: ...\n[/GRAPHRAG_TOOL]"
+UPDATE DESCRIPTION OF QUERY_PARAM orders_per_month.since "First day of the period, YYYY-MM-DD, such as 2024-01-31"
+```
+
+The Describe tab writes the same description, can create and install a new query from its GSQL first, and **Remove tool description** removes only the block.
+
+**Step 2: registration.** On the **Register** tab, a graph admin clicks **Discover queries**. GraphRAG reads the installed queries once and lists those with a valid block, and the others with the reason they were skipped. The admin selects queries and clicks **Register selected**. GraphRAG saves each tool, with its description and its parameters (types, descriptions and defaults), in `configs/graph_configs/<graph>/query_tools.json`. The agents build their tools from this file when they answer, so they make no TigerGraph call to find the tools.
+
+A registered tool stays as it was saved until an admin registers it again. Discover marks a registered tool whose description or parameters changed in TigerGraph, and one whose query is no longer installed. A tool whose query was dropped returns an error that says so when it runs.
+
+**Roles.** Discover, Register, Unregister and the Describe tab need a superuser, a globaldesigner, or a user with the admin role on the graph. Any user can list the registered tools. A tool runs with the signed-in user's connection, so TigerGraph permissions apply to every call.
+
+**Settings.** Registered tools are their own opt-in: they are available to the Deep Agent, the Planned and Reactive agents and `/{graph}/agent/tools` whenever an admin registered them. `allow_installed_queries` controls only the Deep Agent's generic installed-query tool.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/ui/{graph}/query_descriptions/{query}` | A query's tool block, other description text and parameters. Admin. |
+| POST | `/ui/{graph}/query_descriptions` | Write the tool block and parameter descriptions; with `gsql`, create and install the query first. Admin. |
+| POST | `/ui/{graph}/query_descriptions/remove` | Remove only the tool block. Admin. |
+| POST | `/ui/{graph}/query_tools/discover` | List the installed queries with a valid block and the skipped ones. Admin. |
+| GET | `/ui/{graph}/query_tools` | The registered tools. |
+| POST | `/ui/{graph}/query_tools/register` | Register the queries in `names`. Admin. |
+| POST | `/ui/{graph}/query_tools/unregister` | Unregister the queries in `names`. Admin. |
+
+The older `register_docs`, `list_registered_queries`, `upsert_docs`, `delete_docs`, `upsert_from_gsql`, `delete_from_gsql` and `retrieve_docs` endpoints are deprecated and will be removed in a later release.
+
 ```markdown
 ## TigerGraph GraphRAG agent
 
@@ -680,7 +732,7 @@ Copy the below code into `configs/server_config.json`. You shouldn’t need to c
 | ↳ `long_term_memory` | bool | `true` | Keep each user's lasting preferences across conversations. |
 | ↳ `subagents` | bool | `true` | Let the agent hand focused research to its helper agents. |
 | ↳ `recursion_limit` | int | `80` | Most steps the agent may take for one question. |
-| ↳ `allow_installed_queries` | bool | `true` | Let the agent list and run the graph's installed queries. |
+| ↳ `allow_installed_queries` | bool | `true` | Let the agent list and run the graph's installed queries with its generic installed-query tool. Queries an admin registered as tools (see [Installed queries as agent tools](#installed-queries-as-agent-tools)) are a separate opt-in and stay available when this is `false`. |
 | ↳ `installed_query_allowlist` | list | `["*"]` | Name patterns of the installed queries the agent may run. |
 | ↳ `max_tool_output_chars` | int | `60000` | Most characters of one tool result the agent reads. |
 | `agent_style` | string | `"planned"` | Planned / Reactive agent only. Default agentic engine style: `"planned"` (plan the whole retrieval up front) or `"reactive"` (decide each step from the last result). The chat menu can override per request. See [Chat Engines and Agents](#chat-engines-and-agents). |

@@ -54,6 +54,9 @@ class DeepAgentSettings:
     recursion_limit: int = 80
     long_term_memory: bool = True
     subagents: bool = True
+    # The generic run_installed_query tool, which can run any installed query
+    # in installed_query_allowlist. Queries an admin registered as tools in KG
+    # Admin are a separate opt-in and stay available when this is false.
     allow_installed_queries: bool = True
     max_tool_output_chars: int = 60000
 

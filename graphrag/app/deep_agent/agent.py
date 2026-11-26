@@ -295,17 +295,17 @@ class DeepGraphRAGAgent:
         return {}
 
     def _registered_queries(self) -> Dict[str, object]:
-        """Installed GSQL queries registered as tools for the graph in KG Admin
-        (empty when none)."""
+        """The graph's registered query tools, from its stored list
+        (empty when none). Makes no TigerGraph call."""
         try:
-            from tools.gsql_query_tools import discover_tagged_query_tools
-            tools = discover_tagged_query_tools(self.conn, self.graphname)
+            from tools.gsql_query_tools import registered_query_tools
+            tools = registered_query_tools(self.graphname)
             if tools:
-                logger.info(f"deep_agent: {len(tools)} registered GSQL tool(s) "
+                logger.info(f"deep_agent: {len(tools)} registered query tool(s) "
                             f"for graph={self.graphname}")
             return tools
         except Exception as exc:
-            logger.warning(f"deep_agent: registered query discovery skipped: {exc}")
+            logger.warning(f"deep_agent: registered query tools skipped: {exc}")
             return {}
 
     def _instructions(self) -> tuple:

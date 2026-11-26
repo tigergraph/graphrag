@@ -411,9 +411,10 @@ def _is_document_admin(global_roles, graph_roles: dict, graphname: str) -> bool:
     return "admin" in [r.lower() for r in (graph_roles or {}).get(graphname, [])]
 
 
-def _require_document_admin(credentials: HTTPBasicCredentials, graphname: str) -> None:
-    """Raise 403 unless the user can upload, list, delete and ingest the
-    documents of ``graphname``."""
+def _require_document_admin(credentials: HTTPBasicCredentials, graphname: str,
+                            action: str = "manage its documents") -> None:
+    """Raise 403 unless the user is an admin of ``graphname``: a superuser, a
+    globaldesigner, or a user with the admin role on the graph."""
     validate_graphname(graphname)
     try:
         global_roles, graph_roles, _ = _get_user_role_details(
@@ -425,7 +426,7 @@ def _require_document_admin(credentials: HTTPBasicCredentials, graphname: str) -
     if not _is_document_admin(global_roles, graph_roles, graphname):
         raise HTTPException(
             status_code=403,
-            detail=f"Only an admin of graph '{graphname}' can manage its documents.",
+            detail=f"Only an admin of graph '{graphname}' can {action}.",
         )
 
 
@@ -2147,172 +2148,201 @@ def _create_user_query(conn, graphname: str, header: str, query_body: str) -> No
         )
 
 
-def _gsql_desc_quoted(text: str) -> str:
-    escaped = (
-        (text or "")
-        .replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\r\n", "\\n")
-        .replace("\n", "\\n")
-    )
-    return f'"{escaped}"'
+def _require_query_tool_admin(credentials, graphname: str) -> None:
+    _require_document_admin(credentials, graphname, "manage its query tools")
 
 
-def _gsql_desc_cmd(conn, graphname: str, statement: str) -> str:
-    from common.db.schema_utils import gsql_output_error
-
-    out = conn.gsql(f"USE GRAPH {graphname}\n{statement}\n")
-    text = out if isinstance(out, str) else str(out)
-    err = gsql_output_error(text)
-    if err:
-        raise HTTPException(status_code=400, detail=err)
-    return text
-
-
-@router.get(route_prefix + "/{graphname}/registered_queries")
-def ui_list_registered_queries(
-    graphname: ValidGraphName,
-    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
-):
-    """List original installed queries and queries tagged with ``[GRAPHRAG_TOOL]``."""
-    from tools.gsql_query_tools import list_query_catalog
-
+def _query_tool_conn(creds, graphname: str):
     cred_obj = creds[1]
     conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
-    try:
-        catalog = list_query_catalog(conn, graphname)
-    except Exception as exc:
-        logger.warning("list registered queries failed: %s", exc)
+    conn.graphname = graphname
+    return conn
+
+
+def _query_name_or_400(name) -> str:
+    from tools.gsql_query_tools import valid_query_name
+
+    name = str(name or "").strip()
+    if not valid_query_name(name):
         raise HTTPException(
             status_code=400,
-            detail=f"Failed to list queries: {exc}",
-        ) from exc
-    registered = catalog.get("registered") or []
-    installed = catalog.get("installed") or []
+            detail=f"Invalid query name '{name}'. Use letters, digits and underscores; "
+            "start with a letter or underscore.",
+        )
+    return name
+
+
+@router.get(route_prefix + "/{graphname}/query_descriptions/{query_name}")
+def ui_get_query_description(
+    graphname: ValidGraphName,
+    query_name: str,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Stage 1: a query's tool block, the other description text, and its
+    parameters with their types, descriptions and defaults."""
+    from tools import gsql_query_tools as qt
+
+    _require_query_tool_admin(creds[1], graphname)
+    name = _query_name_or_400(query_name)
+    conn = _query_tool_conn(creds, graphname)
+    try:
+        row = qt.read_descriptions(conn, graphname, [name]).get(name)
+        typed = qt.read_param_types(conn, name) if row is not None else []
+    except Exception as exc:
+        # TigerGraph raises "does not exist" for an unknown query name.
+        if "does not exist" in str(exc).lower():
+            row = None
+        else:
+            raise HTTPException(status_code=400, detail=f"Could not read query '{name}': {exc}") from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Query '{name}' is not on graph '{graphname}'.")
+    fields, other, problem = qt.parse_tool_block(row.get("description"))
     return {
-        "queries": registered,
-        "registered": registered,
-        "installed": installed,
+        "name": name,
+        "fields": fields,
+        "problem": problem if qt.BLOCK_START in (row.get("description") or "") else None,
+        "other_text": other,
+        "params": qt.build_params(row.get("parameters"), typed),
     }
 
 
-@router.post(route_prefix + "/{graphname}/registered_queries")
-def ui_register_queries(
+@router.post(route_prefix + "/{graphname}/query_descriptions")
+def ui_save_query_description(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     payload: Annotated[dict | None, Body()] = None,
 ):
-    """Create + install pasted GSQL (when provided), then tag with ``UPDATE DESCRIPTION``.
-
-    Prepends ``[GRAPHRAG_TOOL]`` so ``SHOW DESCRIPTION`` can tell user-registered
-    queries from original installed ones. Empty GSQL tags an already-installed query.
-    """
+    """Stage 1: write a query's tool block and parameter descriptions. With
+    ``gsql``, create and install the query first. Does not register a tool."""
     from common.db.migrate import get_installed_query_names
     from common.db.query_install import install_query_set
-    from tools.gsql_query_tools import TOOL_MARKER
+    from tools import gsql_query_tools as qt
 
+    _require_query_tool_admin(creds[1], graphname)
     body = payload or {}
-    raw = body.get("queries", body if isinstance(body, dict) else [])
-    if isinstance(raw, dict):
-        raw = [raw]
-    if not raw:
-        raise HTTPException(status_code=400, detail="Provide at least one query to register.")
-    to_process: list[tuple[str, str, str]] = []
-    for item in raw:
-        header = (item.get("function_header") or item.get("name") or "").strip()
-        if not header:
-            raise HTTPException(status_code=400, detail="Each query needs a name.")
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", header):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Invalid query name '{header}'. Use letters, digits, and "
-                    "underscores; start with a letter or underscore."
-                ),
-            )
-        description = (item.get("description") or "").strip()
-        if not description:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Description is required for query '{header}'.",
-            )
-        gsql = (item.get("gsql") or item.get("query") or "").strip()
-        to_process.append((header, description, gsql))
-    cred_obj = creds[1]
-    conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
-    conn.graphname = graphname
-
-    created: list[str] = []
-    for header, _description, gsql in to_process:
-        if not gsql:
-            continue
-        query_body = _user_query_gsql(header, gsql, graphname)
-        _create_user_query(conn, graphname, header, query_body)
-        created.append(header)
-    if created:
+    name = _query_name_or_400(body.get("name"))
+    fields = {key: str(body.get(key) or "").strip() for key, _ in qt.FIELDS}
+    for key, label in qt.FIELDS:
+        if key in qt.REQUIRED_FIELDS and not fields[key]:
+            raise HTTPException(status_code=400, detail=f'"{label}" is required.')
+    param_descriptions = body.get("param_descriptions") or {}
+    if not isinstance(param_descriptions, dict):
+        raise HTTPException(status_code=400, detail="param_descriptions must be an object.")
+    gsql = str(body.get("gsql") or "").strip()
+    conn = _query_tool_conn(creds, graphname)
+    created = False
+    if gsql:
+        _create_user_query(conn, graphname, name, _user_query_gsql(name, gsql, graphname))
         try:
-            install_query_set(conn, created)
+            install_query_set(conn, [name])
         except Exception as exc:
-            logger.error("Register: install failed for %s: %s", created, exc, exc_info=True)
+            logger.error("Query description: install failed for %s: %s", name, exc, exc_info=True)
             raise HTTPException(
                 status_code=400,
                 detail=f"Created but failed to install: {concise_gsql_error(exc)}",
             ) from exc
-
-    installed = get_installed_query_names(conn, graphname)
-    registered = []
-    for header, description, gsql in to_process:
-        if header not in installed:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Query '{header}' is not installed on graph '{graphname}'. "
-                    "Paste GSQL to create and install it, or install it first."
-                ),
-            )
-        desc = description if TOOL_MARKER in description else f"{TOOL_MARKER}\n{description}"
-        _gsql_desc_cmd(
-            conn,
-            graphname,
-            f"UPDATE DESCRIPTION OF QUERY {header} {_gsql_desc_quoted(desc)}",
+        created = True
+    if name not in get_installed_query_names(conn, graphname):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Query '{name}' is not installed on graph '{graphname}'. "
+            "Paste its GSQL to create and install it, or install it first.",
         )
-        registered.append(header)
-    return {"registered": registered, "created": created}
+    try:
+        qt.write_description(conn, graphname, name, fields, param_descriptions)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"name": name, "created": created, "registered": name in qt.load_registered(graphname)}
 
 
-@router.post(route_prefix + "/{graphname}/registered_queries/delete")
-def ui_delete_registered_queries(
+@router.post(route_prefix + "/{graphname}/query_descriptions/remove")
+def ui_remove_query_description(
     graphname: ValidGraphName,
     creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
     payload: Annotated[dict | None, Body()] = None,
 ):
-    """GSQL ``DROP DESCRIPTION OF QUERY``. The installed query is not dropped."""
-    body = payload or {}
-    ids = body.get("ids") or body.get("function_headers") or []
-    if isinstance(ids, str):
-        ids = [ids]
-    if not ids:
-        raise HTTPException(status_code=400, detail="Provide ids of queries to unregister.")
-    cred_obj = creds[1]
-    conn = get_db_connection_pwd_manual(graphname, cred_obj.username, cred_obj.password)
-    deleted = []
-    for header in ids:
-        name = str(header).strip()
-        if not name:
-            continue
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-            raise HTTPException(status_code=400, detail=f"Invalid query name '{name}'.")
-        try:
-            _gsql_desc_cmd(conn, graphname, f"DROP DESCRIPTION OF QUERY {name}")
-        except HTTPException as exc:
-            detail = str(exc.detail).lower()
-            if not any(
-                s in detail
-                for s in ("does not exist", "no description", "not found", "has no description")
-            ):
-                raise
-        deleted.append(name)
-    return {"deleted": deleted}
+    """Stage 1: remove only the tool block of a query description."""
+    from tools import gsql_query_tools as qt
+
+    _require_query_tool_admin(creds[1], graphname)
+    name = _query_name_or_400((payload or {}).get("name"))
+    try:
+        qt.remove_description_block(_query_tool_conn(creds, graphname), graphname, name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"name": name}
+
+
+@router.get(route_prefix + "/{graphname}/query_tools")
+def ui_list_query_tools(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Stage 2: the registered tools of the graph, from the stored list."""
+    from tools import gsql_query_tools as qt
+
+    tools = qt.load_registered(graphname)
+    return {"tools": [tools[k] for k in sorted(tools)]}
+
+
+@router.post(route_prefix + "/{graphname}/query_tools/discover")
+def ui_discover_query_tools(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+):
+    """Stage 2: read the installed queries once; list those with a valid tool
+    block and the others with the reason they were skipped."""
+    from tools import gsql_query_tools as qt
+
+    _require_query_tool_admin(creds[1], graphname)
+    try:
+        return qt.discover(_query_tool_conn(creds, graphname), graphname,
+                           qt.load_registered(graphname))
+    except Exception as exc:
+        logger.warning("Query tool discovery failed on %s: %s", graphname, exc)
+        raise HTTPException(status_code=400, detail=f"Discover failed: {exc}") from exc
+
+
+def _names_from(payload) -> list[str]:
+    names = (payload or {}).get("names") or []
+    if isinstance(names, str):
+        names = [names]
+    names = [_query_name_or_400(n) for n in names]
+    if not names:
+        raise HTTPException(status_code=400, detail="Select at least one query.")
+    return names
+
+
+@router.post(route_prefix + "/{graphname}/query_tools/register")
+def ui_register_query_tools(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict | None, Body()] = None,
+):
+    """Stage 2: register the selected queries as tools and save them."""
+    from tools import gsql_query_tools as qt
+
+    _require_query_tool_admin(creds[1], graphname)
+    names = _names_from(payload)
+    try:
+        return qt.register(_query_tool_conn(creds, graphname), graphname, names, creds[1].username)
+    except Exception as exc:
+        logger.warning("Query tool registration failed on %s: %s", graphname, exc)
+        raise HTTPException(status_code=400, detail=f"Register failed: {exc}") from exc
+
+
+@router.post(route_prefix + "/{graphname}/query_tools/unregister")
+def ui_unregister_query_tools(
+    graphname: ValidGraphName,
+    creds: Annotated[tuple[list[str], HTTPBasicCredentials], Depends(ui_basic_auth)],
+    payload: Annotated[dict | None, Body()] = None,
+):
+    """Stage 2: remove tools from the stored list. The query and its
+    description in TigerGraph are not changed."""
+    from tools import gsql_query_tools as qt
+
+    _require_query_tool_admin(creds[1], graphname)
+    return {"unregistered": qt.unregister(graphname, _names_from(payload))}
 
 
 @router.post(route_prefix + "/{graphname}/initialize_graph")
