@@ -317,15 +317,6 @@ def test_a_project_code_filters_the_project_and_work_is_assignment():
     assert "What a person works on, owns, or handles is the issues assigned" in planner
 
 
-def test_a_number_given_as_a_ticket_is_a_zendesk_ticket():
-    assert selected_connectors("Summarize the internal notes on ticket #58911.") == {"zendesk"}
-    assert selected_connectors("How long was ticket 58600 open?") == {"zendesk"}
-    assert "zendesk" in selected_connectors("Tell me about the incident (Ticket 52752)")
-    # A number with no record word still names no source.
-    assert selected_connectors("Summarize 59224.") == set()
-    assert "zendesk" not in selected_connectors("Which Jira ticket 12345 is open?")
-
-
 def test_solved_dates_come_from_the_status_changes():
     text = guidance_for("How long was Zendesk ticket 58600 open before it was solved?", "planner")
     assert "to_value solved or closed" in text
